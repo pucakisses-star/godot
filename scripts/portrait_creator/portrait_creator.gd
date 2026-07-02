@@ -568,7 +568,7 @@ const BACKGROUND_ZOOM_SPEED := 0.0034
 const BACKGROUND_ZOOM_AMOUNT := 0.08
 const BEARD_STYLE_ENABLED_MODULATE := Color(1, 1, 1, 1)
 const BEARD_STYLE_DISABLED_MODULATE := Color(0.55, 0.55, 0.55, 1)
-const ROLLING_DICE_SOUND := preload("res://Github Game/sound/sounds/rolling-dice.mp3")
+const ROLLING_DICE_SOUND_PATH := "res://resources/sounds/rolling-dice.mp3"
 
 var _hovered_attribute_icon: Control
 var _randomize_sound_player: AudioStreamPlayer
@@ -1040,11 +1040,14 @@ func _on_randomize_button_pressed() -> void:
 	_update_attribute_reminders()
 
 func _play_randomize_sound() -> void:
-	if ROLLING_DICE_SOUND == null:
+	if not ResourceLoader.exists(ROLLING_DICE_SOUND_PATH):
+		return
+	var rolling_dice_sound := load(ROLLING_DICE_SOUND_PATH) as AudioStream
+	if rolling_dice_sound == null:
 		return
 	if _randomize_sound_player == null:
 		_randomize_sound_player = AudioStreamPlayer.new()
 		_randomize_sound_player.name = "RandomizeSoundPlayer"
 		add_child(_randomize_sound_player)
-	_randomize_sound_player.stream = ROLLING_DICE_SOUND
+	_randomize_sound_player.stream = rolling_dice_sound
 	_randomize_sound_player.play()

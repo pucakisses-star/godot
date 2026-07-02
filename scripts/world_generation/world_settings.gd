@@ -113,7 +113,7 @@ static func _coerce_map_size_key(raw_settings: Dictionary, merged_settings: Dict
 
 	var map_size_name := str(raw_settings.get("map_size", merged_settings.get("map_size", ""))).strip_edges().to_lower()
 	for map_size_key: String in MAP_SIZE_DEFINITIONS.keys():
-		if (MAP_SIZE_DEFINITIONS[map_size_key] as Dictionary).get("name", "").to_lower() == map_size_name:
+		if str((MAP_SIZE_DEFINITIONS[map_size_key] as Dictionary).get("name", "")).to_lower() == map_size_name:
 			return map_size_key
 
 	var map_dimensions: Variant = raw_settings.get("map_dimensions", merged_settings.get("map_dimensions", Vector2i.ZERO))
