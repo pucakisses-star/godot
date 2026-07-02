@@ -27,13 +27,13 @@ export const tileSheets = {
   },
   worldDetails: {
     key: 'worldDetails',
-    path: 'Dwarf.Fortress/data/vanilla/vanilla_world_map/graphics/images/world_map_details.png',
+    path: 'tilesheet/df/world_map_details.png',
     tileSize: 16,
     image: null
   },
   worldEdgeGlacier: {
     key: 'worldEdgeGlacier',
-    path: 'Dwarf.Fortress/data/vanilla/vanilla_world_map/graphics/images/world_map_edge_glacier.png',
+    path: 'tilesheet/df/world_map_edge_glacier.png',
     tileSize: 16,
     image: null
   },
@@ -60,13 +60,13 @@ export const dwarfSpriteSheets = {
   },
   hair: {
     key: 'hair',
-    path: 'Dwarf.Fortress/data/vanilla/vanilla_creatures_graphics/graphics/images/dwarf_hair_straight.png',
+    path: 'tilesheet/df/dwarf_hair_straight.png',
     tileSize: 32,
     image: null
   },
   hairCurly: {
     key: 'hairCurly',
-    path: 'Dwarf.Fortress/data/vanilla/vanilla_creatures_graphics/graphics/images/dwarf_hair_curly.png',
+    path: 'tilesheet/df/dwarf_hair_curly.png',
     tileSize: 32,
     image: null
   }
