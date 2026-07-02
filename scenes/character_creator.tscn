@@ -22,7 +22,7 @@
 [ext_resource type="Texture2D" uid="uid://cbutrqks1x08q" path="res://resources/images/character_creator/ui/return.png" id="16_dk5wx"]
 [ext_resource type="Texture2D" uid="uid://dgj1gpoublgwt" path="res://resources/images/character_creator/ui/create.png" id="17_8ugf3"]
 [ext_resource type="Texture2D" uid="uid://cma2myns1va2j" path="res://resources/images/character_creator/ui/randombase.png" id="17_s8202"]
-[ext_resource type="Texture2D" uid="uid://du0b24rnhv4ow" path="res://Github Game/tilesheet/dice.png" id="18_tqk83"]
+[ext_resource type="Texture2D" uid="uid://du0b24rnhv4ow" path="res://resources/images/character_creator/dice.png" id="18_tqk83"]
 [ext_resource type="Texture2D" uid="uid://bbn2ka6xktu2n" path="res://resources/images/character_creator/ui/beardless.png" id="18_u8m4a"]
 [ext_resource type="Texture2D" uid="uid://csssca5c4yby4" path="res://resources/images/character_creator/ui/darkdwarf.png" id="19_jk7te"]
 [ext_resource type="Texture2D" uid="uid://ct5n6wuqt60dy" path="res://resources/images/character_creator/ui/greydwarf.png" id="20_g4yx5"]

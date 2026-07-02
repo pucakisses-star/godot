@@ -21,3 +21,6 @@
 *.wav filter=lfs diff=lfs merge=lfs -text
 *.ogg filter=lfs diff=lfs merge=lfs -text
 *.mp3 filter=lfs diff=lfs merge=lfs -text
+
+# Stored in-repo (fork LFS store is missing objects; keep menu art recoverable)
+resources/images/main_menu/smith.png -filter -diff -merge -text
