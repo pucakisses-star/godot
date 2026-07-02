@@ -759,11 +759,11 @@ function growRoadNetwork(options) {
       type: 'main',
       corridorWidth: entranceWidth,
       segmentLength: [Math.max(3, Math.round(3 + scaleFactor * 1.5)), Math.max(4, Math.round(6 + scaleFactor * 1.5))],
-      branchAfter: 3,
-      branchChance: 0.55,
-      dualBranchChance: 0.35,
+      branchAfter: 4,
+      branchChance: 0.4,
+      dualBranchChance: 0.22,
       turnChance: 0.22,
-      areaRatio: clamp(0.08 + scaleFactor * 0.03, 0.08, 0.14),
+      areaRatio: clamp(0.05 + scaleFactor * 0.015, 0.05, 0.08),
       maxSegments: Math.round(48 * scaleFactor),
       maxOverlapSteps: 5
     },
@@ -771,13 +771,13 @@ function growRoadNetwork(options) {
       name: 'ringRoutes',
       type: 'normal',
       corridorWidth: scaleFactor > 1.4 ? 3 : 2,
-      segmentLength: [2, 4 + Math.round(scaleFactor)],
-      branchAfter: 2,
-      branchChance: 0.6,
-      dualBranchChance: 0.4,
-      turnChance: 0.55,
+      segmentLength: [3, 5 + Math.round(scaleFactor)],
+      branchAfter: 4,
+      branchChance: 0.45,
+      dualBranchChance: 0.25,
+      turnChance: 0.5,
       curveAroundCenter: true,
-      areaRatio: clamp(0.12 + scaleFactor * 0.04, 0.12, 0.18),
+      areaRatio: clamp(0.05 + scaleFactor * 0.015, 0.05, 0.08),
       maxSegments: Math.round(76 * scaleFactor),
       maxOverlapSteps: 6
     },
@@ -785,13 +785,13 @@ function growRoadNetwork(options) {
       name: 'lowerSpurs',
       type: 'normal',
       corridorWidth: 2,
-      segmentLength: [2, 4],
-      branchAfter: 2,
-      branchChance: 0.48,
-      dualBranchChance: 0.32,
+      segmentLength: [3, 5],
+      branchAfter: 3,
+      branchChance: 0.4,
+      dualBranchChance: 0.22,
       turnChance: 0.35,
       curveAroundCenter: false,
-      areaRatio: clamp(0.1 + scaleFactor * 0.03, 0.12, 0.2),
+      areaRatio: clamp(0.04 + scaleFactor * 0.012, 0.04, 0.06),
       maxSegments: Math.round(96 * scaleFactor),
       maxOverlapSteps: 7
     }
@@ -893,15 +893,12 @@ function growRoadNetwork(options) {
 }
 
 function extractDistrictLots(options) {
-  const { tiles, roadNetwork, randomFn, minLotArea = 18 } = options;
+  const { tiles, roadNetwork, randomFn, minLotArea = 18, maxLotDepth = 3, targetLotArea = 64 } = options;
   if (!tiles || tiles.length === 0) {
     return [];
   }
   const height = tiles.length;
   const width = tiles[0].length;
-  const visited = Array.from({ length: height }, () => Array(width).fill(false));
-  const districts = [];
-  let idCounter = 1;
 
   const offsets = [
     [1, 0],
@@ -910,85 +907,124 @@ function extractDistrictLots(options) {
     [0, -1]
   ];
 
+  // Lots are bands of rock hugging the corridor network — chambers a clan
+  // would realistically dig off the main arteries. Rock deeper than
+  // maxLotDepth stays untouched mountain, so districts can never flood the
+  // whole map no matter how sparse or dense the corridors grew.
+  const digDepth = Array.from({ length: height }, () => Array(width).fill(Infinity));
+  let frontier = [];
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const type = tiles[y][x]?.type;
+      if (type === 'corridor' || type === 'entrance') {
+        digDepth[y][x] = 0;
+        frontier.push({ x, y });
+      }
+    }
+  }
+  for (let depth = 1; depth <= maxLotDepth && frontier.length > 0; depth += 1) {
+    const nextFrontier = [];
+    for (let i = 0; i < frontier.length; i += 1) {
+      const current = frontier[i];
+      for (let j = 0; j < offsets.length; j += 1) {
+        const nx = current.x + offsets[j][0];
+        const ny = current.y + offsets[j][1];
+        if (!isValidRoadCell(width, height, nx, ny)) {
+          continue;
+        }
+        if (tiles[ny][nx]?.type === 'rock' && digDepth[ny][nx] > depth) {
+          digDepth[ny][nx] = depth;
+          nextFrontier.push({ x: nx, y: ny });
+        }
+      }
+    }
+    frontier = nextFrontier;
+  }
+
+  const isDiggable = (x, y) =>
+    isInsideBounds(width, height, x, y) && Number.isFinite(digDepth[y][x]) && digDepth[y][x] >= 1;
+
+  const claimed = Array.from({ length: height }, () => Array(width).fill(false));
+  const districts = [];
+  let idCounter = 1;
+
+  const buildLot = (startX, startY) => {
+    const queue = [{ x: startX, y: startY }];
+    claimed[startY][startX] = true;
+    const cells = [];
+    let sumX = 0;
+    let sumY = 0;
+    let minX = startX;
+    let maxX = startX;
+    let minY = startY;
+    let maxY = startY;
+    let adjacentCorridor = 0;
+
+    while (queue.length > 0 && cells.length < targetLotArea) {
+      const current = queue.shift();
+      cells.push(current);
+      sumX += current.x;
+      sumY += current.y;
+      minX = Math.min(minX, current.x);
+      maxX = Math.max(maxX, current.x);
+      minY = Math.min(minY, current.y);
+      maxY = Math.max(maxY, current.y);
+      for (let i = 0; i < offsets.length; i += 1) {
+        const nx = current.x + offsets[i][0];
+        const ny = current.y + offsets[i][1];
+        if (digDepth[ny]?.[nx] === 0) {
+          adjacentCorridor += 1;
+          continue;
+        }
+        if (isDiggable(nx, ny) && !claimed[ny][nx]) {
+          claimed[ny][nx] = true;
+          queue.push({ x: nx, y: ny });
+        }
+      }
+    }
+    // Release overflow so a neighbouring lot can grow from it.
+    for (let i = 0; i < queue.length; i += 1) {
+      claimed[queue[i].y][queue[i].x] = false;
+    }
+
+    const area = cells.length;
+    if (area === 0) {
+      return null;
+    }
+    const centroidX = sumX / area;
+    const centroidY = sumY / area;
+    const district = {
+      id: `district-${idCounter}`,
+      cells,
+      area,
+      sumX,
+      sumY,
+      centroid: { x: centroidX, y: centroidY },
+      bounding: { minX, maxX, minY, maxY },
+      touchesEdge: false,
+      adjacentCorridor,
+      stage: null,
+      walled: false,
+      type: null,
+      label: null,
+      primaryCells: [],
+      walkwayCells: [],
+      mode: null,
+      distanceToCenter: euclideanDistance(centroidX, centroidY, roadNetwork.center.x, roadNetwork.center.y)
+    };
+    idCounter += 1;
+    return district;
+  };
+
   for (let y = 1; y < height - 1; y += 1) {
     for (let x = 1; x < width - 1; x += 1) {
-      if (visited[y][x]) {
+      if (!isDiggable(x, y) || claimed[y][x]) {
         continue;
       }
-      const cell = tiles[y][x];
-      if (!cell || cell.type !== 'rock') {
-        visited[y][x] = true;
-        continue;
+      const district = buildLot(x, y);
+      if (district) {
+        districts.push(district);
       }
-
-      const queue = [{ x, y }];
-      visited[y][x] = true;
-      const cells = [];
-      let sumX = 0;
-      let sumY = 0;
-      let minX = x;
-      let maxX = x;
-      let minY = y;
-      let maxY = y;
-      let touchesEdge = false;
-      let adjacentCorridor = 0;
-
-      while (queue.length > 0) {
-        const current = queue.shift();
-        cells.push(current);
-        sumX += current.x;
-        sumY += current.y;
-        minX = Math.min(minX, current.x);
-        maxX = Math.max(maxX, current.x);
-        minY = Math.min(minY, current.y);
-        maxY = Math.max(maxY, current.y);
-        if (!isValidRoadCell(width, height, current.x, current.y)) {
-          touchesEdge = true;
-        }
-        for (let i = 0; i < offsets.length; i += 1) {
-          const nx = current.x + offsets[i][0];
-          const ny = current.y + offsets[i][1];
-          if (!isInsideBounds(width, height, nx, ny)) {
-            touchesEdge = true;
-            continue;
-          }
-          if (!visited[ny][nx] && tiles[ny][nx]?.type === 'rock') {
-            visited[ny][nx] = true;
-            queue.push({ x: nx, y: ny });
-          } else if (tiles[ny][nx] && tiles[ny][nx].type !== 'rock') {
-            adjacentCorridor += tiles[ny][nx].type === 'corridor' || tiles[ny][nx].type === 'entrance' ? 1 : 0;
-          }
-        }
-      }
-
-      if (cells.length === 0 || adjacentCorridor === 0) {
-        continue;
-      }
-
-      const area = cells.length;
-      const centroidX = sumX / area;
-      const centroidY = sumY / area;
-      const district = {
-        id: `district-${idCounter}`,
-        cells,
-        area,
-        sumX,
-        sumY,
-        centroid: { x: centroidX, y: centroidY },
-        bounding: { minX, maxX, minY, maxY },
-        touchesEdge,
-        adjacentCorridor,
-        stage: null,
-        walled: false,
-        type: null,
-        label: null,
-        primaryCells: [],
-        walkwayCells: [],
-        mode: null,
-        distanceToCenter: euclideanDistance(centroidX, centroidY, roadNetwork.center.x, roadNetwork.center.y)
-      };
-      districts.push(district);
-      idCounter += 1;
     }
   }
 
@@ -1626,109 +1662,6 @@ function cloneSpriteDefinition(sprite) {
   return copy;
 }
 
-function buildRoomPositions(baseY, direction, count, roomHeight, mapHeight) {
-  if (!Number.isFinite(baseY) || !Number.isFinite(direction) || count <= 0) {
-    return [];
-  }
-  const minY = 1;
-  const maxY = Math.max(minY, mapHeight - roomHeight - 2);
-  let current = clamp(Math.round(baseY), minY, maxY);
-  const positions = [];
-  for (let i = 0; i < count; i += 1) {
-    if (current < minY || current > maxY) {
-      break;
-    }
-    positions.push(current);
-    current = clamp(
-      direction < 0 ? current - (roomHeight + 2) : current + (roomHeight + 2),
-      minY,
-      maxY
-    );
-  }
-  return direction < 0 ? positions.sort((a, b) => a - b) : positions;
-}
-
-function uniqueSorted(values) {
-  if (!Array.isArray(values)) {
-    return [];
-  }
-  const deduped = Array.from(new Set(values.filter((value) => Number.isFinite(value))));
-  return deduped.sort((a, b) => a - b);
-}
-
-function buildSideRoomSlots(
-  roomX,
-  corridorX,
-  roomYs,
-  corridorWidth,
-  hallMidY,
-  roomWidth,
-  roomHeight,
-  side
-) {
-  const slots = [];
-  if (!Array.isArray(roomYs) || roomYs.length === 0) {
-    return slots;
-  }
-  const doorX = side === 'left' ? corridorX - 1 : corridorX + 1;
-  for (let i = 0; i < roomYs.length; i += 1) {
-    const y = roomYs[i];
-    const doorY = clamp(y + Math.floor(roomHeight / 2), y, y + roomHeight - 1);
-    const distanceFromHall = Math.abs(doorY - hallMidY);
-    slots.push({
-      x: roomX,
-      y,
-      doorX,
-      doorY,
-      side,
-      distanceFromHall
-    });
-  }
-  return slots;
-}
-
-function buildRoomTypePlan(slotCount, scaleFactor, randomFn) {
-  const plan = [];
-  if (!Number.isFinite(slotCount) || slotCount <= 0) {
-    return plan;
-  }
-  const normalizedScale = Number.isFinite(scaleFactor) ? scaleFactor : 1;
-  const coreTypes = ['forge', 'dormitory', 'market', 'brewery'];
-  for (let i = 0; i < coreTypes.length && plan.length < slotCount; i += 1) {
-    plan.push(coreTypes[i]);
-  }
-  const countOf = (type) => plan.filter((entry) => entry === type).length;
-  while (plan.length < slotCount) {
-    const dormTarget = Math.max(Math.ceil(slotCount * 0.5), Math.ceil(normalizedScale * 2));
-    if (countOf('dormitory') < dormTarget) {
-      plan.push('dormitory');
-      continue;
-    }
-    const storageTarget = Math.max(0, Math.floor(normalizedScale));
-    if (countOf('storage') < storageTarget) {
-      plan.push('storage');
-      continue;
-    }
-    const forgeTarget = Math.max(1, Math.ceil(normalizedScale * 1.2));
-    if (countOf('forge') < forgeTarget) {
-      plan.push('forge');
-      continue;
-    }
-    const marketTarget = Math.max(1, Math.ceil(normalizedScale));
-    if (countOf('market') < marketTarget) {
-      plan.push('market');
-      continue;
-    }
-    const breweryTarget = Math.max(1, Math.ceil(normalizedScale));
-    if (countOf('brewery') < breweryTarget) {
-      plan.push('brewery');
-      continue;
-    }
-    plan.push(randomFn() < 0.5 ? 'dormitory' : 'storage');
-  }
-  return plan;
-}
-
 function pickVariantFromPool(variants, seedValue) {
   if (!Array.isArray(variants) || variants.length === 0) {
     return null;
@@ -1856,38 +1789,6 @@ function setCell(tiles, x, y, type, usedTypes, extras = {}) {
   }
   row[x] = { type, ...extras };
   usedTypes.add(type);
-}
-
-function fillRect(tiles, startX, startY, width, height, type, usedTypes, extras = {}) {
-  const rectWidth = Math.max(0, Math.floor(width));
-  const rectHeight = Math.max(0, Math.floor(height));
-  for (let y = 0; y < rectHeight; y += 1) {
-    for (let x = 0; x < rectWidth; x += 1) {
-      setCell(tiles, startX + x, startY + y, type, usedTypes, extras);
-    }
-  }
-}
-
-function carveCorridorHorizontal(tiles, y, startX, endX, corridorWidth, type, usedTypes) {
-  const half = Math.max(0, Math.floor(corridorWidth / 2));
-  const minX = Math.min(startX, endX);
-  const maxX = Math.max(startX, endX);
-  for (let x = minX; x <= maxX; x += 1) {
-    for (let offset = -half; offset <= half; offset += 1) {
-      setCell(tiles, x, y + offset, type, usedTypes);
-    }
-  }
-}
-
-function carveCorridorVertical(tiles, x, startY, endY, corridorWidth, type, usedTypes) {
-  const half = Math.max(0, Math.floor(corridorWidth / 2));
-  const minY = Math.min(startY, endY);
-  const maxY = Math.max(startY, endY);
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let offset = -half; offset <= half; offset += 1) {
-      setCell(tiles, x + offset, y, type, usedTypes);
-    }
-  }
 }
 
 function addMarker(markers, x, y, options = {}) {
@@ -2079,9 +1980,35 @@ export function generateDwarfholdMap(options = {}) {
     markers
   });
 
-  const npcs = [];
-
+  // Carve the cave silhouette before laying out districts so lots are only
+  // dug from rock that remains inside the mountain.
   applyVoidMask(tiles, randomFn);
+
+  const districts = extractDistrictLots({
+    tiles,
+    roadNetwork,
+    randomFn,
+    maxLotDepth: scaleFactor > 1.4 ? 4 : 3,
+    minLotArea: 12,
+    targetLotArea: Math.round(24 + scaleFactor * 8)
+  });
+  assignDistrictStages(districts, roadNetwork.center, randomFn);
+  placeDistrictStructures({
+    districts,
+    roadNetwork,
+    tiles,
+    usedTypes,
+    randomFn,
+    features,
+    featureSet,
+    markers,
+    scaleFactor
+  });
+
+  const npcs =
+    structureKey === 'ABANDONED_DWARFHOLD'
+      ? []
+      : generateNpcRoster({ districts, randomFn, resolvedPopulation: population, scaleFactor });
 
   placeMandatoryStairwellObject(tiles, randomFn, roadNetwork?.center, markers, features, featureSet);
 
