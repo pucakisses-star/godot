@@ -14771,6 +14771,12 @@ function renderDwarfholdScreen() {
     if (elements.dwarfholdLegend) {
       elements.dwarfholdLegend.innerHTML = '';
     }
+    if (elements.dwarfholdNpcs) {
+      elements.dwarfholdNpcs.innerHTML = '';
+    }
+    if (elements.dwarfholdNpcsSection) {
+      elements.dwarfholdNpcsSection.classList.add('hidden');
+    }
     if (elements.dwarfholdCanvas) {
       const canvas = elements.dwarfholdCanvas;
       const ctx = canvas.getContext('2d');
@@ -14913,6 +14919,36 @@ function renderDwarfholdScreen() {
       item.appendChild(text);
       elements.dwarfholdLegend.appendChild(item);
     });
+  }
+
+  if (elements.dwarfholdNpcs) {
+    elements.dwarfholdNpcs.innerHTML = '';
+    const roster = Array.isArray(customMap.npcs) ? customMap.npcs : [];
+    if (elements.dwarfholdNpcsSection) {
+      elements.dwarfholdNpcsSection.classList.toggle('hidden', roster.length === 0);
+    }
+    const npcDisplayLimit = 12;
+    roster.slice(0, npcDisplayLimit).forEach((npc) => {
+      if (!npc || typeof npc.name !== 'string') {
+        return;
+      }
+      const item = document.createElement('li');
+      item.className = 'dwarfhold-feature-item';
+      const role = typeof npc.role === 'string' && npc.role ? npc.role : 'dwarf';
+      const workplaceLabel =
+        typeof npc.workplace?.districtLabel === 'string' && npc.workplace.districtLabel
+          ? ` of the ${npc.workplace.districtLabel}`
+          : '';
+      const personality = typeof npc.personality === 'string' && npc.personality ? ` — ${npc.personality}` : '';
+      item.textContent = `${npc.name}, ${role}${workplaceLabel}${personality}`;
+      elements.dwarfholdNpcs.appendChild(item);
+    });
+    if (roster.length > npcDisplayLimit) {
+      const summaryItem = document.createElement('li');
+      summaryItem.className = 'dwarfhold-feature-item dwarfhold-feature-item--empty';
+      summaryItem.textContent = `…and ${roster.length - npcDisplayLimit} more dwarves dwell in these halls.`;
+      elements.dwarfholdNpcs.appendChild(summaryItem);
+    }
   }
 
   const canvas = elements.dwarfholdCanvas;
