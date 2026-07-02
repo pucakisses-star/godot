@@ -1,0 +1,40 @@
+name: Restore LFS objects from upstream
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Fetch LFS objects from upstream fork
+        run: |
+          git remote add upstream https://github.com/nativenewengland/godot.git
+          git lfs fetch upstream --all || git lfs fetch upstream main || git lfs fetch upstream master
+          echo "--- objects now in local LFS storage:"
+          find .git/lfs/objects -type f | wc -l
+
+      - name: Push LFS objects into this repo's LFS store
+        run: |
+          git lfs push origin --all
+
+      - name: Verify pointers resolve
+        run: |
+          git lfs fsck --pointers || true
+          missing=0
+          while IFS= read -r f; do
+            oid=$(grep -oE 'oid sha256:[a-f0-9]+' "$f" | cut -d: -f2)
+            [ -n "$oid" ] || continue
+            if [ ! -f ".git/lfs/objects/${oid:0:2}/${oid:2:2}/$oid" ]; then
+              missing=$((missing+1))
+              echo "STILL MISSING: $f"
+            fi
+          done < <(git grep -l "version https://git-lfs" -- '*.png' '*.jpg' '*.mp3' '*.ogg' 2>/dev/null || true)
+          echo "=== pointer files whose object is still absent locally: $missing"
