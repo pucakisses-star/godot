@@ -204,7 +204,7 @@ static func building_subtype_summary_text(civic_buildings_by_id: Dictionary) -> 
 		entries.append("%s: %d" % [display_name_for_building_type(subtype), int(subtype_counts[subtype])])
 	return ", ".join(entries)
 
-static func build_house_decor_layouts(grid: Dictionary) -> Dictionary:
+static func build_house_decor_layouts(grid: Dictionary, residence_type_map: Dictionary = {}) -> Dictionary:
 	var visited: Dictionary = {}
 	var overrides: Dictionary = {}
 	for key: Variant in grid.keys():
@@ -233,11 +233,30 @@ static func build_house_decor_layouts(grid: Dictionary) -> Dictionary:
 
 		if component.is_empty():
 			continue
-		place_house_decor_template(component, overrides)
+		place_house_decor_template(component, overrides, _component_residence_type(component, residence_type_map))
 
 	return overrides
 
-static func place_house_decor_template(component: Array[Vector2i], overrides: Dictionary) -> void:
+## Residence components carry their type from placement; merged components
+## resolve by majority vote and default to a plain house.
+static func _component_residence_type(component: Array[Vector2i], residence_type_map: Dictionary) -> String:
+	if residence_type_map.is_empty():
+		return "house"
+	var counts: Dictionary = {}
+	for cell: Vector2i in component:
+		var residence_type := String(residence_type_map.get(cell, ""))
+		if residence_type.is_empty():
+			continue
+		counts[residence_type] = int(counts.get(residence_type, 0)) + 1
+	var best_type := "house"
+	var best_count := 0
+	for type_name: String in counts.keys():
+		if int(counts[type_name]) > best_count:
+			best_count = int(counts[type_name])
+			best_type = type_name
+	return best_type
+
+static func place_house_decor_template(component: Array[Vector2i], overrides: Dictionary, residence_type: String = "house") -> void:
 	var occupied: Dictionary = {}
 	for cell: Vector2i in component:
 		occupied[cell] = true
@@ -252,6 +271,13 @@ static func place_house_decor_template(component: Array[Vector2i], overrides: Di
 		min_y = mini(min_y, cell.y)
 		max_y = maxi(max_y, cell.y)
 
+	if residence_type == "dormitory":
+		place_dormitory_decor(component, occupied, overrides, min_x, min_y, max_x, max_y)
+		return
+	if residence_type == "barracks":
+		place_barracks_decor(component, occupied, overrides, min_x, min_y, max_x, max_y)
+		return
+
 	var top_left_chest := Vector2i(min_x + 1, min_y + 1)
 	var top_left_bed := Vector2i(min_x + 2, min_y + 1)
 	var top_right_wardrobe := find_wall_adjacent_cell(component, occupied, overrides, Vector2i(max_x - 1, min_y + 1))
@@ -265,6 +291,32 @@ static func place_house_decor_template(component: Array[Vector2i], overrides: Di
 	try_assign_house_decor(overrides, occupied, center_table, "table")
 	try_assign_house_decor(overrides, occupied, stool_a, "stool")
 	try_assign_house_decor(overrides, occupied, stool_b, "stool")
+	ensure_house_has_bed(component, overrides)
+
+## Dormitories pack bunks on alternating cells (a bed at every odd local
+## coordinate) with a chest and wardrobe by the walls — one bed per
+## footprint.x * footprint.y placement estimate.
+static func place_dormitory_decor(component: Array[Vector2i], occupied: Dictionary, overrides: Dictionary, min_x: int, min_y: int, max_x: int, max_y: int) -> void:
+	for cell: Vector2i in component:
+		if (cell.x - min_x) % 2 == 1 and (cell.y - min_y) % 2 == 1:
+			try_assign_house_decor(overrides, occupied, cell, "bed")
+	try_assign_house_decor(overrides, occupied, Vector2i(min_x, min_y), "chest")
+	try_assign_house_decor(overrides, occupied, find_wall_adjacent_cell(component, occupied, overrides, Vector2i(max_x, min_y)), "wardrobe")
+	try_assign_house_decor(overrides, occupied, Vector2i((min_x + max_x) / 2, max_y), "water_bucket")
+	ensure_house_has_bed(component, overrides)
+
+## Barracks lay a bed row every third rank with armor stands and a training
+## target between them.
+static func place_barracks_decor(component: Array[Vector2i], occupied: Dictionary, overrides: Dictionary, min_x: int, min_y: int, max_x: int, max_y: int) -> void:
+	for cell: Vector2i in component:
+		var local_x := cell.x - min_x
+		var local_y := cell.y - min_y
+		if local_x % 2 == 1 and local_y % 3 == 1:
+			try_assign_house_decor(overrides, occupied, cell, "bed")
+		elif local_y % 3 == 0 and local_x % 4 == 2:
+			try_assign_house_decor(overrides, occupied, cell, "armor_stand")
+	try_assign_house_decor(overrides, occupied, Vector2i(min_x, min_y), "chest")
+	try_assign_house_decor(overrides, occupied, Vector2i(max_x, max_y), "target")
 	ensure_house_has_bed(component, overrides)
 
 static func ensure_house_has_bed(component: Array[Vector2i], overrides: Dictionary) -> void:

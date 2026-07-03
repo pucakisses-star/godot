@@ -15,6 +15,15 @@ func apply_world_settings(settings: Dictionary, seed_key: String, population_key
 	target_resident_npcs = int(ceil(float(selected_hold_population) / 10.0))
 	return scene_seed
 
+## How many underground levels a hold of this population digs: roughly one
+## level per 120 residents, so a 50-resident hold is a single cozy level
+## while a great hold spans the maximum depth. Returns 0 when there is no
+## population data so callers can fall back to a random roll.
+func population_scaled_level_count(max_levels: int) -> int:
+	if target_resident_npcs <= 0:
+		return 0
+	return clampi(int(ceil(float(target_resident_npcs) / 120.0)), 1, maxi(1, max_levels))
+
 func target_npcs_for_level(level_index: int, level_count: int) -> int:
 	if target_resident_npcs <= 0:
 		return 0
