@@ -84,6 +84,8 @@ static func pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_ti
 	if _is_structural_cell(cell):
 		if _is_corridor_cell(_cell_at(grid, x - 1, y)) or _is_corridor_cell(_cell_at(grid, x + 1, y)) or _is_corridor_cell(_cell_at(grid, x, y - 1)) or _is_corridor_cell(_cell_at(grid, x, y + 1)):
 			return ""
+		if _is_adjacent_to_door(key, door_cells):
+			return ""
 		if rng.randf() > 0.09:
 			return ""
 		if cell == CELL_HOUSE:
@@ -182,7 +184,7 @@ static func building_subtype_summary_text(buildings_by_id: Dictionary) -> String
 ## Residence decor: houses get a bedroom template, dormitories bunk rows,
 ## barracks bed rows with armor stands — same shapes as the dwarfhold
 ## templates, re-pointed at town tile keys.
-static func build_house_decor_layouts(grid: Dictionary, residence_type_map: Dictionary = {}) -> Dictionary:
+static func build_house_decor_layouts(grid: Dictionary, residence_type_map: Dictionary = {}, door_cells: Dictionary = {}) -> Dictionary:
 	var visited: Dictionary = {}
 	var overrides: Dictionary = {}
 	for key: Variant in grid.keys():
@@ -211,9 +213,17 @@ static func build_house_decor_layouts(grid: Dictionary, residence_type_map: Dict
 
 		if component.is_empty():
 			continue
-		place_house_decor_template(component, overrides, _component_residence_type(component, residence_type_map))
+		place_house_decor_template(component, overrides, _component_residence_type(component, residence_type_map), door_cells)
 
 	return overrides
+
+## Furniture next to a doorway would seal the room (furniture blocks
+## movement), so bunk rows and armor stands keep clear of doors.
+static func _is_adjacent_to_door(cell: Vector2i, door_cells: Dictionary) -> bool:
+	for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		if door_cells.has(cell + direction):
+			return true
+	return false
 
 static func _component_residence_type(component: Array[Vector2i], residence_type_map: Dictionary) -> String:
 	if residence_type_map.is_empty():
@@ -232,7 +242,7 @@ static func _component_residence_type(component: Array[Vector2i], residence_type
 			best_type = type_name
 	return best_type
 
-static func place_house_decor_template(component: Array[Vector2i], overrides: Dictionary, residence_type: String = "house") -> void:
+static func place_house_decor_template(component: Array[Vector2i], overrides: Dictionary, residence_type: String = "house", door_cells: Dictionary = {}) -> void:
 	var occupied: Dictionary = {}
 	for cell: Vector2i in component:
 		occupied[cell] = true
@@ -248,51 +258,65 @@ static func place_house_decor_template(component: Array[Vector2i], overrides: Di
 		max_y = maxi(max_y, cell.y)
 
 	if residence_type == "dormitory":
-		_place_dormitory_decor(component, occupied, overrides, min_x, min_y, max_x, max_y)
+		_place_dormitory_decor(component, occupied, overrides, min_x, min_y, max_x, max_y, door_cells)
 		return
 	if residence_type == "barracks":
-		_place_barracks_decor(component, occupied, overrides, min_x, min_y, max_x, max_y)
+		_place_barracks_decor(component, occupied, overrides, min_x, min_y, max_x, max_y, door_cells)
 		return
 
-	_try_assign_decor(overrides, occupied, Vector2i(min_x + 1, min_y + 1), "chest")
-	_try_assign_decor(overrides, occupied, Vector2i(min_x + 2, min_y + 1), "bed")
-	_try_assign_decor(overrides, occupied, Vector2i(max_x - 1, min_y + 1), "wardrobe")
-	_try_assign_decor(overrides, occupied, Vector2i((min_x + max_x) / 2, (min_y + max_y) / 2), "table")
-	_try_assign_decor(overrides, occupied, Vector2i((min_x + max_x) / 2 - 1, (min_y + max_y) / 2), "bench")
-	_try_assign_decor(overrides, occupied, Vector2i(max_x - 1, max_y - 1), "plant")
-	ensure_house_has_bed(component, overrides)
+	_try_assign_clear_decor(overrides, occupied, Vector2i(min_x + 1, min_y + 1), "chest", door_cells)
+	_try_assign_clear_decor(overrides, occupied, Vector2i(min_x + 2, min_y + 1), "bed", door_cells)
+	_try_assign_clear_decor(overrides, occupied, Vector2i(max_x - 1, min_y + 1), "wardrobe", door_cells)
+	_try_assign_clear_decor(overrides, occupied, Vector2i((min_x + max_x) / 2, (min_y + max_y) / 2), "table", door_cells)
+	_try_assign_clear_decor(overrides, occupied, Vector2i((min_x + max_x) / 2 - 1, (min_y + max_y) / 2), "bench", door_cells)
+	_try_assign_clear_decor(overrides, occupied, Vector2i(max_x - 1, max_y - 1), "plant", door_cells)
+	ensure_house_has_bed(component, overrides, door_cells)
 
-static func _place_dormitory_decor(component: Array[Vector2i], occupied: Dictionary, overrides: Dictionary, min_x: int, min_y: int, max_x: int, max_y: int) -> void:
+static func _place_dormitory_decor(component: Array[Vector2i], occupied: Dictionary, overrides: Dictionary, min_x: int, min_y: int, max_x: int, max_y: int, door_cells: Dictionary = {}) -> void:
 	for cell: Vector2i in component:
 		if (cell.x - min_x) % 2 == 1 and (cell.y - min_y) % 2 == 1:
+			if _is_adjacent_to_door(cell, door_cells):
+				continue
 			_try_assign_decor(overrides, occupied, cell, "bed")
 	_try_assign_decor(overrides, occupied, Vector2i(min_x, min_y), "chest")
 	_try_assign_decor(overrides, occupied, Vector2i(max_x, min_y), "wardrobe")
 	_try_assign_decor(overrides, occupied, Vector2i((min_x + max_x) / 2, max_y), "bucket")
-	ensure_house_has_bed(component, overrides)
+	ensure_house_has_bed(component, overrides, door_cells)
 
-static func _place_barracks_decor(component: Array[Vector2i], occupied: Dictionary, overrides: Dictionary, min_x: int, min_y: int, max_x: int, max_y: int) -> void:
+static func _place_barracks_decor(component: Array[Vector2i], occupied: Dictionary, overrides: Dictionary, min_x: int, min_y: int, max_x: int, max_y: int, door_cells: Dictionary = {}) -> void:
 	for cell: Vector2i in component:
 		var local_x := cell.x - min_x
 		var local_y := cell.y - min_y
+		if _is_adjacent_to_door(cell, door_cells):
+			continue
 		if local_x % 2 == 1 and local_y % 3 == 1:
 			_try_assign_decor(overrides, occupied, cell, "bed_alt")
 		elif local_y % 3 == 0 and local_x % 4 == 2:
 			_try_assign_decor(overrides, occupied, cell, "armor_stand")
 	_try_assign_decor(overrides, occupied, Vector2i(min_x, min_y), "chest")
-	ensure_house_has_bed(component, overrides)
+	ensure_house_has_bed(component, overrides, door_cells)
 
-static func ensure_house_has_bed(component: Array[Vector2i], overrides: Dictionary) -> void:
+static func ensure_house_has_bed(component: Array[Vector2i], overrides: Dictionary, door_cells: Dictionary = {}) -> void:
 	for cell: Vector2i in component:
 		var assigned := String(overrides.get(cell, ""))
 		if assigned == "bed" or assigned == "bed_alt":
 			return
 
 	var fallback_bed_cell := component[0]
+	var found_clear_cell := false
 	for cell: Vector2i in component:
-		if not overrides.has(cell):
-			fallback_bed_cell = cell
-			break
+		if overrides.has(cell):
+			continue
+		if _is_adjacent_to_door(cell, door_cells):
+			continue
+		fallback_bed_cell = cell
+		found_clear_cell = true
+		break
+	if not found_clear_cell:
+		for cell: Vector2i in component:
+			if not overrides.has(cell):
+				fallback_bed_cell = cell
+				break
 	overrides[fallback_bed_cell] = "bed"
 
 static func _try_assign_decor(overrides: Dictionary, occupied: Dictionary, cell: Vector2i, tile_key: String) -> void:
@@ -301,6 +325,11 @@ static func _try_assign_decor(overrides: Dictionary, occupied: Dictionary, cell:
 	if overrides.has(cell):
 		return
 	overrides[cell] = tile_key
+
+static func _try_assign_clear_decor(overrides: Dictionary, occupied: Dictionary, cell: Vector2i, tile_key: String, door_cells: Dictionary) -> void:
+	if _is_adjacent_to_door(cell, door_cells):
+		return
+	_try_assign_decor(overrides, occupied, cell, tile_key)
 
 static func _cell_at(grid: Dictionary, x: int, y: int) -> int:
 	return int(grid.get(Vector2i(x, y), CELL_ROCK))

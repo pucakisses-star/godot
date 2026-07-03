@@ -195,11 +195,16 @@ const TOWN_TILE_ATLAS := {
 	"tree": Vector2i(1, 17),
 	"tree_dark": Vector2i(1, 20),
 	"bed": Vector2i(28, 22),
+	"bed_top": Vector2i(28, 21),
 	"bed_alt": Vector2i(31, 22),
+	"bed_alt_top": Vector2i(31, 21),
 	"chest": Vector2i(31, 17),
 	"wardrobe": Vector2i(25, 18),
+	"wardrobe_top": Vector2i(25, 17),
 	"dresser": Vector2i(21, 18),
+	"dresser_top": Vector2i(21, 17),
 	"shelf": Vector2i(27, 18),
+	"shelf_top": Vector2i(27, 17),
 	"table": Vector2i(3, 11),
 	"bench": Vector2i(0, 11),
 	"counter": Vector2i(16, 11),
@@ -217,11 +222,18 @@ const TOWN_TILE_ATLAS := {
 	"brazier": Vector2i(21, 20),
 	"armor_stand": Vector2i(16, 19),
 	"forge": Vector2i(20, 22),
-	"oven": Vector2i(23, 22)
+	"forge_top": Vector2i(20, 21),
+	"oven": Vector2i(23, 22),
+	"oven_top": Vector2i(23, 21)
 }
+## The *_top keys are the upper halves of two-tile-tall furniture sprites.
+## They render as visual caps over the cell above the furniture, so they
+## stay passable — the blocking cell is the furniture base itself.
 const TOWN_PASSABLE_TILE_KEYS := [
 	"grass", "grass_dark", "grass_tuft", "flowers_white", "flowers_yellow",
-	"road", "road_twig", "plaza", "plaza_alt", "floor", "door", "rug"
+	"road", "road_twig", "plaza", "plaza_alt", "floor", "door", "rug",
+	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",
+	"forge_top", "oven_top"
 ]
 
 static func validate_atlas_no_duplicates(atlas_name: String, atlas: Dictionary) -> bool:

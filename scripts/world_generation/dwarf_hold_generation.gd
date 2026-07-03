@@ -694,7 +694,8 @@ func _update_player_turn_movement(delta: float) -> void:
 
 	if _player_move_path.is_empty():
 		if _player_pending_chest_interaction.x != 2147483647:
-			_handle_chest_click(_screen_position_from_cell(_player_pending_chest_interaction))
+			if _is_player_adjacent_to_cell(_player_pending_chest_interaction):
+				_handle_chest_click(_screen_position_from_cell(_player_pending_chest_interaction))
 			_player_pending_chest_interaction = Vector2i(2147483647, 2147483647)
 		return
 
@@ -2004,7 +2005,7 @@ func _item_abbreviation(item_name: String) -> String:
 	return DwarfHoldChestService.item_abbreviation(item_name)
 
 func _build_house_decor_layouts(grid: Dictionary) -> Dictionary:
-	return DwarfHoldTileService.build_house_decor_layouts(grid, _latest_residence_type_map)
+	return DwarfHoldTileService.build_house_decor_layouts(grid, _latest_residence_type_map, _door_cells)
 
 func _on_city_panel_gui_input(event: InputEvent) -> void:
 	_is_panning = DwarfHoldUiInputHandler.handle_city_panel_event(
@@ -2067,7 +2068,11 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_move_path.clear()
 	_player_is_moving = false
 	_player_pending_chest_interaction = Vector2i(2147483647, 2147483647)
-	_walkable_cells = _collect_walkable_cells(grid)
+	var zone_walkable_cells := _collect_walkable_cells(grid)
+	_walkable_cells = []
+	for zone_cell in zone_walkable_cells:
+		if _is_passable_cell_for_actor(zone_cell):
+			_walkable_cells.append(zone_cell)
 	# Resident count follows the hold's population at 10:1, split across
 	# levels; the export count is only the floor for population-less holds.
 	var level_npc_target := _target_npcs_for_level(
@@ -2125,15 +2130,33 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	_request_player_move_to_cell(clicked_cell)
 
 func _request_chest_interaction(chest_cell: Vector2i) -> void:
-	if _player_cell == chest_cell:
+	if _is_player_adjacent_to_cell(chest_cell):
 		_handle_chest_click(_screen_position_from_cell(chest_cell))
 		return
-	if not _is_walkable_cell(chest_cell):
+	var approach_cell := _nearest_walkable_neighbor(chest_cell)
+	if approach_cell.x == 2147483647:
 		_clear_chest_selection()
 		return
-	_request_player_move_to_cell(chest_cell)
+	_request_player_move_to_cell(approach_cell)
 	if not _player_move_path.is_empty():
 		_player_pending_chest_interaction = chest_cell
+
+func _is_player_adjacent_to_cell(cell: Vector2i) -> bool:
+	var delta := cell - _player_cell
+	return maxi(absi(delta.x), absi(delta.y)) <= 1
+
+func _nearest_walkable_neighbor(cell: Vector2i) -> Vector2i:
+	var best := Vector2i(2147483647, 2147483647)
+	var best_distance := INF
+	for offset: Vector2i in SPD_NEIGHBOR_OFFSETS:
+		var neighbor: Vector2i = cell + offset
+		if not _is_walkable_cell(neighbor):
+			continue
+		var distance := Vector2(_player_cell).distance_squared_to(Vector2(neighbor))
+		if distance < best_distance:
+			best_distance = distance
+			best = neighbor
+	return best
 
 func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 	if _player_sprite == null or not _player_control_enabled:
