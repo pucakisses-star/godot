@@ -51,7 +51,8 @@ static func spawn_tavern_characters(
 			spawn_cell = walkable_cells[rng.randi_range(0, walkable_cells.size() - 1)]
 		if not bool(is_walkable_cell.call(spawn_cell)):
 			continue
-		var npc_sprite := create_tavern_character_sprite(placeholder_actor_texture, (i + 1) % TAVERN_CHARACTER_SLOT_COUNT, tile_size)
+		var npc_texture := tavern_character_texture if tavern_character_texture != null else placeholder_actor_texture
+		var npc_sprite := create_tavern_character_sprite(npc_texture, (i + 1) % TAVERN_CHARACTER_SLOT_COUNT, tile_size)
 		actor_sprite_to_cell.call(npc_sprite, spawn_cell)
 		actor_layer.add_child(npc_sprite)
 		npc_states.append({

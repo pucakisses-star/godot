@@ -27,3 +27,5 @@ resources/images/main_menu/smith.png -filter -diff -merge -text
 resources/images/overworld/atlas/world_map_details.png -filter -diff -merge -text
 resources/images/overworld/atlas/overworld.png -filter -diff -merge -text
 resources/images/town/town_tileset.png -filter -diff -merge -text
+resources/images/npc/townsfolk_characters.png -filter -diff -merge -text
+resources/images/npc/dwarf_characters.png -filter -diff -merge -text

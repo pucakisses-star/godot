@@ -1,9 +1,36 @@
 extends RefCounted
 class_name DwarfHoldActorVisuals
 
-static func create_tavern_character_sprite(placeholder_actor_texture: Texture2D, character_slot: int, tile_size: Vector2i) -> Sprite2D:
+## Builds an NPC sprite. When the texture is a 12x8 character sheet
+## (8 slots of 3 walk frames x 4 facings), the sprite uses an animated
+## region that DwarfHoldTavernService.update_character_frame advances;
+## tiny textures (the 1x1 placeholder) fall back to the colored box.
+static func create_tavern_character_sprite(character_texture: Texture2D, character_slot: int, tile_size: Vector2i) -> Sprite2D:
+	if character_texture != null:
+		var source_size := character_texture.get_size()
+		var frame_width := int(source_size.x / 12.0)
+		var frame_height := int(source_size.y / 8.0)
+		if frame_width >= 8 and frame_height >= 8:
+			var sheet_sprite := Sprite2D.new()
+			sheet_sprite.texture = character_texture
+			sheet_sprite.region_enabled = true
+			sheet_sprite.centered = true
+			var slot_column := character_slot % 4
+			var slot_row := character_slot / 4
+			sheet_sprite.region_rect = Rect2(
+				(slot_column * 3 + 1) * frame_width,
+				slot_row * 4 * frame_height,
+				frame_width,
+				frame_height
+			)
+			sheet_sprite.scale = Vector2(
+				float(tile_size.x) / float(frame_width),
+				float(tile_size.y) / float(frame_height)
+			) * 0.9
+			return sheet_sprite
+
 	var sprite := Sprite2D.new()
-	sprite.texture = placeholder_actor_texture
+	sprite.texture = character_texture
 	sprite.region_enabled = false
 	sprite.centered = true
 	sprite.modulate = placeholder_actor_color(character_slot)
