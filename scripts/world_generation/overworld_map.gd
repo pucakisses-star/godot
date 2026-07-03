@@ -1628,11 +1628,19 @@ func _generate_map() -> void:
 
 	generation_started_ms = Time.get_ticks_msec()
 	_place_settlements(biome_map, rng)
+	_log_generation_stage("settlements", generation_started_ms)
+	generation_started_ms = Time.get_ticks_msec()
 	_place_github_style_structures(biome_map, height_map, moisture_map, rng)
+	_log_generation_stage("ambient structures", generation_started_ms)
+	generation_started_ms = Time.get_ticks_msec()
 	_build_routes_overlay_from_settlements()
+	_log_generation_stage("routes overlay", generation_started_ms)
+	generation_started_ms = Time.get_ticks_msec()
 	_rebuild_labels_overlay()
+	_log_generation_stage("labels overlay", generation_started_ms)
+	generation_started_ms = Time.get_ticks_msec()
 	_assign_cultural_groups(biome_map, temperature_map, moisture_map, height_map, rng)
-	_log_generation_stage("settlements and culture", generation_started_ms)
+	_log_generation_stage("cultural groups", generation_started_ms)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "settlements and culture")
 	_height_buffer = height_buffer
 	_temperature_buffer = temperature_buffer
@@ -2668,9 +2676,13 @@ func _place_settlements(biome_map: Dictionary, rng: RandomNumberGenerator) -> vo
 	var ratios: Dictionary = settings.get("settlement_ratios", {}) as Dictionary
 	var settlements: Dictionary = settings.get("settlements", {}) as Dictionary
 	var base_count: int = maxi(1, int(round(float(map_size.x * map_size.y) / 4096.0)))
-	var occupied: Array[Vector2i] = []
 	var candidates := _build_settlement_candidates(biome_map)
 	var min_distance := 8.0
+	# Suitability pools are scored once per faction type; placements then
+	# draw weighted samples against an O(1) blocked-area set instead of
+	# re-filtering and re-scoring every map cell per settlement.
+	var blocked_area: Dictionary = {}
+	var capital_pools: Dictionary = {}
 
 	for civilization: String in DwarfholdLogic.SETTLEMENT_TYPES.keys():
 		var settlement_type := String(DwarfholdLogic.SETTLEMENT_TYPES[civilization])
@@ -2684,18 +2696,15 @@ func _place_settlements(biome_map: Dictionary, rng: RandomNumberGenerator) -> vo
 			ratio = 0.5
 		if ratio <= 0.0:
 			continue
+		if not capital_pools.has(settlement_type):
+			capital_pools[settlement_type] = OverworldSettlementService.build_weighted_capital_pool(settlement_type, candidates)
+		var pool := capital_pools[settlement_type] as Dictionary
 		var count: int = maxi(1, int(round(base_count * ratio)))
 		for _i in range(count):
-			var available := _filter_settlement_candidates(candidates, occupied, min_distance)
-			if available.is_empty():
-				break
-			var chosen := DwarfholdLogic.choose_tile_for_capital(settlement_type, available, rng)
+			var chosen: Vector2i = OverworldSettlementService.sample_capital_from_pool(pool, blocked_area, rng)
 			if chosen == Vector2i(-1, -1):
 				break
-			if _is_too_close(chosen, occupied, min_distance):
-				occupied.append(chosen)
-				continue
-			occupied.append(chosen)
+			OverworldSettlementService.mark_occupied_area(blocked_area, chosen, min_distance)
 			var biome_label := _settlement_biome_label(biome_map.get(chosen, BIOME_GRASSLAND))
 			var tile := _select_settlement_tile(settlement_type, biome_label, rng, chosen)
 			if settlement_layer != null:
@@ -3542,13 +3551,6 @@ func _build_settlement_candidates(biome_map: Dictionary) -> Array:
 		JUNGLE_TREE_TILE,
 		Callable(self, "_settlement_biome_label")
 	)
-
-func _filter_settlement_candidates(
-	candidates: Array,
-	occupied: Array[Vector2i],
-	min_distance: float
-) -> Array:
-	return OverworldSettlementService.filter_settlement_candidates(candidates, occupied, min_distance)
 
 func _is_too_close(coord: Vector2i, occupied: Array[Vector2i], min_distance: float) -> bool:
 	return OverworldSettlementService.is_too_close(coord, occupied, min_distance)
