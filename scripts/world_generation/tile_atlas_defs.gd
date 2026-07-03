@@ -115,6 +115,43 @@ const TRAVELERS_CAMP_TILE := Vector2i(7, 1)
 const DUNGEON_TILE := Vector2i(7, 2)
 const CENTAUR_ENCAMPMENT_TILE := Vector2i(10, 2)
 
+## Winding dirt-road segments (row 5 of the atlas), bucketed by which
+## edges the trail leaves through. Organic art, so buckets hold variants.
+const ROAD_TILES := {
+	"ns": [Vector2i(7, 5), Vector2i(14, 5), Vector2i(16, 5)],
+	"we": [Vector2i(13, 5), Vector2i(15, 5), Vector2i(11, 5), Vector2i(21, 5)],
+	"corner_se": [Vector2i(10, 5)],
+	"corner_sw": [Vector2i(8, 5)],
+	"corner_ne": [Vector2i(9, 5)],
+	"corner_nw": [Vector2i(20, 5)],
+	"junction": [Vector2i(12, 5), Vector2i(17, 5)],
+	"stub": [Vector2i(18, 5), Vector2i(19, 5)]
+}
+
+## The desert city set: golden palace, sandstone walls and gate, hut,
+## serpent statue, and desert vegetation.
+const DESERT_CITY_TILE := Vector2i(8, 3)
+const DESERT_SERPENT_STATUE_TILE := Vector2i(9, 3)
+const DESERT_WALL_A_TILE := Vector2i(6, 6)
+const DESERT_WALL_B_TILE := Vector2i(7, 6)
+const DESERT_GATE_TILE := Vector2i(8, 6)
+const DESERT_HUT_TILE := Vector2i(9, 6)
+const DESERT_PALMS_TILE := Vector2i(7, 3)
+const DESERT_CACTI_TILE := Vector2i(10, 3)
+
+const PIRATE_SHIP_TILE := Vector2i(6, 3)
+const EVIL_KEEP_TILE := Vector2i(18, 1)
+const DARK_GATE_TILE := Vector2i(17, 1)
+const DARK_SPIRE_TILE := Vector2i(17, 2)
+const GREEN_DRAGON_TILE := Vector2i(18, 0)
+const OLD_GROWTH_TILE := Vector2i(0, 2)
+const WATCHTOWER_TILE := Vector2i(3, 4)
+const HERMIT_HUT_TILE := Vector2i(0, 4)
+const TENT_CAMP_TILE := Vector2i(1, 5)
+const FARMHOUSE_TILE := Vector2i(4, 5)
+const STONE_CAIRN_TILE := Vector2i(5, 6)
+const WAR_PYRE_TILE := Vector2i(13, 3)
+
 const BIOME_WATER := "water"
 const BIOME_MOUNTAIN := "mountain"
 const BIOME_HILLS := "hills"

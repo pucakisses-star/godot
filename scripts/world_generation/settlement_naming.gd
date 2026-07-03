@@ -375,8 +375,47 @@ static func castle_name(rng: RandomNumberGenerator) -> String:
 
 ## Names a scored structure by its structure id; returns an empty string
 ## for ids without a dedicated generator so callers can fall back.
+const DESERT_CITY_PREFIXES: Array[String] = [
+	"Qas", "Zar", "Ash", "Sul", "Khem", "Mir", "Azh", "Sef", "Tal", "Nahr",
+	"Kal", "Om", "Zeph", "Har", "Dun"
+]
+const DESERT_CITY_SUFFIXES: Array[String] = [
+	"ara", "abar", "ekh", "oun", "asha", "iram", "adan", "uzir", "emet",
+	"ahim", "izra", "aqar", "oasis", "ashan", "ulam"
+]
+const DESERT_CITY_EPITHETS: Array[String] = [
+	"of the Golden Sands", "of the Serpent", "of a Thousand Wells",
+	"Under the Sun", "of the Shifting Dunes", "the Gilded"
+]
+
+static func desert_city_name(rng: RandomNumberGenerator) -> String:
+	var base := "%s%s" % [
+		DESERT_CITY_PREFIXES[rng.randi_range(0, DESERT_CITY_PREFIXES.size() - 1)],
+		DESERT_CITY_SUFFIXES[rng.randi_range(0, DESERT_CITY_SUFFIXES.size() - 1)]
+	]
+	if rng.randf() < 0.3:
+		return "%s %s" % [base, DESERT_CITY_EPITHETS[rng.randi_range(0, DESERT_CITY_EPITHETS.size() - 1)]]
+	return base
+
+const EVIL_KEEP_PREFIXES: Array[String] = [
+	"Grim", "Dread", "Black", "Iron", "Raven", "Skull", "Thorn", "Blood",
+	"Shadow", "Gloom", "Wraith", "Night"
+]
+const EVIL_KEEP_SUFFIXES: Array[String] = [
+	"hold Keep", "fang Keep", "spire Keep", "gate Bastion", "mor Keep",
+	"crag Fortress", "veil Citadel", "marrow Keep"
+]
+
+static func evil_keep_name(rng: RandomNumberGenerator) -> String:
+	return "%s%s" % [
+		EVIL_KEEP_PREFIXES[rng.randi_range(0, EVIL_KEEP_PREFIXES.size() - 1)],
+		EVIL_KEEP_SUFFIXES[rng.randi_range(0, EVIL_KEEP_SUFFIXES.size() - 1)]
+	]
+
 static func structure_name(structure_id: String, rng: RandomNumberGenerator) -> String:
 	match structure_id:
+		"evilKeep":
+			return evil_keep_name(rng)
 		"monastery":
 			return monastery_name(rng)
 		"saintShrine":

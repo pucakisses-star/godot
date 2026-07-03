@@ -399,7 +399,7 @@ func _add_biome_ambient_source(seed_number: int, coord: Vector2i, biome: String)
 		add_cultural_source(coord.x, coord.y, 6, [{"key": "beastmen", "label": "Beastmen", "color": CULTURE_TYPES.DEFAULT_CULTURE_COLORS["beastmen"], "share": 1.0}], 1.4)
 
 func _add_structure_ambient_source(seed_number: int, coord: Vector2i, structure: String) -> void:
-	if structure.find("dungeon") >= 0 or structure.find("wizard") >= 0 or structure.find("tower") >= 0:
+	if structure.find("dungeon") >= 0 or structure.find("wizard") >= 0 or structure.find("tower") >= 0 or structure.findn("keep") >= 0:
 		if _hash_roll(seed_number, coord.x, coord.y, 61) < 0.6:
 			add_cultural_source(coord.x, coord.y, 8, [{"key": "demons", "label": "Demons", "color": CULTURE_TYPES.DEFAULT_CULTURE_COLORS["demons"], "share": 1.0}], 1.65)
 	if structure.find("cave") >= 0 and _hash_roll(seed_number, coord.x, coord.y, 63) < 0.22:

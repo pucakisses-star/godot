@@ -23,6 +23,9 @@ static func build_tile_set(configured_tile_size: int, iceberg_tile_options: Arra
 	var tile_coords_list := _base_tile_coords_list()
 	for iceberg_tile_coord: Vector2i in iceberg_tile_options:
 		tile_coords_list.append(iceberg_tile_coord)
+	for road_bucket: Variant in TILE_ATLAS_DEFS.ROAD_TILES.values():
+		for road_tile: Vector2i in (road_bucket as Array):
+			tile_coords_list.append(road_tile)
 
 	var atlas_texture := load(TILE_ATLAS_DEFS.ATLAS_TEXTURE) as Texture2D
 	if atlas_texture == null:
@@ -228,5 +231,24 @@ static func _base_tile_coords_list() -> Array[Vector2i]:
 		TILE_ATLAS_DEFS.BANDIT_CAMP_TILE,
 		TILE_ATLAS_DEFS.TRAVELERS_CAMP_TILE,
 		TILE_ATLAS_DEFS.DUNGEON_TILE,
-		TILE_ATLAS_DEFS.CENTAUR_ENCAMPMENT_TILE
+		TILE_ATLAS_DEFS.CENTAUR_ENCAMPMENT_TILE,
+		TILE_ATLAS_DEFS.DESERT_CITY_TILE,
+		TILE_ATLAS_DEFS.DESERT_SERPENT_STATUE_TILE,
+		TILE_ATLAS_DEFS.DESERT_WALL_A_TILE,
+		TILE_ATLAS_DEFS.DESERT_WALL_B_TILE,
+		TILE_ATLAS_DEFS.DESERT_GATE_TILE,
+		TILE_ATLAS_DEFS.DESERT_HUT_TILE,
+		TILE_ATLAS_DEFS.DESERT_PALMS_TILE,
+		TILE_ATLAS_DEFS.DESERT_CACTI_TILE,
+		TILE_ATLAS_DEFS.EVIL_KEEP_TILE,
+		TILE_ATLAS_DEFS.DARK_GATE_TILE,
+		TILE_ATLAS_DEFS.DARK_SPIRE_TILE,
+		TILE_ATLAS_DEFS.GREEN_DRAGON_TILE,
+		TILE_ATLAS_DEFS.OLD_GROWTH_TILE,
+		TILE_ATLAS_DEFS.WATCHTOWER_TILE,
+		TILE_ATLAS_DEFS.HERMIT_HUT_TILE,
+		TILE_ATLAS_DEFS.TENT_CAMP_TILE,
+		TILE_ATLAS_DEFS.FARMHOUSE_TILE,
+		TILE_ATLAS_DEFS.STONE_CAIRN_TILE,
+		TILE_ATLAS_DEFS.WAR_PYRE_TILE
 	]
