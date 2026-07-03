@@ -1,4 +1,5 @@
 extends Control
+class_name EmbarkPreparation
 
 const WorldSettings = preload("res://scripts/world_generation/world_settings.gd")
 
@@ -42,6 +43,11 @@ const WORLD_LAYOUTS := [
 	"Inland Sea",
 	"Archipelago"
 ]
+
+const CHRONOLOGY_YEAR_MIN := 0
+const CHRONOLOGY_YEAR_MAX := 50000
+const CHRONOLOGY_AGE_MIN := 2
+const CHRONOLOGY_AGE_MAX := 20
 
 const WORLD_NAMES := [
 	"Nûrn",
@@ -185,6 +191,11 @@ func _ready() -> void:
 		seed_input.text = _generate_seed()
 	if world_name_input.text.strip_edges().is_empty():
 		world_name_input.text = _generate_world_name()
+	# Chronology validation (browser rules): years 0-50000, ages 2-20.
+	year_input.min_value = CHRONOLOGY_YEAR_MIN
+	year_input.max_value = CHRONOLOGY_YEAR_MAX
+	age_input.min_value = CHRONOLOGY_AGE_MIN
+	age_input.max_value = CHRONOLOGY_AGE_MAX
 	if year_input.value <= 0:
 		year_input.value = 1485
 	if age_input.value <= 0:
@@ -222,9 +233,27 @@ func _refresh_summary() -> void:
 	summary_chronology.text = "Year %d of the %d Age" % [int(year_input.value), int(age_input.value)]
 
 func _on_randomise_chronology_pressed() -> void:
-	year_input.value = randi_range(200, 2500)
-	age_input.value = randi_range(2, 20)
+	year_input.value = random_chronology_year()
+	age_input.value = random_chronology_age()
 	_refresh_summary()
+
+## Browser chronologyBias: rolls skew hard toward the dawn of history.
+## Years span 0-50000 with exponent 2.8, then up to four 85% rerolls
+## keep most worlds under year 1000; ages span 2-20 with exponent 1.6.
+static func biased_random_int(min_value: int, max_value: int, exponent: float) -> int:
+	var span := max_value - min_value + 1
+	return clampi(min_value + int(floor(pow(randf(), exponent) * float(span))), min_value, max_value)
+
+static func random_chronology_year() -> int:
+	var year := biased_random_int(CHRONOLOGY_YEAR_MIN, CHRONOLOGY_YEAR_MAX, 2.8)
+	for _retry in range(4):
+		if year < 1000 or randf() >= 0.85:
+			break
+		year = biased_random_int(CHRONOLOGY_YEAR_MIN, CHRONOLOGY_YEAR_MAX, 2.8)
+	return year
+
+static func random_chronology_age() -> int:
+	return biased_random_int(CHRONOLOGY_AGE_MIN, CHRONOLOGY_AGE_MAX, 1.6)
 
 func _on_randomise_world_name_pressed() -> void:
 	world_name_input.text = _generate_world_name()
