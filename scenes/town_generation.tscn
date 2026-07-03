@@ -295,7 +295,7 @@ layout_mode = 2
 
 [node name="BackpackSectionLabel" type="Label" parent="ChestPopup/Content" unique_id=909011322]
 layout_mode = 2
-text = "Backpack (visual placeholder)"
+text = "Backpack"
 
 [node name="BackpackGrid" type="GridContainer" parent="ChestPopup/Content" unique_id=892333642]
 unique_name_in_owner = true
