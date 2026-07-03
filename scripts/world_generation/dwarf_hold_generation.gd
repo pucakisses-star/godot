@@ -92,6 +92,8 @@ var _latest_floor_decor: Dictionary = {}
 var _world_noise: Dictionary = {}
 var _generated_chunks: Dictionary = {}
 var _dug_cells: Dictionary = {}
+var _applied_light_dim := -1.0
+var _last_clock_stamp := -1
 var _last_player_chunk := Vector2i(2147483647, 2147483647)
 var _world_seed_hash := 0
 var _underdeep_sites: Array = []
@@ -116,6 +118,8 @@ var _escape_menu: EscapeMenu
 var _torch_sprites: Array = []
 var _player_glow: Sprite2D
 var _glow_texture: Texture2D
+var _torch_texture: Texture2D
+var _bobber_texture: Texture2D
 var _light_dim := 1.0
 var _latest_bed_count := 0
 var _show_zone_overlay := false
@@ -166,6 +170,8 @@ var _move_repeat_timer := 0.0
 var _npc_states: Array[Dictionary] = []
 var _furnishing_sprites: Array[Node2D] = []
 var _furnishing_blocked_cells: Dictionary = {}
+var _passable_atlas_set: Dictionary = {}
+var _actor_passable_cache: Dictionary = {}
 var _hold_state := DwarfHoldStateModel.new()
 var _game_hour := 9.0
 var _game_day := 1
@@ -911,10 +917,15 @@ func _update_wild_darkness(delta: float) -> void:
 	if not _world_noise.is_empty() and _player_sprite != null and not _latest_district_cell_map.has(_player_cell):
 		target = 0.4
 	_light_dim = lerpf(_light_dim, target, clampf(delta * 3.0, 0.0, 1.0))
-	var dim_color := Color(_light_dim, _light_dim, _light_dim, 1.0)
-	city_layer.modulate = dim_color
-	decor_layer.modulate = dim_color
-	actor_layer.modulate = dim_color
+	if absf(_light_dim - target) < 0.002:
+		_light_dim = target
+	# Only touch the layers while the dim level is actually moving.
+	if not is_equal_approx(_light_dim, _applied_light_dim):
+		_applied_light_dim = _light_dim
+		var dim_color := Color(_light_dim, _light_dim, _light_dim, 1.0)
+		city_layer.modulate = dim_color
+		decor_layer.modulate = dim_color
+		actor_layer.modulate = dim_color
 	if _player_glow != null:
 		_player_glow.visible = _light_dim < 0.95 and _player_sprite != null
 		if _player_sprite != null:
@@ -937,6 +948,10 @@ func _update_clock_label() -> void:
 		return
 	var hour := int(_game_hour)
 	var minute := int((_game_hour - float(hour)) * 60.0)
+	var clock_stamp := (_game_day * 24 + hour) * 60 + minute
+	if clock_stamp == _last_clock_stamp:
+		return
+	_last_clock_stamp = clock_stamp
 	var is_rest_shift := _game_hour >= 22.0 or _game_hour < 6.0
 	clock_label.text = "%s %02d:%02d — %s (%s)" % [
 		"🌙" if is_rest_shift else "⛏",
@@ -1167,12 +1182,24 @@ func _configure_tile_layer() -> void:
 	decor_layer.tile_set = tile_set
 
 func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
-	for tile_key: String in PASSABLE_TILE_KEYS:
-		if TILE_ATLAS.get(tile_key, Vector2i(-1, -1)) == atlas_coords:
-			return true
-	return false
+	if _passable_atlas_set.is_empty():
+		for tile_key: String in PASSABLE_TILE_KEYS:
+			var coords := TILE_ATLAS.get(tile_key, Vector2i(-1, -1)) as Vector2i
+			if coords != Vector2i(-1, -1):
+				_passable_atlas_set[coords] = true
+	return _passable_atlas_set.has(atlas_coords)
 
 func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
+	# NPCs test candidate cells every step, so verdicts are cached; any
+	# tile write (digging, building, furnishing) invalidates the entry.
+	var cached: Variant = _actor_passable_cache.get(cell)
+	if cached != null:
+		return bool(cached)
+	var passable := _compute_passable_cell_for_actor(cell)
+	_actor_passable_cache[cell] = passable
+	return passable
+
+func _compute_passable_cell_for_actor(cell: Vector2i) -> bool:
 	if city_layer.get_cell_source_id(cell) < 0:
 		return false
 	if not _is_passable_atlas_tile(city_layer.get_cell_atlas_coords(cell)):
@@ -2211,6 +2238,7 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 			continue
 		_place_tile(city_layer, stair_cell, "stairway_up" if stair_key == "up" else "stairway_down")
 		decor_layer.erase_cell(stair_cell)
+		_actor_passable_cache.erase(stair_cell)
 	_rebuild_district_labels()
 	_initialize_shattered_lighting(grid)
 	_refresh_lighting(grid)
@@ -2823,6 +2851,7 @@ func _try_harvest_decor(cell: Vector2i) -> bool:
 	var atlas := decor_layer.get_cell_atlas_coords(cell)
 	if atlas == TILE_ATLAS.get("stone", Vector2i(-1000, -1000)):
 		decor_layer.erase_cell(cell)
+		_actor_passable_cache.erase(cell)
 		_latest_floor_decor.erase(cell)
 		var vein_drop := _roll_weighted_drop(ORE_VEIN_DROPS)
 		_add_to_inventory(
@@ -2832,6 +2861,7 @@ func _try_harvest_decor(cell: Vector2i) -> bool:
 		return true
 	if atlas == TILE_ATLAS.get("mushroom_wild", Vector2i(-1000, -1000)) or atlas == TILE_ATLAS.get("mushroom_crop_wild", Vector2i(-1000, -1000)) or atlas == TILE_ATLAS.get("mushroom_crops", Vector2i(-1000, -1000)):
 		decor_layer.erase_cell(cell)
+		_actor_passable_cache.erase(cell)
 		_latest_floor_decor.erase(cell)
 		_add_to_inventory("Mushrooms", _rng.randi_range(1, 2))
 		if _rng.randi_range(1, 100) <= MUSHROOM_VARIETY_CHANCE_PERCENT:
@@ -2866,7 +2896,9 @@ func _place_torch() -> void:
 
 func _spawn_torch_at(cell: Vector2i) -> void:
 	var torch := Sprite2D.new()
-	torch.texture = _create_torch_texture()
+	if _torch_texture == null:
+		_torch_texture = _create_torch_texture()
+	torch.texture = _torch_texture
 	torch.centered = true
 	torch.position = _cell_center_position(cell)
 	torch.z_index = 14
@@ -3214,7 +3246,9 @@ func _handle_fish_action() -> void:
 		_set_save_status("You need an Old Fishing Rod — search chests and camps", Color(0.95, 0.75, 0.45, 1.0))
 		return
 	var bobber := Sprite2D.new()
-	bobber.texture = _create_bobber_texture()
+	if _bobber_texture == null:
+		_bobber_texture = _create_bobber_texture()
+	bobber.texture = _bobber_texture
 	bobber.position = _cell_center_position(water_cell)
 	bobber.z_index = 13
 	actor_layer.add_child(bobber)
@@ -4014,6 +4048,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 		sprite.queue_free()
 	_furnishing_sprites.clear()
 	_furnishing_blocked_cells.clear()
+	_actor_passable_cache.clear()
 	if actor_layer == null:
 		return
 	var is_occupied := func(cell: Vector2i) -> bool:
@@ -4046,6 +4081,7 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 		if int((RoomFurnishingService.PIECES.get(piece_name, {}) as Dictionary).get("rows_block", 1)) > 0:
 			for cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
 				_furnishing_blocked_cells[cell] = true
+				_actor_passable_cache.erase(cell)
 		if RoomFurnishingService.piece_emits_light(piece_name):
 			var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(
 				_cell_center_position(base_cell),
@@ -4063,6 +4099,7 @@ func _cell_center_position(cell: Vector2i) -> Vector2:
 
 func _place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -> void:
 	DwarfHoldTileService.place_tile(target_layer, cell, tile_key, TILE_ATLAS)
+	_actor_passable_cache.erase(cell)
 
 func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 	if cell == CELL_WATER:

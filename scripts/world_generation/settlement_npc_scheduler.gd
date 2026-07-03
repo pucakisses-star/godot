@@ -245,7 +245,13 @@ static func update_scheduled_npcs(
 			frame = 1
 			frame_elapsed = 0.0
 
-		DwarfHoldTavernService.update_character_frame(sprite, int(state.get("slot", 0)), frame, int(state.get("facing_row", 0)))
+		# Rewrite the sprite region only when the visible frame changed;
+		# idle crowds otherwise cost a region write per NPC per frame.
+		var facing_row := int(state.get("facing_row", 0))
+		var frame_key := facing_row * 16 + frame
+		if int(state.get("frame_key", -1)) != frame_key:
+			state["frame_key"] = frame_key
+			DwarfHoldTavernService.update_character_frame(sprite, int(state.get("slot", 0)), frame, facing_row)
 
 		state["cooldown"] = cooldown
 		state["direction"] = direction
@@ -255,29 +261,31 @@ static func update_scheduled_npcs(
 
 ## One greedy step toward the goal; when the best axis is blocked, tries the
 ## other axis, then any open cell so crowds squeeze around corners.
+const CARDINAL_DIRECTIONS: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
+
 static func _step_toward(from_cell: Vector2i, to_cell: Vector2i, is_npc_walkable: Callable, rng: RandomNumberGenerator) -> Vector2i:
 	var delta := to_cell - from_cell
-	var candidates: Array[Vector2i] = []
 	var primary := Vector2i(signi(delta.x), 0) if absi(delta.x) >= absi(delta.y) else Vector2i(0, signi(delta.y))
 	var secondary := Vector2i(0, signi(delta.y)) if absi(delta.x) >= absi(delta.y) else Vector2i(signi(delta.x), 0)
-	if primary != Vector2i.ZERO:
-		candidates.append(primary)
-	if secondary != Vector2i.ZERO:
-		candidates.append(secondary)
-	var detours: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
-	_shuffle(detours, rng)
-	for detour in detours:
-		if not candidates.has(detour):
-			candidates.append(detour)
-	for candidate in candidates:
-		if bool(is_npc_walkable.call(from_cell + candidate)):
-			return candidate
+	if primary != Vector2i.ZERO and bool(is_npc_walkable.call(from_cell + primary)):
+		return primary
+	if secondary != Vector2i.ZERO and bool(is_npc_walkable.call(from_cell + secondary)):
+		return secondary
+	# Detours walk the fixed cardinal list from a random start so crowds
+	# still squeeze around corners without per-call array churn.
+	var start := rng.randi_range(0, 3)
+	for offset in 4:
+		var detour := CARDINAL_DIRECTIONS[(start + offset) % 4]
+		if detour == primary or detour == secondary:
+			continue
+		if bool(is_npc_walkable.call(from_cell + detour)):
+			return detour
 	return Vector2i.ZERO
 
 static func _wander_step(from_cell: Vector2i, anchor: Vector2i, radius: int, is_npc_walkable: Callable, rng: RandomNumberGenerator) -> Vector2i:
-	var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
-	_shuffle(directions, rng)
-	for direction in directions:
+	var start := rng.randi_range(0, 3)
+	for offset in 4:
+		var direction := CARDINAL_DIRECTIONS[(start + offset) % 4]
 		var next_cell := from_cell + direction
 		if _chebyshev(next_cell, anchor) > radius:
 			continue
