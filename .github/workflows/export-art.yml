@@ -1,0 +1,23 @@
+name: Export art assets as artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: game-art
+          path: |
+            resources/
+            assets/
+          retention-days: 3
