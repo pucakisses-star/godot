@@ -75,6 +75,7 @@ extends Node2D
 @export_range(0.0, 1.0, 0.01) var warm_threshold: float = 0.55
 
 const TILE_ATLAS_DEFS := preload("res://scripts/world_generation/tile_atlas_defs.gd")
+const WorldSettings := preload("res://scripts/world_generation/world_settings.gd")
 const BIOME_CLASSIFIER := preload("res://scripts/world_generation/biome_classifier.gd")
 const STRUCTURE_PLACER := preload("res://scripts/world_generation/structure_placer.gd")
 const WORLD_NAMING := preload("res://scripts/world_generation/world_naming.gd")
@@ -4474,266 +4475,20 @@ func _rotate_globe(delta: float) -> void:
 	globe_mesh.rotate_y(globe_rotation_speed * delta)
 
 func _configure_tileset() -> void:
-	var tile_set := TileSet.new()
-	var overworld_atlas := TileSetAtlasSource.new()
-	var tile_coords_list: Array[Vector2i] = [
-		SAND_TILE,
-		GRASS_TILE,
-		BADLANDS_TILE,
-		MINE_TILE,
-		MARSH_TILE,
-		SNOW_TILE,
-		TREE_TILE,
-		TREE_LONE_TILE,
-		TREE_SNOW_TILE,
-		JUNGLE_TREE_TILE,
-		CUT_TREES_TILE,
-		AMBIENT_LUMBER_MILL_TILE,
-		WATER_TILE,
-		MOUNTAIN_TILE,
-		MOUNTAIN_TOP_A_TILE,
-		MOUNTAIN_TOP_B_TILE,
-		MOUNTAIN_BOTTOM_A_TILE,
-		MOUNTAIN_BOTTOM_B_TILE,
-		DAM_TILE,
-		MOUNTAIN_PEAK_TILE,
-		STONE_TILE,
-		DWARFHOLD_TILE,
-		ABANDONED_DWARFHOLD_TILE,
-		GREAT_DWARFHOLD_TILE,
-		DARK_DWARFHOLD_TILE,
-		HILLHOLD_TILE,
-		CAVE_TILE,
-		TOWER_TILE,
-		EVIL_WIZARDS_TOWER_TILE,
-		WOOD_ELF_GROVES_TILE,
-		WOOD_ELF_GROVES_LARGE_TILE,
-		WOOD_ELF_GROVES_GRAND_TILE,
-		HILLS_TILE,
-		HILLS_BADLANDS_TILE,
-		HILLS_VARIANT_A_TILE,
-		HILLS_VARIANT_B_TILE,
-		HILLS_SNOW_TILE,
-		TOWN_TILE,
-		PORT_TOWN_TILE,
-		CASTLE_TILE,
-		ROADSIDE_TAVERN_TILE,
-		HAMLET_TILE,
-		ACTIVE_VOLCANO_TILE,
-		VOLCANO_TILE,
-		LAVA_TILE,
-		OASIS_TILE,
-		HAMLET_SNOW_TILE,
-		AMBIENT_SLEEPING_DRAGON_TILE,
-		AMBIENT_HUNTING_LODGE_TILE,
-		AMBIENT_HOMESTEAD_TILE,
-		AMBIENT_MOONWELL_TILE,
-		AMBIENT_FARM_TILE,
-		FARM_CROPS_TILE,
-		AMBIENT_FARM_VARIANT_TILE,
-		AMBIENT_GREAT_TREE_TILE,
-		AMBIENT_GREAT_TREE_ALT_TILE,
-		LIZARDMEN_CITY_TILE,
-		SAINT_SHRINE_TILE,
-		MONASTERY_TILE,
-		ORC_CAMP_TILE,
-		GNOLL_CAMP_TILE,
-		TROLL_CAMP_TILE,
-		OGRE_CAMP_TILE,
-		BANDIT_CAMP_TILE,
-		TRAVELERS_CAMP_TILE,
-		DUNGEON_TILE,
-		CENTAUR_ENCAMPMENT_TILE
-	]
-	var atlas_texture := load(ATLAS_TEXTURE) as Texture2D
-	if atlas_texture == null:
-		push_warning("Overworld atlas texture could not be loaded: %s. Using generated fallback atlas." % ATLAS_TEXTURE)
-		atlas_texture = _build_fallback_overworld_atlas(tile_coords_list)
-	if atlas_texture == null:
-		push_error("Overworld atlas fallback texture could not be generated.")
-		_atlas_source_id = -1
-		if map_layer != null:
-			map_layer.tile_set = tile_set
-		if tree_layer != null:
-			tree_layer.tile_set = tile_set
-		if highland_layer != null:
-			highland_layer.tile_set = tile_set
-		if iceberg_layer != null:
-			iceberg_layer.tile_set = tile_set
-		if settlement_layer != null:
-			settlement_layer.tile_set = tile_set
-		return
-	var texture_size := atlas_texture.get_size()
-	for iceberg_tile_coord: Vector2i in iceberg_tile_options:
-		tile_coords_list.append(iceberg_tile_coord)
-	var loaded_overworld_texture: Texture2D = load(ATLAS_TEXTURE) as Texture2D
-	if loaded_overworld_texture == null:
-		push_warning("Overworld atlas texture could not be loaded: %s. Using generated fallback atlas." % ATLAS_TEXTURE)
-		loaded_overworld_texture = _build_fallback_overworld_atlas(tile_coords_list)
-	if loaded_overworld_texture == null:
-		push_error("Overworld atlas fallback texture could not be generated.")
-		_atlas_source_id = -1
-		if map_layer != null:
-			map_layer.tile_set = tile_set
-		if tree_layer != null:
-			tree_layer.tile_set = tile_set
-		if highland_layer != null:
-			highland_layer.tile_set = tile_set
-		if iceberg_layer != null:
-			iceberg_layer.tile_set = tile_set
-		if settlement_layer != null:
-			settlement_layer.tile_set = tile_set
-		return
-	var loaded_texture_size: Vector2i = loaded_overworld_texture.get_size()
-	var max_tile := Vector2i(0, 0)
-	for tile_coords: Vector2i in tile_coords_list:
-		max_tile.x = max(max_tile.x, tile_coords.x)
-		max_tile.y = max(max_tile.y, tile_coords.y)
-	var required_columns := max_tile.x + 1
-	var required_rows := max_tile.y + 1
-	var atlas_tile_size := tile_size
-	if required_columns > 0 and required_rows > 0:
-		if int(loaded_texture_size.x) % required_columns == 0 and int(loaded_texture_size.y) % required_rows == 0:
-			var derived_tile_size_x := int(loaded_texture_size.x / required_columns)
-			var derived_tile_size_y := int(loaded_texture_size.y / required_rows)
-			if derived_tile_size_x == derived_tile_size_y and derived_tile_size_x > 0:
-				if derived_tile_size_x != tile_size:
-					push_warning(
-						"Overworld atlas tile size (%s) differs from configured tile_size (%s); using atlas-derived size." %
-						[derived_tile_size_x, tile_size]
-					)
-					tile_size = derived_tile_size_x
-				atlas_tile_size = derived_tile_size_x
-			else:
-				push_warning(
-					"Overworld atlas texture size (%s) does not map cleanly to a square tile grid (%s x %s)." %
-					[loaded_texture_size, required_columns, required_rows]
-				)
-	var max_columns := int(loaded_texture_size.x / atlas_tile_size)
-	var max_rows := int(loaded_texture_size.y / atlas_tile_size)
-	if max_columns <= 0 or max_rows <= 0:
-		push_error("Overworld atlas texture has no valid tile regions: %s" % ATLAS_TEXTURE)
-		_atlas_source_id = -1
-		if map_layer != null:
-			map_layer.tile_set = tile_set
-		if tree_layer != null:
-			tree_layer.tile_set = tile_set
-		if highland_layer != null:
-			highland_layer.tile_set = tile_set
-		if iceberg_layer != null:
-			iceberg_layer.tile_set = tile_set
-		return
-	if max_columns < required_columns or max_rows < required_rows:
-		push_error(
-			"Overworld atlas texture is too small for required tiles (%s x %s needed, got %s x %s)." %
-			[required_columns, required_rows, max_columns, max_rows]
-		)
-	tile_set.tile_size = Vector2i(atlas_tile_size, atlas_tile_size)
-	overworld_atlas.texture = loaded_overworld_texture
-	overworld_atlas.texture_region_size = Vector2i(atlas_tile_size, atlas_tile_size)
-	var seen_tiles: Dictionary = {}
-	for tile_coords: Vector2i in tile_coords_list:
-		if seen_tiles.has(tile_coords):
+	var result := OverworldTilesetService.build_tile_set(tile_size, iceberg_tile_options)
+	var tile_set := result["tile_set"] as TileSet
+	_atlas_source_id = int(result["atlas_source_id"])
+	_river_atlas_source_id = int(result["river_atlas_source_id"])
+	var derived_tile_size := int(result["tile_size"])
+	if derived_tile_size > 0 and derived_tile_size != tile_size:
+		tile_size = derived_tile_size
+	for layer: TileMapLayer in [map_layer, tree_layer, highland_layer, iceberg_layer, settlement_layer]:
+		if layer == null:
 			continue
-		seen_tiles[tile_coords] = true
-		if tile_coords.x < 0 or tile_coords.y < 0 or tile_coords.x >= max_columns or tile_coords.y >= max_rows:
-			push_warning(
-				"Skipping overworld tile %s because it is outside the atlas bounds (%s x %s)." %
-				[tile_coords, max_columns, max_rows]
-			)
-			continue
-		overworld_atlas.create_tile(tile_coords)
-	_atlas_source_id = tile_set.add_source(overworld_atlas)
-	_river_atlas_source_id = _configure_river_atlas_source(tile_set)
-	map_layer.tile_set = tile_set
-	map_layer.position = Vector2.ZERO
-	if tree_layer != null:
-		tree_layer.tile_set = tile_set
-		tree_layer.position = Vector2.ZERO
-	if highland_layer != null:
-		highland_layer.tile_set = tile_set
-		highland_layer.position = Vector2.ZERO
-	if iceberg_layer != null:
-		iceberg_layer.tile_set = tile_set
-		iceberg_layer.position = Vector2.ZERO
-	if settlement_layer != null:
-		settlement_layer.tile_set = tile_set
-		settlement_layer.position = Vector2.ZERO
+		layer.tile_set = tile_set
+		if _atlas_source_id >= 0:
+			layer.position = Vector2.ZERO
 
-func _configure_river_atlas_source(tile_set: TileSet) -> int:
-	var river_texture := load(TILE_ATLAS_DEFS.RIVER_ATLAS_TEXTURE) as Texture2D
-	if river_texture == null:
-		push_warning(
-			"River atlas texture could not be loaded: %s. Rivers will fall back to the overworld atlas." %
-			TILE_ATLAS_DEFS.RIVER_ATLAS_TEXTURE
-		)
-		return -1
-	var cell_size := int(tile_set.tile_size.x)
-	var source_tile_size := int(TILE_ATLAS_DEFS.RIVER_ATLAS_TILE_SIZE)
-	var river_image := river_texture.get_image()
-	if river_image == null:
-		return -1
-	# The river sheet uses smaller tiles than the overworld atlas; upscale it
-	# (nearest neighbour, pixel art) so its tiles fill the map grid cells.
-	if source_tile_size != cell_size and source_tile_size > 0:
-		var upscale := float(cell_size) / float(source_tile_size)
-		river_image.resize(
-			int(round(river_image.get_width() * upscale)),
-			int(round(river_image.get_height() * upscale)),
-			Image.INTERPOLATE_NEAREST
-		)
-	var river_atlas := TileSetAtlasSource.new()
-	river_atlas.texture = ImageTexture.create_from_image(river_image)
-	river_atlas.texture_region_size = Vector2i(cell_size, cell_size)
-	var max_columns := int(river_image.get_width() / cell_size)
-	var max_rows := int(river_image.get_height() / cell_size)
-	for tile_key: String in TILE_ATLAS_DEFS.RIVER_TILES.keys():
-		var tile_coords: Vector2i = TILE_ATLAS_DEFS.RIVER_TILES[tile_key]
-		if tile_coords.x < 0 or tile_coords.y < 0 or tile_coords.x >= max_columns or tile_coords.y >= max_rows:
-			push_warning(
-				"Skipping river tile %s %s because it is outside the river atlas bounds (%s x %s)." %
-				[tile_key, tile_coords, max_columns, max_rows]
-			)
-			continue
-		if river_atlas.has_tile(tile_coords):
-			continue
-		river_atlas.create_tile(tile_coords)
-	return tile_set.add_source(river_atlas)
-
-
-func _build_fallback_overworld_atlas(tile_coords_list: Array[Vector2i]) -> Texture2D:
-	if tile_coords_list.is_empty():
-		return null
-	var max_coord := Vector2i.ZERO
-	for coords: Vector2i in tile_coords_list:
-		max_coord.x = max(max_coord.x, coords.x)
-		max_coord.y = max(max_coord.y, coords.y)
-	var image_width := (max_coord.x + 1) * tile_size
-	var image_height := (max_coord.y + 1) * tile_size
-	if image_width <= 0 or image_height <= 0:
-		return null
-	var atlas_image := Image.create(image_width, image_height, false, Image.FORMAT_RGBA8)
-	atlas_image.fill(Color(0.12, 0.12, 0.12, 1.0))
-	var palette: Array[Color] = [
-		Color(0.86, 0.68, 0.36, 1.0),
-		Color(0.28, 0.67, 0.36, 1.0),
-		Color(0.61, 0.44, 0.33, 1.0),
-		Color(0.41, 0.44, 0.48, 1.0),
-		Color(0.31, 0.58, 0.51, 1.0),
-		Color(0.88, 0.92, 0.95, 1.0),
-		Color(0.18, 0.38, 0.78, 1.0),
-		Color(0.72, 0.28, 0.64, 1.0)
-	]
-	for i in range(tile_coords_list.size()):
-		var coords: Vector2i = tile_coords_list[i]
-		var tile_rect := Rect2i(coords * tile_size, Vector2i(tile_size, tile_size))
-		var tile_color: Color = palette[i % palette.size()]
-		atlas_image.fill_rect(tile_rect, tile_color)
-		atlas_image.fill_rect(Rect2i(tile_rect.position, Vector2i(tile_size, 1)), Color.BLACK)
-		atlas_image.fill_rect(Rect2i(tile_rect.position + Vector2i(0, tile_size - 1), Vector2i(tile_size, 1)), Color.BLACK)
-		atlas_image.fill_rect(Rect2i(tile_rect.position, Vector2i(1, tile_size)), Color.BLACK)
-		atlas_image.fill_rect(Rect2i(tile_rect.position + Vector2i(tile_size - 1, 0), Vector2i(1, tile_size)), Color.BLACK)
-	return ImageTexture.create_from_image(atlas_image)
 
 func _update_temperature_overlay() -> void:
 	if temperature_overlay == null:
@@ -4905,19 +4660,6 @@ func _update_labels_overlay_visibility() -> void:
 func _rebuild_labels_overlay() -> void:
 	if labels_overlay == null:
 		return
-	for child in labels_overlay.get_children():
-		child.queue_free()
-
-	var grouped_settlements := {
-		"major": Node2D.new(),
-		"minor": Node2D.new()
-	}
-	for group_name_variant: Variant in grouped_settlements.keys():
-		var group_name := String(group_name_variant)
-		var group := grouped_settlements[group_name] as Node2D
-		group.name = "%sLabels" % group_name.capitalize()
-		labels_overlay.add_child(group)
-
 	var entries: Array[Dictionary] = []
 	for coord_variant: Variant in _tile_data.keys():
 		var coord := coord_variant as Vector2i
@@ -4928,113 +4670,34 @@ func _rebuild_labels_overlay() -> void:
 		var region_name := _tile_region_name(coord, tile_info)
 		if region_name.is_empty():
 			continue
-		var base_font_size := _label_font_size_for_settlement(settlement_type)
-		var priority := _label_priority_for_settlement(settlement_type)
-		var population := int(tile_info.get("population", 0))
 		entries.append({
-			"coord": coord,
+			"center": _map_cell_center(coord),
 			"name": region_name,
-			"type": settlement_type,
-			"font_size": base_font_size,
-			"priority": priority,
-			"population": population
+			"font_size": OverworldLabelsService.font_size_for_settlement(settlement_type),
+			"priority": OverworldLabelsService.priority_for_settlement(settlement_type),
+			"population": int(tile_info.get("population", 0))
 		})
-
-	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		var a_priority := int(a.get("priority", 0))
-		var b_priority := int(b.get("priority", 0))
-		if a_priority == b_priority:
-			return int(a.get("population", 0)) > int(b.get("population", 0))
-		return a_priority > b_priority
-	)
-
-	var occupied_rects: Array[Rect2] = []
-	for entry: Dictionary in entries:
-		var font_size := int(entry.get("font_size", 12))
-		var text := String(entry.get("name", ""))
-		var center := _map_cell_center(entry.get("coord", Vector2i.ZERO) as Vector2i)
-		var estimated_width := maxf(22.0, text.length() * float(font_size) * 0.52)
-		var estimated_height := float(font_size) * 1.2
-		var candidate_rect := Rect2(
-			center + Vector2(-estimated_width * 0.5, -float(tile_size) * 0.72 - estimated_height),
-			Vector2(estimated_width, estimated_height)
-		)
-		if _rect_overlaps_any(candidate_rect, occupied_rects):
-			continue
-		occupied_rects.append(candidate_rect)
-
-		var label := Label.new()
-		label.text = text
-		label.position = candidate_rect.position
-		label.size = candidate_rect.size
-		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		label.clip_text = true
-		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		label.add_theme_font_size_override("font_size", font_size)
-		label.add_theme_color_override("font_color", labels_overlay_primary_color if int(entry.get("priority", 0)) >= 2 else labels_overlay_secondary_color)
-		label.add_theme_color_override("font_outline_color", labels_overlay_outline_color)
-		label.add_theme_constant_override("outline_size", int(round(labels_overlay_outline_size)))
-		label.set_meta("base_font_size", font_size)
-
-		var group_key := "major" if int(entry.get("priority", 0)) >= 2 else "minor"
-		var target_group := grouped_settlements[group_key] as Node2D
-		target_group.add_child(label)
-
+	OverworldLabelsService.rebuild(labels_overlay, entries, {
+		"tile_size": tile_size,
+		"primary_color": labels_overlay_primary_color,
+		"secondary_color": labels_overlay_secondary_color,
+		"outline_color": labels_overlay_outline_color,
+		"outline_size": labels_overlay_outline_size
+	})
 	_update_labels_overlay_zoom_behavior()
 	_update_labels_overlay_visibility()
 
 func _update_labels_overlay_zoom_behavior() -> void:
-	if labels_overlay == null:
+	if labels_overlay == null or overworld_camera == null:
 		return
-	if overworld_camera == null:
-		return
+	OverworldLabelsService.update_zoom_behavior(labels_overlay, overworld_camera.zoom.x, {
+		"tile_size": tile_size,
+		"rescale_on_zoom": labels_overlay_rescale_on_zoom,
+		"auto_visibility": labels_overlay_auto_visibility,
+		"min_screen_size": labels_overlay_min_screen_size,
+		"max_screen_size": labels_overlay_max_screen_size
+	})
 
-	var zoom_factor := maxf(overworld_camera.zoom.x, 0.001)
-	for group in labels_overlay.get_children():
-		for child in group.get_children():
-			var label := child as Label
-			if label == null:
-				continue
-			var base_font_size := float(label.get_meta("base_font_size", 12.0))
-			var scaled_font_size := base_font_size
-			if labels_overlay_rescale_on_zoom:
-				scaled_font_size = maxf(8.0, (base_font_size + (base_font_size * zoom_factor)) * 0.5)
-			label.add_theme_font_size_override("font_size", int(round(scaled_font_size)))
-
-			if labels_overlay_auto_visibility:
-				var screen_size := scaled_font_size / zoom_factor
-				label.visible = screen_size >= labels_overlay_min_screen_size and screen_size <= labels_overlay_max_screen_size
-			else:
-				label.visible = true
-
-func _label_font_size_for_settlement(settlement_type: String) -> int:
-	match settlement_type:
-		"great_dwarfhold", "dark_dwarfhold", "abandoned_dwarfhold", "dwarfhold":
-			return 15
-		"city", "wood_elf_grove", "lizardmen_city":
-			return 13
-		"town", "wizard_tower":
-			return 12
-		_:
-			return 11
-
-func _label_priority_for_settlement(settlement_type: String) -> int:
-	match settlement_type:
-		"great_dwarfhold", "dark_dwarfhold", "abandoned_dwarfhold", "dwarfhold":
-			return 3
-		"city", "wood_elf_grove", "lizardmen_city":
-			return 2
-		"town", "wizard_tower":
-			return 2
-		_:
-			return 1
-
-func _rect_overlaps_any(candidate: Rect2, rects: Array[Rect2]) -> bool:
-	for rect in rects:
-		if candidate.intersects(rect):
-			return true
-	return false
 
 func _build_routes_overlay_from_settlements() -> void:
 	_route_segments.clear()
@@ -5141,94 +4804,6 @@ func _update_biome_overlay_visibility() -> void:
 		return
 	biome_overlay.visible = _biome_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
 
-func _get_layout_generation_preset(layout_label: String) -> Dictionary:
-	# Every preset lists every tunable so switching layouts can never leak
-	# values from a previously applied preset.
-	var layout_presets := {
-		"normal": {
-			# DF-style geography: several ragged landmasses split by channels
-			# and inland seas, land running close to the map edges.
-			"landmass_center_count": 7,
-			"landmass_center_min_separation": 0.0,
-			"center_shape_strength": 1.0,
-			"landmass_mask_strength": 0.55,
-			"landmass_mask_scale": 1.6,
-			"landmass_mask_threshold": 0.45,
-			"landmass_mask_edge_falloff": 0.07,
-			"falloff_strength": 0.0,
-			"landmass_falloff_scale": 2.0,
-			"edge_ocean_strength": 0.06,
-			"edge_ocean_falloff": 0.1,
-			"water_level": 0.45
-		},
-		"major continent": {
-			# One dominant ragged landmass surrounded by open ocean.
-			"landmass_center_count": 1,
-			"landmass_center_min_separation": 0.0,
-			"center_shape_strength": 1.4,
-			"landmass_mask_strength": 0.4,
-			"landmass_mask_scale": 1.1,
-			"landmass_mask_threshold": 0.44,
-			"landmass_mask_edge_falloff": 0.16,
-			"falloff_strength": 0.34,
-			"landmass_falloff_scale": 1.5,
-			"edge_ocean_strength": 0.3,
-			"edge_ocean_falloff": 0.28,
-			"water_level": 0.45
-		},
-		"twin continents": {
-			# Two forced lobes far apart with a sea channel between them.
-			"landmass_center_count": 2,
-			"landmass_center_min_separation": 1.1,
-			"center_shape_strength": 3.2,
-			"landmass_mask_strength": 0.3,
-			"landmass_mask_scale": 1.5,
-			"landmass_mask_threshold": 0.45,
-			"landmass_mask_edge_falloff": 0.1,
-			"falloff_strength": 0.0,
-			"landmass_falloff_scale": 1.1,
-			"edge_ocean_strength": 0.12,
-			"edge_ocean_falloff": 0.14,
-			"water_level": 0.45
-		},
-		"inland sea": {
-			# Inverted radial profile: sea at the centre, a ragged ring of
-			# land around it.
-			"landmass_center_count": 4,
-			"landmass_center_min_separation": 0.0,
-			"center_shape_strength": 0.4,
-			"landmass_mask_strength": 0.25,
-			"landmass_mask_scale": 1.6,
-			"landmass_mask_threshold": 0.48,
-			"landmass_mask_edge_falloff": 0.06,
-			"falloff_strength": -0.45,
-			"falloff_power": 1.3,
-			"landmass_falloff_scale": 1.6,
-			"edge_ocean_strength": 0.05,
-			"edge_ocean_falloff": 0.08,
-			"water_level": 0.49
-		},
-		"archipelago": {
-			# High-frequency mask with no continental anchors: island fields.
-			"landmass_center_count": 9,
-			"landmass_center_min_separation": 0.0,
-			"center_shape_strength": 0.0,
-			"landmass_mask_strength": 0.65,
-			"landmass_mask_scale": 3.8,
-			"landmass_mask_threshold": 0.55,
-			"landmass_mask_edge_falloff": 0.07,
-			"falloff_strength": 0.0,
-			"landmass_falloff_scale": 1.35,
-			"edge_ocean_strength": 0.06,
-			"edge_ocean_falloff": 0.08,
-			"water_level": 0.5
-		}
-	}
-	var key := layout_label.strip_edges().to_lower()
-	if layout_presets.has(key):
-		return layout_presets[key]
-	return layout_presets["normal"]
-
 func _seed_to_map_seed(seed_setting: Variant) -> int:
 	var seed_text := str(seed_setting).strip_edges()
 	if seed_text.is_empty():
@@ -5265,7 +4840,7 @@ func _apply_cached_world_settings() -> void:
 		if settings.has("world_seed"):
 			map_seed = _seed_to_map_seed(settings["world_seed"])
 		if settings.has("world_layout"):
-			var layout_preset := _get_layout_generation_preset(str(settings["world_layout"]))
+			var layout_preset := WorldSettings.layout_generation_preset(str(settings["world_layout"]))
 			landmass_center_count = int(layout_preset.get("landmass_center_count", 4))
 			landmass_center_min_separation = float(layout_preset.get("landmass_center_min_separation", 0.0))
 			center_shape_strength = float(layout_preset.get("center_shape_strength", 1.0))

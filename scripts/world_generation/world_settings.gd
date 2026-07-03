@@ -177,3 +177,92 @@ static func _ratios_to_percentages(ratios: Dictionary) -> Dictionary:
 	for key: String in ratios.keys():
 		percentages[key] = int(roundf(float(ratios[key]) * 100.0))
 	return percentages
+
+static func layout_generation_preset(layout_label: String) -> Dictionary:
+	# Every preset lists every tunable so switching layouts can never leak
+	# values from a previously applied preset.
+	var layout_presets := {
+		"normal": {
+			# DF-style geography: several ragged landmasses split by channels
+			# and inland seas, land running close to the map edges.
+			"landmass_center_count": 7,
+			"landmass_center_min_separation": 0.0,
+			"center_shape_strength": 1.0,
+			"landmass_mask_strength": 0.55,
+			"landmass_mask_scale": 1.6,
+			"landmass_mask_threshold": 0.45,
+			"landmass_mask_edge_falloff": 0.07,
+			"falloff_strength": 0.0,
+			"landmass_falloff_scale": 2.0,
+			"edge_ocean_strength": 0.06,
+			"edge_ocean_falloff": 0.1,
+			"water_level": 0.45
+		},
+		"major continent": {
+			# One dominant ragged landmass surrounded by open ocean.
+			"landmass_center_count": 1,
+			"landmass_center_min_separation": 0.0,
+			"center_shape_strength": 1.4,
+			"landmass_mask_strength": 0.4,
+			"landmass_mask_scale": 1.1,
+			"landmass_mask_threshold": 0.44,
+			"landmass_mask_edge_falloff": 0.16,
+			"falloff_strength": 0.34,
+			"landmass_falloff_scale": 1.5,
+			"edge_ocean_strength": 0.3,
+			"edge_ocean_falloff": 0.28,
+			"water_level": 0.45
+		},
+		"twin continents": {
+			# Two forced lobes far apart with a sea channel between them.
+			"landmass_center_count": 2,
+			"landmass_center_min_separation": 1.1,
+			"center_shape_strength": 3.2,
+			"landmass_mask_strength": 0.3,
+			"landmass_mask_scale": 1.5,
+			"landmass_mask_threshold": 0.45,
+			"landmass_mask_edge_falloff": 0.1,
+			"falloff_strength": 0.0,
+			"landmass_falloff_scale": 1.1,
+			"edge_ocean_strength": 0.12,
+			"edge_ocean_falloff": 0.14,
+			"water_level": 0.45
+		},
+		"inland sea": {
+			# Inverted radial profile: sea at the centre, a ragged ring of
+			# land around it.
+			"landmass_center_count": 4,
+			"landmass_center_min_separation": 0.0,
+			"center_shape_strength": 0.4,
+			"landmass_mask_strength": 0.25,
+			"landmass_mask_scale": 1.6,
+			"landmass_mask_threshold": 0.48,
+			"landmass_mask_edge_falloff": 0.06,
+			"falloff_strength": -0.45,
+			"falloff_power": 1.3,
+			"landmass_falloff_scale": 1.6,
+			"edge_ocean_strength": 0.05,
+			"edge_ocean_falloff": 0.08,
+			"water_level": 0.49
+		},
+		"archipelago": {
+			# High-frequency mask with no continental anchors: island fields.
+			"landmass_center_count": 9,
+			"landmass_center_min_separation": 0.0,
+			"center_shape_strength": 0.0,
+			"landmass_mask_strength": 0.65,
+			"landmass_mask_scale": 3.8,
+			"landmass_mask_threshold": 0.55,
+			"landmass_mask_edge_falloff": 0.07,
+			"falloff_strength": 0.0,
+			"landmass_falloff_scale": 1.35,
+			"edge_ocean_strength": 0.06,
+			"edge_ocean_falloff": 0.08,
+			"water_level": 0.5
+		}
+	}
+	var key := layout_label.strip_edges().to_lower()
+	if layout_presets.has(key):
+		return layout_presets[key]
+	return layout_presets["normal"]
+
