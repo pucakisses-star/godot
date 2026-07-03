@@ -245,8 +245,8 @@ text = "Scale Bar"
 anchor_top = 1.0
 anchor_bottom = 1.0
 offset_left = 16.0
-offset_top = -86.0
-offset_right = 250.0
+offset_top = -72.0
+offset_right = 254.0
 offset_bottom = -16.0
 theme_override_styles/panel = SubResource("StyleBoxFlat_6v0i6")
 
@@ -263,11 +263,12 @@ theme_override_constants/separation = 3
 
 [node name="ScaleBarDistanceLabel" type="Label" parent="MapUi/ScaleBarContainer/ScaleBarMargin/ScaleBarVBox"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 10
+theme_override_font_sizes/font_size = 11
 text = "100 km"
+horizontal_alignment = 1
 
 [node name="ScaleBarVisual" type="Control" parent="MapUi/ScaleBarContainer/ScaleBarMargin/ScaleBarVBox"]
-custom_minimum_size = Vector2(210, 30)
+custom_minimum_size = Vector2(218, 20)
 layout_mode = 2
 script = ExtResource("3_k8s2k")
 

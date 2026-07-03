@@ -29,12 +29,24 @@ static func sample_height(continent_noise: FastNoiseLite, detail_noise: FastNois
 	var coast_jag := detail_noise.get_noise_2d(float(x) * 5.1, float(y) * 5.1) * 0.06 * coast_mask
 	return clampf(height + coast_jag, 0.0, 1.0)
 
-static func configure_landmass_centers(rng: RandomNumberGenerator, count: int, margin: float) -> Array[Vector2]:
+static func configure_landmass_centers(rng: RandomNumberGenerator, count: int, margin: float, min_separation: float = 0.0) -> Array[Vector2]:
 	var centers: Array[Vector2] = []
 	var safe_count := maxi(1, count)
 	var clamped_margin := clampf(margin, 0.0, 0.45)
 	for _i in range(safe_count):
-		centers.append(Vector2(rng.randf_range(-1.0 + clamped_margin, 1.0 - clamped_margin), rng.randf_range(-1.0 + clamped_margin, 1.0 - clamped_margin)))
+		var candidate := Vector2.ZERO
+		for attempt in 24:
+			candidate = Vector2(rng.randf_range(-1.0 + clamped_margin, 1.0 - clamped_margin), rng.randf_range(-1.0 + clamped_margin, 1.0 - clamped_margin))
+			if min_separation <= 0.0:
+				break
+			var far_enough := true
+			for existing: Vector2 in centers:
+				if candidate.distance_to(existing) < min_separation:
+					far_enough = false
+					break
+			if far_enough:
+				break
+		centers.append(candidate)
 	return centers
 
 static func smooth_height_map(height_map: Dictionary, passes: int, strength: float, water_level: float) -> void:
@@ -71,7 +83,7 @@ static func sample_continent_bias(x: int, y: int, settings: Dictionary, landmass
 	var fractal := (value_noise(nx * 18.0 + 2.3, ny * 18.0 + 9.7, base_seed) - 0.5) * 0.1
 	fractal += (value_noise(nx * 42.0 + 13.1, ny * 42.0 + 5.4, base_seed + 0xbb67ae85) - 0.5) * 0.05
 	var radial := sample_radial_falloff_bias(centered_nx, centered_ny, float(settings.get("falloff_strength", 0.0)), float(settings.get("falloff_power", 2.4)))
-	var center := sample_landmass_center_bias(centered_nx, centered_ny, float(settings.get("landmass_falloff_scale", 1.35)), float(settings.get("falloff_power", 2.4)), landmass_centers)
+	var center := sample_landmass_center_bias(centered_nx, centered_ny, float(settings.get("landmass_falloff_scale", 1.35)), float(settings.get("falloff_power", 2.4)), landmass_centers) * float(settings.get("center_shape_strength", 1.0))
 	var mask := sample_landmass_mask_bias(nx, ny, settings)
 	return fractal + radial + center + mask + sample_edge_ocean_bias(x, y, settings)
 
@@ -90,7 +102,10 @@ static func sample_edge_ocean_bias(x: int, y: int, settings: Dictionary) -> floa
 	return interior_support - edge_ocean * strength
 
 static func sample_radial_falloff_bias(centered_nx: float, centered_ny: float, falloff_strength: float, falloff_power: float) -> float:
-	if falloff_strength <= 0.0: return 0.0
+	# Positive strength pulls land toward the map centre; negative strength
+	# inverts the profile (sea at the centre, land toward the edges), which
+	# the Inland Sea layout relies on.
+	if is_zero_approx(falloff_strength): return 0.0
 	var radial_distance := Vector2(centered_nx, centered_ny).length() / sqrt(2.0)
 	var attenuation := 1.0 - pow(clampf(radial_distance, 0.0, 1.0), maxf(falloff_power, 0.05))
 	return (attenuation - 0.5) * 2.0 * falloff_strength
