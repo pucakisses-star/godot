@@ -262,13 +262,40 @@ const CHEST_LOOT_TABLE := [
 	{"name": "Dynamite Stick", "min": 1, "max": 2},
 	{"name": "Skeleton Keys", "min": 1, "max": 1},
 	{"name": "Rusty Pickaxe", "min": 1, "max": 1},
-	{"name": "Old Fishing Rod", "min": 1, "max": 1}
+	{"name": "Old Fishing Rod", "min": 1, "max": 1},
+	{"name": "Miner's Pickaxe", "min": 1, "max": 1},
+	{"name": "Copper Pick", "min": 1, "max": 1},
+	{"name": "Worn Pickaxe", "min": 1, "max": 1},
+	{"name": "Steel Pickaxe", "min": 1, "max": 1},
+	{"name": "Prospector's Trowel", "min": 1, "max": 1},
+	{"name": "Spade", "min": 1, "max": 1},
+	{"name": "Steel Trowel", "min": 1, "max": 1},
+	{"name": "Wooden Mallet", "min": 1, "max": 1},
+	{"name": "Stone Hammer", "min": 1, "max": 1},
+	{"name": "Geologist's Hammer", "min": 1, "max": 1},
+	{"name": "Oil Pot", "min": 1, "max": 2},
+	{"name": "Silver Lantern", "min": 1, "max": 1},
+	{"name": "Mason's Chisel", "min": 1, "max": 2},
+	{"name": "Jig Lures", "min": 1, "max": 2},
+	{"name": "Painted Lure", "min": 1, "max": 1},
+	{"name": "Willow Rod", "min": 1, "max": 1},
+	{"name": "Oak Rod", "min": 1, "max": 1},
+	{"name": "Fishing Spear", "min": 1, "max": 1},
+	{"name": "Casting Net", "min": 1, "max": 1},
+	{"name": "Fish Trap", "min": 1, "max": 1},
+	{"name": "Barbed Hook", "min": 1, "max": 3},
+	{"name": "Grappling Hook", "min": 1, "max": 1},
+	{"name": "Silk Line Spool", "min": 1, "max": 2},
+	{"name": "Cork Bobber", "min": 1, "max": 3}
 ]
 
 ## Digging rock occasionally turns up a fossil alongside the Stone.
 const DIG_FOSSIL_FINDS := [
 	"Amber", "Spider Amber", "Fossil Leaf", "Ancient Skull",
-	"Fossil Claw", "Ammonite Shell", "Old Bone", "Serpent Spine"
+	"Fossil Claw", "Ammonite Shell", "Old Bone", "Serpent Spine",
+	"Chalk Ammonite", "Beast-Claw Charm", "Fossil Ribs", "Beast Skull",
+	"Petrified Bone", "Fossil Fish", "Skeletal Paw", "Moss Agate",
+	"Fossil Antler", "Fern Amber", "Fossil Cluster", "Fin Spines"
 ]
 const DIG_FOSSIL_CHANCE_PERCENT := 7
 
@@ -283,7 +310,16 @@ const ORE_VEIN_DROPS := [
 ## Wild fungal growth sometimes includes a rarer species.
 const WILD_MUSHROOM_VARIETIES := [
 	"Glowcap", "Frostcap", "Emberspore", "Violet Veil",
-	"King Bolete", "Fairy Bells", "Scarlet Cap"
+	"King Bolete", "Fairy Bells", "Scarlet Cap",
+	"Chanterelle", "Wine Cap", "Honey Fungus", "Rosegill", "Porcini",
+	"Sunshelf", "Bloodbolete", "Oyster Cap", "Inkcap", "Deep Puffball",
+	"Scarlet Stem", "Gilded Parasol", "Firegill Shelf", "Flamecrest",
+	"Umber Dapperling", "Violet Coral", "Wyrm's Tongue", "Ghost Funnel",
+	"Cauliflower Fungus", "Black Morel", "Ash Parasol", "Pink Bonnet",
+	"Chestnut Bonnet", "Verdigris Shelf", "Weeping Olive", "Coral Frill",
+	"Pale Umbrella", "Star Fungus", "Mahogany Cap", "Nightgill",
+	"Amber Shelf", "Rose Puff", "Fire Coral", "Seafoam Parasol",
+	"Dragonmane", "Banded Stalk"
 ]
 const MUSHROOM_VARIETY_CHANCE_PERCENT := 30
 
@@ -301,7 +337,31 @@ const FISH_CATCH_TABLE := [
 	{"name": "Cave Crab", "weight": 6},
 	{"name": "Golden Koi", "weight": 5},
 	{"name": "Coral Snail", "weight": 5},
+	{"name": "Striped Bass", "weight": 12},
+	{"name": "Cobalt Chub", "weight": 12},
+	{"name": "Marigold Carp", "weight": 10},
+	{"name": "Sapphire Perch", "weight": 10},
+	{"name": "Copperback Trout", "weight": 10},
+	{"name": "Jade Carp", "weight": 8},
+	{"name": "Crimson Carp", "weight": 8},
+	{"name": "Flicker Minnow", "weight": 8},
+	{"name": "Frilled Loach", "weight": 6},
+	{"name": "Duskfin", "weight": 6},
+	{"name": "Bloodfin", "weight": 5},
+	{"name": "Speckled Prawn", "weight": 5},
+	{"name": "Silverfry", "weight": 5},
+	{"name": "Amethyst Angelfish", "weight": 4},
+	{"name": "Blossom Koi", "weight": 4},
+	{"name": "Cave Lobster", "weight": 4},
+	{"name": "Pale Squid", "weight": 3},
+	{"name": "Gloom Octopus", "weight": 3},
+	{"name": "Ember Squid", "weight": 3},
+	{"name": "Bloodworm", "weight": 4},
+	{"name": "Mud Grub", "weight": 4},
 	{"name": "Rusted Hook", "weight": 6},
+	{"name": "Cork Bobber", "weight": 2},
+	{"name": "Painted Lure", "weight": 2},
+	{"name": "Rusty Anchor", "weight": 1},
 	{"name": "Skeleton Keys", "weight": 1}
 ]
 
