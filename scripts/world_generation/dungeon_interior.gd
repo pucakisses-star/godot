@@ -1004,8 +1004,13 @@ func _spawn_player() -> void:
 	# Your delver is the dwarf chosen at character creation; characters
 	# made before the picker wear the profession hero sheet instead.
 	_player_sprite = Sprite2D.new()
+	var composed := DwarfHoldActorVisuals.resolve_player_dwarf_texture(self)
 	var character_slot := DwarfHoldActorVisuals.resolve_player_character_slot(self)
-	if character_slot >= 0:
+	if composed != null:
+		_player_sprite.texture = composed
+		_player_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		_player_sprite.scale = Vector2.ONE * (float(TILE_PX) / float(composed.get_height())) * 0.95
+	elif character_slot >= 0:
 		var dwarf_texture := DwarfHoldActorVisuals.DWARF_CHARACTERS_TEXTURE
 		var frame := Vector2i(dwarf_texture.get_width() / 12, dwarf_texture.get_height() / 8)
 		_player_sprite.texture = dwarf_texture

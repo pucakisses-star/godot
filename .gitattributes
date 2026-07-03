@@ -35,3 +35,4 @@ resources/images/dwarfhold/map.png -filter -diff -merge -text
 resources/images/webgame_tiles/** -filter -diff -merge -text
 resources/images/items/item_icons2.png -filter -diff -merge -text
 resources/images/items/item_icons3.png -filter -diff -merge -text
+resources/images/character_creator/** -filter -diff -merge -text

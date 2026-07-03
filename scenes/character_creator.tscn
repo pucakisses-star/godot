@@ -72,7 +72,7 @@ corner_radius_bottom_left = 8
 shadow_color = Color(0.03, 0.16, 0.35, 0.4)
 shadow_size = 10
 
-[node name="CharacterCreator" type="Control" unique_id=416902352 node_paths=PackedStringArray("target_render", "character_name", "profession_choice", "clan_name", "female_button", "male_button", "return_button", "create_button", "animated_background", "skin_color", "eye_color", "hair_color", "hair_style", "beard_style", "beardless_reminder", "dark_dwarf_reminder", "grey_dwarf_reminder", "banker_reminder", "attribute_tooltip_backdrop", "attribute_tooltip_panel", "attribute_reminder_title", "attribute_reminder_text")]
+[node name="CharacterCreator" type="Control" unique_id=416902352 node_paths=PackedStringArray("target_render", "character_name", "profession_choice", "clan_name", "female_button", "male_button", "return_button", "create_button", "animated_background", "skin_color", "clothing_color", "hair_color", "hair_style", "beard_style", "beardless_reminder", "dark_dwarf_reminder", "grey_dwarf_reminder", "banker_reminder", "attribute_tooltip_backdrop", "attribute_tooltip_panel", "attribute_reminder_title", "attribute_reminder_text")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -95,7 +95,7 @@ portrait_dir = "res://resources/images/character_creator/portraits"
 beard_dir = "res://resources/images/character_creator/beards"
 hair_dir = "res://resources/images/character_creator/hair"
 skin_color = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer/CenterContainer/HSlider")
-eye_color = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer2/CenterContainer/HSlider")
+clothing_color = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer2/CenterContainer/HSlider")
 hair_color = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer3/CenterContainer/HSlider")
 hair_style = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer4/CenterContainer/HSlider")
 beard_style = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer5/CenterContainer/HSlider")
@@ -207,12 +207,12 @@ columns = 2
 [node name="Label" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=830437725]
 layout_mode = 2
 theme = ExtResource("3_0yffs")
-text = "Skin Tone"
+text = "Skin Color"
 
 [node name="Eye Color" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=1707607665]
 layout_mode = 2
 theme = ExtResource("3_0yffs")
-text = "Eye Color"
+text = "Clothing"
 
 [node name="HBoxContainer" type="HBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=664899758]
 layout_mode = 2

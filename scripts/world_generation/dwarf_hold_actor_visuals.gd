@@ -67,9 +67,30 @@ static func hero_class_for_profession(profession: String) -> String:
 
 ## Picks the hero sheet matching the session's player character; the
 ## warrior stands in when no character has been made yet.
-## The dwarf the player picked at character creation (-1 when the
-## character predates the picker; callers then fall back to the SPD
-## hero sheet by profession).
+## The dwarf assembled at character creation from the DF layer sheets
+## (null when the character predates the creator's body panel; callers
+## then try the sheet slot, then the SPD hero sheet by profession).
+static func resolve_player_dwarf_texture(context: Node) -> Texture2D:
+	var session := context.get_node_or_null("/root/GameSession")
+	if session == null or not session.has_method("get_player_character"):
+		return null
+	var character: Dictionary = session.call("get_player_character")
+	var layers := DwarfSpriteComposer.layers_from_character(character)
+	if layers.is_empty():
+		return null
+	return DwarfSpriteComposer.compose(layers)
+
+static func create_composed_player_sprite(texture: Texture2D, tile_size: Vector2i) -> Sprite2D:
+	var sprite := Sprite2D.new()
+	sprite.texture = texture
+	sprite.centered = true
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.scale = Vector2(
+		float(tile_size.x) / float(maxi(texture.get_width(), 1)),
+		float(tile_size.y) / float(maxi(texture.get_height(), 1))
+	) * 0.95
+	return sprite
+
 static func resolve_player_character_slot(context: Node) -> int:
 	var session := context.get_node_or_null("/root/GameSession")
 	if session == null or not session.has_method("get_player_character"):
