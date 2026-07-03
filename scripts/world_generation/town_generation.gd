@@ -163,6 +163,8 @@ var _farm_pens: Array = []
 var _farm_blocked_cells: Dictionary = {}
 var _windmill_sails: Array[Dictionary] = []
 var _desert_decor_textures: Dictionary = {}
+var _furnishing_sprites: Array[Node2D] = []
+var _furnishing_blocked_cells: Dictionary = {}
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
 const PLAYER_MOVE_REPEAT_INTERVAL := 0.10
@@ -774,7 +776,7 @@ func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 	return false
 
 func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
-	if _farm_blocked_cells.has(cell):
+	if _farm_blocked_cells.has(cell) or _furnishing_blocked_cells.has(cell):
 		return false
 	if city_layer.get_cell_source_id(cell) < 0:
 		return false
@@ -1049,6 +1051,8 @@ func _show_level(target_level_index: int) -> void:
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
 	_spawn_tavern_characters(grid)
+	# After the NPC spawn (which rebuilds the actor layer's children).
+	_furnish_interiors(grid)
 	_build_farmsteads()
 	_scatter_desert_decor()
 	_spawn_farm_animals()
@@ -2081,6 +2085,101 @@ const FARM_ANIMAL_DEFS := [
 	{"id": "pig", "path": "res://resources/images/webgame_tiles/Farm/Tiled_files/Pig_animation.png", "frame": 32, "speed": 22.0, "rows": 6},
 	{"id": "cow", "path": "res://resources/images/webgame_tiles/Farm/Tiled_files/Cow_animation.png", "frame": 64, "speed": 16.0, "rows": 6}
 ]
+
+## --- Interior furnishing: lived-in homes and stocked shops ------------------
+## After the tile pass, every house gets template furniture (dining sets,
+## pantries, cabinets, rugs, candles) and every shopfront gets stocked
+## shelves and crates, as layered sprites from the web game's interior
+## sheets. Hearths and candles cast warm light pools.
+
+func _furnish_interiors(grid: Dictionary) -> void:
+	for sprite: Node2D in _furnishing_sprites:
+		sprite.queue_free()
+	_furnishing_sprites.clear()
+	_furnishing_blocked_cells.clear()
+	if actor_layer == null:
+		return
+	var is_occupied := func(cell: Vector2i) -> bool:
+		return decor_layer.get_cell_source_id(cell) >= 0
+	# Houses get home comforts.
+	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_HOUSE):
+		var component: Array[Vector2i] = []
+		for cell_variant: Variant in (component_variant as Array):
+			component.append(cell_variant as Vector2i)
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_house_furnishing(component, is_occupied, _door_cells, _rng)
+		_apply_furnishing_placements(placements)
+		_place_house_hearth(component, is_occupied)
+	# Shops get stock on the shelves.
+	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_BUILDING):
+		var component: Array[Vector2i] = []
+		for cell_variant: Variant in (component_variant as Array):
+			component.append(cell_variant as Vector2i)
+		if component.is_empty():
+			continue
+		var building_type := String(_latest_civic_building_type_map.get(component[0], ""))
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_shop_dressing(component, building_type, is_occupied, _door_cells, _rng)
+		_apply_furnishing_placements(placements)
+	# Fire-bearing furniture anywhere on the map casts a warm pool.
+	for cell: Vector2i in decor_layer.get_used_cells():
+		var decor_key := _tile_name_from_atlas(decor_layer.get_cell_atlas_coords(cell))
+		if ["forge", "oven", "brazier"].has(decor_key):
+			_spawn_hearth_glow(cell, 3.4)
+
+func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
+	for placement: Dictionary in placements:
+		var piece_name := String(placement.get("piece", ""))
+		var base_cell := placement.get("cell", Vector2i.ZERO) as Vector2i
+		var sprite: Sprite2D = RoomFurnishingService.create_piece_sprite(piece_name, base_cell, tile_size)
+		if sprite == null:
+			continue
+		actor_layer.add_child(sprite)
+		_furnishing_sprites.append(sprite)
+		if int((RoomFurnishingService.PIECES.get(piece_name, {}) as Dictionary).get("rows_block", 1)) > 0:
+			for cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
+				_furnishing_blocked_cells[cell] = true
+		if RoomFurnishingService.piece_emits_light(piece_name):
+			_spawn_hearth_glow(base_cell, 2.4)
+
+## Every roomy house earns a hearth on its north wall row: an oven tile,
+## its chimney cap, and firelight.
+func _place_house_hearth(component: Array[Vector2i], is_occupied: Callable) -> void:
+	var interior: Array[Vector2i] = RoomFurnishingService.interior_cells(component)
+	if interior.size() < 9:
+		return
+	var north_row := interior[0].y
+	for cell: Vector2i in interior:
+		north_row = mini(north_row, cell.y)
+	for cell: Vector2i in interior:
+		if cell.y != north_row:
+			continue
+		if bool(is_occupied.call(cell)) or _furnishing_blocked_cells.has(cell):
+			continue
+		var door_adjacent := false
+		for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			if _door_cells.has(cell + direction):
+				door_adjacent = true
+				break
+		if door_adjacent:
+			continue
+		var occupied_or_furnished := func(check_cell: Vector2i) -> bool:
+			return _furnishing_blocked_cells.has(check_cell) or bool(is_occupied.call(check_cell))
+		var oven_block: Array[Vector2i] = [cell]
+		if not RoomFurnishingService.block_keeps_room_open(oven_block, interior, occupied_or_furnished, _door_cells):
+			continue
+		_place_tile(decor_layer, cell, "oven")
+		if decor_layer.get_cell_source_id(cell + Vector2i.UP) < 0:
+			_place_tile(decor_layer, cell + Vector2i.UP, "oven_top")
+		_spawn_hearth_glow(cell, 3.4)
+		return
+
+func _spawn_hearth_glow(cell: Vector2i, radius_cells: float) -> void:
+	var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(
+		_cell_center_position(cell),
+		radius_cells * float(tile_size.x),
+		Color(1.0, 0.72, 0.35, 1.0)
+	)
+	actor_layer.add_child(glow)
+	_furnishing_sprites.append(glow)
 
 ## --- Farmsteads: real farm buildings on the town greens -------------------
 ## Each farmstead stakes out a rectangle of open grass and raises a

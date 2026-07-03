@@ -164,6 +164,8 @@ var _hover_tooltip_layer: TileMapLayer
 var _last_move_direction := Vector2i.ZERO
 var _move_repeat_timer := 0.0
 var _npc_states: Array[Dictionary] = []
+var _furnishing_sprites: Array[Node2D] = []
+var _furnishing_blocked_cells: Dictionary = {}
 var _hold_state := DwarfHoldStateModel.new()
 var _game_hour := 9.0
 var _game_day := 1
@@ -1474,6 +1476,8 @@ func _show_level(target_level_index: int) -> void:
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
 	_spawn_tavern_characters(grid)
+	# After the NPC spawn (which rebuilds the actor layer's children).
+	_furnish_interiors(grid)
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
 	_update_depth_controls()
@@ -3967,6 +3971,8 @@ func _create_placeholder_tavern_character_texture() -> Texture2D:
 func _is_walkable_cell(cell: Vector2i) -> bool:
 	if _latest_grid.is_empty():
 		return false
+	if _furnishing_blocked_cells.has(cell):
+		return false
 	var zone := int(_latest_grid.get(cell, CELL_ROCK))
 	if zone != CELL_HALL and zone != CELL_HOUSE and zone != CELL_BUILDING and zone != CELL_PLAZA:
 		return false
@@ -3974,6 +3980,58 @@ func _is_walkable_cell(cell: Vector2i) -> bool:
 
 func _is_npc_walkable_cell(cell: Vector2i) -> bool:
 	return DwarfHoldTavernService.is_npc_walkable_cell(cell, Callable(self, "_is_walkable_cell"), decor_layer, TILE_ATLAS["stone"])
+
+## --- Interior furnishing: lived-in homes and stocked cellars ---------------
+## Same engine as the towns: template furniture sprites in every roomy
+## house, stocked shelves in tavern/brewery/warehouse-type buildings,
+## and candlelight pools. The hold's stone rooms keep their tile beds;
+## the sprites layer comfort on top.
+
+func _furnish_interiors(grid: Dictionary) -> void:
+	for sprite: Node2D in _furnishing_sprites:
+		sprite.queue_free()
+	_furnishing_sprites.clear()
+	_furnishing_blocked_cells.clear()
+	if actor_layer == null:
+		return
+	var is_occupied := func(cell: Vector2i) -> bool:
+		return decor_layer.get_cell_source_id(cell) >= 0
+	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_HOUSE):
+		var component: Array[Vector2i] = []
+		for cell_variant: Variant in (component_variant as Array):
+			component.append(cell_variant as Vector2i)
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_house_furnishing(component, is_occupied, _door_cells, _rng)
+		_apply_furnishing_placements(placements)
+	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_BUILDING):
+		var component: Array[Vector2i] = []
+		for cell_variant: Variant in (component_variant as Array):
+			component.append(cell_variant as Vector2i)
+		if component.is_empty():
+			continue
+		var building_type := String(_latest_civic_building_type_map.get(component[0], ""))
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_shop_dressing(component, building_type, is_occupied, _door_cells, _rng)
+		_apply_furnishing_placements(placements)
+
+func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
+	for placement: Dictionary in placements:
+		var piece_name := String(placement.get("piece", ""))
+		var base_cell := placement.get("cell", Vector2i.ZERO) as Vector2i
+		var sprite: Sprite2D = RoomFurnishingService.create_piece_sprite(piece_name, base_cell, tile_size)
+		if sprite == null:
+			continue
+		actor_layer.add_child(sprite)
+		_furnishing_sprites.append(sprite)
+		if int((RoomFurnishingService.PIECES.get(piece_name, {}) as Dictionary).get("rows_block", 1)) > 0:
+			for cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
+				_furnishing_blocked_cells[cell] = true
+		if RoomFurnishingService.piece_emits_light(piece_name):
+			var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(
+				_cell_center_position(base_cell),
+				2.4 * float(tile_size.x),
+				Color(1.0, 0.72, 0.35, 1.0)
+			)
+			actor_layer.add_child(glow)
+			_furnishing_sprites.append(glow)
 
 func _actor_sprite_to_cell(sprite: Sprite2D, cell: Vector2i) -> void:
 	sprite.position = _cell_center_position(cell)
