@@ -29,6 +29,42 @@ const WALL_DARK_TILE := Vector2i(4, 5)
 const STAIRS_TILE := Vector2i(13, 21)
 const DEBRIS_TILES: Array[Vector2i] = [Vector2i(7, 20), Vector2i(8, 21), Vector2i(9, 20)]
 
+## Dungeons run three floors deep. The first floor keeps the web game's
+## brick vaults; below that the Shattered Pixel Dungeon terrain sheets
+## take over — the sunken sewers, then the deep caves — with more traps,
+## meaner garrisons, and richer treasure the farther down you go.
+const MAX_DEPTH := 3
+const SPD_SEWERS_TEXTURE := preload("res://resources/images/shattered_ui/tiles_sewers.png")
+const SPD_CAVES_TEXTURE := preload("res://resources/images/shattered_ui/tiles_caves.png")
+const DEPTH_THEMES: Array[Dictionary] = [
+	{
+		"label": "the old vaults",
+		"floor": Vector2i(11, 18), "floor_variants": [],
+		"walls": [Vector2i(13, 1), Vector2i(12, 1)], "wall_dark": Vector2i(4, 5),
+		"stairs_up": Vector2i(13, 21), "stairs_down": Vector2i(13, 21),
+		"debris": [Vector2i(7, 20), Vector2i(8, 21), Vector2i(9, 20)],
+		"tint": Color(1.0, 1.0, 1.0, 1.0)
+	},
+	{
+		"label": "the sunken sewers",
+		"texture": "sewers",
+		"floor": Vector2i(0, 0), "floor_variants": [Vector2i(1, 0), Vector2i(2, 0)],
+		"walls": [Vector2i(0, 5), Vector2i(1, 5), Vector2i(2, 5), Vector2i(3, 5)], "wall_dark": Vector2i(14, 3),
+		"stairs_up": Vector2i(0, 1), "stairs_down": Vector2i(1, 1),
+		"debris": [Vector2i(2, 4), Vector2i(3, 4), Vector2i(1, 4), Vector2i(0, 4)],
+		"tint": Color(0.88, 1.0, 0.92, 1.0)
+	},
+	{
+		"label": "the deep caves",
+		"texture": "caves",
+		"floor": Vector2i(0, 0), "floor_variants": [Vector2i(1, 0), Vector2i(2, 0)],
+		"walls": [Vector2i(0, 5), Vector2i(1, 5), Vector2i(2, 5), Vector2i(3, 5)], "wall_dark": Vector2i(14, 3),
+		"stairs_up": Vector2i(0, 1), "stairs_down": Vector2i(1, 1),
+		"debris": [Vector2i(2, 4), Vector2i(3, 4), Vector2i(1, 4), Vector2i(0, 4)],
+		"tint": Color(1.0, 0.93, 0.86, 1.0)
+	}
+]
+
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
 
@@ -43,7 +79,12 @@ const PLAYER_ATTACK_COOLDOWN := 0.45
 ## the treasure room; lesser wanderers haunt the other rooms.
 const CREATURE_TEXTURE := preload("res://resources/images/npc/creature_characters.png")
 const TREASURE_GUARD_DEF_INDICES: Array[int] = [4, 5, 6, 7]
-const ROOM_MOB_DEF_INDICES: Array[int] = [0, 1, 2, 3, 6]
+## Roaming mobs by depth: fungi near the surface, war parties in the caves.
+const ROOM_MOB_DEF_INDICES_BY_DEPTH: Array = [
+	[0, 1, 2, 3, 6],
+	[1, 2, 3, 4, 6],
+	[3, 4, 5, 6, 7]
+]
 
 ## Sprite frame tables, transcribed from the web game's Tiled animation data.
 const FIRE_FRAME_COUNT := 8
@@ -109,6 +150,9 @@ var _entrance_cell := Vector2i.ZERO
 var _spawn_cell := Vector2i.ZERO
 var _dungeon_name := "Forgotten Dungeon"
 var _blocked_cells: Dictionary = {}
+var _base_seed_text := ""
+var _depth := 1
+var _down_stairs_cell := Vector2i(2147483647, 2147483647)
 
 var _player_sprite: Sprite2D
 var _player_cell := Vector2i.ZERO
@@ -136,7 +180,6 @@ var _player_attack_timer := 0.0
 func _ready() -> void:
 	_load_scene_context()
 	_load_player_inventory()
-	_configure_tile_layer()
 	leave_button.pressed.connect(_leave_dungeon)
 	dungeon_panel.gui_input.connect(_on_panel_gui_input)
 	_escape_menu = EscapeMenu.new()
@@ -183,8 +226,7 @@ func _load_scene_context() -> void:
 	if seed_text.is_empty():
 		_rng.randomize()
 		seed_text = str(_rng.randi())
-	_rng.seed = hash(seed_text)
-	dungeon_name_label.text = _dungeon_name
+	_base_seed_text = seed_text
 
 func _load_player_inventory() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -204,12 +246,31 @@ func _save_player_inventory() -> void:
 	settings["player_coins"] = _player_coins
 	game_session.call("set_world_settings", settings)
 
+func _theme() -> Dictionary:
+	return DEPTH_THEMES[clampi(_depth - 1, 0, DEPTH_THEMES.size() - 1)]
+
+func _theme_texture(depth_theme: Dictionary) -> Texture2D:
+	match String(depth_theme.get("texture", "")):
+		"sewers":
+			return SPD_SEWERS_TEXTURE
+		"caves":
+			return SPD_CAVES_TEXTURE
+		_:
+			return WALLS_FLOOR_TEXTURE
+
 func _configure_tile_layer() -> void:
+	var depth_theme := _theme()
 	var atlas := TileSetAtlasSource.new()
-	atlas.texture = WALLS_FLOOR_TEXTURE
+	atlas.texture = _theme_texture(depth_theme)
 	atlas.texture_region_size = Vector2i(TILE_PX, TILE_PX)
-	var used_tiles: Array[Vector2i] = [FLOOR_TILE, WALL_FACE_TILE, WALL_FACE_ALT_TILE, WALL_DARK_TILE, STAIRS_TILE]
-	used_tiles.append_array(DEBRIS_TILES)
+	var used_tiles: Array[Vector2i] = [
+		depth_theme.get("floor", Vector2i.ZERO) as Vector2i,
+		depth_theme.get("wall_dark", Vector2i.ZERO) as Vector2i,
+		depth_theme.get("stairs_up", Vector2i.ZERO) as Vector2i,
+		depth_theme.get("stairs_down", Vector2i.ZERO) as Vector2i
+	]
+	for coords_variant: Variant in (depth_theme.get("floor_variants", []) as Array) + (depth_theme.get("walls", []) as Array) + (depth_theme.get("debris", []) as Array):
+		used_tiles.append(coords_variant as Vector2i)
 	for coords: Vector2i in used_tiles:
 		if not atlas.has_tile(coords):
 			atlas.create_tile(coords)
@@ -218,13 +279,20 @@ func _configure_tile_layer() -> void:
 	tile_set.add_source(atlas, 0)
 	floor_layer.tile_set = tile_set
 	decor_layer.tile_set = tile_set
+	floor_layer.modulate = depth_theme.get("tint", Color.WHITE) as Color
+	decor_layer.modulate = depth_theme.get("tint", Color.WHITE) as Color
 
 ## --- Generation -------------------------------------------------------------
 
 func _generate_dungeon() -> void:
+	_rng.seed = hash("%s::depth_%d" % [_base_seed_text, _depth])
+	_configure_tile_layer()
+	dungeon_name_label.text = "%s — Depth %d / %d" % [_dungeon_name, _depth, MAX_DEPTH]
 	_grid.clear()
 	_rooms.clear()
 	_blocked_cells.clear()
+	_trap_damage_timers.clear()
+	_down_stairs_cell = Vector2i(2147483647, 2147483647)
 	var room_count := _rng.randi_range(7, 11)
 	var area := Rect2i(0, 0, 58, 42)
 	for _attempt in range(room_count * 14):
@@ -263,10 +331,31 @@ func _generate_dungeon() -> void:
 		child.queue_free()
 	# Treasure claims its ground first; traps then keep clear of it.
 	_place_treasure()
+	_place_down_stairs()
 	_place_traps()
 	_spawn_dungeon_creatures()
 	_spawn_player()
-	_set_status("You descend into %s… watch the floor." % _dungeon_name, Color(0.85, 0.8, 0.95, 1.0))
+	_set_status("Depth %d — you enter %s… watch the floor." % [_depth, String((_theme() as Dictionary).get("label", "the dark"))], Color(0.85, 0.8, 0.95, 1.0))
+
+## The way down: a staircase in the treasure room's corner on every floor
+## above the bottom. Stepping on it descends into the next theme.
+func _place_down_stairs() -> void:
+	if _depth >= MAX_DEPTH or _rooms.is_empty():
+		return
+	var treasure_room := _treasure_room()
+	for _attempt in range(30):
+		var cell := _random_room_cell(treasure_room)
+		if _is_walkable(cell) and cell != _entrance_cell:
+			_down_stairs_cell = cell
+			floor_layer.set_cell(cell, 0, (_theme() as Dictionary).get("stairs_down", Vector2i.ZERO) as Vector2i)
+			decor_layer.erase_cell(cell)
+			return
+
+func _travel_to_depth(new_depth: int) -> void:
+	_depth = clampi(new_depth, 1, MAX_DEPTH)
+	_player_move_path.clear()
+	_player_is_moving = false
+	_generate_dungeon()
 
 func _carve_corridor(from_cell: Vector2i, to_cell: Vector2i) -> void:
 	var cursor := from_cell
@@ -284,6 +373,12 @@ func _carve_corridor(from_cell: Vector2i, to_cell: Vector2i) -> void:
 			_grid[cursor] = FLOOR
 
 func _render_grid() -> void:
+	var depth_theme := _theme()
+	var floor_tile := depth_theme.get("floor", Vector2i.ZERO) as Vector2i
+	var floor_variants := depth_theme.get("floor_variants", []) as Array
+	var wall_tiles := depth_theme.get("walls", []) as Array
+	var wall_dark := depth_theme.get("wall_dark", Vector2i.ZERO) as Vector2i
+	var debris := depth_theme.get("debris", []) as Array
 	floor_layer.clear()
 	decor_layer.clear()
 	var floor_cells: Array[Vector2i] = []
@@ -292,7 +387,10 @@ func _render_grid() -> void:
 			floor_cells.append(cell_variant as Vector2i)
 	var wall_cells: Dictionary = {}
 	for cell: Vector2i in floor_cells:
-		floor_layer.set_cell(cell, 0, FLOOR_TILE)
+		var cell_tile := floor_tile
+		if not floor_variants.is_empty() and (cell.x * 31 + cell.y * 17) % 9 == 0:
+			cell_tile = floor_variants[(cell.x + cell.y) % floor_variants.size()] as Vector2i
+		floor_layer.set_cell(cell, 0, cell_tile)
 		for dy in range(-1, 2):
 			for dx in range(-1, 2):
 				var neighbor := cell + Vector2i(dx, dy)
@@ -300,16 +398,16 @@ func _render_grid() -> void:
 					wall_cells[neighbor] = true
 	for wall_variant: Variant in wall_cells.keys():
 		var wall_cell := wall_variant as Vector2i
-		# South-facing walls show their brick face; the rest read as dark mass.
-		if int(_grid.get(wall_cell + Vector2i(0, 1), WALL)) == FLOOR:
-			floor_layer.set_cell(wall_cell, 0, WALL_FACE_TILE if (wall_cell.x + wall_cell.y) % 2 == 0 else WALL_FACE_ALT_TILE)
+		# South-facing walls show their face; the rest read as dark mass.
+		if int(_grid.get(wall_cell + Vector2i(0, 1), WALL)) == FLOOR and not wall_tiles.is_empty():
+			floor_layer.set_cell(wall_cell, 0, wall_tiles[(wall_cell.x + wall_cell.y) % wall_tiles.size()] as Vector2i)
 		else:
-			floor_layer.set_cell(wall_cell, 0, WALL_DARK_TILE)
-	floor_layer.set_cell(_entrance_cell, 0, STAIRS_TILE)
+			floor_layer.set_cell(wall_cell, 0, wall_dark)
+	floor_layer.set_cell(_entrance_cell, 0, depth_theme.get("stairs_up", Vector2i.ZERO) as Vector2i)
 	# Rubble keeps the halls from feeling freshly swept.
 	for cell: Vector2i in floor_cells:
-		if cell != _entrance_cell and _rng.randf() < 0.045:
-			decor_layer.set_cell(cell, 0, DEBRIS_TILES[_rng.randi_range(0, DEBRIS_TILES.size() - 1)])
+		if cell != _entrance_cell and not debris.is_empty() and _rng.randf() < 0.045:
+			decor_layer.set_cell(cell, 0, debris[_rng.randi_range(0, debris.size() - 1)] as Vector2i)
 
 ## --- Trap placement ----------------------------------------------------------
 
@@ -365,7 +463,7 @@ func _place_saw_traps() -> void:
 	var runs := _corridor_runs(5)
 	var placed := 0
 	for run: Dictionary in runs:
-		if placed >= 3:
+		if placed >= 2 + _depth:
 			break
 		var start := run.get("start", Vector2i.ZERO) as Vector2i
 		if _is_safe_zone(start):
@@ -395,7 +493,7 @@ func _place_saw_traps() -> void:
 func _place_fire_traps() -> void:
 	var placed := 0
 	for room_index in range(1, _rooms.size()):
-		if placed >= 2:
+		if placed >= 1 + _depth:
 			break
 		var room := _rooms[room_index]
 		if room.size.x < FIRE_BLOCK_CELLS.x + 2 or room.size.y < FIRE_BLOCK_CELLS.y + 1:
@@ -462,7 +560,7 @@ func _place_spike_plates() -> void:
 		candidates.append(cell)
 	candidates.sort()
 	_seeded_shuffle(candidates)
-	var target := clampi(candidates.size() / 24, 4, 10)
+	var target := clampi(candidates.size() / 24, 4, 10) + 2 * (_depth - 1)
 	for cell: Vector2i in candidates:
 		if _spike_plates.size() >= target:
 			break
@@ -503,7 +601,7 @@ func _place_treasure() -> void:
 		if distance > best_distance:
 			best_distance = distance
 			treasure_room = room
-	var pedestal_count := _rng.randi_range(2, 4)
+	var pedestal_count := _rng.randi_range(2, 4) + (_depth - 1)
 	for _pedestal_attempt in range(pedestal_count * 10):
 		if _pedestals.size() >= pedestal_count:
 			break
@@ -526,7 +624,7 @@ func _place_treasure() -> void:
 		_pedestals[cell] = {"sprite": sprite, "icon": icon, "item": item, "looted": false}
 		_blocked_cells[cell] = true
 	# Chests in one or two of the other far rooms.
-	var chest_count := _rng.randi_range(1, 2)
+	var chest_count := _rng.randi_range(1, 2) + (_depth - 1)
 	var chest_rooms := _rooms.duplicate()
 	chest_rooms.erase(_rooms[0])
 	_seeded_shuffle(chest_rooms)
@@ -611,7 +709,7 @@ func _spawn_dungeon_creatures() -> void:
 		return
 	# The treasure room's honor guard, posted beside the pedestals.
 	var treasure_room := _treasure_room()
-	var guard_count := _rng.randi_range(2, 3)
+	var guard_count := _rng.randi_range(2, 3) + (_depth - 1)
 	for _guard_index in range(guard_count * 8):
 		if _guards_in_room(treasure_room) >= guard_count:
 			break
@@ -619,9 +717,11 @@ func _spawn_dungeon_creatures() -> void:
 		if _creature_can_spawn_at(cell):
 			_spawn_creature_at(cell, TREASURE_GUARD_DEF_INDICES[_rng.randi_range(0, TREASURE_GUARD_DEF_INDICES.size() - 1)])
 	# Wandering mobs in the other rooms; the entrance room stays safe.
+	var mob_pool := ROOM_MOB_DEF_INDICES_BY_DEPTH[clampi(_depth - 1, 0, ROOM_MOB_DEF_INDICES_BY_DEPTH.size() - 1)] as Array
+	var room_chance := minf(0.6 + 0.15 * float(_depth - 1), 0.9)
 	for room_index in range(1, _rooms.size()):
 		var room := _rooms[room_index]
-		if room == treasure_room or _rng.randf() > 0.6:
+		if room == treasure_room or _rng.randf() > room_chance:
 			continue
 		var mob_count := _rng.randi_range(1, 2)
 		for _mob_attempt in range(mob_count * 6):
@@ -629,7 +729,7 @@ func _spawn_dungeon_creatures() -> void:
 				break
 			var cell := _random_room_cell(room)
 			if _creature_can_spawn_at(cell):
-				_spawn_creature_at(cell, ROOM_MOB_DEF_INDICES[_rng.randi_range(0, ROOM_MOB_DEF_INDICES.size() - 1)])
+				_spawn_creature_at(cell, int(mob_pool[_rng.randi_range(0, mob_pool.size() - 1)]))
 
 func _treasure_room() -> Rect2i:
 	var treasure_room := _rooms[0]
@@ -845,12 +945,15 @@ func _attack_creature(creature_index: int) -> void:
 func _spawn_player() -> void:
 	if _player_sprite != null:
 		_player_sprite.queue_free()
+	# Your delver wears the hero sheet matching your character's profession
+	# (warrior, mage, rogue or huntress from the SPD pack).
 	_player_sprite = Sprite2D.new()
-	var texture := load("res://resources/images/shattered_ui/warrior.png") as Texture2D
+	var texture := DwarfHoldActorVisuals.resolve_hero_texture(self)
 	_player_sprite.texture = texture
 	if texture != null:
-		var longest := maxf(texture.get_size().x, texture.get_size().y)
-		_player_sprite.scale = Vector2.ONE * (float(TILE_PX) / maxf(longest, 1.0)) * 1.25
+		_player_sprite.region_enabled = true
+		_player_sprite.region_rect = Rect2(Vector2.ZERO, DwarfHoldActorVisuals.HERO_FRAME_SIZE)
+		_player_sprite.scale = Vector2.ONE * (float(TILE_PX) / DwarfHoldActorVisuals.HERO_FRAME_SIZE.y) * 1.05
 	_player_sprite.z_index = 10
 	_player_cell = _spawn_cell
 	_player_sprite.position = _cell_center(_player_cell)
@@ -913,7 +1016,15 @@ func _update_player_movement(delta: float) -> void:
 
 func _on_player_entered_cell(cell: Vector2i) -> void:
 	if cell == _entrance_cell:
-		_leave_dungeon()
+		# The stairs up: out of the dungeon from the first floor,
+		# back toward daylight from anywhere deeper.
+		if _depth <= 1:
+			_leave_dungeon()
+		else:
+			_travel_to_depth(_depth - 1)
+		return
+	if cell == _down_stairs_cell:
+		_travel_to_depth(_depth + 1)
 		return
 	var plate := _spike_plates.get(cell, {}) as Dictionary
 	if not plate.is_empty() and not bool(plate.get("triggered", false)):

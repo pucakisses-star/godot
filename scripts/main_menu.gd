@@ -69,10 +69,6 @@ func _on_options_button_pressed() -> void:
 	get_tree().change_scene_to_file("res://scenes/options_menu.tscn")
 
 
-func _on_shattered_pixel_dungeon_button_pressed() -> void:
-	get_tree().change_scene_to_file("res://scenes/shattered_pixel_dungeon_windows.tscn")
-
-
 func _on_load_game_button_pressed() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null or not game_session.has_method("load_from_file"):

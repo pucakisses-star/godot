@@ -794,7 +794,9 @@ func _ready() -> void:
 	_tavern_character_texture = load(tavern_vehicle_sprite_path) as Texture2D
 	if _tavern_character_texture == null:
 		_tavern_character_texture = _create_placeholder_tavern_character_texture()
-	_shattered_player_texture = load(shattered_player_sprite_path) as Texture2D
+	_shattered_player_texture = DwarfHoldActorVisuals.resolve_hero_texture(self)
+	if _shattered_player_texture == null:
+		_shattered_player_texture = load(shattered_player_sprite_path) as Texture2D
 	_creature_texture = load(creature_sprite_path) as Texture2D
 	_placeholder_actor_texture = _create_placeholder_actor_texture()
 	generate_button.pressed.connect(_on_generate_pressed)
