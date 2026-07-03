@@ -68,10 +68,10 @@ const DEPTH_THEMES: Array[Dictionary] = [
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
 
-const PLAYER_MAX_HP := 20.0
+var _player_max_hp := PlayerStatsService.BASE_MAX_HP
 const PLAYER_MOVE_SPEED := 150.0
 const TRAP_DAMAGE_COOLDOWN := 0.9
-const PLAYER_ATTACK_DAMAGE := 2
+var _player_attack_damage := PlayerStatsService.BASE_ATTACK
 const PLAYER_ATTACK_COOLDOWN := 0.45
 
 ## Dungeon garrison: the underdeep mob roster stands guard down here too.
@@ -156,7 +156,7 @@ var _down_stairs_cell := Vector2i(2147483647, 2147483647)
 
 var _player_sprite: Sprite2D
 var _player_cell := Vector2i.ZERO
-var _player_hp := PLAYER_MAX_HP
+var _player_hp := _player_max_hp
 var _player_move_path: Array[Vector2i] = []
 var _player_is_moving := false
 var _player_move_target_cell := Vector2i.ZERO
@@ -237,7 +237,10 @@ func _load_player_inventory() -> void:
 	var inventory_variant: Variant = settings.get("player_inventory", {})
 	_player_inventory = (inventory_variant as Dictionary).duplicate() if inventory_variant is Dictionary else {}
 	_player_coins = int(settings.get("player_coins", 0))
-	_player_hp = clampf(float(settings.get("player_hp", PLAYER_MAX_HP)), 1.0, PLAYER_MAX_HP)
+	var stats := PlayerStatsService.for_session(self)
+	_player_max_hp = float(stats.get("max_hp", _player_max_hp))
+	_player_attack_damage = int(stats.get("attack", _player_attack_damage))
+	_player_hp = clampf(float(settings.get("player_hp", _player_max_hp)), 1.0, _player_max_hp)
 
 func _save_player_inventory() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -944,10 +947,10 @@ func _attack_creature(creature_index: int) -> void:
 		return
 	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
 	var sprite := state.get("sprite") as Sprite2D
-	state["hp"] = int(state.get("hp", 1)) - PLAYER_ATTACK_DAMAGE
+	state["hp"] = int(state.get("hp", 1)) - _player_attack_damage
 	if sprite != null:
 		_flash_sprite(sprite, Color(1.0, 0.45, 0.45, 1.0))
-		_spawn_floating_text("-%d" % PLAYER_ATTACK_DAMAGE, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
+		_spawn_floating_text("-%d" % _player_attack_damage, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
 	if int(state.get("hp", 0)) > 0:
 		_set_creature_anim(state, "hurt")
 		return
@@ -1287,7 +1290,7 @@ func _damage_player(amount: int, source_name: String) -> void:
 		_handle_player_death(source_name)
 
 func _handle_player_death(source_name: String) -> void:
-	_player_hp = PLAYER_MAX_HP
+	_player_hp = _player_max_hp
 	var lost_coins := _player_coins / 2
 	if lost_coins > 0:
 		_player_coins -= lost_coins
@@ -1357,8 +1360,8 @@ func _add_to_inventory(item_name: String, amount: int) -> void:
 ## --- UI ----------------------------------------------------------------------
 
 func _update_hp_label() -> void:
-	hp_label.text = "❤ %d / %d" % [int(ceil(_player_hp)), int(PLAYER_MAX_HP)]
-	if _player_hp <= PLAYER_MAX_HP * 0.3:
+	hp_label.text = "❤ %d / %d" % [int(ceil(_player_hp)), int(_player_max_hp)]
+	if _player_hp <= _player_max_hp * 0.3:
 		hp_label.modulate = Color(1.0, 0.5, 0.5, 1.0)
 	else:
 		hp_label.modulate = Color(0.95, 0.87, 0.87, 1.0)

@@ -1,0 +1,96 @@
+class_name PlayerStatsService
+extends RefCounted
+
+## Derives the player's combat and survival stats from the character
+## sheet, so the profession chosen at creation matters in play. Named
+## professions carry their own bonuses; everything else falls back to
+## its hero-class temperament (the same mapping that used to pick the
+## SPD sprite).
+
+const BASE_MAX_HP := 20.0
+const BASE_ATTACK := 2
+
+## Exact profession overrides (lowercase): {hp, attack}.
+const PROFESSION_STATS := {
+	"miner": {"hp": 8, "attack": 1},
+	"mason": {"hp": 6, "attack": 0},
+	"armourer": {"hp": 10, "attack": 0},
+	"weaponsmith": {"hp": 0, "attack": 3},
+	"smith": {"hp": 4, "attack": 2},
+	"metalsmith": {"hp": 4, "attack": 2},
+	"brewmaster": {"hp": 6, "attack": 0},
+	"brewer": {"hp": 6, "attack": 0},
+	"distiller": {"hp": 6, "attack": 0},
+	"ranger": {"hp": 2, "attack": 2},
+	"hunter": {"hp": 2, "attack": 2},
+	"farmer": {"hp": 4, "attack": 0},
+	"herder": {"hp": 4, "attack": 0},
+	"shepard": {"hp": 4, "attack": 0},
+	"scholar": {"hp": -2, "attack": 3},
+	"alchemist": {"hp": -2, "attack": 3},
+	"banker": {"hp": -2, "attack": -1}
+}
+
+## Class fallbacks for the long tail of professions.
+const CLASS_STATS := {
+	"warrior": {"hp": 4, "attack": 1},
+	"mage": {"hp": -2, "attack": 2},
+	"rogue": {"hp": 0, "attack": 1},
+	"huntress": {"hp": 2, "attack": 1}
+}
+
+static func _modifiers(character: Dictionary) -> Dictionary:
+	var profession := String(character.get("profession", "")).strip_edges().to_lower()
+	if PROFESSION_STATS.has(profession):
+		return PROFESSION_STATS[profession] as Dictionary
+	var hero_class := DwarfHoldActorVisuals.hero_class_for_profession(profession)
+	return CLASS_STATS.get(hero_class, {"hp": 0, "attack": 0}) as Dictionary
+
+static func max_hp(character: Dictionary) -> float:
+	return maxf(8.0, BASE_MAX_HP + float(int(_modifiers(character).get("hp", 0))))
+
+static func attack_damage(character: Dictionary) -> int:
+	return maxi(1, BASE_ATTACK + int(_modifiers(character).get("attack", 0)))
+
+static func for_session(context: Node) -> Dictionary:
+	var character: Dictionary = {}
+	var session := context.get_node_or_null("/root/GameSession")
+	if session != null and session.has_method("get_player_character"):
+		character = session.call("get_player_character")
+	return {"max_hp": max_hp(character), "attack": attack_damage(character)}
+
+static func stat_summary(character: Dictionary) -> String:
+	return "❤ %d   ⚔ %d" % [int(max_hp(character)), attack_damage(character)]
+
+## --- Hunger ---------------------------------------------------------------
+## Satiety runs 0..100 and drains with the world clock; food restores it
+## in proportion to its heal value. Below the hungry line wounds stop
+## mending; at zero the dwarf starves.
+
+const SATIETY_MAX := 100.0
+const SATIETY_DRAIN_PER_GAME_HOUR := 4.0
+const SATIETY_HUNGRY_THRESHOLD := 25.0
+const STARVATION_DAMAGE_PER_GAME_HOUR := 2.0
+const SATIETY_PER_HEAL_POINT := 4.0
+
+static func load_satiety(context: Node) -> float:
+	var session := context.get_node_or_null("/root/GameSession")
+	if session == null or not session.has_method("get_world_settings"):
+		return SATIETY_MAX
+	var settings: Dictionary = session.call("get_world_settings")
+	return clampf(float(settings.get("player_satiety", SATIETY_MAX)), 0.0, SATIETY_MAX)
+
+static func save_satiety(context: Node, satiety: float) -> void:
+	var session := context.get_node_or_null("/root/GameSession")
+	if session == null or not session.has_method("get_world_settings") or not session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = session.call("get_world_settings")
+	settings["player_satiety"] = clampf(satiety, 0.0, SATIETY_MAX)
+	session.call("set_world_settings", settings)
+
+static func hunger_label(satiety: float) -> String:
+	if satiety <= 0.0:
+		return "🍖 Starving!"
+	if satiety <= SATIETY_HUNGRY_THRESHOLD:
+		return "🍖 Hungry (%d%%)" % int(satiety)
+	return "🍖 Sated (%d%%)" % int(satiety)

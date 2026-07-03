@@ -147,6 +147,7 @@ var _passable_atlas_set: Dictionary = {}
 var _actor_passable_cache: Dictionary = {}
 var _last_clock_stamp := -1
 var _applied_day_night_tint := Color(-1.0, -1.0, -1.0, -1.0)
+var _player_satiety := PlayerStatsService.SATIETY_MAX
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
 const PLAYER_MOVE_REPEAT_INTERVAL := 0.10
@@ -491,10 +492,13 @@ func _process(delta: float) -> void:
 func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
 		return
-	_game_hour += delta * 24.0 / (minutes_per_game_day * 60.0)
+	var delta_hours := delta * 24.0 / (minutes_per_game_day * 60.0)
+	_game_hour += delta_hours
 	while _game_hour >= 24.0:
 		_game_hour -= 24.0
 		_game_day += 1
+	# Strolling the market works up an appetite too.
+	_player_satiety = clampf(_player_satiety - delta_hours * PlayerStatsService.SATIETY_DRAIN_PER_GAME_HOUR, 0.0, PlayerStatsService.SATIETY_MAX)
 	_update_day_night_tint()
 	_update_clock_label()
 
@@ -593,6 +597,7 @@ func _load_persistent_clock() -> void:
 		var clock := clock_variant as Dictionary
 		_game_hour = clampf(float(clock.get("hour", _game_hour)), 0.0, 23.99)
 		_game_day = maxi(1, int(clock.get("day", _game_day)))
+	_player_satiety = PlayerStatsService.load_satiety(self)
 
 func _exit_tree() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -600,6 +605,7 @@ func _exit_tree() -> void:
 		return
 	var settings: Dictionary = game_session.call("get_world_settings")
 	settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
+	settings["player_satiety"] = _player_satiety
 	game_session.call("set_world_settings", settings)
 
 func _update_player_character_label() -> void:

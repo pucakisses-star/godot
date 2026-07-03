@@ -166,8 +166,12 @@ var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
 const PLAYER_MOVE_REPEAT_INTERVAL := 0.10
 const PLAYER_MOVE_SPEED := 260.0
-const PLAYER_MAX_HP := 20.0
-const PLAYER_ATTACK_DAMAGE := 2
+## Base values live in PlayerStatsService; the profession chosen at
+## character creation shifts them per player.
+var _player_max_hp := PlayerStatsService.BASE_MAX_HP
+var _player_attack_damage := PlayerStatsService.BASE_ATTACK
+var _player_satiety := PlayerStatsService.SATIETY_MAX
+var _hunger_label: Label
 const PLAYER_ATTACK_COOLDOWN := 0.45
 const CREATURE_CAP := 24
 const CREATURE_DESPAWN_DISTANCE := 90
@@ -916,10 +920,12 @@ func _update_wild_darkness(delta: float) -> void:
 func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
 		return
-	_game_hour += delta * 24.0 / (minutes_per_game_day * 60.0)
+	var delta_hours := delta * 24.0 / (minutes_per_game_day * 60.0)
+	_game_hour += delta_hours
 	while _game_hour >= 24.0:
 		_game_hour -= 24.0
 		_game_day += 1
+	_advance_hunger(delta_hours)
 	_update_clock_label()
 
 func _update_clock_label() -> void:
@@ -2743,8 +2749,8 @@ func _handle_cook_action() -> void:
 ## Quick-eat: pick the smallest-heal edible in the pack so nothing big is
 ## wasted on a scratch.
 func _handle_quick_eat_action() -> void:
-	if _player_hp >= PLAYER_MAX_HP:
-		_set_save_status("You're at full health", Color(0.7, 0.9, 0.7, 1.0))
+	if _player_hp >= _player_max_hp and _player_satiety > PlayerStatsService.SATIETY_MAX * 0.9:
+		_set_save_status("You're at full health and well fed", Color(0.7, 0.9, 0.7, 1.0))
 		return
 	var choice := ""
 	var choice_heal := 2147483647
@@ -2768,13 +2774,16 @@ func _handle_quick_eat_action() -> void:
 func _eat_item(item_name: String) -> void:
 	if not ItemDefsService.is_edible(item_name) or int(_player_inventory.get(item_name, 0)) < 1:
 		return
-	if _player_hp >= PLAYER_MAX_HP:
-		_set_save_status("You're at full health", Color(0.7, 0.9, 0.7, 1.0))
+	if _player_hp >= _player_max_hp and _player_satiety > PlayerStatsService.SATIETY_MAX * 0.9:
+		_set_save_status("You're at full health and well fed", Color(0.7, 0.9, 0.7, 1.0))
 		return
 	var heal := ItemDefsService.heal_amount(item_name)
 	_add_to_inventory(item_name, -1)
-	_player_hp = minf(_player_hp + float(heal), PLAYER_MAX_HP)
+	_player_hp = minf(_player_hp + float(heal), _player_max_hp)
+	_player_satiety = clampf(_player_satiety + float(heal) * PlayerStatsService.SATIETY_PER_HEAL_POINT, 0.0, PlayerStatsService.SATIETY_MAX)
+	PlayerStatsService.save_satiety(self, _player_satiety)
 	_update_hp_label()
+	_update_hunger_label()
 	if _player_sprite != null:
 		_spawn_floating_text("+%d" % heal, _player_sprite.position, Color(0.5, 0.95, 0.5, 1.0))
 	_set_save_status("Ate %s (+%d)" % [item_name, heal], Color(0.7, 0.95, 0.6, 1.0))
@@ -2948,10 +2957,10 @@ func _attack_creature(creature_index: int) -> void:
 		return
 	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
 	var sprite := state.get("sprite") as Sprite2D
-	state["hp"] = int(state.get("hp", 1)) - PLAYER_ATTACK_DAMAGE
+	state["hp"] = int(state.get("hp", 1)) - _player_attack_damage
 	if sprite != null:
 		_flash_sprite(sprite, Color(1.0, 0.45, 0.45, 1.0))
-		_spawn_floating_text("-%d" % PLAYER_ATTACK_DAMAGE, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
+		_spawn_floating_text("-%d" % _player_attack_damage, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
 	if int(state.get("hp", 0)) > 0:
 		_set_creature_anim(state, "hurt")
 		return
@@ -2983,7 +2992,7 @@ func _damage_player(amount: int, source_name: String) -> void:
 		_handle_player_death(source_name)
 
 func _handle_player_death(source_name: String) -> void:
-	_player_hp = PLAYER_MAX_HP
+	_player_hp = _player_max_hp
 	var lost_coins := _player_coins / 2
 	if lost_coins > 0:
 		_adjust_coins(-lost_coins)
@@ -2996,13 +3005,31 @@ func _handle_player_death(source_name: String) -> void:
 	_relocate_player_to_city_heart(_latest_grid)
 	_set_save_status("Slain by %s — you wake back in the hold" % source_name, Color(0.95, 0.5, 0.5, 1.0))
 
-## The hold is home: standing on city ground slowly mends your wounds.
+## The hold is home: standing on city ground slowly mends your wounds -
+## as long as there's food in your belly.
 func _update_player_regen(delta: float) -> void:
-	if _player_sprite == null or _player_hp >= PLAYER_MAX_HP:
+	if _player_sprite == null or _player_hp >= _player_max_hp:
+		return
+	if _player_satiety <= PlayerStatsService.SATIETY_HUNGRY_THRESHOLD:
 		return
 	if _latest_district_cell_map.is_empty() or _latest_district_cell_map.has(_player_cell):
-		_player_hp = minf(_player_hp + CITY_REGEN_PER_SECOND * delta, PLAYER_MAX_HP)
+		_player_hp = minf(_player_hp + CITY_REGEN_PER_SECOND * delta, _player_max_hp)
 		_update_hp_label()
+
+func _advance_hunger(delta_hours: float) -> void:
+	if delta_hours <= 0.0:
+		return
+	var was_starving := _player_satiety <= 0.0
+	_player_satiety = clampf(_player_satiety - delta_hours * PlayerStatsService.SATIETY_DRAIN_PER_GAME_HOUR, 0.0, PlayerStatsService.SATIETY_MAX)
+	if _player_satiety <= 0.0:
+		if not was_starving:
+			_set_save_status("Your stomach gnaws at you — find food!", Color(0.95, 0.6, 0.4, 1.0))
+		_player_hp = maxf(_player_hp - delta_hours * PlayerStatsService.STARVATION_DAMAGE_PER_GAME_HOUR, 0.0)
+		_update_hp_label()
+		if _player_hp <= 0.0:
+			_handle_player_death("starvation")
+			_player_satiety = PlayerStatsService.SATIETY_MAX * 0.3
+	_update_hunger_label()
 
 func _setup_hp_label() -> void:
 	var controls := get_node_or_null("Margin/Layout/Controls")
@@ -3011,16 +3038,32 @@ func _setup_hp_label() -> void:
 	_hp_label = Label.new()
 	_hp_label.add_theme_font_size_override("font_size", 13)
 	controls.add_child(_hp_label)
+	_hunger_label = Label.new()
+	_hunger_label.add_theme_font_size_override("font_size", 13)
+	controls.add_child(_hunger_label)
 	var clock := controls.get_node_or_null("ClockLabel")
 	if clock != null:
 		controls.move_child(_hp_label, clock.get_index() + 1)
+		controls.move_child(_hunger_label, clock.get_index() + 2)
 	_update_hp_label()
+	_update_hunger_label()
+
+func _update_hunger_label() -> void:
+	if _hunger_label == null:
+		return
+	_hunger_label.text = PlayerStatsService.hunger_label(_player_satiety)
+	if _player_satiety <= 0.0:
+		_hunger_label.modulate = Color(1.0, 0.5, 0.4, 1.0)
+	elif _player_satiety <= PlayerStatsService.SATIETY_HUNGRY_THRESHOLD:
+		_hunger_label.modulate = Color(1.0, 0.8, 0.5, 1.0)
+	else:
+		_hunger_label.modulate = Color.WHITE
 
 func _update_hp_label() -> void:
 	if _hp_label == null:
 		return
-	_hp_label.text = "❤ %d / %d" % [int(ceil(_player_hp)), int(PLAYER_MAX_HP)]
-	if _player_hp <= PLAYER_MAX_HP * 0.3:
+	_hp_label.text = "❤ %d / %d" % [int(ceil(_player_hp)), int(_player_max_hp)]
+	if _player_hp <= _player_max_hp * 0.3:
 		_hp_label.modulate = Color(1.0, 0.5, 0.5, 1.0)
 	else:
 		_hp_label.modulate = Color(0.95, 0.87, 0.87, 1.0)
@@ -3178,8 +3221,12 @@ func _load_persistent_player_state() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null or not game_session.has_method("get_world_settings"):
 		return
+	var stats := PlayerStatsService.for_session(self)
+	_player_max_hp = float(stats.get("max_hp", _player_max_hp))
+	_player_attack_damage = int(stats.get("attack", _player_attack_damage))
+	_player_satiety = PlayerStatsService.load_satiety(self)
 	var settings: Dictionary = game_session.call("get_world_settings")
-	_player_hp = clampf(float(settings.get("player_hp", PLAYER_MAX_HP)), 1.0, PLAYER_MAX_HP)
+	_player_hp = clampf(float(settings.get("player_hp", _player_max_hp)), 1.0, _player_max_hp)
 	var clock_variant: Variant = settings.get("game_clock")
 	if clock_variant is Dictionary:
 		var clock := clock_variant as Dictionary
@@ -3192,6 +3239,7 @@ func _save_persistent_player_state() -> void:
 		return
 	var settings: Dictionary = game_session.call("get_world_settings")
 	settings["player_hp"] = _player_hp
+	settings["player_satiety"] = _player_satiety
 	settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
 	game_session.call("set_world_settings", settings)
 
