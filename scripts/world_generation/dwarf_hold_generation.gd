@@ -14,6 +14,7 @@ const CELL_PLAZA := 4
 @export var tilesheet_path := "res://resources/images/dwarfhold/map.png"
 @export var structure_fallback_max_extra_radius := 240
 @export var tavern_vehicle_sprite_path := "res://resources/images/npc/dwarf_characters.png"
+@export var creature_sprite_path := "res://resources/images/npc/creature_characters.png"
 @export var shattered_player_sprite_path := "res://resources/images/shattered_ui/warrior.png"
 @export var tavern_npc_count := 5
 @export var tavern_npc_speed_range := Vector2(38.0, 62.0)
@@ -96,6 +97,12 @@ var _underdeep_sites: Array = []
 var _sites_by_chunk: Dictionary = {}
 var _player_inventory: Dictionary = {}
 var _inventory_label: Label
+var _creature_states: Array[Dictionary] = []
+var _creature_texture: Texture2D
+var _creature_repop_timer := 0.0
+var _player_hp := 20.0
+var _player_attack_timer := 0.0
+var _hp_label: Label
 var _torch_sprites: Array = []
 var _player_glow: Sprite2D
 var _glow_texture: Texture2D
@@ -152,6 +159,12 @@ var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
 const PLAYER_MOVE_REPEAT_INTERVAL := 0.10
 const PLAYER_MOVE_SPEED := 260.0
+const PLAYER_MAX_HP := 20.0
+const PLAYER_ATTACK_DAMAGE := 2
+const PLAYER_ATTACK_COOLDOWN := 0.45
+const CREATURE_CAP := 24
+const CREATURE_DESPAWN_DISTANCE := 90
+const CITY_REGEN_PER_SECOND := 2.0
 const SPD_NEIGHBOR_OFFSETS := [
 	Vector2i(-1, -1),
 	Vector2i(0, -1),
@@ -602,6 +615,7 @@ func _ready() -> void:
 	if _tavern_character_texture == null:
 		_tavern_character_texture = _create_placeholder_tavern_character_texture()
 	_shattered_player_texture = load(shattered_player_sprite_path) as Texture2D
+	_creature_texture = load(creature_sprite_path) as Texture2D
 	_placeholder_actor_texture = _create_placeholder_actor_texture()
 	generate_button.pressed.connect(_on_generate_pressed)
 	depth_down_button.pressed.connect(_on_depth_down_pressed)
@@ -627,6 +641,7 @@ func _ready() -> void:
 	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
 	_update_clock_label()
 	_setup_inventory_label()
+	_setup_hp_label()
 	_glow_texture = _create_glow_texture()
 	_player_glow = _create_glow_sprite(7.0)
 	lighting_layer.add_child(_player_glow)
@@ -673,6 +688,10 @@ func _process(delta: float) -> void:
 	_advance_game_clock(delta)
 	_stream_world_chunks()
 	_update_wild_darkness(delta)
+	_player_attack_timer = maxf(_player_attack_timer - delta, 0.0)
+	_update_creature_spawning(delta)
+	_update_creatures(delta)
+	_update_player_regen(delta)
 
 ## The city and deep levels stay lit; the wild underground is dark, held
 ## back by the player's lantern glow and any placed torches.
@@ -2344,6 +2363,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_relocate_player_to_city_heart(grid)
 	_assign_npc_daily_lives(grid)
 	_clear_torch_sprites()
+	_clear_creatures()
 	var shown_level := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	for torch_cell_variant: Variant in (shown_level.get("torches", []) as Array):
 		_spawn_torch_at(torch_cell_variant as Vector2i)
@@ -2459,6 +2479,10 @@ func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 			_render_world_rect(rect.grow(14 if stamped_site else 1))
 			if stamped_site or not discovery.is_empty():
 				_rebuild_district_labels()
+			var spawn_rng := RandomNumberGenerator.new()
+			spawn_rng.seed = _world_seed_hash ^ hash(key)
+			for spawn: Dictionary in UndergroundCreatureService.roll_chunk_spawns(_latest_grid, _latest_district_cell_map, rect, spawn_rng):
+				_spawn_creature_at(spawn.get("cell", Vector2i.ZERO) as Vector2i, int(spawn.get("def_index", 0)))
 
 ## Renders a rect of the open world: carved floor, rock shells around it,
 ## and any streamed floor decor. Place-only, so city cells keep their
@@ -2555,6 +2579,296 @@ func _create_torch_texture() -> Texture2D:
 			image.set_pixel(x, y, flame)
 	image.resize(16, 32, Image.INTERPOLATE_NEAREST)
 	return ImageTexture.create_from_image(image)
+
+## --- Creatures & combat -------------------------------------------------
+## The wild dark bites back: chunks roll ambient spawns, the deep repopulates
+## near the player, and anything that closes to melee range chews on the
+## player's hearts. The city itself stays safe ground - creatures refuse to
+## step onto district cells and the hold slowly heals you.
+
+func _spawn_creature_at(cell: Vector2i, def_index: int) -> void:
+	if _creature_states.size() >= CREATURE_CAP:
+		return
+	if def_index < 0 or def_index >= UndergroundCreatureService.CREATURE_DEFS.size():
+		return
+	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[def_index]
+	var sprite: Sprite2D = UndergroundCreatureService.create_creature_sprite(_creature_texture, int(def.get("slot", 0)), tile_size)
+	sprite.position = _cell_center_position(cell)
+	sprite.z_index = 12
+	actor_layer.add_child(sprite)
+	_creature_states.append({
+		"def_index": def_index,
+		"hp": int(def.get("max_hp", 4)),
+		"cell": cell,
+		"sprite": sprite,
+		"moving": false,
+		"dying": false,
+		"anim": "idle",
+		"wander_timer": _rng.randf_range(0.5, 2.0),
+		"attack_timer": 0.0,
+		"anim_time": _rng.randf_range(0.0, 1.0),
+		"facing_dir": Vector2i(0, 1)
+	})
+
+func _clear_creatures() -> void:
+	for state: Dictionary in _creature_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite != null:
+			sprite.queue_free()
+	_creature_states = []
+
+func _creature_index_at_cell(cell: Vector2i) -> int:
+	for index in range(_creature_states.size()):
+		var state := _creature_states[index]
+		if bool(state.get("dying", false)):
+			continue
+		if (state.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i) == cell:
+			return index
+		if bool(state.get("moving", false)) and (state.get("move_cell", Vector2i(2147483647, 2147483647)) as Vector2i) == cell:
+			return index
+	return -1
+
+func _creature_can_step_to(cell: Vector2i) -> bool:
+	if not _is_walkable_cell(cell):
+		return false
+	if _latest_district_cell_map.has(cell):
+		return false
+	if _creature_index_at_cell(cell) >= 0:
+		return false
+	return cell != _player_cell
+
+## Keeps the dark around the player populated after chunk-roll creatures
+## are slain or left behind.
+func _update_creature_spawning(delta: float) -> void:
+	if _world_noise.is_empty() or _player_sprite == null or not _player_control_enabled:
+		return
+	if _latest_district_cell_map.has(_player_cell):
+		return
+	_creature_repop_timer -= delta
+	if _creature_repop_timer > 0.0:
+		return
+	_creature_repop_timer = _rng.randf_range(3.0, 6.0)
+	if _creature_states.size() >= CREATURE_CAP:
+		return
+	var angle := _rng.randf_range(0.0, TAU)
+	var distance := _rng.randf_range(12.0, 26.0)
+	var cell := _player_cell + Vector2i(int(round(cos(angle) * distance)), int(round(sin(angle) * distance)))
+	if not _creature_can_step_to(cell):
+		return
+	_spawn_creature_at(cell, UndergroundCreatureService.pick_definition_index(Vector2(cell).length(), _rng))
+
+func _update_creatures(delta: float) -> void:
+	if _creature_states.is_empty():
+		return
+	var removals: Array[int] = []
+	for index in range(_creature_states.size()):
+		var state := _creature_states[index]
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			removals.append(index)
+			continue
+		var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
+		state["anim_time"] = float(state.get("anim_time", 0.0)) + delta
+		# Corpses play their death animation, linger a beat, then fade.
+		if bool(state.get("dying", false)):
+			if float(state.get("anim_time", 0.0)) >= UndergroundCreatureService.anim_duration("death") + 0.6:
+				sprite.queue_free()
+				removals.append(index)
+			else:
+				_animate_creature(state, sprite, def)
+			continue
+		var cell := state.get("cell", Vector2i.ZERO) as Vector2i
+		var player_distance := maxi(absi(cell.x - _player_cell.x), absi(cell.y - _player_cell.y))
+		if player_distance > CREATURE_DESPAWN_DISTANCE:
+			sprite.queue_free()
+			removals.append(index)
+			continue
+		state["attack_timer"] = maxf(float(state.get("attack_timer", 0.0)) - delta, 0.0)
+		# One-shot swings and flinches play out, then locomotion retakes the sprite.
+		var current_anim := String(state.get("anim", "idle"))
+		if (current_anim == "attack" or current_anim == "hurt") and float(state.get("anim_time", 0.0)) >= UndergroundCreatureService.anim_duration(current_anim):
+			_set_creature_anim(state, "idle")
+		if bool(state.get("moving", false)):
+			var target := state.get("move_target", sprite.position) as Vector2
+			sprite.position = sprite.position.move_toward(target, float(def.get("speed", 60.0)) * delta)
+			if sprite.position.distance_to(target) <= 0.5:
+				sprite.position = target
+				state["cell"] = state.get("move_cell", cell) as Vector2i
+				state["moving"] = false
+		elif player_distance <= 1 and _player_sprite != null and _player_control_enabled:
+			state["facing_dir"] = _direction_between_cells(cell, _player_cell)
+			if float(state.get("attack_timer", 0.0)) <= 0.0:
+				state["attack_timer"] = float(def.get("attack_cooldown", 1.3))
+				_set_creature_anim(state, "attack")
+				_damage_player(int(def.get("damage", 1)), String(def.get("name", "creature")))
+		else:
+			var step := Vector2i.ZERO
+			if player_distance <= int(def.get("aggro_range", 6)) and not _latest_district_cell_map.has(_player_cell):
+				step = _creature_step_toward(cell, _player_cell)
+			else:
+				state["wander_timer"] = float(state.get("wander_timer", 0.0)) - delta
+				if float(state.get("wander_timer", 0.0)) <= 0.0:
+					state["wander_timer"] = _rng.randf_range(1.2, 3.2)
+					var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
+					step = directions[_rng.randi_range(0, 3)]
+			if step != Vector2i.ZERO:
+				var next_cell := cell + step
+				if _creature_can_step_to(next_cell):
+					state["moving"] = true
+					state["move_cell"] = next_cell
+					state["move_target"] = _cell_center_position(next_cell)
+					state["facing_dir"] = step
+		# Locomotion owns the looped animations unless a one-shot is playing.
+		current_anim = String(state.get("anim", "idle"))
+		if current_anim != "attack" and current_anim != "hurt":
+			_set_creature_anim(state, "walk" if bool(state.get("moving", false)) else "idle")
+		_animate_creature(state, sprite, def)
+	for removal_index in range(removals.size() - 1, -1, -1):
+		_creature_states.remove_at(removals[removal_index])
+
+func _creature_step_toward(from_cell: Vector2i, target_cell: Vector2i) -> Vector2i:
+	var best := Vector2i.ZERO
+	var best_distance := Vector2(from_cell).distance_squared_to(Vector2(target_cell))
+	for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var next := from_cell + direction
+		if not _creature_can_step_to(next):
+			continue
+		var distance := Vector2(next).distance_squared_to(Vector2(target_cell))
+		if distance < best_distance:
+			best_distance = distance
+			best = direction
+	return best
+
+func _direction_between_cells(from_cell: Vector2i, to_cell: Vector2i) -> Vector2i:
+	var delta := to_cell - from_cell
+	if absi(delta.x) >= absi(delta.y):
+		return Vector2i.RIGHT if delta.x >= 0 else Vector2i.LEFT
+	return Vector2i.DOWN if delta.y >= 0 else Vector2i.UP
+
+func _set_creature_anim(state: Dictionary, anim_name: String) -> void:
+	if String(state.get("anim", "")) == anim_name:
+		return
+	state["anim"] = anim_name
+	state["anim_time"] = 0.0
+
+func _animate_creature(state: Dictionary, sprite: Sprite2D, def: Dictionary) -> void:
+	var facing_dir := state.get("facing_dir", Vector2i(0, 1)) as Vector2i
+	var facing_row := 0
+	if facing_dir == Vector2i.RIGHT:
+		facing_row = 1
+	elif facing_dir == Vector2i.LEFT:
+		facing_row = 2
+	elif facing_dir == Vector2i.UP:
+		facing_row = 3
+	UndergroundCreatureService.update_creature_frame(
+		sprite, int(def.get("slot", 0)),
+		String(state.get("anim", "idle")),
+		float(state.get("anim_time", 0.0)),
+		facing_row
+	)
+
+func _attack_creature(creature_index: int) -> void:
+	if creature_index < 0 or creature_index >= _creature_states.size():
+		return
+	if _player_attack_timer > 0.0:
+		return
+	_player_attack_timer = PLAYER_ATTACK_COOLDOWN
+	var state := _creature_states[creature_index]
+	if bool(state.get("dying", false)):
+		return
+	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
+	var sprite := state.get("sprite") as Sprite2D
+	state["hp"] = int(state.get("hp", 1)) - PLAYER_ATTACK_DAMAGE
+	if sprite != null:
+		_flash_sprite(sprite, Color(1.0, 0.45, 0.45, 1.0))
+		_spawn_floating_text("-%d" % PLAYER_ATTACK_DAMAGE, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
+	if int(state.get("hp", 0)) > 0:
+		_set_creature_anim(state, "hurt")
+		return
+	var loot: Dictionary = UndergroundCreatureService.roll_loot(def, _rng)
+	var loot_parts := PackedStringArray()
+	var loot_items := loot.keys()
+	loot_items.sort()
+	for item_variant: Variant in loot_items:
+		_add_to_inventory(String(item_variant), int(loot[item_variant]))
+		loot_parts.append("%s ×%d" % [String(item_variant), int(loot[item_variant])])
+	# The corpse plays its death animation out before fading (see
+	# _update_creatures); dying creatures no longer block or take hits.
+	state["dying"] = true
+	state["moving"] = false
+	_set_creature_anim(state, "death")
+	var message := "Slew %s" % String(def.get("name", "creature"))
+	if not loot_parts.is_empty():
+		message += " — " + ", ".join(loot_parts)
+	_set_save_status(message, Color(0.85, 0.95, 0.7, 1.0))
+
+func _damage_player(amount: int, source_name: String) -> void:
+	if _player_sprite == null:
+		return
+	_player_hp = maxf(_player_hp - float(amount), 0.0)
+	_update_hp_label()
+	_flash_sprite(_player_sprite, Color(1.0, 0.35, 0.35, 1.0))
+	_spawn_floating_text("-%d" % amount, _player_sprite.position, Color(1.0, 0.4, 0.4, 1.0))
+	if _player_hp <= 0.0:
+		_handle_player_death(source_name)
+
+func _handle_player_death(source_name: String) -> void:
+	_player_hp = PLAYER_MAX_HP
+	_update_hp_label()
+	_player_move_path.clear()
+	_player_is_moving = false
+	_relocate_player_to_city_heart(_latest_grid)
+	_set_save_status("Slain by %s — you wake back in the hold" % source_name, Color(0.95, 0.5, 0.5, 1.0))
+
+## The hold is home: standing on city ground slowly mends your wounds.
+func _update_player_regen(delta: float) -> void:
+	if _player_sprite == null or _player_hp >= PLAYER_MAX_HP:
+		return
+	if _latest_district_cell_map.is_empty() or _latest_district_cell_map.has(_player_cell):
+		_player_hp = minf(_player_hp + CITY_REGEN_PER_SECOND * delta, PLAYER_MAX_HP)
+		_update_hp_label()
+
+func _setup_hp_label() -> void:
+	var controls := get_node_or_null("Margin/Layout/Controls")
+	if controls == null:
+		return
+	_hp_label = Label.new()
+	_hp_label.add_theme_font_size_override("font_size", 13)
+	controls.add_child(_hp_label)
+	var clock := controls.get_node_or_null("ClockLabel")
+	if clock != null:
+		controls.move_child(_hp_label, clock.get_index() + 1)
+	_update_hp_label()
+
+func _update_hp_label() -> void:
+	if _hp_label == null:
+		return
+	_hp_label.text = "❤ %d / %d" % [int(ceil(_player_hp)), int(PLAYER_MAX_HP)]
+	if _player_hp <= PLAYER_MAX_HP * 0.3:
+		_hp_label.modulate = Color(1.0, 0.5, 0.5, 1.0)
+	else:
+		_hp_label.modulate = Color(0.95, 0.87, 0.87, 1.0)
+
+func _flash_sprite(sprite: Sprite2D, flash_color: Color) -> void:
+	sprite.modulate = flash_color
+	var tween := create_tween()
+	tween.tween_property(sprite, "modulate", Color.WHITE, 0.25)
+
+func _spawn_floating_text(text: String, world_position: Vector2, color: Color) -> void:
+	var label := Label.new()
+	label.text = text
+	label.add_theme_font_size_override("font_size", 18)
+	label.add_theme_color_override("font_color", color)
+	label.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.1, 1.0))
+	label.add_theme_constant_override("outline_size", 4)
+	label.position = world_position + Vector2(-12.0, -30.0)
+	label.z_index = 30
+	city_layer.add_child(label)
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(label, "position:y", label.position.y - 22.0, 0.7)
+	tween.tween_property(label, "modulate:a", 0.0, 0.55).set_delay(0.15)
+	tween.chain().tween_callback(label.queue_free)
 
 func _add_to_inventory(item_name: String, amount: int) -> void:
 	_player_inventory[item_name] = int(_player_inventory.get(item_name, 0)) + amount
@@ -2661,6 +2975,15 @@ func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 		return
 	if target_cell == _player_cell:
 		_player_move_path.clear()
+		return
+	var creature_index := _creature_index_at_cell(target_cell)
+	if creature_index >= 0:
+		if _is_player_adjacent_to_cell(target_cell):
+			_attack_creature(creature_index)
+			return
+		var approach_cell := _nearest_walkable_neighbor(target_cell)
+		if approach_cell.x != 2147483647 and approach_cell != target_cell:
+			_request_player_move_to_cell(approach_cell)
 		return
 	if _is_diggable_cell(target_cell) and _is_player_adjacent_to_cell(target_cell):
 		_dig_cell(target_cell)
@@ -2769,6 +3092,8 @@ func _can_step_to_cell(from_cell: Vector2i, to_cell: Vector2i, goal_cell: Vector
 		return false
 	if to_cell != goal_cell and _is_cell_occupied_by_npc(to_cell):
 		return false
+	if _creature_index_at_cell(to_cell) >= 0:
+		return false
 	var delta := to_cell - from_cell
 	if absi(delta.x) == 1 and absi(delta.y) == 1:
 		var orth_a := from_cell + Vector2i(delta.x, 0)
@@ -2790,6 +3115,8 @@ func _try_move_player(direction: Vector2i) -> bool:
 	if not _is_walkable_cell(target_cell):
 		return false
 	if _is_cell_occupied_by_npc(target_cell):
+		return false
+	if _creature_index_at_cell(target_cell) >= 0:
 		return false
 	_player_move_target_cell = target_cell
 	_player_move_target_position = _cell_center_position(target_cell)
