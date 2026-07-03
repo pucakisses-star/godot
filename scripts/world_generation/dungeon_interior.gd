@@ -173,6 +173,7 @@ var _saw_traps: Array[Dictionary] = []
 var _spike_plates: Dictionary = {}
 var _spike_pits: Array[Dictionary] = []
 var _pedestals: Dictionary = {}
+var _restored_loot_state: Dictionary = {}
 var _chests: Dictionary = {}
 var _creatures: Array[Dictionary] = []
 var _player_attack_timer := 0.0
@@ -236,6 +237,7 @@ func _load_player_inventory() -> void:
 	var inventory_variant: Variant = settings.get("player_inventory", {})
 	_player_inventory = (inventory_variant as Dictionary).duplicate() if inventory_variant is Dictionary else {}
 	_player_coins = int(settings.get("player_coins", 0))
+	_player_hp = clampf(float(settings.get("player_hp", PLAYER_MAX_HP)), 1.0, PLAYER_MAX_HP)
 
 func _save_player_inventory() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -244,7 +246,53 @@ func _save_player_inventory() -> void:
 	var settings: Dictionary = game_session.call("get_world_settings")
 	settings["player_inventory"] = _player_inventory.duplicate()
 	settings["player_coins"] = _player_coins
+	settings["player_hp"] = _player_hp
 	game_session.call("set_world_settings", settings)
+
+func _exit_tree() -> void:
+	_save_player_inventory()
+
+## Chests opened and pedestals looted are remembered per floor, so a
+## dungeon cannot be farmed by walking out and back in.
+func _dungeon_state_key() -> String:
+	return "%s::depth_%d" % [_base_seed_text, _depth]
+
+func _looted_state(create: bool) -> Dictionary:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings"):
+		return {}
+	var settings: Dictionary = game_session.call("get_world_settings")
+	var all_state_variant: Variant = settings.get("dungeon_state", {})
+	var all_state: Dictionary = all_state_variant as Dictionary if all_state_variant is Dictionary else {}
+	var key := _dungeon_state_key()
+	var state_variant: Variant = all_state.get(key, {})
+	var state: Dictionary = state_variant as Dictionary if state_variant is Dictionary else {}
+	if create:
+		all_state[key] = state
+		settings["dungeon_state"] = all_state
+		game_session.call("set_world_settings", settings)
+	return state
+
+func _record_looted(kind: String, cell: Vector2i) -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	var all_state_variant: Variant = settings.get("dungeon_state", {})
+	var all_state: Dictionary = all_state_variant as Dictionary if all_state_variant is Dictionary else {}
+	var key := _dungeon_state_key()
+	var state: Dictionary = all_state.get(key, {}) as Dictionary
+	var cells: Array = state.get(kind, []) as Array
+	var cell_key := "%d,%d" % [cell.x, cell.y]
+	if not cells.has(cell_key):
+		cells.append(cell_key)
+	state[kind] = cells
+	all_state[key] = state
+	settings["dungeon_state"] = all_state
+	game_session.call("set_world_settings", settings)
+
+func _was_looted(state: Dictionary, kind: String, cell: Vector2i) -> bool:
+	return (state.get(kind, []) as Array).has("%d,%d" % [cell.x, cell.y])
 
 func _theme() -> Dictionary:
 	return DEPTH_THEMES[clampi(_depth - 1, 0, DEPTH_THEMES.size() - 1)]
@@ -589,6 +637,7 @@ func _place_spike_plates() -> void:
 ## --- Treasure ----------------------------------------------------------------
 
 func _place_treasure() -> void:
+	_restored_loot_state = _looted_state(false)
 	_pedestals.clear()
 	_chests.clear()
 	if _rooms.is_empty():
@@ -622,6 +671,10 @@ func _place_treasure() -> void:
 		var item := PEDESTAL_LOOT[_rng.randi_range(0, PEDESTAL_LOOT.size() - 1)]
 		var icon := _spawn_item_icon(item, _cell_center(cell) + Vector2(0, -10.0))
 		_pedestals[cell] = {"sprite": sprite, "icon": icon, "item": item, "looted": false}
+		if _was_looted(_restored_loot_state, "pedestals", cell):
+			_pedestals[cell]["looted"] = true
+			icon.queue_free()
+			_pedestals[cell]["icon"] = null
 		_blocked_cells[cell] = true
 	# Chests in one or two of the other far rooms.
 	var chest_count := _rng.randi_range(1, 2) + (_depth - 1)
@@ -647,6 +700,9 @@ func _place_treasure() -> void:
 		sprite.z_index = 7
 		trap_layer.add_child(sprite)
 		_chests[cell] = {"sprite": sprite, "opened": false, "anim_time": 0.0, "animating": false}
+		if _was_looted(_restored_loot_state, "chests", cell):
+			_chests[cell]["opened"] = true
+			sprite.region_rect = Rect2(96, (CHEST_STATE_COUNT - 1) * 48 + 16, 32, 32)
 		_blocked_cells[cell] = true
 	# A few supply piles for dressing.
 	for room: Rect2i in _rooms:
@@ -1244,6 +1300,12 @@ func _damage_player(amount: int, source_name: String) -> void:
 
 func _handle_player_death(source_name: String) -> void:
 	_player_hp = PLAYER_MAX_HP
+	var lost_coins := _player_coins / 2
+	if lost_coins > 0:
+		_player_coins -= lost_coins
+		_update_coins_label()
+		_spawn_floating_text("-%d coins" % lost_coins, _player_sprite.position, Color(0.95, 0.8, 0.4, 1.0))
+	_save_player_inventory()
 	_update_hp_label()
 	_player_move_path.clear()
 	_player_is_moving = false
@@ -1258,6 +1320,7 @@ func _loot_pedestal(cell: Vector2i) -> void:
 	if pedestal.is_empty() or bool(pedestal.get("looted", false)):
 		return
 	pedestal["looted"] = true
+	_record_looted("pedestals", cell)
 	var item := String(pedestal.get("item", ""))
 	_add_to_inventory(item, 1)
 	var icon := pedestal.get("icon") as Sprite2D
@@ -1273,6 +1336,7 @@ func _loot_chest(cell: Vector2i) -> void:
 	if chest.is_empty() or bool(chest.get("opened", false)):
 		return
 	chest["opened"] = true
+	_record_looted("chests", cell)
 	chest["animating"] = true
 	chest["anim_time"] = 0.0
 	var loot_parts: PackedStringArray = []
