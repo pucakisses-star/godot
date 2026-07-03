@@ -157,6 +157,12 @@ var _green_cells: Array[Vector2i] = []
 var _farm_animals: Array[Dictionary] = []
 var _farm_animal_textures: Dictionary = {}
 var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
+var _town_theme := ""
+var _farm_sprites: Array[Node2D] = []
+var _farm_pens: Array = []
+var _farm_blocked_cells: Dictionary = {}
+var _windmill_sails: Array[Dictionary] = []
+var _desert_decor_textures: Dictionary = {}
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
 const PLAYER_MOVE_REPEAT_INTERVAL := 0.10
@@ -212,6 +218,53 @@ const BACKPACK_SLOT_ROWS := 3
 const TOWN_SCENE_SEED_KEY := "town_scene_seed"
 const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
 const TOWN_SCENE_NAME_KEY := "town_scene_name"
+const TOWN_SCENE_THEME_KEY := "town_scene_theme"
+
+## Farmstead art from the web game's Farm tileset (16px art; town cells are
+## 32px, so a 128px sprite spans four cells).
+const FARM_HOUSES_TEXTURE := preload("res://resources/images/webgame_tiles/Farm/Tiled_files/Houses.png")
+const FARM_PLANTS_TEXTURE := preload("res://resources/images/webgame_tiles/Farm/Tiled_files/Plants.png")
+const FARM_SAILS_TEXTURE := preload("res://resources/images/webgame_tiles/Farm/Tiled_files/Sails_animation.png")
+const FARMSTEAD_SITE := Vector2i(10, 9)
+const FARM_BUILDING_CROPS := {
+	"farmhouse": Rect2(272, 0, 128, 152),
+	"barn": Rect2(128, 0, 80, 88),
+	"open_barn": Rect2(400, 16, 96, 80)
+}
+const WINDMILL_BODY_CROP := Rect2(80, 152, 64, 144)
+const SAIL_FRAME := Vector2(160, 144)
+const SAIL_FRAME_COUNT := 6
+const SAIL_FRAME_TIME := 0.16
+const FARM_CROP_RECTS: Array[Rect2] = [
+	Rect2(480, 0, 16, 32),
+	Rect2(368, 0, 16, 32),
+	Rect2(192, 48, 32, 32),
+	Rect2(32, 0, 32, 32)
+]
+
+## Desert dressing for desert-city interiors, from the Desert decor set.
+const DESERT_DECOR_DIR := "res://resources/images/webgame_tiles/Desert/Objects_separately/"
+const DESERT_DECOR_COMMON: Array[String] = [
+	"Cactus1_sand_shadow2.png", "Cactus2_sand_shadow1.png", "Cactus2_sand_shadow2.png",
+	"Bones_sand_shadow2.png", "Bones_sand_shadow3.png",
+	"Flower_sand_shadow1.png", "Flower_sand_shadow2.png",
+	"Roots_sand_shadow5.png", "Roots_sand_shadow6.png", "Roots_sand_shadow7.png"
+]
+const DESERT_DECOR_RARE: Array[String] = [
+	"Statues_sand_shadow1.png", "Statues_sand_shadow2.png",
+	"Statues_sand_shadow3.png", "Statues_sand_shadow4.png",
+	"The_beast_sand_shadow1.png", "House_stump_sand_shadow.png",
+	"Scarabaeus_house_sand_shadow.png", "trilobite_house_sand_shadow.png"
+]
+const DESERT_BASE_SWAP := {
+	"grass": "sand",
+	"grass_dark": "sand_alt",
+	"grass_tuft": "sand_pebbles"
+}
+const DESERT_SKIPPED_DECOR: Array[String] = [
+	"tree", "tree_dark", "hedge", "hedge_alt",
+	"flowers_white", "flowers_yellow"
+]
 
 ## Spritesheet slots in townsfolk_characters.png block order.
 const ROLE_VILLAGER := 0
@@ -459,6 +512,7 @@ func _process(delta: float) -> void:
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
 	_update_farm_animals(delta)
+	_update_windmill_sails(delta)
 
 func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
@@ -718,6 +772,8 @@ func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 	return false
 
 func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
+	if _farm_blocked_cells.has(cell):
+		return false
 	if city_layer.get_cell_source_id(cell) < 0:
 		return false
 	if not _is_passable_atlas_tile(city_layer.get_cell_atlas_coords(cell)):
@@ -733,6 +789,11 @@ func _apply_cached_town_scene_seed() -> void:
 	var settings: Dictionary = game_session.call("get_world_settings")
 	var scene_seed := _hold_state.apply_world_settings(settings, TOWN_SCENE_SEED_KEY, TOWN_SCENE_POPULATION_KEY)
 	_town_name = String(settings.get(TOWN_SCENE_NAME_KEY, "")).strip_edges()
+	_town_theme = String(settings.get(TOWN_SCENE_THEME_KEY, "")).strip_edges().to_lower()
+	if _town_theme == "desert":
+		var title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
+		if title_label != null:
+			title_label.text = "Desert City"
 	var chronology := settings.get("chronology", {}) as Dictionary
 	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
 	if scene_seed.is_empty():
@@ -986,6 +1047,8 @@ func _show_level(target_level_index: int) -> void:
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
 	_spawn_tavern_characters(grid)
+	_build_farmsteads()
+	_scatter_desert_decor()
 	_spawn_farm_animals()
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
@@ -2017,43 +2080,240 @@ const FARM_ANIMAL_DEFS := [
 	{"id": "cow", "path": "res://resources/images/webgame_tiles/Farm/Tiled_files/Cow_animation.png", "frame": 64, "speed": 16.0, "rows": 6}
 ]
 
+## --- Farmsteads: real farm buildings on the town greens -------------------
+## Each farmstead stakes out a rectangle of open grass and raises a
+## farmhouse or barn, an animated windmill, a fenced animal pen, and a
+## tilled crop plot from the web game's Farm tileset.
+
+func _build_farmsteads() -> void:
+	for sprite: Node2D in _farm_sprites:
+		sprite.queue_free()
+	_farm_sprites.clear()
+	_farm_pens.clear()
+	_farm_blocked_cells.clear()
+	_windmill_sails.clear()
+	if actor_layer == null or _town_theme == "desert" or _green_cells.is_empty():
+		return
+	var farm_target := clampi(_green_cells.size() / 260, 1, 3)
+	var origins: Array[Vector2i] = []
+	var candidates := _green_cells.duplicate()
+	_seeded_shuffle(candidates)
+	for candidate_variant: Variant in candidates:
+		if origins.size() >= farm_target:
+			break
+		var origin := candidate_variant as Vector2i
+		if not _farmstead_site_fits(origin):
+			continue
+		var too_close := false
+		for existing: Vector2i in origins:
+			if Vector2(existing).distance_to(Vector2(origin)) < 16.0:
+				too_close = true
+				break
+		if too_close:
+			continue
+		# Clear the brush: trees and hedges on the site make way for the farm.
+		for y in range(FARMSTEAD_SITE.y):
+			for x in range(FARMSTEAD_SITE.x):
+				decor_layer.erase_cell(origin + Vector2i(x, y))
+		origins.append(origin)
+		_stamp_farmstead(origin, origins.size() == 1)
+	# Farmstead ground is spoken for: animals and future farms keep off it.
+	if not origins.is_empty():
+		var occupied: Dictionary = {}
+		for origin: Vector2i in origins:
+			for y in range(FARMSTEAD_SITE.y):
+				for x in range(FARMSTEAD_SITE.x):
+					occupied[origin + Vector2i(x, y)] = true
+		var remaining: Array[Vector2i] = []
+		for cell: Vector2i in _green_cells:
+			if not occupied.has(cell):
+				remaining.append(cell)
+		_green_cells = remaining
+
+## A farmstead site is open grassland: grass-family base tiles, with only
+## removable greenery (trees, hedges, flowers) as decor.
+func _farmstead_site_fits(origin: Vector2i) -> bool:
+	var removable: Array[Vector2i] = []
+	for key: String in ["tree", "tree_dark", "hedge", "hedge_alt", "flowers_white", "flowers_yellow"]:
+		removable.append(TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i)
+	for y in range(FARMSTEAD_SITE.y):
+		for x in range(FARMSTEAD_SITE.x):
+			var cell := origin + Vector2i(x, y)
+			if city_layer.get_cell_source_id(cell) < 0:
+				return false
+			if _cell_at(_latest_grid, cell.x, cell.y) != CELL_ROCK:
+				return false
+			if decor_layer.get_cell_source_id(cell) >= 0 and not removable.has(decor_layer.get_cell_atlas_coords(cell)):
+				return false
+	return true
+
+func _stamp_farmstead(origin: Vector2i, with_windmill: bool) -> void:
+	# Farmhouse or barn over the top-left quarter.
+	var building_keys: Array[String] = ["farmhouse", "barn", "open_barn"]
+	var building_key := building_keys[0] if with_windmill else building_keys[_rng.randi_range(1, building_keys.size() - 1)]
+	var building_crop := FARM_BUILDING_CROPS[building_key] as Rect2
+	var building_sprite := _spawn_farm_sprite(FARM_HOUSES_TEXTURE, building_crop, Vector2(origin * tile_size), 10)
+	var building_cells := Vector2i(ceili(building_crop.size.x / float(tile_size.x)), ceili(building_crop.size.y / float(tile_size.y)))
+	# Anchor the sprite so its base sits on the site's building rows.
+	building_sprite.position = Vector2(origin * tile_size) + Vector2(0.0, float(5 * tile_size.y) - building_crop.size.y)
+	for y in range(mini(building_cells.y, 5)):
+		for x in range(building_cells.x):
+			_farm_blocked_cells[origin + Vector2i(x, 5 - 1 - y)] = true
+
+	# Windmill tower with spinning sails to the building's right.
+	if with_windmill:
+		var body_origin := Vector2(origin * tile_size) + Vector2(float(7 * tile_size.x), float(5 * tile_size.y) - WINDMILL_BODY_CROP.size.y)
+		_spawn_farm_sprite(FARM_HOUSES_TEXTURE, WINDMILL_BODY_CROP, body_origin, 10)
+		for y in range(5):
+			for x in range(2):
+				_farm_blocked_cells[origin + Vector2i(7 + x, y)] = true
+		var sails := Sprite2D.new()
+		sails.texture = FARM_SAILS_TEXTURE
+		sails.region_enabled = true
+		sails.centered = true
+		sails.region_rect = Rect2(Vector2.ZERO, SAIL_FRAME)
+		sails.position = body_origin + Vector2(WINDMILL_BODY_CROP.size.x * 0.5, 44.0)
+		sails.z_index = 12
+		actor_layer.add_child(sails)
+		_farm_sprites.append(sails)
+		_windmill_sails.append({"sprite": sails, "anim_time": _rng.randf_range(0.0, 2.0)})
+
+	# Fenced pen along the bottom-left, with a gate gap on its south side.
+	var pen_rect := Rect2i(origin + Vector2i(0, 5), Vector2i(6, 4))
+	var gate_cell := Vector2i(pen_rect.position.x + pen_rect.size.x / 2, pen_rect.end.y - 1)
+	var pen_cells: Array[Vector2i] = []
+	for y in range(pen_rect.position.y, pen_rect.end.y):
+		for x in range(pen_rect.position.x, pen_rect.end.x):
+			var cell := Vector2i(x, y)
+			var on_edge := x == pen_rect.position.x or x == pen_rect.end.x - 1 or y == pen_rect.position.y or y == pen_rect.end.y - 1
+			if on_edge and cell != gate_cell:
+				# Rails run along the top and bottom; posts hold the sides.
+				var side := x == pen_rect.position.x or x == pen_rect.end.x - 1
+				_place_tile(decor_layer, cell, "fence_post" if side else "fence")
+			elif not on_edge:
+				pen_cells.append(cell)
+	if not pen_cells.is_empty():
+		_farm_pens.append(pen_cells)
+
+	# Tilled crop plot on the bottom-right: sandy soil in crop rows.
+	var crop_rect := Rect2i(origin + Vector2i(7, 5), Vector2i(3, 4))
+	var crop_art := FARM_CROP_RECTS[_rng.randi_range(0, FARM_CROP_RECTS.size() - 1)]
+	for y in range(crop_rect.position.y, crop_rect.end.y):
+		for x in range(crop_rect.position.x, crop_rect.end.x):
+			_place_tile(city_layer, Vector2i(x, y), "sand")
+			var plant := Sprite2D.new()
+			plant.texture = FARM_PLANTS_TEXTURE
+			plant.region_enabled = true
+			plant.centered = true
+			plant.region_rect = crop_art
+			plant.position = _cell_center_position(Vector2i(x, y)) - Vector2(0.0, crop_art.size.y * 0.5 - float(tile_size.y) * 0.25)
+			plant.z_index = 9
+			actor_layer.add_child(plant)
+			_farm_sprites.append(plant)
+
+func _spawn_farm_sprite(texture: Texture2D, crop: Rect2, top_left: Vector2, z: int) -> Sprite2D:
+	var sprite := Sprite2D.new()
+	sprite.texture = texture
+	sprite.region_enabled = true
+	sprite.centered = false
+	sprite.region_rect = crop
+	sprite.position = top_left
+	sprite.z_index = z
+	actor_layer.add_child(sprite)
+	_farm_sprites.append(sprite)
+	return sprite
+
+func _update_windmill_sails(delta: float) -> void:
+	for entry: Dictionary in _windmill_sails:
+		var sprite := entry.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var anim_time := float(entry.get("anim_time", 0.0)) + delta
+		entry["anim_time"] = anim_time
+		var frame := int(anim_time / SAIL_FRAME_TIME) % SAIL_FRAME_COUNT
+		sprite.region_rect = Rect2(Vector2(0.0, frame * SAIL_FRAME.y), SAIL_FRAME)
+
+## Desert-city dressing: cacti, bleached bones, dry roots and half-buried
+## statues scattered over the sand where a green town would grow trees.
+func _scatter_desert_decor() -> void:
+	if _town_theme != "desert" or actor_layer == null or _green_cells.is_empty():
+		return
+	var decor_count := clampi(_green_cells.size() / 36, 8, 30)
+	var used_cells: Dictionary = {}
+	for decor_index in range(decor_count):
+		var cell := _green_cells[_rng.randi_range(0, _green_cells.size() - 1)]
+		if used_cells.has(cell):
+			continue
+		used_cells[cell] = true
+		var rare := decor_index < 2 and _rng.randf() < 0.6
+		var pool := DESERT_DECOR_RARE if rare else DESERT_DECOR_COMMON
+		var file_name := pool[_rng.randi_range(0, pool.size() - 1)]
+		var texture := _desert_decor_texture(file_name)
+		if texture == null:
+			continue
+		var sprite := Sprite2D.new()
+		sprite.texture = texture
+		sprite.centered = true
+		sprite.position = _cell_center_position(cell)
+		sprite.z_index = 9
+		actor_layer.add_child(sprite)
+		_farm_sprites.append(sprite)
+
+func _desert_decor_texture(file_name: String) -> Texture2D:
+	if not _desert_decor_textures.has(file_name):
+		_desert_decor_textures[file_name] = load(DESERT_DECOR_DIR + file_name) as Texture2D
+	return _desert_decor_textures.get(file_name) as Texture2D
+
 func _spawn_farm_animals() -> void:
 	for state: Dictionary in _farm_animals:
 		var old_sprite := state.get("sprite") as Sprite2D
 		if old_sprite != null:
 			old_sprite.queue_free()
 	_farm_animals.clear()
-	if actor_layer == null or _green_cells.is_empty():
+	if actor_layer == null or _town_theme == "desert":
+		return
+	# Penned animals first: every farmstead pen gets its own little herd.
+	for pen_index in range(_farm_pens.size()):
+		var pen_cells := _farm_pens[pen_index] as Array
+		var herd_size := _rng.randi_range(2, 3)
+		for _herd_index in range(herd_size):
+			var pen_cell := pen_cells[_rng.randi_range(0, pen_cells.size() - 1)] as Vector2i
+			_spawn_farm_animal_at(pen_cell, pen_index)
+	if _green_cells.is_empty():
 		return
 	var animal_count := clampi(_green_cells.size() / 14, 4, 10)
 	for _animal_index in range(animal_count):
-		var def := FARM_ANIMAL_DEFS[_rng.randi_range(0, FARM_ANIMAL_DEFS.size() - 1)] as Dictionary
-		var animal_id := String(def.get("id", "chicken"))
-		if not _farm_animal_textures.has(animal_id):
-			_farm_animal_textures[animal_id] = load(String(def.get("path", ""))) as Texture2D
-		var texture := _farm_animal_textures.get(animal_id) as Texture2D
-		if texture == null:
-			continue
 		var cell := _green_cells[_rng.randi_range(0, _green_cells.size() - 1)]
-		var frame_px := int(def.get("frame", 32))
-		var sprite := Sprite2D.new()
-		sprite.texture = texture
-		sprite.region_enabled = true
-		sprite.centered = true
-		sprite.region_rect = Rect2(0, 0, frame_px, frame_px)
-		sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px)) * 0.9
-		sprite.position = _cell_center_position(cell)
-		sprite.z_index = 11
-		actor_layer.add_child(sprite)
-		_farm_animals.append({
-			"def": def,
-			"sprite": sprite,
-			"cell": cell,
-			"moving": false,
-			"facing": Vector2i(0, 1),
-			"wander_timer": _rng.randf_range(0.5, 4.0),
-			"anim_time": _rng.randf_range(0.0, 2.0)
-		})
+		_spawn_farm_animal_at(cell, -1)
+
+func _spawn_farm_animal_at(cell: Vector2i, pen_index: int) -> void:
+	var def := FARM_ANIMAL_DEFS[_rng.randi_range(0, FARM_ANIMAL_DEFS.size() - 1)] as Dictionary
+	var animal_id := String(def.get("id", "chicken"))
+	if not _farm_animal_textures.has(animal_id):
+		_farm_animal_textures[animal_id] = load(String(def.get("path", ""))) as Texture2D
+	var texture := _farm_animal_textures.get(animal_id) as Texture2D
+	if texture == null:
+		return
+	var frame_px := int(def.get("frame", 32))
+	var sprite := Sprite2D.new()
+	sprite.texture = texture
+	sprite.region_enabled = true
+	sprite.centered = true
+	sprite.region_rect = Rect2(0, 0, frame_px, frame_px)
+	sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px)) * 0.9
+	sprite.position = _cell_center_position(cell)
+	sprite.z_index = 11
+	actor_layer.add_child(sprite)
+	_farm_animals.append({
+		"def": def,
+		"sprite": sprite,
+		"cell": cell,
+		"pen_index": pen_index,
+		"moving": false,
+		"facing": Vector2i(0, 1),
+		"wander_timer": _rng.randf_range(0.5, 4.0),
+		"anim_time": _rng.randf_range(0.0, 2.0)
+	})
 
 func _update_farm_animals(delta: float) -> void:
 	for state: Dictionary in _farm_animals:
@@ -2076,8 +2336,14 @@ func _update_farm_animals(delta: float) -> void:
 				var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
 				var step := directions[_rng.randi_range(0, 3)]
 				var next_cell := (state.get("cell", Vector2i.ZERO) as Vector2i) + step
-				# Animals keep to the greens: they only step between grass cells.
-				if _green_cells.has(next_cell) and not bool(state.get("moving", false)):
+				# Animals keep to the greens; penned animals keep to their pen.
+				var pen_index := int(state.get("pen_index", -1))
+				var allowed: bool
+				if pen_index >= 0 and pen_index < _farm_pens.size():
+					allowed = (_farm_pens[pen_index] as Array).has(next_cell)
+				else:
+					allowed = _green_cells.has(next_cell)
+				if allowed and not bool(state.get("moving", false)):
 					state["moving"] = true
 					state["move_cell"] = next_cell
 					state["move_target"] = _cell_center_position(next_cell)
@@ -2731,13 +2997,20 @@ func _place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -
 	DwarfHoldTileService.place_tile(target_layer, cell, tile_key, TILE_ATLAS)
 
 func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
-	return TownTileService.pick_base_tile(grid, x, y, cell, _door_cells)
+	var tile_key := TownTileService.pick_base_tile(grid, x, y, cell, _door_cells)
+	if _town_theme == "desert" and DESERT_BASE_SWAP.has(tile_key):
+		return String(DESERT_BASE_SWAP[tile_key])
+	return tile_key
 
 func _building_type_for_cell(cell: Vector2i) -> String:
 	return String(_latest_civic_building_type_map.get(cell, "workshop"))
 
 func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: String, house_decor_overrides: Dictionary) -> String:
-	return TownTileService.pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, _latest_civic_building_type_map, CIVIC_BUILDING_TYPES, _rng, _door_cells)
+	var decor_key := TownTileService.pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, _latest_civic_building_type_map, CIVIC_BUILDING_TYPES, _rng, _door_cells)
+	# The desert has no greenery: cacti and bones are scattered as sprites instead.
+	if _town_theme == "desert" and DESERT_SKIPPED_DECOR.has(decor_key):
+		return ""
+	return decor_key
 
 
 func _update_summary(grid: Dictionary, seed_text: String) -> void:

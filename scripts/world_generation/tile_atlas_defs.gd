@@ -218,6 +218,9 @@ const TOWN_TILE_ATLAS := {
 	"flowers_yellow": Vector2i(5, 18),
 	"road": Vector2i(14, 4),
 	"road_twig": Vector2i(13, 4),
+	"sand": Vector2i(11, 4),
+	"sand_alt": Vector2i(9, 4),
+	"sand_pebbles": Vector2i(12, 3),
 	"plaza": Vector2i(17, 2),
 	"plaza_alt": Vector2i(18, 3),
 	"wall": Vector2i(1, 7),
@@ -269,7 +272,8 @@ const TOWN_TILE_ATLAS := {
 ## stay passable — the blocking cell is the furniture base itself.
 const TOWN_PASSABLE_TILE_KEYS := [
 	"grass", "grass_dark", "grass_tuft", "flowers_white", "flowers_yellow",
-	"road", "road_twig", "plaza", "plaza_alt", "floor", "door", "rug",
+	"road", "road_twig", "sand", "sand_alt", "sand_pebbles",
+	"plaza", "plaza_alt", "floor", "door", "rug",
 	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",
 	"forge_top", "oven_top"
 ]
