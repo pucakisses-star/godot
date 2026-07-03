@@ -42,6 +42,15 @@ const ITEM_VALUES := {
 	"Gloom Octopus": 6, "Ember Squid": 7, "Cave Crab": 5,
 	"Coral Snail": 4, "Bloodworm": 1, "Mud Grub": 1, "Dried Fish": 4,
 
+	# Mounted trophy fish: bragging rights, priced accordingly.
+	"Trophy Gudgeon": 18, "Trophy Bleak": 20, "Trophy Ruffe": 22,
+	"Trophy Rudd": 26, "Trophy Perch": 28, "Trophy Bluegill": 28,
+	"Trophy Grayling": 30, "Trophy Tench": 32, "Trophy Asp": 34,
+	"Trophy Zope": 30, "Trophy Piranha": 36, "Trophy Ghost Cat": 38,
+	"Trophy Zander": 42, "Trophy Burbot": 44, "Trophy Largemouth Bass": 48,
+	"Trophy Pike": 55, "Trophy Alligator Gar": 70, "Trophy Redtail Catfish": 80,
+	"Trophy Chinese Paddlefish": 95, "Trophy Beluga Sturgeon": 130,
+
 	"Cork Bobber": 3, "Jig Lures": 6, "Painted Lure": 8, "Barbed Hook": 5,
 	"Rusted Hook": 2, "Willow Rod": 12, "Oak Rod": 14,
 	"Old Fishing Rod": 10, "Fishing Spear": 12, "Casting Net": 15,

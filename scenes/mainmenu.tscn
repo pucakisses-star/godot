@@ -1,95 +1,29 @@
 [gd_scene format=3 uid="uid://d2purte7x74wp"]
 
 [ext_resource type="Script" uid="uid://ceg7uogn7q53o" path="res://scripts/main_menu.gd" id="1_m4ki5"]
-[ext_resource type="Texture2D" uid="uid://cmx84ny343d20" path="res://resources/images/main_menu/Titlescreen_image.png" id="2_srphr"]
 [ext_resource type="Texture2D" uid="uid://cnkihol71load" path="res://resources/images/main_menu/logo.png" id="3_lpb7j"]
 [ext_resource type="Texture2D" uid="uid://b1ddrq1sqlcv" path="res://resources/images/main_menu/Start.png" id="4_64s5s"]
 [ext_resource type="Texture2D" uid="uid://cprefmjsn5w40" path="res://resources/images/main_menu/Options.png" id="5_h52vu"]
-[ext_resource type="Texture2D" uid="uid://dqmw5tdux8dyt" path="res://resources/images/main_menu/return.png" id="6_jnu17"]
 [ext_resource type="Texture2D" uid="uid://baodsmqugvlte" path="res://resources/images/main_menu/smith.png" id="7_smith"]
+[ext_resource type="Texture2D" uid="uid://g20bs36dodig" path="res://resources/images/main_menu/title.png" id="8_title"]
 
-[sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_dfy5j"]
-texture = ExtResource("7_smith")
-texture_region_size = Vector2i(640, 480)
-0:0/animation_columns = 66
-0:0/0 = 0
-1:0/0 = 0
-2:0/0 = 0
-3:0/0 = 0
-4:0/0 = 0
-0:1/0 = 0
-1:1/0 = 0
-2:1/0 = 0
-3:1/0 = 0
-4:1/0 = 0
-0:2/0 = 0
-1:2/0 = 0
-2:2/0 = 0
-3:2/0 = 0
-4:2/0 = 0
-0:3/0 = 0
-1:3/0 = 0
-2:3/0 = 0
-3:3/0 = 0
-4:3/0 = 0
-0:4/0 = 0
-0:5/0 = 0
-0:6/0 = 0
-0:7/0 = 0
-0:8/0 = 0
-0:9/0 = 0
-0:10/0 = 0
-0:11/0 = 0
-0:12/0 = 0
-0:13/0 = 0
-1:4/0 = 0
-1:5/0 = 0
-1:6/0 = 0
-1:7/0 = 0
-1:8/animation_columns = 14
-1:8/0 = 0
-1:9/0 = 0
-1:10/0 = 0
-1:11/0 = 0
-1:12/0 = 0
-1:13/0 = 0
-2:4/0 = 0
-2:5/0 = 0
-2:6/0 = 0
-2:7/0 = 0
-2:8/0 = 0
-2:9/0 = 0
-2:10/0 = 0
-2:11/0 = 0
-2:12/0 = 0
-2:13/0 = 0
-3:4/0 = 0
-3:5/0 = 0
-3:6/0 = 0
-3:7/0 = 0
-3:8/0 = 0
-3:9/0 = 0
-3:10/0 = 0
-3:11/0 = 0
-3:12/0 = 0
-3:13/0 = 0
-4:4/0 = 0
-4:5/0 = 0
-4:6/0 = 0
-4:7/0 = 0
-4:8/0 = 0
-4:9/0 = 0
-4:10/0 = 0
-4:11/0 = 0
-4:12/0 = 0
-4:13/0 = 0
-0:14/0 = 0
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
+bg_color = Color(0.075, 0.066, 0.055, 0.94)
+border_width_left = 4
+border_width_top = 4
+border_width_right = 4
+border_width_bottom = 4
+border_color = Color(0.72, 0.55, 0.25, 1)
+corner_radius_top_left = 14
+corner_radius_top_right = 14
+corner_radius_bottom_right = 14
+corner_radius_bottom_left = 14
+content_margin_left = 34
+content_margin_right = 34
+content_margin_top = 26
+content_margin_bottom = 26
 
-[sub_resource type="TileSet" id="TileSet_85riq"]
-tile_size = Vector2i(640, 480)
-sources/0 = SubResource("TileSetAtlasSource_dfy5j")
-
-[node name="MainMenu" type="Control" unique_id=338512690]
+[node name="MainMenu" type="Control"]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -98,97 +32,105 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_m4ki5")
 
-[node name="TileMap" type="TileMap" parent="." unique_id=228384824]
-tile_set = SubResource("TileSet_85riq")
-format = 2
-layer_0/name = "BackgroundAnimation"
-layer_0/tile_data = PackedInt32Array(0, 0, 0)
-
-[node name="Background" type="TextureRect" parent="." unique_id=666901434]
+[node name="LeftPane" type="Control" parent="."]
+unique_name_in_owner = true
+clip_contents = true
 layout_mode = 1
 anchors_preset = 15
+anchor_right = 0.5
+anchor_bottom = 1.0
+grow_vertical = 2
+
+[node name="SmithSprite" type="Sprite2D" parent="LeftPane"]
+unique_name_in_owner = true
+texture = ExtResource("7_smith")
+region_enabled = true
+region_rect = Rect2(0, 0, 640, 480)
+
+[node name="RightPane" type="Control" parent="."]
+unique_name_in_owner = true
+clip_contents = true
+layout_mode = 1
+anchors_preset = 15
+anchor_left = 0.5
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = 371.0
-offset_top = 36.0
-offset_right = -368.0
-offset_bottom = -26.0
-grow_horizontal = 2
 grow_vertical = 2
-texture = ExtResource("2_srphr")
-expand_mode = 1
-stretch_mode = 6
 
-[node name="Logo" type="TextureRect" parent="." unique_id=390251558]
-custom_minimum_size = Vector2(480, 0)
-layout_mode = 1
-anchors_preset = 5
-anchor_left = 0.5
-anchor_right = 0.5
-offset_left = -243.0
-offset_top = 106.0
-offset_right = 237.0
-offset_bottom = 298.0
-grow_horizontal = 2
-texture = ExtResource("3_lpb7j")
-expand_mode = 1
-stretch_mode = 5
+[node name="TitleSprite" type="Sprite2D" parent="RightPane"]
+unique_name_in_owner = true
+texture = ExtResource("8_title")
+region_enabled = true
+region_rect = Rect2(0, 0, 640, 480)
 
-[node name="CenterContainer" type="CenterContainer" parent="." unique_id=1355029343]
+[node name="MenuPanel" type="PanelContainer" parent="."]
 layout_mode = 1
 anchors_preset = 8
 anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -172.0
-offset_top = -24.0
-offset_right = 172.0
-offset_bottom = 252.0
+offset_left = -210.0
+offset_top = -310.0
+offset_right = 210.0
+offset_bottom = 310.0
 grow_horizontal = 2
 grow_vertical = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
 
-[node name="VBoxContainer" type="VBoxContainer" parent="CenterContainer" unique_id=378673059]
+[node name="VBoxContainer" type="VBoxContainer" parent="MenuPanel"]
 layout_mode = 2
-theme_override_constants/separation = 20
+theme_override_constants/separation = 18
+alignment = 1
 
-[node name="StartButton" type="TextureButton" parent="CenterContainer/VBoxContainer" unique_id=331316424]
-custom_minimum_size = Vector2(344, 72)
+[node name="Logo" type="TextureRect" parent="MenuPanel/VBoxContainer"]
+custom_minimum_size = Vector2(340, 300)
 layout_mode = 2
+texture = ExtResource("3_lpb7j")
+expand_mode = 1
+stretch_mode = 5
+
+[node name="StartButton" type="TextureButton" parent="MenuPanel/VBoxContainer"]
+custom_minimum_size = Vector2(190, 52)
+layout_mode = 2
+size_flags_horizontal = 4
 texture_normal = ExtResource("4_64s5s")
 ignore_texture_size = true
 stretch_mode = 5
 
-[node name="LoadGameButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=1414141414]
+[node name="LoadGameButton" type="Button" parent="MenuPanel/VBoxContainer"]
 unique_name_in_owner = true
-custom_minimum_size = Vector2(344, 72)
+custom_minimum_size = Vector2(190, 44)
 layout_mode = 2
-theme_override_font_sizes/font_size = 28
+size_flags_horizontal = 4
+theme_override_font_sizes/font_size = 20
 disabled = true
 text = "Load Game"
 
-[node name="OptionsButton" type="TextureButton" parent="CenterContainer/VBoxContainer" unique_id=903604802]
-custom_minimum_size = Vector2(344, 72)
+[node name="OptionsButton" type="TextureButton" parent="MenuPanel/VBoxContainer"]
+custom_minimum_size = Vector2(190, 52)
 layout_mode = 2
+size_flags_horizontal = 4
 texture_normal = ExtResource("5_h52vu")
 ignore_texture_size = true
 stretch_mode = 5
 
-[node name="ShatteredPixelDungeonButton" type="Button" parent="CenterContainer/VBoxContainer"]
-custom_minimum_size = Vector2(344, 72)
+[node name="ShatteredPixelDungeonButton" type="Button" parent="MenuPanel/VBoxContainer"]
+custom_minimum_size = Vector2(190, 36)
 layout_mode = 2
-theme_override_font_sizes/font_size = 28
+size_flags_horizontal = 4
+theme_override_font_sizes/font_size = 15
 text = "Shattered UI"
 
-[node name="ReturnButton" type="TextureButton" parent="CenterContainer/VBoxContainer" unique_id=1053349442]
-custom_minimum_size = Vector2(344, 72)
+[node name="ReturnButton" type="Button" parent="MenuPanel/VBoxContainer"]
+custom_minimum_size = Vector2(190, 36)
 layout_mode = 2
-texture_normal = ExtResource("6_jnu17")
-ignore_texture_size = true
-stretch_mode = 5
+size_flags_horizontal = 4
+theme_override_font_sizes/font_size = 15
+text = "Quit"
 
-[connection signal="pressed" from="CenterContainer/VBoxContainer/StartButton" to="." method="_on_start_button_pressed"]
-[connection signal="pressed" from="CenterContainer/VBoxContainer/LoadGameButton" to="." method="_on_load_game_button_pressed"]
-[connection signal="pressed" from="CenterContainer/VBoxContainer/OptionsButton" to="." method="_on_options_button_pressed"]
-[connection signal="pressed" from="CenterContainer/VBoxContainer/ShatteredPixelDungeonButton" to="." method="_on_shattered_pixel_dungeon_button_pressed"]
-[connection signal="pressed" from="CenterContainer/VBoxContainer/ReturnButton" to="." method="_on_return_button_pressed"]
+[connection signal="pressed" from="MenuPanel/VBoxContainer/StartButton" to="." method="_on_start_button_pressed"]
+[connection signal="pressed" from="MenuPanel/VBoxContainer/LoadGameButton" to="." method="_on_load_game_button_pressed"]
+[connection signal="pressed" from="MenuPanel/VBoxContainer/OptionsButton" to="." method="_on_options_button_pressed"]
+[connection signal="pressed" from="MenuPanel/VBoxContainer/ShatteredPixelDungeonButton" to="." method="_on_shattered_pixel_dungeon_button_pressed"]
+[connection signal="pressed" from="MenuPanel/VBoxContainer/ReturnButton" to="." method="_on_return_button_pressed"]

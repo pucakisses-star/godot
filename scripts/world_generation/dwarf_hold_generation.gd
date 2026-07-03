@@ -404,7 +404,28 @@ const FISH_CATCH_TABLE := [
 	{"name": "Cork Bobber", "weight": 2},
 	{"name": "Painted Lure", "weight": 2},
 	{"name": "Rusty Anchor", "weight": 1},
-	{"name": "Skeleton Keys", "weight": 1}
+	{"name": "Skeleton Keys", "weight": 1},
+	# Trophy fish: once-in-a-season catches, straight onto a plaque.
+	{"name": "Trophy Asp", "weight": 1},
+	{"name": "Trophy Tench", "weight": 1},
+	{"name": "Trophy Piranha", "weight": 1},
+	{"name": "Trophy Zander", "weight": 1},
+	{"name": "Trophy Ghost Cat", "weight": 1},
+	{"name": "Trophy Rudd", "weight": 1},
+	{"name": "Trophy Grayling", "weight": 1},
+	{"name": "Trophy Largemouth Bass", "weight": 1},
+	{"name": "Trophy Pike", "weight": 1},
+	{"name": "Trophy Burbot", "weight": 1},
+	{"name": "Trophy Zope", "weight": 1},
+	{"name": "Trophy Alligator Gar", "weight": 1},
+	{"name": "Trophy Redtail Catfish", "weight": 1},
+	{"name": "Trophy Bluegill", "weight": 1},
+	{"name": "Trophy Perch", "weight": 1},
+	{"name": "Trophy Bleak", "weight": 1},
+	{"name": "Trophy Chinese Paddlefish", "weight": 1},
+	{"name": "Trophy Ruffe", "weight": 1},
+	{"name": "Trophy Beluga Sturgeon", "weight": 1},
+	{"name": "Trophy Gudgeon", "weight": 1}
 ]
 
 const CIVIC_BUILDING_TYPES := {
