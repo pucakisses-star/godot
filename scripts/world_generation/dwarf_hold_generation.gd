@@ -92,6 +92,14 @@ var _generated_chunks: Dictionary = {}
 var _dug_cells: Dictionary = {}
 var _last_player_chunk := Vector2i(2147483647, 2147483647)
 var _world_seed_hash := 0
+var _underdeep_sites: Array = []
+var _sites_by_chunk: Dictionary = {}
+var _player_inventory: Dictionary = {}
+var _inventory_label: Label
+var _torch_sprites: Array = []
+var _player_glow: Sprite2D
+var _glow_texture: Texture2D
+var _light_dim := 1.0
 var _latest_bed_count := 0
 var _show_zone_overlay := false
 var _lighting_enabled := true
@@ -618,11 +626,69 @@ func _ready() -> void:
 	_update_player_character_label()
 	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
 	_update_clock_label()
+	_setup_inventory_label()
+	_glow_texture = _create_glow_texture()
+	_player_glow = _create_glow_sprite(7.0)
+	lighting_layer.add_child(_player_glow)
+	_player_glow.visible = false
 	_generate_city()
+
+func _setup_inventory_label() -> void:
+	var controls := get_node_or_null("Margin/Layout/Controls")
+	if controls == null:
+		return
+	_inventory_label = Label.new()
+	_inventory_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_inventory_label.add_theme_font_size_override("font_size", 13)
+	controls.add_child(_inventory_label)
+	var clock := controls.get_node_or_null("ClockLabel")
+	if clock != null:
+		controls.move_child(_inventory_label, clock.get_index() + 1)
+	_update_inventory_label()
+
+func _create_glow_texture() -> Texture2D:
+	var glow_size := 128
+	var image := Image.create(glow_size, glow_size, false, Image.FORMAT_RGBA8)
+	var center := Vector2(glow_size / 2.0, glow_size / 2.0)
+	for y in range(glow_size):
+		for x in range(glow_size):
+			var distance := Vector2(x + 0.5, y + 0.5).distance_to(center) / (glow_size / 2.0)
+			var strength := clampf(1.0 - distance, 0.0, 1.0)
+			strength = strength * strength
+			image.set_pixel(x, y, Color(1.0, 0.85, 0.6, strength * 0.85))
+	return ImageTexture.create_from_image(image)
+
+func _create_glow_sprite(tile_span: float) -> Sprite2D:
+	var glow := Sprite2D.new()
+	glow.texture = _glow_texture
+	glow.centered = true
+	var glow_material := CanvasItemMaterial.new()
+	glow_material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	glow.material = glow_material
+	glow.scale = Vector2.ONE * (tile_span * float(tile_size.x) / 128.0)
+	glow.z_index = 15
+	return glow
 
 func _process(delta: float) -> void:
 	_advance_game_clock(delta)
 	_stream_world_chunks()
+	_update_wild_darkness(delta)
+
+## The city and deep levels stay lit; the wild underground is dark, held
+## back by the player's lantern glow and any placed torches.
+func _update_wild_darkness(delta: float) -> void:
+	var target := 1.0
+	if not _world_noise.is_empty() and _player_sprite != null and not _latest_district_cell_map.has(_player_cell):
+		target = 0.4
+	_light_dim = lerpf(_light_dim, target, clampf(delta * 3.0, 0.0, 1.0))
+	var dim_color := Color(_light_dim, _light_dim, _light_dim, 1.0)
+	city_layer.modulate = dim_color
+	decor_layer.modulate = dim_color
+	actor_layer.modulate = dim_color
+	if _player_glow != null:
+		_player_glow.visible = _light_dim < 0.95 and _player_sprite != null
+		if _player_sprite != null:
+			_player_glow.position = _player_sprite.position
 	_update_player_turn_movement(delta)
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
@@ -653,6 +719,11 @@ func _update_clock_label() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and not _is_text_input_focused():
 		_on_back_button_pressed()
+		get_viewport().set_input_as_handled()
+		return
+	var key_event := event as InputEventKey
+	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_T and not _is_text_input_focused():
+		_place_torch()
 		get_viewport().set_input_as_handled()
 		return
 	if _player_sprite == null or not _player_control_enabled:
@@ -871,6 +942,25 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 	var scene_seed := _hold_state.apply_world_settings(settings, DWARFHOLD_SCENE_SEED_KEY, DWARFHOLD_SCENE_POPULATION_KEY)
 	var chronology := settings.get("chronology", {}) as Dictionary
 	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
+	_underdeep_sites = []
+	_sites_by_chunk = {}
+	for site_variant: Variant in (settings.get("underdeep_sites", []) as Array):
+		var raw_site := site_variant as Dictionary
+		var site_cell := Vector2i(int(raw_site.get("x", 0)), int(raw_site.get("y", 0)))
+		if maxi(absi(site_cell.x), absi(site_cell.y)) < 90:
+			continue
+		var site := {
+			"name": String(raw_site.get("name", "Lost Settlement")),
+			"type": String(raw_site.get("type", "town")),
+			"cell": site_cell
+		}
+		_underdeep_sites.append(site)
+		var site_chunk_key: String = UndergroundWorldService.chunk_key(UndergroundWorldService.chunk_for_cell(site_cell))
+		if not _sites_by_chunk.has(site_chunk_key):
+			_sites_by_chunk[site_chunk_key] = []
+		(_sites_by_chunk[site_chunk_key] as Array).append(site)
+	var inventory_variant: Variant = settings.get("player_inventory", {})
+	_player_inventory = (inventory_variant as Dictionary).duplicate() if inventory_variant is Dictionary else {}
 	if scene_seed.is_empty():
 		return
 	seed_input.text = scene_seed
@@ -1473,7 +1563,11 @@ func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
 		_refresh_lighting(_latest_grid)
 
 func _apply_lighting_state() -> void:
-	lighting_layer.visible = _lighting_enabled
+	# The layer stays visible: it carries the player lantern glow and
+	# placed torches. The toggle gates only the fog-of-war mask.
+	lighting_layer.visible = true
+	if _lighting_mask_sprite != null:
+		_lighting_mask_sprite.visible = _lighting_enabled
 
 func _update_zone_overlay() -> void:
 	if zone_overlay.has_method("set_overlay_state"):
@@ -2102,6 +2196,9 @@ func _clear_chest_selection() -> void:
 func _on_loot_chest_button_pressed() -> void:
 	if _selected_chest_cell.x == 2147483647:
 		return
+	for entry_variant: Variant in (_chest_inventories.get(_selected_chest_cell, []) as Array):
+		var entry := entry_variant as Dictionary
+		_add_to_inventory(String(entry.get("name", "Supplies")), int(entry.get("quantity", 1)))
 	_chest_inventories[_selected_chest_cell] = []
 	_update_chest_inventory_panel()
 
@@ -2246,6 +2343,10 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	_relocate_player_to_city_heart(grid)
 	_assign_npc_daily_lives(grid)
+	_clear_torch_sprites()
+	var shown_level := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	for torch_cell_variant: Variant in (shown_level.get("torches", []) as Array):
+		_spawn_torch_at(torch_cell_variant as Vector2i)
 
 ## On the district city level the player arrives at the Great Hall, the
 ## one spot guaranteed to connect to every quarter, rather than a random
@@ -2345,8 +2446,19 @@ func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 			if _generated_chunks.has(key):
 				continue
 			_generated_chunks[key] = true
+			var stamped_site := false
+			for site_variant: Variant in (_sites_by_chunk.get(key, []) as Array):
+				var site := site_variant as Dictionary
+				UndergroundWorldService.stamp_settlement_site(_latest_grid, _latest_floor_decor, site)
+				_latest_district_labels.append({"name": String(site.get("name", "")), "center": site.get("cell", Vector2i.ZERO)})
+				stamped_site = true
+			var discovery: Dictionary = UndergroundWorldService.stamp_chunk_discovery(_latest_grid, _latest_floor_decor, chunk, _world_seed_hash)
+			if not discovery.is_empty():
+				_latest_district_labels.append(discovery)
 			var rect: Rect2i = UndergroundWorldService.generate_chunk(_latest_grid, _latest_floor_decor, chunk, _world_noise)
-			_render_world_rect(rect.grow(1))
+			_render_world_rect(rect.grow(14 if stamped_site else 1))
+			if stamped_site or not discovery.is_empty():
+				_rebuild_district_labels()
 
 ## Renders a rect of the open world: carved floor, rock shells around it,
 ## and any streamed floor decor. Place-only, so city cells keep their
@@ -2361,7 +2473,10 @@ func _render_world_rect(rect: Rect2i) -> void:
 				continue
 			_place_tile(city_layer, cell, base_tile)
 			if decor_layer.get_cell_source_id(cell) < 0 and _latest_floor_decor.has(cell):
-				_place_tile(decor_layer, cell, String(_latest_floor_decor[cell]))
+				var decor_key := String(_latest_floor_decor[cell])
+				_place_tile(decor_layer, cell, decor_key)
+				if decor_key == "chest":
+					_ensure_chest_inventory(cell)
 
 func _is_diggable_cell(cell: Vector2i) -> bool:
 	if _world_noise.is_empty():
@@ -2373,9 +2488,106 @@ func _is_minable_rubble(cell: Vector2i) -> bool:
 		return false
 	return decor_layer.get_cell_atlas_coords(cell) == TILE_ATLAS.get("stone", Vector2i(-1000, -1000))
 
+## Click-harvest for wild decor: ore veins yield iron, fungal growth
+## yields mushrooms.
+func _try_harvest_decor(cell: Vector2i) -> bool:
+	if not _is_player_adjacent_to_cell(cell):
+		return false
+	if decor_layer.get_cell_source_id(cell) < 0:
+		return false
+	var atlas := decor_layer.get_cell_atlas_coords(cell)
+	if atlas == TILE_ATLAS.get("stone", Vector2i(-1000, -1000)):
+		decor_layer.erase_cell(cell)
+		_latest_floor_decor.erase(cell)
+		_add_to_inventory("Iron Ore", _rng.randi_range(2, 4))
+		return true
+	if atlas == TILE_ATLAS.get("mushroom_wild", Vector2i(-1000, -1000)) or atlas == TILE_ATLAS.get("mushroom_crop_wild", Vector2i(-1000, -1000)) or atlas == TILE_ATLAS.get("mushroom_crops", Vector2i(-1000, -1000)):
+		decor_layer.erase_cell(cell)
+		_latest_floor_decor.erase(cell)
+		_add_to_inventory("Mushrooms", _rng.randi_range(1, 2))
+		return true
+	return false
+
+func _place_torch() -> void:
+	if _player_sprite == null or _world_noise.is_empty():
+		return
+	if int(_player_inventory.get("Stone", 0)) < 1:
+		_set_save_status("Need 1 Stone to place a torch (dig a wall)", Color(0.95, 0.75, 0.45, 1.0))
+		return
+	_add_to_inventory("Stone", -1)
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	if not level_data.has("torches"):
+		level_data["torches"] = []
+	(level_data["torches"] as Array).append(_player_cell)
+	_spawn_torch_at(_player_cell)
+	_set_save_status("Torch placed", Color(0.95, 0.85, 0.55, 1.0))
+
+func _spawn_torch_at(cell: Vector2i) -> void:
+	var torch := Sprite2D.new()
+	torch.texture = _create_torch_texture()
+	torch.centered = true
+	torch.position = _cell_center_position(cell)
+	torch.z_index = 14
+	lighting_layer.add_child(torch)
+	var glow := _create_glow_sprite(5.0)
+	glow.position = Vector2.ZERO
+	torch.add_child(glow)
+	_torch_sprites.append(torch)
+
+func _clear_torch_sprites() -> void:
+	for torch_variant: Variant in _torch_sprites:
+		var torch := torch_variant as Sprite2D
+		if torch != null:
+			torch.queue_free()
+	_torch_sprites = []
+
+func _create_torch_texture() -> Texture2D:
+	var image := Image.create(8, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	for y in range(7, 15):
+		image.set_pixel(3, y, Color(0.45, 0.3, 0.16, 1.0))
+		image.set_pixel(4, y, Color(0.36, 0.24, 0.13, 1.0))
+	for y in range(2, 7):
+		for x in range(2, 6):
+			var flame := Color(1.0, 0.62, 0.15, 1.0) if y > 3 else Color(1.0, 0.85, 0.3, 1.0)
+			if (x == 2 or x == 5) and y == 2:
+				continue
+			image.set_pixel(x, y, flame)
+	image.resize(16, 32, Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(image)
+
+func _add_to_inventory(item_name: String, amount: int) -> void:
+	_player_inventory[item_name] = int(_player_inventory.get(item_name, 0)) + amount
+	if int(_player_inventory.get(item_name, 0)) <= 0:
+		_player_inventory.erase(item_name)
+	_update_inventory_label()
+	_save_player_inventory()
+
+func _save_player_inventory() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings["player_inventory"] = _player_inventory.duplicate()
+	game_session.call("set_world_settings", settings)
+
+func _update_inventory_label() -> void:
+	if _inventory_label == null:
+		return
+	if _player_inventory.is_empty():
+		_inventory_label.text = "🎒 Backpack empty — dig rock, mine ore, pick mushrooms"
+		return
+	var parts := PackedStringArray()
+	var item_names := _player_inventory.keys()
+	item_names.sort()
+	for item_variant: Variant in item_names:
+		parts.append("%s ×%d" % [String(item_variant), int(_player_inventory[item_variant])])
+	_inventory_label.text = "🎒 " + ", ".join(parts)
+
 func _dig_cell(cell: Vector2i) -> void:
 	_latest_grid[cell] = CELL_HALL
 	_dug_cells[cell] = true
+	_add_to_inventory("Stone", 1)
 	_render_world_rect(Rect2i(cell - Vector2i(1, 1), Vector2i(3, 3)))
 	if _lighting_enabled:
 		_update_shattered_visibility(_latest_grid)
@@ -2411,8 +2623,7 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	if _is_chest_cell(clicked_cell):
 		_request_chest_interaction(clicked_cell)
 		return
-	if _is_minable_rubble(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
-		decor_layer.erase_cell(clicked_cell)
+	if _try_harvest_decor(clicked_cell):
 		return
 	_request_player_move_to_cell(clicked_cell)
 
