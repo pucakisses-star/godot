@@ -87,6 +87,11 @@ var _latest_residence_type_map: Dictionary = {}
 var _latest_district_labels: Array = []
 var _latest_district_cell_map: Dictionary = {}
 var _latest_floor_decor: Dictionary = {}
+var _world_noise: Dictionary = {}
+var _generated_chunks: Dictionary = {}
+var _dug_cells: Dictionary = {}
+var _last_player_chunk := Vector2i(2147483647, 2147483647)
+var _world_seed_hash := 0
 var _latest_bed_count := 0
 var _show_zone_overlay := false
 var _lighting_enabled := true
@@ -617,6 +622,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_advance_game_clock(delta)
+	_stream_world_chunks()
 	_update_player_turn_movement(delta)
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
@@ -886,6 +892,7 @@ func _generate_city() -> void:
 		seed_input.text = seed_text
 
 	_rng.seed = hash(seed_text)
+	_world_seed_hash = hash(seed_text)
 	_hold_state.generated_levels.clear()
 
 	var minimum_levels := mini(underground_level_count_range.x, underground_level_count_range.y)
@@ -1132,6 +1139,21 @@ func _show_level(target_level_index: int) -> void:
 	_latest_district_labels = level_data.get("district_labels", []) as Array
 	_latest_district_cell_map = level_data.get("district_cell_map", {}) as Dictionary
 	_latest_floor_decor = level_data.get("floor_decor", {}) as Dictionary
+	if _hold_state.current_level_index == 0:
+		# The surface level is an open, diggable underground: rock beyond
+		# the city streams in as deterministic noise-carved chunks.
+		if not level_data.has("generated_chunks"):
+			level_data["generated_chunks"] = {}
+		if not level_data.has("dug_cells"):
+			level_data["dug_cells"] = {}
+		_generated_chunks = level_data.get("generated_chunks", {}) as Dictionary
+		_dug_cells = level_data.get("dug_cells", {}) as Dictionary
+		_world_noise = UndergroundWorldService.make_noise_set(_world_seed_hash)
+	else:
+		_world_noise = {}
+		_generated_chunks = {}
+		_dug_cells = {}
+	_last_player_chunk = Vector2i(2147483647, 2147483647)
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
 	_chest_inventories.clear()
@@ -2306,6 +2328,59 @@ func _assign_npc_daily_lives(grid: Dictionary) -> void:
 			state["target"] = sprite.position
 		DwarfHoldTavernService.update_character_frame(sprite, int(state.get("slot", 0)), 1, 0)
 
+func _stream_world_chunks() -> void:
+	if _world_noise.is_empty() or _player_sprite == null:
+		return
+	var player_chunk: Vector2i = UndergroundWorldService.chunk_for_cell(_player_cell)
+	if player_chunk == _last_player_chunk:
+		return
+	_last_player_chunk = player_chunk
+	_ensure_chunks_around(player_chunk)
+
+func _ensure_chunks_around(player_chunk: Vector2i) -> void:
+	for chunk_dy in range(-2, 3):
+		for chunk_dx in range(-2, 3):
+			var chunk := player_chunk + Vector2i(chunk_dx, chunk_dy)
+			var key: String = UndergroundWorldService.chunk_key(chunk)
+			if _generated_chunks.has(key):
+				continue
+			_generated_chunks[key] = true
+			var rect: Rect2i = UndergroundWorldService.generate_chunk(_latest_grid, _latest_floor_decor, chunk, _world_noise)
+			_render_world_rect(rect.grow(1))
+
+## Renders a rect of the open world: carved floor, rock shells around it,
+## and any streamed floor decor. Place-only, so city cells keep their
+## richer render.
+func _render_world_rect(rect: Rect2i) -> void:
+	for y in range(rect.position.y, rect.end.y):
+		for x in range(rect.position.x, rect.end.x):
+			var cell := Vector2i(x, y)
+			var zone := _cell_at(_latest_grid, x, y)
+			var base_tile := _pick_base_tile(_latest_grid, x, y, zone)
+			if base_tile.is_empty():
+				continue
+			_place_tile(city_layer, cell, base_tile)
+			if decor_layer.get_cell_source_id(cell) < 0 and _latest_floor_decor.has(cell):
+				_place_tile(decor_layer, cell, String(_latest_floor_decor[cell]))
+
+func _is_diggable_cell(cell: Vector2i) -> bool:
+	if _world_noise.is_empty():
+		return false
+	return _cell_at(_latest_grid, cell.x, cell.y) == CELL_ROCK
+
+func _is_minable_rubble(cell: Vector2i) -> bool:
+	if decor_layer.get_cell_source_id(cell) < 0:
+		return false
+	return decor_layer.get_cell_atlas_coords(cell) == TILE_ATLAS.get("stone", Vector2i(-1000, -1000))
+
+func _dig_cell(cell: Vector2i) -> void:
+	_latest_grid[cell] = CELL_HALL
+	_dug_cells[cell] = true
+	_render_world_rect(Rect2i(cell - Vector2i(1, 1), Vector2i(3, 3)))
+	if _lighting_enabled:
+		_update_shattered_visibility(_latest_grid)
+		_refresh_lighting(_latest_grid)
+
 func _collect_walkable_cells(grid: Dictionary) -> Array[Vector2i]:
 	return DwarfHoldLayoutService.collect_walkable_cells(grid, [CELL_HALL, CELL_HOUSE, CELL_BUILDING, CELL_PLAZA])
 
@@ -2335,6 +2410,9 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	var clicked_cell := _cell_from_mouse_position(mouse_position)
 	if _is_chest_cell(clicked_cell):
 		_request_chest_interaction(clicked_cell)
+		return
+	if _is_minable_rubble(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
+		decor_layer.erase_cell(clicked_cell)
 		return
 	_request_player_move_to_cell(clicked_cell)
 
@@ -2372,6 +2450,9 @@ func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 		return
 	if target_cell == _player_cell:
 		_player_move_path.clear()
+		return
+	if _is_diggable_cell(target_cell) and _is_player_adjacent_to_cell(target_cell):
+		_dig_cell(target_cell)
 		return
 	if _latest_grid.is_empty() or not _latest_grid.has(target_cell):
 		return
