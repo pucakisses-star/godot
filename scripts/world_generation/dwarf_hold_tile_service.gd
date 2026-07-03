@@ -18,7 +18,7 @@ static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cel
 		return wall_or_floor_tile(grid, x, y, cell, door_cells)
 	match cell:
 		CELL_HALL:
-			return "floor"
+			return "dirt"
 		CELL_PLAZA:
 			return "floor"
 		CELL_ROCK:
