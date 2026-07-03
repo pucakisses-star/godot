@@ -487,26 +487,21 @@ layout_mode = 2
 
 [node name="MarginContainer" type="MarginContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2" unique_id=1765104491]
 layout_mode = 2
-theme_override_constants/margin_left = 50
+theme_override_constants/margin_left = 40
+theme_override_constants/margin_top = 10
 
 [node name="VBoxContainer2" type="VBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer" unique_id=2108813356]
 layout_mode = 2
 size_flags_vertical = 3
 
 [node name="TextureRect" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer/VBoxContainer2" unique_id=974652834]
-custom_minimum_size = Vector2(210, 210)
-layout_mode = 1
-anchors_preset = 1
-anchor_left = 1.0
-anchor_right = 1.0
-offset_left = -210.0
-offset_right = 0.0
-offset_bottom = 210.0
-grow_horizontal = 0
-size_flags_vertical = 8
+custom_minimum_size = Vector2(300, 420)
+layout_mode = 2
+size_flags_horizontal = 0
+size_flags_vertical = 0
 texture = ExtResource("15_dk5wx")
 expand_mode = 1
-stretch_mode = 2
+stretch_mode = 1
 
 [node name="DwarfHairSprite" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer/VBoxContainer2/TextureRect" unique_id=1039548828]
 visible = false
@@ -531,10 +526,10 @@ layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = 8.0
-offset_top = 8.0
-offset_right = -8.0
-offset_bottom = -8.0
+offset_left = 24.0
+offset_top = 24.0
+offset_right = -24.0
+offset_bottom = -24.0
 grow_horizontal = 2
 grow_vertical = 2
 texture = ExtResource("15_y6x2m")
@@ -559,45 +554,20 @@ texture = ExtResource("16_5kcbn")
 expand_mode = 1
 stretch_mode = 5
 
-[node name="AttributeReminderTitle" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer/VBoxContainer2" unique_id=873200111]
-layout_mode = 2
-theme = ExtResource("3_0yffs")
-
-[node name="AttributeReminderBody" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer/VBoxContainer2" unique_id=173200112]
-visible = false
-custom_minimum_size = Vector2(250, 120)
-layout_mode = 2
-size_flags_horizontal = 3
-horizontal_alignment = 1
-vertical_alignment = 1
-autowrap_mode = 3
-
-[node name="AttributeReminderTitle2" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer/VBoxContainer2" unique_id=2026944547]
-layout_mode = 2
-theme = ExtResource("3_0yffs")
-
-[node name="AttributeReminderBody2" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer/VBoxContainer2" unique_id=384314617]
-visible = false
-custom_minimum_size = Vector2(250, 120)
-layout_mode = 2
-size_flags_horizontal = 3
-horizontal_alignment = 1
-vertical_alignment = 1
-autowrap_mode = 3
-
-[node name="HBoxContainer2" type="HBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer/VBoxContainer2" unique_id=1864353817]
-layout_mode = 2
-size_flags_horizontal = 0
-size_flags_vertical = 8
-
 [node name="MarginContainer2" type="MarginContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2" unique_id=795934576]
 layout_mode = 2
+theme_override_constants/margin_left = 35
+theme_override_constants/margin_top = 10
 
 [node name="VBoxContainer" type="VBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer2" unique_id=1795062068]
 layout_mode = 2
+size_flags_vertical = 0
+theme_override_constants/separation = 18
 
 [node name="HBoxContainer" type="HBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer2/VBoxContainer" unique_id=1135558308]
 layout_mode = 2
+alignment = 1
+theme_override_constants/separation = 16
 
 [node name="TextureRect2" type="Button" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer2/VBoxContainer/HBoxContainer" unique_id=1311269939]
 self_modulate = Color(0.85, 0.85, 0.85, 1)
@@ -628,17 +598,15 @@ flat = true
 
 [node name="GridContainer" type="GridContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer2/VBoxContainer" unique_id=1563533582]
 layout_mode = 2
-columns = 2
+columns = 1
+theme_override_constants/v_separation = 6
 
 [node name="Label" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer2/VBoxContainer/GridContainer" unique_id=774911927]
 layout_mode = 2
 text = "Profession"
 
-[node name="Label2" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer2/VBoxContainer/GridContainer" unique_id=1859086624]
-layout_mode = 2
-text = "Clan"
-
 [node name="OptionButton" type="OptionButton" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer2/VBoxContainer/GridContainer" unique_id=181962817]
+custom_minimum_size = Vector2(230, 0)
 layout_mode = 2
 selected = 0
 item_count = 51
@@ -745,7 +713,12 @@ popup/item_49/id = 49
 popup/item_50/text = "Smelter"
 popup/item_50/id = 50
 
+[node name="Label2" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer2/VBoxContainer/GridContainer" unique_id=1859086624]
+layout_mode = 2
+text = "Clan"
+
 [node name="OptionButton2" type="OptionButton" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2/MarginContainer2/VBoxContainer/GridContainer" unique_id=1635665934]
+custom_minimum_size = Vector2(230, 0)
 layout_mode = 2
 size_flags_horizontal = 3
 selected = 0
@@ -1141,9 +1114,6 @@ popup/item_193/id = 193
 popup/item_194/text = "Highhelm"
 popup/item_194/id = 194
 
-[node name="MarginContainer3" type="MarginContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer2/HBoxContainer2" unique_id=675707990]
-layout_mode = 2
-
 [node name="AttributeTooltipBackdrop" type="ColorRect" parent="." unique_id=2001887122]
 visible = false
 z_index = 49
@@ -1235,9 +1205,9 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -21.0
+offset_left = -45.0
 offset_top = 250.0
-offset_right = 22.0
+offset_right = 45.0
 offset_bottom = 341.0
 grow_horizontal = 2
 grow_vertical = 2
@@ -1251,10 +1221,10 @@ anchor_left = 0.5
 anchor_top = 0.46300003
 anchor_right = 0.5
 anchor_bottom = 0.46300003
-offset_left = -30.5
-offset_top = -23.133003
-offset_right = 6.5
-offset_bottom = 17.866997
+offset_left = -26.0
+offset_top = -29.0
+offset_right = 26.0
+offset_bottom = 23.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
