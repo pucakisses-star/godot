@@ -80,6 +80,54 @@ const CREATURE_DEFS: Array[Dictionary] = [
 	}
 ]
 
+## Animation layout of creature_characters.png: 8 slot blocks in a 4x2
+## grid, each block 17 columns x 4 facing rows (down, right, left, up).
+## Columns per block: walk 3 | idle 3 | attack 4 | hurt 3 | death 4,
+## resampled from the web game's 64x64 mob sheets.
+const SHEET_BLOCK_COLUMNS := 17
+const SHEET_COLUMNS := 68
+const SHEET_ROWS := 8
+const ANIM_FRAMES := {
+	"walk": {"start": 0, "count": 3, "frame_time": 0.16, "loop": true},
+	"idle": {"start": 3, "count": 3, "frame_time": 0.34, "loop": true},
+	"attack": {"start": 6, "count": 4, "frame_time": 0.11, "loop": false},
+	"hurt": {"start": 10, "count": 3, "frame_time": 0.10, "loop": false},
+	"death": {"start": 13, "count": 4, "frame_time": 0.16, "loop": false}
+}
+
+static func anim_duration(anim: String) -> float:
+	var spec := ANIM_FRAMES.get(anim, {}) as Dictionary
+	return float(int(spec.get("count", 1))) * float(spec.get("frame_time", 0.15))
+
+static func create_creature_sprite(creature_texture: Texture2D, slot: int, tile_size: Vector2i) -> Sprite2D:
+	var sprite := Sprite2D.new()
+	sprite.texture = creature_texture
+	sprite.centered = true
+	if creature_texture != null:
+		var frame_height := creature_texture.get_size().y / float(SHEET_ROWS)
+		sprite.region_enabled = true
+		# Mobs occupy ~45px of their 64px frame; 1.35x keeps them tile-sized.
+		sprite.scale = Vector2.ONE * (float(tile_size.y) / maxf(frame_height, 1.0)) * 1.35
+	update_creature_frame(sprite, slot, "idle", 0.0, 0)
+	return sprite
+
+static func update_creature_frame(sprite: Sprite2D, slot: int, anim: String, anim_time: float, facing_row: int) -> void:
+	if sprite == null or sprite.texture == null or not sprite.region_enabled:
+		return
+	var spec := ANIM_FRAMES.get(anim, ANIM_FRAMES["idle"]) as Dictionary
+	var frame_count := int(spec.get("count", 1))
+	var frame_index := int(anim_time / maxf(float(spec.get("frame_time", 0.15)), 0.001))
+	if bool(spec.get("loop", true)):
+		frame_index = frame_index % frame_count
+	else:
+		frame_index = mini(frame_index, frame_count - 1)
+	var source_size := sprite.texture.get_size()
+	var frame_width := source_size.x / float(SHEET_COLUMNS)
+	var frame_height := source_size.y / float(SHEET_ROWS)
+	var column := (slot % 4) * SHEET_BLOCK_COLUMNS + int(spec.get("start", 0)) + frame_index
+	var row := (slot / 4) * 4 + facing_row
+	sprite.region_rect = Rect2(column * frame_width, row * frame_height, frame_width, frame_height)
+
 ## Picks a creature for a spawn point, weighted among everything whose
 ## danger gate the distance has passed.
 static func pick_definition_index(distance_from_city: float, rng: RandomNumberGenerator) -> int:

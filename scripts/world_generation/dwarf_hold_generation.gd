@@ -2592,7 +2592,7 @@ func _spawn_creature_at(cell: Vector2i, def_index: int) -> void:
 	if def_index < 0 or def_index >= UndergroundCreatureService.CREATURE_DEFS.size():
 		return
 	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[def_index]
-	var sprite := DwarfHoldTavernService.create_tavern_character_sprite(_creature_texture, int(def.get("slot", 0)), tile_size)
+	var sprite: Sprite2D = UndergroundCreatureService.create_creature_sprite(_creature_texture, int(def.get("slot", 0)), tile_size)
 	sprite.position = _cell_center_position(cell)
 	sprite.z_index = 12
 	actor_layer.add_child(sprite)
@@ -2602,6 +2602,8 @@ func _spawn_creature_at(cell: Vector2i, def_index: int) -> void:
 		"cell": cell,
 		"sprite": sprite,
 		"moving": false,
+		"dying": false,
+		"anim": "idle",
 		"wander_timer": _rng.randf_range(0.5, 2.0),
 		"attack_timer": 0.0,
 		"anim_time": _rng.randf_range(0.0, 1.0),
@@ -2618,6 +2620,8 @@ func _clear_creatures() -> void:
 func _creature_index_at_cell(cell: Vector2i) -> int:
 	for index in range(_creature_states.size()):
 		var state := _creature_states[index]
+		if bool(state.get("dying", false)):
+			continue
 		if (state.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i) == cell:
 			return index
 		if bool(state.get("moving", false)) and (state.get("move_cell", Vector2i(2147483647, 2147483647)) as Vector2i) == cell:
@@ -2663,15 +2667,27 @@ func _update_creatures(delta: float) -> void:
 		if sprite == null:
 			removals.append(index)
 			continue
+		var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
+		state["anim_time"] = float(state.get("anim_time", 0.0)) + delta
+		# Corpses play their death animation, linger a beat, then fade.
+		if bool(state.get("dying", false)):
+			if float(state.get("anim_time", 0.0)) >= UndergroundCreatureService.anim_duration("death") + 0.6:
+				sprite.queue_free()
+				removals.append(index)
+			else:
+				_animate_creature(state, sprite, def)
+			continue
 		var cell := state.get("cell", Vector2i.ZERO) as Vector2i
 		var player_distance := maxi(absi(cell.x - _player_cell.x), absi(cell.y - _player_cell.y))
 		if player_distance > CREATURE_DESPAWN_DISTANCE:
 			sprite.queue_free()
 			removals.append(index)
 			continue
-		var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
 		state["attack_timer"] = maxf(float(state.get("attack_timer", 0.0)) - delta, 0.0)
-		state["anim_time"] = float(state.get("anim_time", 0.0)) + delta
+		# One-shot swings and flinches play out, then locomotion retakes the sprite.
+		var current_anim := String(state.get("anim", "idle"))
+		if (current_anim == "attack" or current_anim == "hurt") and float(state.get("anim_time", 0.0)) >= UndergroundCreatureService.anim_duration(current_anim):
+			_set_creature_anim(state, "idle")
 		if bool(state.get("moving", false)):
 			var target := state.get("move_target", sprite.position) as Vector2
 			sprite.position = sprite.position.move_toward(target, float(def.get("speed", 60.0)) * delta)
@@ -2679,31 +2695,33 @@ func _update_creatures(delta: float) -> void:
 				sprite.position = target
 				state["cell"] = state.get("move_cell", cell) as Vector2i
 				state["moving"] = false
-			_animate_creature(state, sprite, def)
-			continue
-		if player_distance <= 1 and _player_sprite != null and _player_control_enabled:
+		elif player_distance <= 1 and _player_sprite != null and _player_control_enabled:
 			state["facing_dir"] = _direction_between_cells(cell, _player_cell)
 			if float(state.get("attack_timer", 0.0)) <= 0.0:
 				state["attack_timer"] = float(def.get("attack_cooldown", 1.3))
+				_set_creature_anim(state, "attack")
 				_damage_player(int(def.get("damage", 1)), String(def.get("name", "creature")))
-			_animate_creature(state, sprite, def)
-			continue
-		var step := Vector2i.ZERO
-		if player_distance <= int(def.get("aggro_range", 6)) and not _latest_district_cell_map.has(_player_cell):
-			step = _creature_step_toward(cell, _player_cell)
 		else:
-			state["wander_timer"] = float(state.get("wander_timer", 0.0)) - delta
-			if float(state.get("wander_timer", 0.0)) <= 0.0:
-				state["wander_timer"] = _rng.randf_range(1.2, 3.2)
-				var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
-				step = directions[_rng.randi_range(0, 3)]
-		if step != Vector2i.ZERO:
-			var next_cell := cell + step
-			if _creature_can_step_to(next_cell):
-				state["moving"] = true
-				state["move_cell"] = next_cell
-				state["move_target"] = _cell_center_position(next_cell)
-				state["facing_dir"] = step
+			var step := Vector2i.ZERO
+			if player_distance <= int(def.get("aggro_range", 6)) and not _latest_district_cell_map.has(_player_cell):
+				step = _creature_step_toward(cell, _player_cell)
+			else:
+				state["wander_timer"] = float(state.get("wander_timer", 0.0)) - delta
+				if float(state.get("wander_timer", 0.0)) <= 0.0:
+					state["wander_timer"] = _rng.randf_range(1.2, 3.2)
+					var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
+					step = directions[_rng.randi_range(0, 3)]
+			if step != Vector2i.ZERO:
+				var next_cell := cell + step
+				if _creature_can_step_to(next_cell):
+					state["moving"] = true
+					state["move_cell"] = next_cell
+					state["move_target"] = _cell_center_position(next_cell)
+					state["facing_dir"] = step
+		# Locomotion owns the looped animations unless a one-shot is playing.
+		current_anim = String(state.get("anim", "idle"))
+		if current_anim != "attack" and current_anim != "hurt":
+			_set_creature_anim(state, "walk" if bool(state.get("moving", false)) else "idle")
 		_animate_creature(state, sprite, def)
 	for removal_index in range(removals.size() - 1, -1, -1):
 		_creature_states.remove_at(removals[removal_index])
@@ -2727,6 +2745,12 @@ func _direction_between_cells(from_cell: Vector2i, to_cell: Vector2i) -> Vector2
 		return Vector2i.RIGHT if delta.x >= 0 else Vector2i.LEFT
 	return Vector2i.DOWN if delta.y >= 0 else Vector2i.UP
 
+func _set_creature_anim(state: Dictionary, anim_name: String) -> void:
+	if String(state.get("anim", "")) == anim_name:
+		return
+	state["anim"] = anim_name
+	state["anim_time"] = 0.0
+
 func _animate_creature(state: Dictionary, sprite: Sprite2D, def: Dictionary) -> void:
 	var facing_dir := state.get("facing_dir", Vector2i(0, 1)) as Vector2i
 	var facing_row := 0
@@ -2736,10 +2760,12 @@ func _animate_creature(state: Dictionary, sprite: Sprite2D, def: Dictionary) -> 
 		facing_row = 2
 	elif facing_dir == Vector2i.UP:
 		facing_row = 3
-	var frame := 1
-	if bool(state.get("moving", false)):
-		frame = int(float(state.get("anim_time", 0.0)) * 6.0) % 3
-	DwarfHoldTavernService.update_character_frame(sprite, int(def.get("slot", 0)), frame, facing_row)
+	UndergroundCreatureService.update_creature_frame(
+		sprite, int(def.get("slot", 0)),
+		String(state.get("anim", "idle")),
+		float(state.get("anim_time", 0.0)),
+		facing_row
+	)
 
 func _attack_creature(creature_index: int) -> void:
 	if creature_index < 0 or creature_index >= _creature_states.size():
@@ -2748,6 +2774,8 @@ func _attack_creature(creature_index: int) -> void:
 		return
 	_player_attack_timer = PLAYER_ATTACK_COOLDOWN
 	var state := _creature_states[creature_index]
+	if bool(state.get("dying", false)):
+		return
 	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
 	var sprite := state.get("sprite") as Sprite2D
 	state["hp"] = int(state.get("hp", 1)) - PLAYER_ATTACK_DAMAGE
@@ -2755,6 +2783,7 @@ func _attack_creature(creature_index: int) -> void:
 		_flash_sprite(sprite, Color(1.0, 0.45, 0.45, 1.0))
 		_spawn_floating_text("-%d" % PLAYER_ATTACK_DAMAGE, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
 	if int(state.get("hp", 0)) > 0:
+		_set_creature_anim(state, "hurt")
 		return
 	var loot: Dictionary = UndergroundCreatureService.roll_loot(def, _rng)
 	var loot_parts := PackedStringArray()
@@ -2763,9 +2792,11 @@ func _attack_creature(creature_index: int) -> void:
 	for item_variant: Variant in loot_items:
 		_add_to_inventory(String(item_variant), int(loot[item_variant]))
 		loot_parts.append("%s ×%d" % [String(item_variant), int(loot[item_variant])])
-	if sprite != null:
-		sprite.queue_free()
-	_creature_states.remove_at(creature_index)
+	# The corpse plays its death animation out before fading (see
+	# _update_creatures); dying creatures no longer block or take hits.
+	state["dying"] = true
+	state["moving"] = false
+	_set_creature_anim(state, "death")
 	var message := "Slew %s" % String(def.get("name", "creature"))
 	if not loot_parts.is_empty():
 		message += " — " + ", ".join(loot_parts)
