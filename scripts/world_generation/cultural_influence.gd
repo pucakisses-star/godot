@@ -72,14 +72,24 @@ func apply_cultural_influence(
 	seed_number: int,
 	wood_elf_territory_info: Dictionary
 ) -> void:
+	var stage_started := Time.get_ticks_msec()
 	_sources.clear()
 	_clear_existing_influence(tiles)
 	_build_settlement_sources(settlements)
 	_build_faction_sources(factions)
 	_build_ambient_sources(width, height, tiles, seed_number, wood_elf_territory_info)
+	var sources_ms := Time.get_ticks_msec() - stage_started
+	stage_started = Time.get_ticks_msec()
 	_apply_sources(width, height, tiles, is_land_base_tile_fn)
+	var apply_ms := Time.get_ticks_msec() - stage_started
+	stage_started = Time.get_ticks_msec()
 	_resolve_scores(width, height, tiles)
+	var resolve_ms := Time.get_ticks_msec() - stage_started
+	stage_started = Time.get_ticks_msec()
 	_assign_political_regions(width, height, tiles, settlements, factions, is_land_base_tile_fn, seed_number)
+	print("[CulturalInfluence] sources %d ms | apply %d ms (%d sources) | resolve %d ms | political %d ms" % [
+		sources_ms, apply_ms, _sources.size(), resolve_ms, Time.get_ticks_msec() - stage_started
+	])
 
 func add_cultural_source(
 	x: int,

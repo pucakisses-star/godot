@@ -3272,6 +3272,7 @@ func _assign_cultural_groups(
 		map_seed,
 		wood_elf_territory_info
 	)
+	var ambient_started := Time.get_ticks_msec()
 	pipeline.spawn_ambient_structures(
 		map_size.x,
 		map_size.y,
@@ -3282,6 +3283,7 @@ func _assign_cultural_groups(
 		map_seed,
 		CultureTypes.AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE
 	)
+	print("[CulturalInfluence] ambient structure spawn %d ms" % (Time.get_ticks_msec() - ambient_started))
 	for coord: Vector2i in _tile_data.keys():
 		var tile_info := _tile_data.get(coord, {}) as Dictionary
 		if tile_info.is_empty():
