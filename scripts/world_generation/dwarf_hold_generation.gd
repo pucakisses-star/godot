@@ -19,6 +19,9 @@ const CELL_PLAZA := 4
 @export var tavern_npc_speed_range := Vector2(38.0, 62.0)
 @export var enable_fog_of_war := true
 @export var underground_level_count_range := Vector2i(3, 7)
+## Real minutes for one full in-game day (the hold's shift cycle).
+@export var minutes_per_game_day := 6.0
+@export var clock_start_hour := 9.0
 
 # Residence variety: footprints are half-extents (rooms span 2*radius+1
 # tiles). Houses sleep one dwarf; dormitories and barracks pack bed rows so
@@ -44,6 +47,7 @@ const COLLISION_LAYER_WORLD := 1
 @onready var overlay_toggle: CheckButton = %OverlayToggle
 @onready var lighting_toggle: CheckButton = %LightingToggle
 @onready var city_summary: Label = %CitySummary
+@onready var clock_label: Label = get_node_or_null("%ClockLabel")
 @onready var city_panel: PanelContainer = %CityPanel
 @onready var city_layer: TileMapLayer = %CityTileLayer
 @onready var decor_layer: TileMapLayer = %DecorTileLayer
@@ -123,6 +127,10 @@ var _last_move_direction := Vector2i.ZERO
 var _move_repeat_timer := 0.0
 var _npc_states: Array[Dictionary] = []
 var _hold_state := DwarfHoldStateModel.new()
+var _game_hour := 9.0
+var _game_day := 1
+var _calendar_start_year := 250
+var _bed_cells: Array[Vector2i] = []
 var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
@@ -175,6 +183,27 @@ const CHEST_SLOT_COLUMNS := 8
 const CHEST_SLOT_ROWS := 4
 const BACKPACK_SLOT_ROWS := 3
 
+
+## Spritesheet slots in dwarf_characters.png block order.
+const ROLE_MINER := 0
+const ROLE_WARRIOR := 1
+const ROLE_SMITH := 2
+const ROLE_HOLD_ELDER := 3
+const ROLE_BREWER := 4
+const ROLE_RUNESCRIBE := 5
+const ROLE_DWARF_WOMAN := 6
+const ROLE_GOLDSMITH := 7
+
+## Which building types each working role reports to, in preference order.
+const ROLE_WORKPLACES := {
+	ROLE_MINER: ["miners_guild", "smeltery", "mason_lodge", "storage_warehouse", "workshop"],
+	ROLE_SMITH: ["forge", "smeltery", "armory", "weapon_shop", "armor_shop", "engineers_foundry", "workshop"],
+	ROLE_HOLD_ELDER: ["archives", "guild_hall", "temple", "merchants_counting_house", "cartographers_office"],
+	ROLE_BREWER: ["brewery", "tavern", "cooperage", "granary", "kitchen"],
+	ROLE_RUNESCRIBE: ["runesmith_sanctum", "enchanting_study", "archives", "alchemy_laboratory"],
+	ROLE_DWARF_WOMAN: ["kitchen", "bakery", "tavern", "infirmary", "tailoring_shop", "general_goods_shop", "mushroom_farm", "butchery", "millhouse"],
+	ROLE_GOLDSMITH: ["gemcutters_studio", "bank_vaults", "auction_house", "merchants_counting_house", "trade_supply_store"]
+}
 
 const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
 const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
@@ -572,12 +601,38 @@ func _ready() -> void:
 	_apply_lighting_state()
 	_clear_chest_selection()
 	_update_player_character_label()
+	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
+	_update_clock_label()
 	_generate_city()
 
 func _process(delta: float) -> void:
+	_advance_game_clock(delta)
 	_update_player_turn_movement(delta)
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
+
+func _advance_game_clock(delta: float) -> void:
+	if minutes_per_game_day <= 0.0:
+		return
+	_game_hour += delta * 24.0 / (minutes_per_game_day * 60.0)
+	while _game_hour >= 24.0:
+		_game_hour -= 24.0
+		_game_day += 1
+	_update_clock_label()
+
+func _update_clock_label() -> void:
+	if clock_label == null:
+		return
+	var hour := int(_game_hour)
+	var minute := int((_game_hour - float(hour)) * 60.0)
+	var is_rest_shift := _game_hour >= 22.0 or _game_hour < 6.0
+	clock_label.text = "%s %02d:%02d — %s (%s)" % [
+		"🌙" if is_rest_shift else "⛏",
+		hour,
+		minute,
+		GameCalendar.date_text(_game_day - 1, _calendar_start_year),
+		GameCalendar.season_for_day(_game_day - 1)
+	]
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and not _is_text_input_focused():
@@ -798,6 +853,8 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 		return
 	var settings: Dictionary = game_session.call("get_world_settings")
 	var scene_seed := _hold_state.apply_world_settings(settings, DWARFHOLD_SCENE_SEED_KEY, DWARFHOLD_SCENE_POPULATION_KEY)
+	var chronology := settings.get("chronology", {}) as Dictionary
+	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
 	if scene_seed.is_empty():
 		return
 	seed_input.text = scene_seed
@@ -1722,9 +1779,11 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	var bounds := _find_bounds(grid).grow(1)
 	var house_decor_overrides := _build_house_decor_layouts(grid)
 	_latest_bed_count = 0
-	for decor_value: Variant in house_decor_overrides.values():
-		if String(decor_value) == "bed":
+	_bed_cells = []
+	for decor_cell_variant: Variant in house_decor_overrides.keys():
+		if String(house_decor_overrides[decor_cell_variant]) == "bed":
 			_latest_bed_count += 1
+			_bed_cells.append(decor_cell_variant as Vector2i)
 	for y in range(bounds.position.y, bounds.end.y):
 		for x in range(bounds.position.x, bounds.end.x):
 			var cell := _cell_at(grid, x, y)
@@ -2093,9 +2152,61 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_sprite = result.get("player_sprite")
 	_player_cell = result.get("player_cell", _player_cell)
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
+	_assign_npc_daily_lives(grid)
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
 	_refresh_lighting(grid)
+
+func _assign_npc_daily_lives(grid: Dictionary) -> void:
+	if _npc_states.is_empty():
+		return
+	var building_cells_by_type: Dictionary = {}
+	for building_cell_variant: Variant in _latest_civic_building_type_map.keys():
+		var building_type := String(_latest_civic_building_type_map[building_cell_variant])
+		if not building_cells_by_type.has(building_type):
+			building_cells_by_type[building_type] = []
+		(building_cells_by_type[building_type] as Array).append(building_cell_variant)
+	var street_cells: Array[Vector2i] = []
+	for grid_cell_variant: Variant in grid.keys():
+		var zone := int(grid[grid_cell_variant])
+		if zone != CELL_HALL and zone != CELL_PLAZA:
+			continue
+		var street_cell := grid_cell_variant as Vector2i
+		if _is_walkable_cell(street_cell):
+			street_cells.append(street_cell)
+	var npc_count := _npc_states.size()
+	SettlementNpcScheduler.assign_daily_lives(_npc_states, {
+		"bed_cells": _bed_cells,
+		"building_cells_by_type": building_cells_by_type,
+		"street_cells": street_cells,
+		"green_cells": [],
+		"is_walkable": Callable(self, "_is_walkable_cell"),
+		"rng": _rng,
+		"guard_role": ROLE_WARRIOR,
+		"green_role": -1,
+		"role_workplaces": ROLE_WORKPLACES,
+		"filler_roles": [ROLE_MINER, ROLE_DWARF_WOMAN],
+		"role_quotas": [
+			{"role": ROLE_WARRIOR, "count": maxi(2, npc_count / 12)},
+			{"role": ROLE_SMITH, "count": mini(maxi(1, npc_count / 8), (building_cells_by_type.get("forge", []) as Array).size() + (building_cells_by_type.get("smeltery", []) as Array).size() * 2 + 1)},
+			{"role": ROLE_BREWER, "count": mini(maxi(1, npc_count / 10), (building_cells_by_type.get("brewery", []) as Array).size() * 2 + (building_cells_by_type.get("tavern", []) as Array).size() + 1)},
+			{"role": ROLE_RUNESCRIBE, "count": mini(maxi(1, npc_count / 14), (building_cells_by_type.get("runesmith_sanctum", []) as Array).size() * 2 + (building_cells_by_type.get("archives", []) as Array).size() + 1)},
+			{"role": ROLE_GOLDSMITH, "count": mini(maxi(1, npc_count / 14), (building_cells_by_type.get("gemcutters_studio", []) as Array).size() * 2 + (building_cells_by_type.get("bank_vaults", []) as Array).size() + 1)},
+			{"role": ROLE_HOLD_ELDER, "count": maxi(1, npc_count / 12)}
+		]
+	})
+	# Start every dwarf where the current shift already puts them.
+	for state: Dictionary in _npc_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var mode: String = SettlementNpcScheduler.mode_for_hour(state, _game_hour)
+		var anchor: Vector2i = SettlementNpcScheduler.anchor_for_mode(state, mode)
+		if anchor.x != 2147483647 and _is_walkable_cell(anchor):
+			sprite.position = _cell_center_position(anchor)
+			state["cell"] = anchor
+			state["target"] = sprite.position
+		DwarfHoldTavernService.update_character_frame(sprite, int(state.get("slot", 0)), 1, 0)
 
 func _collect_walkable_cells(grid: Dictionary) -> Array[Vector2i]:
 	return DwarfHoldLayoutService.collect_walkable_cells(grid, [CELL_HALL, CELL_HOUSE, CELL_BUILDING, CELL_PLAZA])
@@ -2307,9 +2418,9 @@ func _center_view_on_world_position(local_position: Vector2) -> void:
 	_update_city_layer_transform()
 
 func _update_npc_movement(delta: float) -> void:
-	DwarfHoldTavernService.update_npc_movement(
+	SettlementNpcScheduler.update_scheduled_npcs(
 		delta, _npc_states, city_layer, _rng,
-		tavern_npc_speed_range, tile_size,
+		tile_size, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),
 		Callable(self, "_cell_center_position")
 	)
