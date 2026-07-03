@@ -200,6 +200,9 @@ static func chunk_for_cell(cell: Vector2i) -> Vector2i:
 		int(floor(float(cell.y) / float(CHUNK_SIZE)))
 	)
 
+static func chunk_rect(chunk: Vector2i) -> Rect2i:
+	return Rect2i(chunk * CHUNK_SIZE, Vector2i(CHUNK_SIZE, CHUNK_SIZE))
+
 static func chunk_key(chunk: Vector2i) -> String:
 	return "%d,%d" % [chunk.x, chunk.y]
 

@@ -513,6 +513,14 @@ const CIVILIZATION_LABELS := {
 @onready var rivers_overlay: Node2D = get_node_or_null("MapOverlays/RiversOverlay")
 @onready var labels_overlay: Node2D = get_node_or_null("MapOverlays/LabelsOverlay")
 @onready var overworld_camera: OverworldCamera = get_node_or_null("OverworldCamera")
+
+## Far-zoom LOD: past this zoom the dense tile layers swap for one baked
+## snapshot sprite (a tile is ~4px on screen there, so per-tile art is
+## imperceptible). Settlements, labels and actors stay live.
+const MAP_LOD_ZOOM_THRESHOLD := 0.45
+const MAP_LOD_PX_PER_TILE := 2
+var _map_snapshot_sprite: Sprite2D
+var _map_lod_active := false
 @onready var globe_view: Node3D = get_node_or_null("GlobeView")
 @onready var globe_camera: Camera3D = get_node_or_null("GlobeView/GlobeCamera")
 @onready var globe_mesh: MeshInstance3D = get_node_or_null("GlobeView/GlobeMesh")
@@ -783,10 +791,69 @@ func _hide_loading_screen() -> void:
 	if loading_screen != null:
 		loading_screen.visible = false
 
+func _build_map_snapshot() -> void:
+	if _tile_data.is_empty():
+		return
+	var image := Image.create(map_size.x * MAP_LOD_PX_PER_TILE, map_size.y * MAP_LOD_PX_PER_TILE, false, Image.FORMAT_RGBA8)
+	var biome_colors := {
+		BIOME_WATER: Color(0.16, 0.32, 0.55),
+		BIOME_GRASSLAND: Color(0.36, 0.55, 0.28),
+		BIOME_FOREST: Color(0.22, 0.42, 0.22),
+		BIOME_JUNGLE: Color(0.16, 0.38, 0.24),
+		BIOME_DESERT: Color(0.78, 0.70, 0.47),
+		BIOME_BADLANDS: Color(0.62, 0.45, 0.32),
+		BIOME_MOUNTAIN: Color(0.52, 0.50, 0.48),
+		BIOME_HILLS: Color(0.45, 0.50, 0.36),
+		BIOME_MARSH: Color(0.32, 0.44, 0.36),
+		BIOME_TUNDRA: Color(0.78, 0.80, 0.78)
+	}
+	for y in range(map_size.y):
+		for x in range(map_size.x):
+			var coord := Vector2i(x, y)
+			var info := _tile_data.get(coord, {}) as Dictionary
+			var base_biome := _biome_id_to_string(int(info.get("base_biome_id", 0)))
+			var color := biome_colors.get(base_biome, Color(0.36, 0.55, 0.28)) as Color
+			var flags := int(info.get("overlay_flags", 0))
+			if flags & TILE_OVERLAY_RIVER:
+				color = Color(0.24, 0.42, 0.62)
+			elif flags & (TILE_OVERLAY_TREE | TILE_OVERLAY_FOREST):
+				color = color.darkened(0.18)
+			var hill_biome := _biome_id_to_string(int(info.get("hill_biome_id", 0)))
+			if hill_biome == BIOME_MOUNTAIN:
+				color = biome_colors[BIOME_MOUNTAIN]
+			elif hill_biome == BIOME_HILLS:
+				color = color.lerp(biome_colors[BIOME_HILLS], 0.6)
+			for py in range(MAP_LOD_PX_PER_TILE):
+				for px in range(MAP_LOD_PX_PER_TILE):
+					image.set_pixel(x * MAP_LOD_PX_PER_TILE + px, y * MAP_LOD_PX_PER_TILE + py, color)
+	if _map_snapshot_sprite == null:
+		_map_snapshot_sprite = Sprite2D.new()
+		_map_snapshot_sprite.centered = false
+		_map_snapshot_sprite.z_index = map_layer.z_index if map_layer != null else 0
+		_map_snapshot_sprite.visible = false
+		add_child(_map_snapshot_sprite)
+		if map_layer != null:
+			move_child(_map_snapshot_sprite, map_layer.get_index())
+	_map_snapshot_sprite.texture = ImageTexture.create_from_image(image)
+	_map_snapshot_sprite.scale = Vector2.ONE * (float(tile_size) / float(MAP_LOD_PX_PER_TILE))
+
+func _update_map_lod() -> void:
+	if _map_snapshot_sprite == null or overworld_camera == null:
+		return
+	var far_out: bool = overworld_camera.zoom.x < MAP_LOD_ZOOM_THRESHOLD and not (_is_globe_view or _is_scene3d_view)
+	if far_out == _map_lod_active:
+		return
+	_map_lod_active = far_out
+	_map_snapshot_sprite.visible = far_out and not (_is_globe_view or _is_scene3d_view)
+	for layer: TileMapLayer in [map_layer, tree_layer, river_layer, highland_layer, iceberg_layer]:
+		if layer != null:
+			layer.visible = not far_out
+
 func _process(delta: float) -> void:
 	_update_map_tooltip()
 	_update_caravans(delta)
 	_update_pirate_ships(delta)
+	_update_map_lod()
 	if _is_globe_view:
 		_rotate_globe(delta)
 
@@ -1008,19 +1075,19 @@ func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 			print("Unable to resolve dwarfhold scene seed for %s" % tile_coord)
 			return
 		_store_selected_dwarfhold_scene_context(dwarfhold_seed, tile_coord, details)
-		get_tree().change_scene_to_file(DWARFHOLD_GENERATION_SCENE_PATH)
+		SceneCacheService.request_change(self, DWARFHOLD_GENERATION_SCENE_PATH)
 		return
 
 	if _is_town_settlement(details):
 		var town_seed := _town_scene_seed_for_tile(tile_coord, details)
 		_store_selected_town_scene_context(town_seed, tile_coord, details, _town_theme_for_details(details))
-		get_tree().change_scene_to_file(TOWN_GENERATION_SCENE_PATH)
+		SceneCacheService.request_change(self, TOWN_GENERATION_SCENE_PATH)
 		return
 
 	if _is_dungeon_structure(details):
 		var dungeon_seed := _dungeon_scene_seed_for_tile(tile_coord, details)
 		_store_selected_dungeon_scene_context(dungeon_seed, tile_coord, details)
-		get_tree().change_scene_to_file(DUNGEON_INTERIOR_SCENE_PATH)
+		SceneCacheService.request_change(self, DUNGEON_INTERIOR_SCENE_PATH)
 		return
 
 	print("Begin journey is not yet available for this settlement type: %s" % tile_coord)
@@ -1651,6 +1718,7 @@ func _generate_map() -> void:
 	_moisture_map = _float_buffer_to_dictionary(_moisture_buffer)
 	_biome_map = _biome_buffer_to_dictionary(_biome_buffer)
 	_update_height_texture()
+	_build_map_snapshot()
 	_mark_all_overlays_dirty()
 	_ensure_overlay_texture("elevation")
 	if _temperature_overlay_enabled:

@@ -111,10 +111,11 @@ func _on_save_pressed() -> void:
 
 func _on_return_pressed() -> void:
 	get_tree().paused = false
-	get_tree().change_scene_to_file(OVERWORLD_SCENE_PATH)
+	SceneCacheService.request_change(self, OVERWORLD_SCENE_PATH)
 
 func _on_main_menu_pressed() -> void:
 	get_tree().paused = false
+	SceneCacheService.request_clear(self)
 	get_tree().change_scene_to_file(MAIN_MENU_SCENE_PATH)
 
 func _on_quit_pressed() -> void:
