@@ -649,6 +649,11 @@ const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
 const DWARFHOLD_SCENE_TILE_KEY := "dwarfhold_scene_tile"
 const DWARFHOLD_SCENE_NAME_KEY := "dwarfhold_scene_name"
 const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
+const TOWN_GENERATION_SCENE_PATH := "res://scenes/town_generation.tscn"
+const TOWN_SCENE_SEED_KEY := "town_scene_seed"
+const TOWN_SCENE_TILE_KEY := "town_scene_tile"
+const TOWN_SCENE_NAME_KEY := "town_scene_name"
+const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
 const MORE_INFO_IMAGE_FOLDER := "res://resources/images/overworld/more_info"
 const GENERATION_YIELD_ROW_INTERVAL := 32
 const GENERATION_YIELD_CELL_INTERVAL := 1024
@@ -968,17 +973,27 @@ func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 	var details := _tile_data.get(tile_coord, {}) as Dictionary
 	if details.is_empty():
 		return
-	if not _is_dwarfhold_structure(details):
-		print("Begin journey is currently available for dwarfholds only: %s" % tile_coord)
+
+	if _is_dwarfhold_structure(details):
+		var dwarfhold_seed := _dwarfhold_scene_seed_for_tile(tile_coord, details)
+		if dwarfhold_seed.is_empty():
+			print("Unable to resolve dwarfhold scene seed for %s" % tile_coord)
+			return
+		_store_selected_dwarfhold_scene_context(dwarfhold_seed, tile_coord, details)
+		get_tree().change_scene_to_file(DWARFHOLD_GENERATION_SCENE_PATH)
 		return
 
-	var dwarfhold_seed := _dwarfhold_scene_seed_for_tile(tile_coord, details)
-	if dwarfhold_seed.is_empty():
-		print("Unable to resolve dwarfhold scene seed for %s" % tile_coord)
+	if _is_town_settlement(details):
+		var town_seed := _town_scene_seed_for_tile(tile_coord, details)
+		_store_selected_town_scene_context(town_seed, tile_coord, details)
+		get_tree().change_scene_to_file(TOWN_GENERATION_SCENE_PATH)
 		return
 
-	_store_selected_dwarfhold_scene_context(dwarfhold_seed, tile_coord, details)
-	get_tree().change_scene_to_file(DWARFHOLD_GENERATION_SCENE_PATH)
+	print("Begin journey is not yet available for this settlement type: %s" % tile_coord)
+
+func _is_town_settlement(details: Dictionary) -> bool:
+	var settlement_type := String(details.get("settlement_type", "")).strip_edges().to_lower()
+	return settlement_type == "town" or settlement_type == "city" or settlement_type == "hamlet"
 
 func _store_selected_dwarfhold_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary) -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -992,6 +1007,31 @@ func _store_selected_dwarfhold_scene_context(seed_text: String, tile_coord: Vect
 	settings[DWARFHOLD_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
 	settings[DWARFHOLD_SCENE_POPULATION_KEY] = maxi(0, int(details.get("population", 0)))
 	game_session.call("set_world_settings", settings)
+
+func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary) -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null:
+		return
+	if not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings[TOWN_SCENE_SEED_KEY] = seed_text
+	settings[TOWN_SCENE_TILE_KEY] = {"x": tile_coord.x, "y": tile_coord.y}
+	settings[TOWN_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
+	settings[TOWN_SCENE_POPULATION_KEY] = maxi(0, int(details.get("population", 0)))
+	game_session.call("set_world_settings", settings)
+
+func _town_scene_seed_for_tile(tile_coord: Vector2i, details: Dictionary) -> String:
+	var existing_seed := String(details.get(TOWN_SCENE_SEED_KEY, "")).strip_edges()
+	if not existing_seed.is_empty():
+		return existing_seed
+
+	var settlement_name := _tile_region_name(tile_coord, details)
+	if settlement_name.is_empty():
+		settlement_name = "Unknown Town"
+	var population := maxi(0, int(details.get("population", 0)))
+	var seed_basis := "town|%s|%d|%d|%d|%d" % [settlement_name, tile_coord.x, tile_coord.y, map_seed, population]
+	return str(seed_basis.hash())
 
 func _dwarfhold_scene_seed_for_tile(tile_coord: Vector2i, details: Dictionary) -> String:
 	var existing_seed := String(details.get(DWARFHOLD_SCENE_SEED_KEY, "")).strip_edges()
