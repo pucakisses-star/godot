@@ -2524,15 +2524,31 @@ func _npc_state_at_cell(cell: Vector2i) -> Dictionary:
 			return state
 	return {}
 
+## Every villager is somebody: identities are rolled once at spawn from
+## the town's seeded rng, so the same seed always houses the same folk.
+func _assign_npc_identities() -> void:
+	for state: Dictionary in _npc_states:
+		var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
+		var identity: Dictionary = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		state["identity"] = identity
+		state["npc_name"] = String(identity.get("name", "A villager"))
+
 func _show_npc_dialogue(state: Dictionary) -> void:
-	if not state.has("npc_name"):
-		state["npc_name"] = TownDetailsGenerator.npc_name(_rng)
 	var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
-	var rumor: String = SettlementEconomyService.rumor_from_town_details(_town_details, _rng)
-	var line: String = SettlementEconomyService.dialogue_line(role_title, rumor, _rng)
+	if not state.has("identity"):
+		state["identity"] = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		state["npc_name"] = String((state["identity"] as Dictionary).get("name", "A villager"))
+	var identity := state.get("identity", {}) as Dictionary
+	# Sometimes they talk about themselves instead of the news.
+	var line: String
+	if _rng.randf() < 0.4:
+		line = SettlementEconomyService.dialogue_line(role_title, NpcIdentityService.personal_line(identity, _rng), _rng)
+	else:
+		var rumor: String = SettlementEconomyService.rumor_from_town_details(_town_details, _rng)
+		line = SettlementEconomyService.dialogue_line(role_title, rumor, _rng)
 	var sprite := state.get("sprite") as Sprite2D
 	var anchor_position: Vector2 = sprite.position if sprite != null else _player_sprite.position
-	_spawn_speech_bubble("%s, %s\n%s" % [String(state.get("npc_name", "A villager")), role_title, line], anchor_position)
+	_spawn_speech_bubble("%s\n%s" % [NpcIdentityService.summary_line(identity), line], anchor_position)
 
 func _spawn_speech_bubble(text: String, world_position: Vector2) -> void:
 	if _active_speech_bubble != null and is_instance_valid(_active_speech_bubble):
@@ -2695,6 +2711,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_cell = result.get("player_cell", _player_cell)
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	_assign_npc_daily_lives(grid)
+	_assign_npc_identities()
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
 	_refresh_lighting(grid)
@@ -3090,7 +3107,17 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	var atlas_coords := hovered_layer.get_cell_atlas_coords(hovered_cell)
 	var tile_name := _tile_name_from_atlas(atlas_coords)
 	var zone_name := _zone_name_for_cell(hovered_cell)
-	var tooltip_lines: PackedStringArray = ["Tile: %s" % tile_name, "Zone: %s" % zone_name]
+	var tooltip_lines: PackedStringArray = []
+	# A villager under the cursor introduces themselves, Dwarf Fortress style.
+	var hovered_npc := _npc_state_at_cell(hovered_cell)
+	if not hovered_npc.is_empty() and hovered_npc.has("identity"):
+		var identity := hovered_npc.get("identity", {}) as Dictionary
+		tooltip_lines.append(NpcIdentityService.summary_line(identity))
+		for detail: String in NpcIdentityService.detail_lines(identity):
+			tooltip_lines.append(detail)
+		tooltip_lines.append("")
+	tooltip_lines.append("Tile: %s" % tile_name)
+	tooltip_lines.append("Zone: %s" % zone_name)
 	var subtype := _building_type_for_cell_or_empty(hovered_cell)
 	if not subtype.is_empty():
 		tooltip_lines.append("Subtype: %s" % _display_name_for_building_type(subtype))
