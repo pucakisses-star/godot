@@ -40,7 +40,10 @@ const CREATURE_DEFS: Array[Dictionary] = [
 		"name": "Lizardman Skirmisher", "slot": 3, "max_hp": 8, "damage": 2,
 		"speed": 100.0, "aggro_range": 9, "attack_cooldown": 1.2,
 		"min_distance": 40, "weight": 7,
-		"loot": [{"item": "Lizard Scale", "min": 1, "max": 2, "chance": 100}]
+		"loot": [
+			{"item": "Lizard Scale", "min": 1, "max": 2, "chance": 100},
+			{"item": "Lizard Fillet", "min": 1, "max": 1, "chance": 70}
+		]
 	},
 	{
 		"name": "Lizardman Stalker", "slot": 4, "max_hp": 11, "damage": 3,
@@ -48,6 +51,7 @@ const CREATURE_DEFS: Array[Dictionary] = [
 		"min_distance": 80, "weight": 5,
 		"loot": [
 			{"item": "Lizard Scale", "min": 1, "max": 2, "chance": 100},
+			{"item": "Lizard Fillet", "min": 1, "max": 2, "chance": 70},
 			{"item": "Iron Ore", "min": 1, "max": 1, "chance": 40}
 		]
 	},
@@ -66,6 +70,7 @@ const CREATURE_DEFS: Array[Dictionary] = [
 		"min_distance": 90, "weight": 5,
 		"loot": [
 			{"item": "Orcish Tooth", "min": 1, "max": 2, "chance": 100},
+			{"item": "Raw Haunch", "min": 1, "max": 1, "chance": 60},
 			{"item": "Stone", "min": 1, "max": 2, "chance": 50}
 		]
 	},
@@ -75,6 +80,7 @@ const CREATURE_DEFS: Array[Dictionary] = [
 		"min_distance": 150, "weight": 4,
 		"loot": [
 			{"item": "Orcish Tooth", "min": 2, "max": 3, "chance": 100},
+			{"item": "Rack of Ribs", "min": 1, "max": 1, "chance": 60},
 			{"item": "Iron Ore", "min": 1, "max": 2, "chance": 60}
 		]
 	}
