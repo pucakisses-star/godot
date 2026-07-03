@@ -25,3 +25,4 @@
 # Stored in-repo (fork LFS store is missing objects; keep menu art recoverable)
 resources/images/main_menu/smith.png -filter -diff -merge -text
 resources/images/overworld/atlas/world_map_details.png -filter -diff -merge -text
+resources/images/overworld/atlas/overworld.png -filter -diff -merge -text
