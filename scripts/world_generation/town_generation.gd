@@ -498,6 +498,7 @@ func _ready() -> void:
 	_clear_chest_selection()
 	_update_player_character_label()
 	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
+	_load_persistent_clock()
 	_update_day_night_tint()
 	_update_clock_label()
 	_generate_city()
@@ -602,6 +603,27 @@ func _set_save_status(text: String, color: Color) -> void:
 		return
 	save_status_label.text = text
 	save_status_label.modulate = color
+
+## The world clock is shared across scenes: entering town resumes wherever
+## time stood when you left the last settlement.
+func _load_persistent_clock() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	var clock_variant: Variant = settings.get("game_clock")
+	if clock_variant is Dictionary:
+		var clock := clock_variant as Dictionary
+		_game_hour = clampf(float(clock.get("hour", _game_hour)), 0.0, 23.99)
+		_game_day = maxi(1, int(clock.get("day", _game_day)))
+
+func _exit_tree() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
+	game_session.call("set_world_settings", settings)
 
 func _update_player_character_label() -> void:
 	if player_character_label == null:

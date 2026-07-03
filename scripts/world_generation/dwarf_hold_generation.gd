@@ -94,6 +94,7 @@ var _generated_chunks: Dictionary = {}
 var _dug_cells: Dictionary = {}
 var _applied_light_dim := -1.0
 var _last_clock_stamp := -1
+var _restoring_hold_diffs := false
 var _last_player_chunk := Vector2i(2147483647, 2147483647)
 var _world_seed_hash := 0
 var _underdeep_sites: Array = []
@@ -851,6 +852,7 @@ func _ready() -> void:
 	_clear_chest_selection()
 	_update_player_character_label()
 	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
+	_load_persistent_player_state()
 	_update_clock_label()
 	_setup_inventory_label()
 	_setup_hp_label()
@@ -1523,6 +1525,7 @@ func _show_level(target_level_index: int) -> void:
 
 	_chest_inventories.clear()
 	_clear_chest_selection()
+	_apply_hold_diffs_to_level(level_data, grid)
 	_render_city(grid, _hold_state.active_level_stairs)
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
@@ -2805,6 +2808,7 @@ func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 				discovery["wild"] = true
 				_latest_district_labels.append(discovery)
 			var rect: Rect2i = UndergroundWorldService.generate_chunk(_latest_grid, _latest_floor_decor, chunk, _world_noise)
+			_apply_hold_diffs_to_rect(rect)
 			_render_world_rect(rect.grow(14 if stamped_site else 1))
 			if stamped_site or not discovery.is_empty():
 				_rebuild_district_labels()
@@ -2853,6 +2857,7 @@ func _try_harvest_decor(cell: Vector2i) -> bool:
 		decor_layer.erase_cell(cell)
 		_actor_passable_cache.erase(cell)
 		_latest_floor_decor.erase(cell)
+		_record_hold_edit("decor_erased", cell)
 		var vein_drop := _roll_weighted_drop(ORE_VEIN_DROPS)
 		_add_to_inventory(
 			String(vein_drop.get("name", "Iron Ore")),
@@ -2863,6 +2868,7 @@ func _try_harvest_decor(cell: Vector2i) -> bool:
 		decor_layer.erase_cell(cell)
 		_actor_passable_cache.erase(cell)
 		_latest_floor_decor.erase(cell)
+		_record_hold_edit("decor_erased", cell)
 		_add_to_inventory("Mushrooms", _rng.randi_range(1, 2))
 		if _rng.randi_range(1, 100) <= MUSHROOM_VARIETY_CHANCE_PERCENT:
 			_add_to_inventory(WILD_MUSHROOM_VARIETIES[_rng.randi_range(0, WILD_MUSHROOM_VARIETIES.size() - 1)], 1)
@@ -2891,6 +2897,7 @@ func _place_torch() -> void:
 	if not level_data.has("torches"):
 		level_data["torches"] = []
 	(level_data["torches"] as Array).append(_player_cell)
+	_record_hold_edit("torches", _player_cell)
 	_spawn_torch_at(_player_cell)
 	_set_save_status("Torch placed", Color(0.95, 0.85, 0.55, 1.0))
 
@@ -3196,6 +3203,7 @@ func _try_place_build(cell: Vector2i) -> bool:
 				return true
 			_latest_grid[cell] = CELL_ROCK
 			_dug_cells.erase(cell)
+			_record_hold_edit("grid_edits", cell, CELL_ROCK)
 			_render_world_rect(Rect2i(cell - Vector2i(2, 2), Vector2i(5, 5)))
 			if _lighting_enabled:
 				_update_shattered_visibility(_latest_grid)
@@ -3205,6 +3213,7 @@ func _try_place_build(cell: Vector2i) -> bool:
 				_set_save_status("Paving needs bare cavern floor", Color(0.95, 0.75, 0.45, 1.0))
 				return true
 			_latest_grid[cell] = CELL_PLAZA
+			_record_hold_edit("grid_edits", cell, CELL_PLAZA)
 			_render_world_rect(Rect2i(cell - Vector2i(1, 1), Vector2i(3, 3)))
 		_:
 			if zone != CELL_HALL and zone != CELL_PLAZA and zone != CELL_HOUSE:
@@ -3215,6 +3224,7 @@ func _try_place_build(cell: Vector2i) -> bool:
 				return true
 			var tile_key := String(entry.get("tile", "table"))
 			_latest_floor_decor[cell] = tile_key
+			_record_hold_edit("decor_edits", cell, tile_key)
 			# Player-built chests start empty: storage, not treasure.
 			if tile_key == "chest" and not _chest_inventories.has(cell):
 				_chest_inventories[cell] = []
@@ -3671,6 +3681,12 @@ func _damage_player(amount: int, source_name: String) -> void:
 
 func _handle_player_death(source_name: String) -> void:
 	_player_hp = PLAYER_MAX_HP
+	var lost_coins := _player_coins / 2
+	if lost_coins > 0:
+		_adjust_coins(-lost_coins)
+		if _player_sprite != null:
+			_spawn_floating_text("-%d coins" % lost_coins, _player_sprite.position, Color(0.95, 0.8, 0.4, 1.0))
+	_save_player_inventory()
 	_update_hp_label()
 	_player_move_path.clear()
 	_player_is_moving = false
@@ -3745,7 +3761,139 @@ func _save_player_inventory() -> void:
 	var settings: Dictionary = game_session.call("get_world_settings")
 	settings["player_inventory"] = _player_inventory.duplicate()
 	settings["player_coins"] = _player_coins
+	settings["player_hp"] = _player_hp
 	game_session.call("set_world_settings", settings)
+
+## --- Cross-visit persistence ---------------------------------------------
+## Player edits to the hold (digging, torches, builds, cleared decor) are
+## mirrored into GameSession keyed by hold seed and level, then re-applied
+## on entry - so the base you carve survives leaving the scene.
+
+static func _cell_key(cell: Vector2i) -> String:
+	return "%d,%d" % [cell.x, cell.y]
+
+static func _parse_cell_key(key: String) -> Vector2i:
+	var parts := key.split(",")
+	if parts.size() != 2:
+		return Vector2i.ZERO
+	return Vector2i(int(parts[0]), int(parts[1]))
+
+func _hold_diff_for_level() -> Dictionary:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings"):
+		return {}
+	var settings: Dictionary = game_session.call("get_world_settings")
+	var diffs: Dictionary = settings.get("hold_diffs", {}) as Dictionary if settings.get("hold_diffs") is Dictionary else {}
+	var hold: Dictionary = diffs.get(str(_world_seed_hash), {}) as Dictionary if diffs.get(str(_world_seed_hash)) is Dictionary else {}
+	var level_variant: Variant = hold.get(str(_hold_state.current_level_index), {})
+	return level_variant as Dictionary if level_variant is Dictionary else {}
+
+## field semantics: "dug"/"torches"/"decor_erased" are cell lists
+## (value omitted); "grid_edits"/"decor_edits" map cell -> value.
+func _record_hold_edit(field: String, cell: Vector2i, value: Variant = null) -> void:
+	if _restoring_hold_diffs:
+		return
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	var diffs: Dictionary = settings.get("hold_diffs", {}) as Dictionary if settings.get("hold_diffs") is Dictionary else {}
+	var hold_key := str(_world_seed_hash)
+	var hold: Dictionary = diffs.get(hold_key, {}) as Dictionary if diffs.get(hold_key) is Dictionary else {}
+	var level_key := str(_hold_state.current_level_index)
+	var level: Dictionary = hold.get(level_key, {}) as Dictionary if hold.get(level_key) is Dictionary else {}
+	var key := _cell_key(cell)
+	if value == null:
+		var cells: Array = level.get(field, []) as Array
+		if not cells.has(key):
+			cells.append(key)
+		level[field] = cells
+	else:
+		var edits: Dictionary = level.get(field, {}) as Dictionary
+		edits[key] = value
+		level[field] = edits
+	hold[level_key] = level
+	diffs[hold_key] = hold
+	settings["hold_diffs"] = diffs
+	game_session.call("set_world_settings", settings)
+
+## Re-applies the stored diff to freshly generated level data. Order
+## matters: digs first, then grid edits (a wall built over a dug cell
+## must win), then decor.
+func _apply_hold_diffs_to_level(level_data: Dictionary, grid: Dictionary) -> void:
+	var diff := _hold_diff_for_level()
+	if diff.is_empty():
+		return
+	_restoring_hold_diffs = true
+	for key_variant: Variant in (diff.get("dug", []) as Array):
+		var cell := _parse_cell_key(String(key_variant))
+		grid[cell] = CELL_HALL
+		_dug_cells[cell] = true
+	var grid_edits := diff.get("grid_edits", {}) as Dictionary
+	for key_variant: Variant in grid_edits.keys():
+		grid[_parse_cell_key(String(key_variant))] = int(grid_edits[key_variant])
+	var decor_edits := diff.get("decor_edits", {}) as Dictionary
+	for key_variant: Variant in decor_edits.keys():
+		var cell := _parse_cell_key(String(key_variant))
+		var tile_key := String(decor_edits[key_variant])
+		_latest_floor_decor[cell] = tile_key
+		if tile_key == "chest" and not _chest_inventories.has(cell):
+			_chest_inventories[cell] = []
+	for key_variant: Variant in (diff.get("decor_erased", []) as Array):
+		_latest_floor_decor.erase(_parse_cell_key(String(key_variant)))
+	if not level_data.has("torches"):
+		level_data["torches"] = []
+	var torches := level_data["torches"] as Array
+	for key_variant: Variant in (diff.get("torches", []) as Array):
+		var cell := _parse_cell_key(String(key_variant))
+		if not torches.has(cell):
+			torches.append(cell)
+	_restoring_hold_diffs = false
+
+## Chunk streaming regenerates terrain from noise, which would refill
+## player-dug tunnels: re-assert the diff for cells inside the new chunk.
+func _apply_hold_diffs_to_rect(rect: Rect2i) -> void:
+	var diff := _hold_diff_for_level()
+	if diff.is_empty():
+		return
+	for key_variant: Variant in (diff.get("dug", []) as Array):
+		var cell := _parse_cell_key(String(key_variant))
+		if rect.has_point(cell):
+			_latest_grid[cell] = CELL_HALL
+			_dug_cells[cell] = true
+	var grid_edits := diff.get("grid_edits", {}) as Dictionary
+	for key_variant: Variant in grid_edits.keys():
+		var cell := _parse_cell_key(String(key_variant))
+		if rect.has_point(cell):
+			_latest_grid[cell] = int(grid_edits[key_variant])
+	for key_variant: Variant in (diff.get("decor_erased", []) as Array):
+		var cell := _parse_cell_key(String(key_variant))
+		if rect.has_point(cell):
+			_latest_floor_decor.erase(cell)
+
+func _load_persistent_player_state() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	_player_hp = clampf(float(settings.get("player_hp", PLAYER_MAX_HP)), 1.0, PLAYER_MAX_HP)
+	var clock_variant: Variant = settings.get("game_clock")
+	if clock_variant is Dictionary:
+		var clock := clock_variant as Dictionary
+		_game_hour = clampf(float(clock.get("hour", _game_hour)), 0.0, 23.99)
+		_game_day = maxi(1, int(clock.get("day", _game_day)))
+
+func _save_persistent_player_state() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings["player_hp"] = _player_hp
+	settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
+	game_session.call("set_world_settings", settings)
+
+func _exit_tree() -> void:
+	_save_persistent_player_state()
 
 func _update_inventory_label() -> void:
 	if _inventory_label == null:
@@ -3765,6 +3913,7 @@ func _update_inventory_label() -> void:
 func _dig_cell(cell: Vector2i) -> void:
 	_latest_grid[cell] = CELL_HALL
 	_dug_cells[cell] = true
+	_record_hold_edit("dug", cell)
 	_add_to_inventory("Stone", 1)
 	if _rng.randi_range(1, 100) <= DIG_FOSSIL_CHANCE_PERCENT:
 		var fossil: String = DIG_FOSSIL_FINDS[_rng.randi_range(0, DIG_FOSSIL_FINDS.size() - 1)]
