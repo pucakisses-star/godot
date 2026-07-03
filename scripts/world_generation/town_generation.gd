@@ -138,6 +138,7 @@ var _town_name := ""
 var _town_details: Dictionary = {}
 var _game_hour := 9.0
 var _game_day := 1
+var _calendar_start_year := 250
 var _bed_cells: Array[Vector2i] = []
 var _green_cells: Array[Vector2i] = []
 var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
@@ -196,6 +197,26 @@ const BACKPACK_SLOT_ROWS := 3
 const TOWN_SCENE_SEED_KEY := "town_scene_seed"
 const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
 const TOWN_SCENE_NAME_KEY := "town_scene_name"
+
+## Spritesheet slots in townsfolk_characters.png block order.
+const ROLE_VILLAGER := 0
+const ROLE_VILLAGER_WOMAN := 1
+const ROLE_GUARD := 2
+const ROLE_MERCHANT := 3
+const ROLE_BLACKSMITH := 4
+const ROLE_CLERIC := 5
+const ROLE_FARMER := 6
+const ROLE_ELDER := 7
+
+## Which building types each working role reports to, in preference order.
+const ROLE_WORKPLACES := {
+	ROLE_BLACKSMITH: ["smithy", "workshop", "carpenter"],
+	ROLE_MERCHANT: ["market_stall", "general_store", "warehouse"],
+	ROLE_CLERIC: ["chapel", "town_hall"],
+	ROLE_ELDER: ["town_hall", "guild_hall", "tavern"],
+	ROLE_VILLAGER: ["tavern", "bakery", "general_store", "warehouse", "stable", "carpenter", "tailor", "apothecary", "inn", "workshop"],
+	ROLE_VILLAGER_WOMAN: ["bakery", "tailor", "apothecary", "inn", "tavern", "general_store", "guild_hall", "workshop"]
+}
 
 ## Upper halves of two-tile-tall furniture, drawn over the cell above the
 ## furniture base at render time (passable visual caps).
@@ -420,7 +441,13 @@ func _update_clock_label() -> void:
 	var hour := int(_game_hour)
 	var minute := int((_game_hour - float(hour)) * 60.0)
 	var is_night := _game_hour >= 20.0 or _game_hour < 6.0
-	clock_label.text = "%s Day %d — %02d:%02d" % ["🌙" if is_night else "☀", _game_day, hour, minute]
+	clock_label.text = "%s %02d:%02d — %s (%s)" % [
+		"🌙" if is_night else "☀",
+		hour,
+		minute,
+		GameCalendar.date_text(_game_day - 1, _calendar_start_year),
+		GameCalendar.season_for_day(_game_day - 1)
+	]
 
 ## Sky tint over the whole scene: white at noon, deep blue at night, warm
 ## sunrise/sunset shoulders.
@@ -670,6 +697,8 @@ func _apply_cached_town_scene_seed() -> void:
 	var settings: Dictionary = game_session.call("get_world_settings")
 	var scene_seed := _hold_state.apply_world_settings(settings, TOWN_SCENE_SEED_KEY, TOWN_SCENE_POPULATION_KEY)
 	_town_name = String(settings.get(TOWN_SCENE_NAME_KEY, "")).strip_edges()
+	var chronology := settings.get("chronology", {}) as Dictionary
+	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
 	if scene_seed.is_empty():
 		return
 	seed_input.text = scene_seed
@@ -2002,21 +2031,34 @@ func _assign_npc_daily_lives(grid: Dictionary) -> void:
 		var street_cell := grid_cell_variant as Vector2i
 		if _is_walkable_cell(street_cell):
 			street_cells.append(street_cell)
-	TownNpcScheduler.assign_daily_lives(_npc_states, {
+	var npc_count := _npc_states.size()
+	SettlementNpcScheduler.assign_daily_lives(_npc_states, {
 		"bed_cells": _bed_cells,
 		"building_cells_by_type": building_cells_by_type,
 		"street_cells": street_cells,
 		"green_cells": _green_cells,
 		"is_walkable": Callable(self, "_is_walkable_cell"),
-		"rng": _rng
+		"rng": _rng,
+		"guard_role": ROLE_GUARD,
+		"green_role": ROLE_FARMER,
+		"role_workplaces": ROLE_WORKPLACES,
+		"filler_roles": [ROLE_VILLAGER, ROLE_VILLAGER_WOMAN],
+		"role_quotas": [
+			{"role": ROLE_GUARD, "count": maxi(2, npc_count / 12)},
+			{"role": ROLE_BLACKSMITH, "count": mini(npc_count / 10, (building_cells_by_type.get("smithy", []) as Array).size() * 2 + 1)},
+			{"role": ROLE_MERCHANT, "count": mini(maxi(1, npc_count / 8), (building_cells_by_type.get("market_stall", []) as Array).size() + (building_cells_by_type.get("general_store", []) as Array).size() * 2 + 1)},
+			{"role": ROLE_CLERIC, "count": mini(maxi(1, npc_count / 20), (building_cells_by_type.get("chapel", []) as Array).size() * 2 + 1)},
+			{"role": ROLE_FARMER, "count": maxi(1, npc_count / 8)},
+			{"role": ROLE_ELDER, "count": maxi(1, npc_count / 10)}
+		]
 	})
 	# Start everyone where their schedule already puts them.
 	for state: Dictionary in _npc_states:
 		var sprite := state.get("sprite") as Sprite2D
 		if sprite == null:
 			continue
-		var mode: String = TownNpcScheduler.mode_for_hour(state, _game_hour)
-		var anchor: Vector2i = TownNpcScheduler.anchor_for_mode(state, mode)
+		var mode: String = SettlementNpcScheduler.mode_for_hour(state, _game_hour)
+		var anchor: Vector2i = SettlementNpcScheduler.anchor_for_mode(state, mode)
 		if anchor.x != 2147483647 and _is_walkable_cell(anchor):
 			sprite.position = _cell_center_position(anchor)
 			state["cell"] = anchor
@@ -2233,7 +2275,7 @@ func _center_view_on_world_position(local_position: Vector2) -> void:
 	_update_city_layer_transform()
 
 func _update_npc_movement(delta: float) -> void:
-	TownNpcScheduler.update_scheduled_npcs(
+	SettlementNpcScheduler.update_scheduled_npcs(
 		delta, _npc_states, city_layer, _rng,
 		tile_size, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),

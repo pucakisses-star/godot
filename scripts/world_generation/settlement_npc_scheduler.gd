@@ -1,23 +1,18 @@
 extends RefCounted
-class_name TownNpcScheduler
+class_name SettlementNpcScheduler
 
-## Daily-life simulation for town NPCs. Each resident gets a role (matching
-## their spritesheet slot), a home bed and a workplace; the game clock then
-## drives where they head: work by day, leisure around the market in the
-## morning and evening, home to bed at night. Guards patrol street
-## waypoints instead of working a building, and half of them keep a night
-## watch. Movement is greedy step-toward-anchor with a random wander inside
-## the anchor radius, reusing the tavern service's facing/frame animation.
-
-## Spritesheet slots (townsfolk_characters.png block order).
-const ROLE_VILLAGER := 0
-const ROLE_VILLAGER_WOMAN := 1
-const ROLE_GUARD := 2
-const ROLE_MERCHANT := 3
-const ROLE_BLACKSMITH := 4
-const ROLE_CLERIC := 5
-const ROLE_FARMER := 6
-const ROLE_ELDER := 7
+## Daily-life simulation for settlement NPCs (towns and dwarfholds).
+## Each resident gets a role (matching their spritesheet slot), a home bed
+## and a workplace; the game clock then drives where they head: work by
+## day, leisure around the plaza in the morning and evening, home to bed
+## at night. Guard-role NPCs patrol waypoints instead of working a
+## building, and half of them keep a night watch. Movement is greedy
+## step-toward-anchor with a random wander inside the anchor radius,
+## reusing the tavern service's facing/frame animation.
+##
+## Role numbers are spritesheet slots; which slot means what is supplied
+## by the calling scene through the assignment context ("role_quotas",
+## "filler_roles", "guard_role", "green_role", "role_workplaces").
 
 const MODE_SLEEP := "sleep"
 const MODE_WORK := "work"
@@ -33,16 +28,6 @@ const TRAVEL_COOLDOWN_RANGE := Vector2(0.05, 0.25)
 const WANDER_COOLDOWN_RANGE := Vector2(0.8, 2.4)
 const SLEEP_COOLDOWN_RANGE := Vector2(4.0, 9.0)
 
-## Which building types each working role reports to, in preference order.
-const ROLE_WORKPLACES := {
-	ROLE_BLACKSMITH: ["smithy", "workshop", "carpenter"],
-	ROLE_MERCHANT: ["market_stall", "general_store", "warehouse"],
-	ROLE_CLERIC: ["chapel", "town_hall"],
-	ROLE_ELDER: ["town_hall", "guild_hall", "tavern"],
-	ROLE_VILLAGER: ["tavern", "bakery", "general_store", "warehouse", "stable", "carpenter", "tailor", "apothecary", "inn", "workshop"],
-	ROLE_VILLAGER_WOMAN: ["bakery", "tailor", "apothecary", "inn", "tavern", "general_store", "guild_hall", "workshop"]
-}
-
 ## Assigns roles, homes and workplaces to freshly spawned NPC states.
 ## context keys:
 ##   "bed_cells": Array[Vector2i] (impassable bed decor cells)
@@ -51,6 +36,11 @@ const ROLE_WORKPLACES := {
 ##   "green_cells": Array[Vector2i] (walkable open grass cells)
 ##   "is_walkable": Callable(Vector2i) -> bool
 ##   "rng": RandomNumberGenerator
+##   "role_quotas": Array of {"role": int, "count": int}
+##   "filler_roles": Array[int] used to round-robin the remainder
+##   "guard_role": int (slot that patrols; -1 for none)
+##   "green_role": int (slot that works open green cells; -1 for none)
+##   "role_workplaces": Dictionary role -> Array[String] building types
 static func assign_daily_lives(npc_states: Array[Dictionary], context: Dictionary) -> void:
 	var rng := context.get("rng") as RandomNumberGenerator
 	var is_walkable := context.get("is_walkable") as Callable
@@ -65,8 +55,11 @@ static func assign_daily_lives(npc_states: Array[Dictionary], context: Dictionar
 	for green_variant: Variant in (context.get("green_cells", []) as Array):
 		green_cells.append(green_variant as Vector2i)
 	var buildings := context.get("building_cells_by_type", {}) as Dictionary
+	var guard_role := int(context.get("guard_role", -1))
+	var green_role := int(context.get("green_role", -1))
+	var role_workplaces := context.get("role_workplaces", {}) as Dictionary
 
-	var roles := _build_role_list(npc_states.size(), buildings, rng)
+	var roles := _build_role_list(npc_states.size(), context.get("role_quotas", []) as Array, context.get("filler_roles", []) as Array, rng)
 	var bed_index := 0
 	for npc_index in npc_states.size():
 		var state := npc_states[npc_index]
@@ -87,52 +80,42 @@ static func assign_daily_lives(npc_states: Array[Dictionary], context: Dictionar
 		state["home_anchor"] = home_anchor
 
 		# Workplace by role.
-		match role:
-			ROLE_GUARD:
-				state["patrol_points"] = _pick_patrol_points(street_cells, rng)
-				state["patrol_index"] = 0
-				state["work_anchor"] = home_anchor
-				state["night_watch"] = (npc_index % 2) == 0
-			ROLE_FARMER:
-				state["work_anchor"] = _pick_from(green_cells, rng, home_anchor)
-			_:
-				state["work_anchor"] = _pick_workplace(role, buildings, is_walkable, rng, street_cells, home_anchor)
+		state["is_guard"] = role == guard_role
+		if role == guard_role:
+			state["patrol_points"] = _pick_patrol_points(street_cells, rng)
+			state["patrol_index"] = 0
+			state["work_anchor"] = home_anchor
+			state["night_watch"] = (npc_index % 2) == 0
+		elif role == green_role and not green_cells.is_empty():
+			state["work_anchor"] = _pick_from(green_cells, rng, home_anchor)
+		else:
+			state["work_anchor"] = _pick_workplace(role, role_workplaces, buildings, is_walkable, rng, street_cells, home_anchor)
 
 		# Leisure: around the market and streets.
 		state["leisure_anchor"] = _pick_from(street_cells, rng, home_anchor)
 		state["mode"] = ""
 
-## Role composition scaled to what the town actually built.
-static func _build_role_list(npc_count: int, buildings: Dictionary, rng: RandomNumberGenerator) -> Array[int]:
+## Role composition from caller-supplied quotas, padded with filler roles.
+static func _build_role_list(npc_count: int, role_quotas: Array, filler_roles: Array, rng: RandomNumberGenerator) -> Array[int]:
 	var roles: Array[int] = []
-	var guard_count := maxi(2, npc_count / 12)
-	var smith_count := mini(npc_count / 10, (buildings.get("smithy", []) as Array).size() * 2 + 1)
-	var merchant_count := mini(maxi(1, npc_count / 8), (buildings.get("market_stall", []) as Array).size() + (buildings.get("general_store", []) as Array).size() * 2 + 1)
-	var cleric_count := mini(maxi(1, npc_count / 20), (buildings.get("chapel", []) as Array).size() * 2 + 1)
-	var farmer_count := maxi(1, npc_count / 8)
-	var elder_count := maxi(1, npc_count / 10)
-	for _i in range(guard_count):
-		roles.append(ROLE_GUARD)
-	for _i in range(smith_count):
-		roles.append(ROLE_BLACKSMITH)
-	for _i in range(merchant_count):
-		roles.append(ROLE_MERCHANT)
-	for _i in range(cleric_count):
-		roles.append(ROLE_CLERIC)
-	for _i in range(farmer_count):
-		roles.append(ROLE_FARMER)
-	for _i in range(elder_count):
-		roles.append(ROLE_ELDER)
-	var villager_toggle := false
+	for quota_variant: Variant in role_quotas:
+		var quota := quota_variant as Dictionary
+		var role := int(quota.get("role", 0))
+		for _i in range(maxi(0, int(quota.get("count", 0)))):
+			roles.append(role)
+	var filler_index := 0
 	while roles.size() < npc_count:
-		roles.append(ROLE_VILLAGER if villager_toggle else ROLE_VILLAGER_WOMAN)
-		villager_toggle = not villager_toggle
+		if filler_roles.is_empty():
+			roles.append(0)
+		else:
+			roles.append(int(filler_roles[filler_index % filler_roles.size()]))
+		filler_index += 1
 	roles.resize(npc_count)
 	_shuffle_ints(roles, rng)
 	return roles
 
-static func _pick_workplace(role: int, buildings: Dictionary, is_walkable: Callable, rng: RandomNumberGenerator, street_cells: Array[Vector2i], fallback: Vector2i) -> Vector2i:
-	var preferences: Array = ROLE_WORKPLACES.get(role, []) as Array
+static func _pick_workplace(role: int, role_workplaces: Dictionary, buildings: Dictionary, is_walkable: Callable, rng: RandomNumberGenerator, street_cells: Array[Vector2i], fallback: Vector2i) -> Vector2i:
+	var preferences: Array = role_workplaces.get(role, []) as Array
 	for type_variant: Variant in preferences:
 		var cells := buildings.get(String(type_variant), []) as Array
 		if cells.is_empty():
@@ -154,8 +137,7 @@ static func _pick_patrol_points(street_cells: Array[Vector2i], rng: RandomNumber
 ## The mode an NPC should be in at the given hour.
 static func mode_for_hour(state: Dictionary, hour: float) -> String:
 	var sleeping := hour >= SLEEP_START_HOUR or hour < SLEEP_END_HOUR
-	var role := int(state.get("role", ROLE_VILLAGER))
-	if role == ROLE_GUARD:
+	if bool(state.get("is_guard", false)):
 		if sleeping and not bool(state.get("night_watch", false)):
 			return MODE_SLEEP
 		return MODE_PATROL
