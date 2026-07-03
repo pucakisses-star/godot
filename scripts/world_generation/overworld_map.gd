@@ -631,6 +631,10 @@ var _routes_overlay_enabled := false
 var _labels_overlay_enabled := true
 var _scale_bar_enabled := true
 var _route_segments: Array = []
+var _caravans_layer: Node2D
+var _caravan_states: Array[Dictionary] = []
+var _caravan_texture: Texture2D
+var _escape_menu: EscapeMenu
 var _overlay_dirty := {
 	"elevation": true,
 	"temperature": true,
@@ -667,6 +671,8 @@ func _ready() -> void:
 	if map_layer == null:
 		push_error("Overworld map is missing a TileMapLayer named MapLayer.")
 		return
+	_escape_menu = EscapeMenu.new()
+	add_child(_escape_menu)
 	_show_loading_screen()
 	await get_tree().process_frame
 	_apply_cached_world_settings()
@@ -764,10 +770,16 @@ func _hide_loading_screen() -> void:
 
 func _process(delta: float) -> void:
 	_update_map_tooltip()
+	_update_caravans(delta)
 	if _is_globe_view:
 		_rotate_globe(delta)
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		if _escape_menu != null:
+			_escape_menu.toggle()
+			get_viewport().set_input_as_handled()
+		return
 	if _is_globe_view and _handle_globe_input(event):
 		return
 	if _is_scene3d_view and _handle_scene3d_input(event):
@@ -4722,7 +4734,110 @@ func _update_political_boundaries_overlay_visibility() -> void:
 		return
 	political_boundaries_overlay.visible = _political_boundaries_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
 
+## --- Caravans -------------------------------------------------------------
+## Merchant wagons ride the trade routes between settlements, ping-ponging
+## endlessly. Pure map life: they follow the same terrain-following paths
+## the routes overlay draws, and stay visible even with the overlay off.
+
+func _spawn_caravans() -> void:
+	_caravan_states.clear()
+	if _caravans_layer != null:
+		_caravans_layer.queue_free()
+		_caravans_layer = null
+	if routes_overlay == null or _route_segments.is_empty():
+		return
+	_caravans_layer = Node2D.new()
+	_caravans_layer.name = "CaravansOverlay"
+	_caravans_layer.z_index = 6
+	routes_overlay.get_parent().add_child(_caravans_layer)
+	if _caravan_texture == null:
+		_caravan_texture = _create_caravan_texture()
+	var caravan_rng := RandomNumberGenerator.new()
+	caravan_rng.seed = hash("caravans") + _route_segments.size() * 31
+	var caravan_count := mini(6, _route_segments.size())
+	for _caravan_index in range(caravan_count):
+		var path := _route_segments[caravan_rng.randi_range(0, _route_segments.size() - 1)] as PackedVector2Array
+		if path.size() < 4:
+			continue
+		var total_length := 0.0
+		for i in range(path.size() - 1):
+			total_length += path[i].distance_to(path[i + 1])
+		if total_length <= 1.0:
+			continue
+		var sprite := Sprite2D.new()
+		sprite.texture = _caravan_texture
+		sprite.centered = true
+		_caravans_layer.add_child(sprite)
+		_caravan_states.append({
+			"path": path,
+			"length": total_length,
+			"t": caravan_rng.randf_range(0.0, total_length),
+			"dir": 1.0 if caravan_rng.randf() < 0.5 else -1.0,
+			"speed": caravan_rng.randf_range(9.0, 16.0),
+			"sprite": sprite
+		})
+	_update_caravans(0.0)
+	_update_caravans_visibility()
+
+func _update_caravans(delta: float) -> void:
+	for state: Dictionary in _caravan_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var total_length := float(state.get("length", 1.0))
+		var t := float(state.get("t", 0.0)) + float(state.get("speed", 10.0)) * float(state.get("dir", 1.0)) * delta
+		if t <= 0.0:
+			t = 0.0
+			state["dir"] = 1.0
+		elif t >= total_length:
+			t = total_length
+			state["dir"] = -1.0
+		state["t"] = t
+		var path := state.get("path") as PackedVector2Array
+		var remaining := t
+		var caravan_position := path[0]
+		var heading := Vector2.RIGHT
+		for i in range(path.size() - 1):
+			var segment_length := path[i].distance_to(path[i + 1])
+			if segment_length <= 0.001:
+				continue
+			if remaining <= segment_length:
+				caravan_position = path[i].lerp(path[i + 1], remaining / segment_length)
+				heading = path[i + 1] - path[i]
+				break
+			remaining -= segment_length
+			caravan_position = path[i + 1]
+		sprite.position = caravan_position
+		sprite.flip_h = heading.x * float(state.get("dir", 1.0)) < 0.0
+
+func _update_caravans_visibility() -> void:
+	if _caravans_layer == null:
+		return
+	_caravans_layer.visible = not (_is_globe_view or _is_scene3d_view)
+
+func _create_caravan_texture() -> Texture2D:
+	var image := Image.create(14, 11, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var canopy := Color(0.92, 0.85, 0.7, 1.0)
+	var canopy_shade := Color(0.82, 0.73, 0.57, 1.0)
+	var body := Color(0.5, 0.34, 0.19, 1.0)
+	var wheel := Color(0.22, 0.16, 0.1, 1.0)
+	for x in range(3, 11):
+		image.set_pixel(x, 1, canopy_shade)
+	for y in range(2, 5):
+		for x in range(2, 12):
+			image.set_pixel(x, y, canopy)
+	for y in range(5, 8):
+		for x in range(1, 13):
+			image.set_pixel(x, y, body)
+	for wheel_x: int in [2, 9]:
+		for y in range(8, 10):
+			image.set_pixel(wheel_x, y, wheel)
+			image.set_pixel(wheel_x + 1, y, wheel)
+	return ImageTexture.create_from_image(image)
+
 func _update_routes_overlay_visibility() -> void:
+	_update_caravans_visibility()
 	if routes_overlay == null:
 		return
 	routes_overlay.visible = _routes_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
@@ -4844,6 +4959,7 @@ func _build_routes_overlay_from_settlements() -> void:
 	for path in route_paths:
 		_route_segments.append(path)
 	_refresh_routes_overlay_lines()
+	_spawn_caravans()
 
 func _add_route_edge(a: Vector2i, b: Vector2i, edge_set: Dictionary, route_edges: Array) -> void:
 	if a == b:

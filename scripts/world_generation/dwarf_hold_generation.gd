@@ -111,6 +111,8 @@ var _trade_shop_cell := Vector2i(2147483647, 2147483647)
 var _trade_shop_type := ""
 var _shop_stocks: Dictionary = {}
 var _active_speech_bubble: PanelContainer
+var _build_selection := -1
+var _escape_menu: EscapeMenu
 var _torch_sprites: Array = []
 var _player_glow: Sprite2D
 var _glow_texture: Texture2D
@@ -339,6 +341,18 @@ const WILD_MUSHROOM_VARIETIES := [
 	"Dragonmane", "Banded Stalk"
 ]
 const MUSHROOM_VARIETY_CHANCE_PERCENT := 30
+
+## Homesteading: B cycles the build catalog, then click a tile beside you
+## to raise it. Walls become solid rock again - dig them back for the
+## Stone. Placed chests start empty (they store, they don't spawn loot).
+const BUILD_CATALOG := [
+	{"name": "Stone Wall", "kind": "wall", "costs": {"Stone": 2}},
+	{"name": "Paved Floor", "kind": "floor", "costs": {"Stone": 1}},
+	{"name": "Door", "kind": "decor", "tile": "door", "costs": {"Stone": 2}},
+	{"name": "Bed", "kind": "decor", "tile": "bed", "costs": {"Stone": 4}},
+	{"name": "Table", "kind": "decor", "tile": "table", "costs": {"Stone": 3}},
+	{"name": "Storage Chest", "kind": "decor", "tile": "chest", "costs": {"Stone": 4}}
+]
 
 ## Core-Keeper-style fishing in the underdeep's still lakes: cast with F
 ## next to water (rod required), wait for the bite, reel on the "!".
@@ -777,6 +791,9 @@ func _ready() -> void:
 	_setup_inventory_label()
 	_setup_hp_label()
 	_setup_coins_label()
+	_escape_menu = EscapeMenu.new()
+	_escape_menu.show_return_to_map = true
+	add_child(_escape_menu)
 	_glow_texture = _create_glow_texture()
 	_player_glow = _create_glow_sprite(7.0)
 	lighting_layer.add_child(_player_glow)
@@ -873,7 +890,8 @@ func _update_clock_label() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and not _is_text_input_focused():
-		_on_back_button_pressed()
+		if _escape_menu != null:
+			_escape_menu.toggle()
 		get_viewport().set_input_as_handled()
 		return
 	var key_event := event as InputEventKey
@@ -883,6 +901,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_F and not _is_text_input_focused():
 		_handle_fish_action()
+		get_viewport().set_input_as_handled()
+		return
+	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_B and not _is_text_input_focused():
+		_cycle_build_selection()
 		get_viewport().set_input_as_handled()
 		return
 	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_C and not _is_text_input_focused():
@@ -3004,6 +3026,95 @@ func _spawn_speech_bubble(text: String, world_position: Vector2) -> void:
 	tween.tween_property(bubble, "modulate:a", 0.0, 0.5)
 	tween.tween_callback(bubble.queue_free)
 
+## --- Homesteading -------------------------------------------------------
+## Carve a cave, then make it home: walls, paving, doors, and furniture
+## built from what you've mined. Everything places adjacent to the player.
+
+func _cycle_build_selection() -> void:
+	_build_selection += 1
+	if _build_selection >= BUILD_CATALOG.size():
+		_build_selection = -1
+		_set_save_status("Build mode off", Color(0.8, 0.8, 0.8, 1.0))
+		return
+	var entry := BUILD_CATALOG[_build_selection] as Dictionary
+	_set_save_status("🔨 Build: %s (%s) — click a tile beside you · B for next" % [
+		String(entry.get("name", "")), _build_costs_text(entry)
+	], Color(0.85, 0.9, 0.75, 1.0))
+
+func _build_costs_text(entry: Dictionary) -> String:
+	var parts := PackedStringArray()
+	var costs := entry.get("costs", {}) as Dictionary
+	for item_variant: Variant in costs.keys():
+		parts.append("%d %s" % [int(costs[item_variant]), String(item_variant)])
+	return ", ".join(parts)
+
+func _can_afford_build(entry: Dictionary) -> bool:
+	var costs := entry.get("costs", {}) as Dictionary
+	for item_variant: Variant in costs.keys():
+		if int(_player_inventory.get(String(item_variant), 0)) < int(costs[item_variant]):
+			return false
+	return true
+
+func _consume_build_costs(entry: Dictionary) -> void:
+	var costs := entry.get("costs", {}) as Dictionary
+	for item_variant: Variant in costs.keys():
+		_add_to_inventory(String(item_variant), -int(costs[item_variant]))
+
+## Places the selected buildable on an adjacent tile. Returns true when
+## the click was consumed by build mode (even on a refused placement).
+func _try_place_build(cell: Vector2i) -> bool:
+	if _build_selection < 0 or _build_selection >= BUILD_CATALOG.size():
+		return false
+	if not _is_player_adjacent_to_cell(cell) or cell == _player_cell:
+		return false
+	var entry := BUILD_CATALOG[_build_selection] as Dictionary
+	var build_name := String(entry.get("name", ""))
+	if not _can_afford_build(entry):
+		_set_save_status("Need %s for %s" % [_build_costs_text(entry), build_name], Color(0.95, 0.75, 0.45, 1.0))
+		return true
+	var zone := int(_latest_grid.get(cell, CELL_ROCK))
+	var kind := String(entry.get("kind", "decor"))
+	match kind:
+		"wall":
+			if zone != CELL_HALL and zone != CELL_PLAZA:
+				_set_save_status("A wall needs open floor to stand on", Color(0.95, 0.75, 0.45, 1.0))
+				return true
+			if decor_layer.get_cell_source_id(cell) >= 0:
+				_set_save_status("Clear that tile first", Color(0.95, 0.75, 0.45, 1.0))
+				return true
+			if _is_cell_occupied_by_npc(cell) or _creature_index_at_cell(cell) >= 0:
+				_set_save_status("Someone is standing there", Color(0.95, 0.75, 0.45, 1.0))
+				return true
+			_latest_grid[cell] = CELL_ROCK
+			_dug_cells.erase(cell)
+			_render_world_rect(Rect2i(cell - Vector2i(2, 2), Vector2i(5, 5)))
+			if _lighting_enabled:
+				_update_shattered_visibility(_latest_grid)
+				_refresh_lighting(_latest_grid)
+		"floor":
+			if zone != CELL_HALL:
+				_set_save_status("Paving needs bare cavern floor", Color(0.95, 0.75, 0.45, 1.0))
+				return true
+			_latest_grid[cell] = CELL_PLAZA
+			_render_world_rect(Rect2i(cell - Vector2i(1, 1), Vector2i(3, 3)))
+		_:
+			if zone != CELL_HALL and zone != CELL_PLAZA and zone != CELL_HOUSE:
+				_set_save_status("%s needs carved ground" % build_name, Color(0.95, 0.75, 0.45, 1.0))
+				return true
+			if decor_layer.get_cell_source_id(cell) >= 0:
+				_set_save_status("That tile is already furnished", Color(0.95, 0.75, 0.45, 1.0))
+				return true
+			var tile_key := String(entry.get("tile", "table"))
+			_latest_floor_decor[cell] = tile_key
+			# Player-built chests start empty: storage, not treasure.
+			if tile_key == "chest" and not _chest_inventories.has(cell):
+				_chest_inventories[cell] = []
+			_place_tile(decor_layer, cell, tile_key)
+	_consume_build_costs(entry)
+	_set_save_status("Built %s" % build_name, Color(0.75, 0.92, 0.7, 1.0))
+	_spawn_floating_text("+%s" % build_name, _cell_center_position(cell), Color(0.8, 0.95, 0.7, 1.0))
+	return true
+
 ## --- Fishing ------------------------------------------------------------
 ## Cast next to a lake with F. The bobber drifts, dips on a bite ("!"),
 ## and pressing F inside the bite window reels in the catch. Moving
@@ -3577,6 +3688,8 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	if _player_sprite == null or not _player_control_enabled:
 		return
 	var clicked_cell := _cell_from_mouse_position(mouse_position)
+	if _build_selection >= 0 and _try_place_build(clicked_cell):
+		return
 	if _is_chest_cell(clicked_cell):
 		_request_chest_interaction(clicked_cell)
 		return
