@@ -70,7 +70,51 @@ const ITEM_DEFS := {
 
 	# --- trophies off the wild things ---
 	"Lizard Scale": {"icon": 129, "flavor": "Iridescent and knife-hard."},
-	"Orcish Tooth": {"icon": 7, "flavor": "Strung as a warning, kept as a prize."}
+	"Orcish Tooth": {"icon": 7, "flavor": "Strung as a warning, kept as a prize."},
+
+	# --- dishes off the cookfire ---
+	"Grilled Fish": {"icon": 109, "flavor": "Charred crisp outside, flaking sweet within."},
+	"Mushroom Skewer": {"icon": 80, "flavor": "Caps roasted on a pick haft, miner style."},
+	"Hearty Stew": {"icon": 40, "flavor": "Fish, fungus, and firelight in one bowl."}
+}
+
+## Everything edible: how much it heals, and (for raw food) the dish a
+## cookfire turns it into. One raw fish plus one raw mushroom cooked
+## together make a Hearty Stew instead of their single dishes.
+const FOOD_DEFS := {
+	# --- raw catch (cooks into Grilled Fish) ---
+	"Cave Perch": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Silver Darter": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Emerald Trout": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Ruby Snapper": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Blindcave Fish": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Deep Eel": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Violet Grouper": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Golden Koi": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Cave Crab": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Coral Snail": {"heal": 3, "cooked_into": "Grilled Fish"},
+	"Dried Fish": {"heal": 5},
+
+	# --- raw fungi (cook into Mushroom Skewer) ---
+	"Mushrooms": {"heal": 2, "cooked_into": "Mushroom Skewer"},
+	"Glowcap": {"heal": 2, "cooked_into": "Mushroom Skewer"},
+	"Frostcap": {"heal": 2, "cooked_into": "Mushroom Skewer"},
+	"Emberspore": {"heal": 2, "cooked_into": "Mushroom Skewer"},
+	"Violet Veil": {"heal": 2, "cooked_into": "Mushroom Skewer"},
+	"King Bolete": {"heal": 2, "cooked_into": "Mushroom Skewer"},
+	"Fairy Bells": {"heal": 2, "cooked_into": "Mushroom Skewer"},
+	"Scarlet Cap": {"heal": 2, "cooked_into": "Mushroom Skewer"},
+	"Mushroom Ration": {"heal": 5},
+
+	# --- cooked dishes ---
+	"Grilled Fish": {"heal": 8},
+	"Mushroom Skewer": {"heal": 6},
+	"Hearty Stew": {"heal": 14},
+
+	# --- town provisions ---
+	"Loaf of Bread": {"heal": 4},
+	"Wheel of Cheese": {"heal": 6},
+	"Jar of Honey": {"heal": 5}
 }
 
 static var _texture_cache: Dictionary = {}
@@ -98,6 +142,18 @@ static func icon_texture(item_name: String) -> Texture2D:
 	)
 	_texture_cache[item_name] = atlas
 	return atlas
+
+static func is_edible(item_name: String) -> bool:
+	return FOOD_DEFS.has(item_name)
+
+static func heal_amount(item_name: String) -> int:
+	var def := FOOD_DEFS.get(item_name, {}) as Dictionary
+	return int(def.get("heal", 0))
+
+## The dish this raw item cooks into, or "" when it cannot be cooked.
+static func cooked_result(item_name: String) -> String:
+	var def := FOOD_DEFS.get(item_name, {}) as Dictionary
+	return String(def.get("cooked_into", ""))
 
 static func slot_tooltip(item_name: String, quantity: int) -> String:
 	var tooltip := "%s ×%d" % [item_name, quantity]
