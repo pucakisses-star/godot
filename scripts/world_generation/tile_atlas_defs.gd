@@ -166,7 +166,7 @@ const DWARFHOLD_TILE_ATLAS := {
 	"anvil": Vector2i(6, 4),
 	"stairway_down": Vector2i(6, 7)
 }
-const DWARFHOLD_PASSABLE_TILE_KEYS := ["floor", "door", "stairway_up", "stairway_down"]
+const DWARFHOLD_PASSABLE_TILE_KEYS := ["floor", "dirt", "door", "stairway_up", "stairway_down"]
 
 ## Above-ground human town interiors. Coordinates index the 32px grid of
 ## resources/images/town/town_tileset.png (a 2x upscale of the village

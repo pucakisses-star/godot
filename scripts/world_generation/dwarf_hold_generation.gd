@@ -84,6 +84,9 @@ var _latest_grid: Dictionary = {}
 var _latest_civic_buildings_by_id: Dictionary = {}
 var _latest_civic_building_type_map: Dictionary = {}
 var _latest_residence_type_map: Dictionary = {}
+var _latest_district_labels: Array = []
+var _latest_district_cell_map: Dictionary = {}
+var _latest_floor_decor: Dictionary = {}
 var _latest_bed_count := 0
 var _show_zone_overlay := false
 var _lighting_enabled := true
@@ -220,6 +223,13 @@ const CHEST_LOOT_TABLE := [
 ]
 
 const CIVIC_BUILDING_TYPES := {
+	"high_kings_palace": {
+		"placement_weight": 0.0,
+		"preferred_footprint_min": Vector2i(5, 4),
+		"preferred_footprint_max": Vector2i(7, 5),
+		"decor_tile_pool": ["sign", "chest", "armor_stand", "table_alt"],
+		"adjacency_preferences": {}
+	},
 	"forge": {
 		"placement_weight": 1.25,
 		"preferred_footprint_min": Vector2i(2, 2),
@@ -933,131 +943,152 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	_latest_civic_buildings_by_id = {}
 	_latest_civic_building_type_map = {}
 	_latest_residence_type_map = {}
-	var plaza_layouts: Array[Dictionary] = []
-	var central_plaza_radius := Vector2i(
-		maxi(4, roundi(float(_rng.randi_range(12, 18)) * footprint_scale)),
-		maxi(3, roundi(float(_rng.randi_range(10, 16)) * footprint_scale))
-	)
-	var central_plaza_shape := _roll_plaza_shape()
-	var central_plaza := {"center": Vector2i.ZERO, "radius": central_plaza_radius, "shape": central_plaza_shape}
-	_dig_plaza_zone(
-		grid,
-		central_plaza["center"] as Vector2i,
-		central_plaza["radius"] as Vector2i,
-		String(central_plaza["shape"]),
-		CELL_PLAZA
-	)
-	plaza_layouts.append(central_plaza)
-
-	for _plaza_index in maxi(0, requested_plaza_count - 1):
-		var plaza_radius := Vector2i(
-			maxi(3, roundi(float(_rng.randi_range(10, 18)) * footprint_scale)),
-			maxi(3, roundi(float(_rng.randi_range(8, 15)) * footprint_scale))
+	var district_labels: Array = []
+	var district_cell_map: Dictionary = {}
+	var floor_decor: Dictionary = {}
+	if level_index == 0:
+		# The surface level is a full city of named districts; deeper levels
+		# keep the older warren generator as the hold's lower reaches.
+		var city_plan := DwarfHoldDistrictPlanner.generate_city_level(
+			_rng,
+			target_npcs_for_level,
+			_hold_state.target_resident_npcs,
+			requested_bed_count,
+			requested_building_count
 		)
-		var plaza_shape := _roll_plaza_shape()
-		var plaza_center := Vector2i.ZERO
-		var found_location := false
-		var plaza_spacing := maxi(8, roundi(22.0 * footprint_scale))
-		for _placement_attempt in 24:
-			var plaza_anchor := (plaza_layouts[_rng.randi_range(0, plaza_layouts.size() - 1)] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
-			var plaza_direction := [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN][_rng.randi_range(0, 3)] as Vector2i
-			var plaza_offset_distance := maxi(18, roundi(float(_rng.randi_range(56, 120)) * footprint_scale))
-			var candidate_center := plaza_anchor + plaza_direction * plaza_offset_distance
-			candidate_center += Vector2i(_rng.randi_range(-14, 14), _rng.randi_range(-14, 14))
-			if _is_plaza_too_close(candidate_center, plaza_radius, plaza_layouts, plaza_spacing):
+		grid = city_plan.get("grid", {}) as Dictionary
+		_latest_civic_building_type_map = city_plan.get("building_type_map", {}) as Dictionary
+		_latest_residence_type_map = city_plan.get("residence_type_map", {}) as Dictionary
+		district_labels = city_plan.get("district_labels", []) as Array
+		district_cell_map = city_plan.get("district_cell_map", {}) as Dictionary
+		floor_decor = city_plan.get("floor_decor", {}) as Dictionary
+	else:
+		var plaza_layouts: Array[Dictionary] = []
+		var central_plaza_radius := Vector2i(
+			maxi(4, roundi(float(_rng.randi_range(12, 18)) * footprint_scale)),
+			maxi(3, roundi(float(_rng.randi_range(10, 16)) * footprint_scale))
+		)
+		var central_plaza_shape := _roll_plaza_shape()
+		var central_plaza := {"center": Vector2i.ZERO, "radius": central_plaza_radius, "shape": central_plaza_shape}
+		_dig_plaza_zone(
+			grid,
+			central_plaza["center"] as Vector2i,
+			central_plaza["radius"] as Vector2i,
+			String(central_plaza["shape"]),
+			CELL_PLAZA
+		)
+		plaza_layouts.append(central_plaza)
+
+		for _plaza_index in maxi(0, requested_plaza_count - 1):
+			var plaza_radius := Vector2i(
+				maxi(3, roundi(float(_rng.randi_range(10, 18)) * footprint_scale)),
+				maxi(3, roundi(float(_rng.randi_range(8, 15)) * footprint_scale))
+			)
+			var plaza_shape := _roll_plaza_shape()
+			var plaza_center := Vector2i.ZERO
+			var found_location := false
+			var plaza_spacing := maxi(8, roundi(22.0 * footprint_scale))
+			for _placement_attempt in 24:
+				var plaza_anchor := (plaza_layouts[_rng.randi_range(0, plaza_layouts.size() - 1)] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
+				var plaza_direction := [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN][_rng.randi_range(0, 3)] as Vector2i
+				var plaza_offset_distance := maxi(18, roundi(float(_rng.randi_range(56, 120)) * footprint_scale))
+				var candidate_center := plaza_anchor + plaza_direction * plaza_offset_distance
+				candidate_center += Vector2i(_rng.randi_range(-14, 14), _rng.randi_range(-14, 14))
+				if _is_plaza_too_close(candidate_center, plaza_radius, plaza_layouts, plaza_spacing):
+					continue
+				plaza_center = candidate_center
+				found_location = true
+				break
+			if not found_location:
+				var fallback_spread := maxi(40, roundi(160.0 * footprint_scale))
+				plaza_center = (plaza_layouts[_rng.randi_range(0, plaza_layouts.size() - 1)] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
+				plaza_center += Vector2i(_rng.randi_range(-fallback_spread, fallback_spread), _rng.randi_range(-fallback_spread, fallback_spread))
+			_dig_plaza_zone(grid, plaza_center, plaza_radius, plaza_shape, CELL_PLAZA)
+			plaza_layouts.append({"center": plaza_center, "radius": plaza_radius, "shape": plaza_shape})
+
+		var hubs: Array[Vector2i] = []
+		for plaza_data_variant: Variant in plaza_layouts:
+			var plaza_data := plaza_data_variant as Dictionary
+			hubs.append(plaza_data.get("center", Vector2i.ZERO) as Vector2i)
+
+		if plaza_layouts.size() >= 2:
+			for plaza_index in range(1, plaza_layouts.size()):
+				var from_plaza := plaza_layouts[plaza_index] as Dictionary
+				var from_center := from_plaza.get("center", Vector2i.ZERO) as Vector2i
+				var nearest_index := 0
+				var nearest_distance := INF
+				for candidate_index in range(plaza_index):
+					var candidate_center := (plaza_layouts[candidate_index] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
+					var candidate_distance := from_center.distance_squared_to(candidate_center)
+					if candidate_distance < nearest_distance:
+						nearest_distance = candidate_distance
+						nearest_index = candidate_index
+				var to_plaza := plaza_layouts[nearest_index] as Dictionary
+				_dig_branching_hall_between_plazas(grid, from_plaza, to_plaza)
+
+		var extra_hall_branches := maxi(0, requested_hall_count - maxi(0, plaza_layouts.size() - 1))
+		for _extra_hall_index in extra_hall_branches:
+			if plaza_layouts.size() < 2:
+				break
+			var from_index := _rng.randi_range(0, plaza_layouts.size() - 1)
+			var to_index := _rng.randi_range(0, plaza_layouts.size() - 2)
+			if to_index >= from_index:
+				to_index += 1
+			_dig_branching_hall_between_plazas(grid, plaza_layouts[from_index] as Dictionary, plaza_layouts[to_index] as Dictionary)
+
+		# Place residences until the level's bed budget is met: mostly houses
+		# (one bed each), with dormitories and barracks packing bed rows for
+		# larger populations.
+		var beds_planned := 0
+		var residences_placed := 0
+		var max_residence_attempts := requested_bed_count * 2 + 60
+		for _residence_attempt in max_residence_attempts:
+			if beds_planned >= requested_bed_count:
+				break
+			var residence_type := _roll_residence_type()
+			# Small remainders shouldn't burn the budget on one huge barracks.
+			if requested_bed_count - beds_planned < 6 and residence_type != "house":
+				residence_type = "house"
+			var residence_footprint := _roll_residence_footprint(residence_type)
+			var estimated_beds := _estimate_residence_beds(residence_type, residence_footprint)
+			var placed := _place_structure_along_halls(grid, CELL_HOUSE, residence_footprint, residence_type)
+			if not placed:
+				placed = _place_structure_zone(
+					grid,
+					hubs,
+					CELL_HOUSE,
+					func() -> Vector2i:
+						return Vector2i(_rng.randi_range(-14, 14), _rng.randi_range(-9, 9)),
+					func() -> Vector2i:
+						return residence_footprint,
+					residence_type
+				)
+			if placed:
+				beds_planned += estimated_beds
+				residences_placed += 1
+		requested_zone_counts["houses"] = residences_placed
+
+		for i in requested_building_count:
+			var civic_type := _pick_civic_building_type()
+			var civic_definition := CIVIC_BUILDING_TYPES[civic_type] as Dictionary
+			var civic_footprint := _roll_civic_footprint(civic_definition)
+			var prefers_hall_arteries := _civic_prefers_hall_arteries(civic_definition)
+			if prefers_hall_arteries and _place_structure_along_halls(grid, CELL_BUILDING, civic_footprint, civic_type):
 				continue
-			plaza_center = candidate_center
-			found_location = true
-			break
-		if not found_location:
-			var fallback_spread := maxi(40, roundi(160.0 * footprint_scale))
-			plaza_center = (plaza_layouts[_rng.randi_range(0, plaza_layouts.size() - 1)] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
-			plaza_center += Vector2i(_rng.randi_range(-fallback_spread, fallback_spread), _rng.randi_range(-fallback_spread, fallback_spread))
-		_dig_plaza_zone(grid, plaza_center, plaza_radius, plaza_shape, CELL_PLAZA)
-		plaza_layouts.append({"center": plaza_center, "radius": plaza_radius, "shape": plaza_shape})
-
-	var hubs: Array[Vector2i] = []
-	for plaza_data_variant: Variant in plaza_layouts:
-		var plaza_data := plaza_data_variant as Dictionary
-		hubs.append(plaza_data.get("center", Vector2i.ZERO) as Vector2i)
-
-	if plaza_layouts.size() >= 2:
-		for plaza_index in range(1, plaza_layouts.size()):
-			var from_plaza := plaza_layouts[plaza_index] as Dictionary
-			var from_center := from_plaza.get("center", Vector2i.ZERO) as Vector2i
-			var nearest_index := 0
-			var nearest_distance := INF
-			for candidate_index in range(plaza_index):
-				var candidate_center := (plaza_layouts[candidate_index] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
-				var candidate_distance := from_center.distance_squared_to(candidate_center)
-				if candidate_distance < nearest_distance:
-					nearest_distance = candidate_distance
-					nearest_index = candidate_index
-			var to_plaza := plaza_layouts[nearest_index] as Dictionary
-			_dig_branching_hall_between_plazas(grid, from_plaza, to_plaza)
-
-	var extra_hall_branches := maxi(0, requested_hall_count - maxi(0, plaza_layouts.size() - 1))
-	for _extra_hall_index in extra_hall_branches:
-		if plaza_layouts.size() < 2:
-			break
-		var from_index := _rng.randi_range(0, plaza_layouts.size() - 1)
-		var to_index := _rng.randi_range(0, plaza_layouts.size() - 2)
-		if to_index >= from_index:
-			to_index += 1
-		_dig_branching_hall_between_plazas(grid, plaza_layouts[from_index] as Dictionary, plaza_layouts[to_index] as Dictionary)
-
-	# Place residences until the level's bed budget is met: mostly houses
-	# (one bed each), with dormitories and barracks packing bed rows for
-	# larger populations.
-	var beds_planned := 0
-	var residences_placed := 0
-	var max_residence_attempts := requested_bed_count * 2 + 60
-	for _residence_attempt in max_residence_attempts:
-		if beds_planned >= requested_bed_count:
-			break
-		var residence_type := _roll_residence_type()
-		# Small remainders shouldn't burn the budget on one huge barracks.
-		if requested_bed_count - beds_planned < 6 and residence_type != "house":
-			residence_type = "house"
-		var residence_footprint := _roll_residence_footprint(residence_type)
-		var estimated_beds := _estimate_residence_beds(residence_type, residence_footprint)
-		var placed := _place_structure_along_halls(grid, CELL_HOUSE, residence_footprint, residence_type)
-		if not placed:
-			placed = _place_structure_zone(
+			var civic_size_generator := func() -> Vector2i:
+				return civic_footprint
+			var placed := _place_structure_zone(
 				grid,
 				hubs,
-				CELL_HOUSE,
+				CELL_BUILDING,
 				func() -> Vector2i:
-					return Vector2i(_rng.randi_range(-14, 14), _rng.randi_range(-9, 9)),
-				func() -> Vector2i:
-					return residence_footprint,
-				residence_type
+					return Vector2i(_rng.randi_range(-15, 15), _rng.randi_range(-10, 10)),
+				civic_size_generator,
+				civic_type
 			)
-		if placed:
-			beds_planned += estimated_beds
-			residences_placed += 1
-	requested_zone_counts["houses"] = residences_placed
+			if not placed and not prefers_hall_arteries:
+				_place_structure_along_halls(grid, CELL_BUILDING, civic_footprint, civic_type)
 
-	for i in requested_building_count:
-		var civic_type := _pick_civic_building_type()
-		var civic_definition := CIVIC_BUILDING_TYPES[civic_type] as Dictionary
-		var civic_footprint := _roll_civic_footprint(civic_definition)
-		var prefers_hall_arteries := _civic_prefers_hall_arteries(civic_definition)
-		if prefers_hall_arteries and _place_structure_along_halls(grid, CELL_BUILDING, civic_footprint, civic_type):
-			continue
-		var civic_size_generator := func() -> Vector2i:
-			return civic_footprint
-		var placed := _place_structure_zone(
-			grid,
-			hubs,
-			CELL_BUILDING,
-			func() -> Vector2i:
-				return Vector2i(_rng.randi_range(-15, 15), _rng.randi_range(-10, 10)),
-			civic_size_generator,
-			civic_type
-		)
-		if not placed and not prefers_hall_arteries:
-			_place_structure_along_halls(grid, CELL_BUILDING, civic_footprint, civic_type)
 
 	_ensure_walkable_connectivity(grid)
 	var level_door_cells := _compute_single_doors(grid)
@@ -1075,6 +1106,9 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 		"civic_buildings_by_id": civic_buildings_by_id,
 		"civic_building_type_map": civic_building_type_map,
 		"residence_type_map": _latest_residence_type_map,
+		"district_labels": district_labels,
+		"district_cell_map": district_cell_map,
+		"floor_decor": floor_decor,
 		"stair_cells": stair_cells
 	}
 
@@ -1095,6 +1129,9 @@ func _show_level(target_level_index: int) -> void:
 	_latest_civic_buildings_by_id = level_data.get("civic_buildings_by_id", {}) as Dictionary
 	_latest_civic_building_type_map = level_data.get("civic_building_type_map", {}) as Dictionary
 	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
+	_latest_district_labels = level_data.get("district_labels", []) as Array
+	_latest_district_cell_map = level_data.get("district_cell_map", {}) as Dictionary
+	_latest_floor_decor = level_data.get("floor_decor", {}) as Dictionary
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
 	_chest_inventories.clear()
@@ -1778,6 +1815,9 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	decor_layer.clear()
 	var bounds := _find_bounds(grid).grow(1)
 	var house_decor_overrides := _build_house_decor_layouts(grid)
+	for floor_cell_variant: Variant in _latest_floor_decor.keys():
+		if not house_decor_overrides.has(floor_cell_variant):
+			house_decor_overrides[floor_cell_variant] = _latest_floor_decor[floor_cell_variant]
 	_latest_bed_count = 0
 	_bed_cells = []
 	for decor_cell_variant: Variant in house_decor_overrides.keys():
@@ -1805,9 +1845,39 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 			continue
 		_place_tile(city_layer, stair_cell, "stairway_up" if stair_key == "up" else "stairway_down")
 		decor_layer.erase_cell(stair_cell)
+	_rebuild_district_labels()
 	_initialize_shattered_lighting(grid)
 	_refresh_lighting(grid)
 	_reset_view(bounds)
+
+func _rebuild_district_labels() -> void:
+	var existing := city_layer.get_node_or_null("DistrictLabels")
+	if existing != null:
+		existing.queue_free()
+	if _latest_district_labels.is_empty():
+		return
+	var labels_root := Node2D.new()
+	labels_root.name = "DistrictLabels"
+	labels_root.z_index = 20
+	city_layer.add_child(labels_root)
+	for label_variant: Variant in _latest_district_labels:
+		var entry := label_variant as Dictionary
+		var text := String(entry.get("name", ""))
+		if text.is_empty():
+			continue
+		var center := entry.get("center", Vector2i.ZERO) as Vector2i
+		var label := Label.new()
+		label.text = text.to_upper()
+		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		label.add_theme_font_size_override("font_size", 24)
+		label.add_theme_color_override("font_color", Color(0.93, 0.88, 0.78, 0.95))
+		label.add_theme_color_override("font_outline_color", Color(0.09, 0.08, 0.09, 0.9))
+		label.add_theme_constant_override("outline_size", 6)
+		var estimated_width := maxf(40.0, float(label.text.length()) * 14.0)
+		label.position = city_layer.map_to_local(center) - Vector2(estimated_width * 0.5, float(tile_size.y) * 2.2)
+		label.size = Vector2(estimated_width, 28.0)
+		labels_root.add_child(label)
 
 func _pick_level_stair_cells(grid: Dictionary, level_index: int, level_count: int) -> Dictionary:
 	var result := {}
@@ -2152,7 +2222,35 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_sprite = result.get("player_sprite")
 	_player_cell = result.get("player_cell", _player_cell)
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
+	_relocate_player_to_city_heart(grid)
 	_assign_npc_daily_lives(grid)
+
+## On the district city level the player arrives at the Great Hall, the
+## one spot guaranteed to connect to every quarter, rather than a random
+## alley pocket.
+func _relocate_player_to_city_heart(grid: Dictionary) -> void:
+	if _player_sprite == null or _latest_district_labels.is_empty():
+		return
+	var heart := Vector2i.ZERO
+	for label_variant: Variant in _latest_district_labels:
+		var entry := label_variant as Dictionary
+		if String(entry.get("name", "")) == "Great Hall":
+			heart = entry.get("center", Vector2i.ZERO) as Vector2i
+			break
+	for ring in range(0, 14):
+		for dy in range(-ring, ring + 1):
+			for dx in range(-ring, ring + 1):
+				if maxi(absi(dx), absi(dy)) != ring:
+					continue
+				var candidate := heart + Vector2i(dx, dy)
+				if int(grid.get(candidate, CELL_ROCK)) != CELL_PLAZA and int(grid.get(candidate, CELL_ROCK)) != CELL_HALL:
+					continue
+				if not _is_walkable_cell(candidate):
+					continue
+				_player_cell = candidate
+				_player_sprite.position = _cell_center_position(candidate)
+				_center_view_on_cell(candidate)
+				return
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
 	_refresh_lighting(grid)
@@ -2522,6 +2620,9 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	var tile_name := _tile_name_from_atlas(atlas_coords)
 	var zone_name := _zone_name_for_cell(hovered_cell)
 	var tooltip_lines: PackedStringArray = ["Tile: %s" % tile_name, "Zone: %s" % zone_name]
+	var district_name := String(_latest_district_cell_map.get(hovered_cell, ""))
+	if not district_name.is_empty():
+		tooltip_lines.insert(0, "District: %s" % district_name)
 	var subtype := _building_type_for_cell_or_empty(hovered_cell)
 	if not subtype.is_empty():
 		tooltip_lines.append("Subtype: %s" % _display_name_for_building_type(subtype))
