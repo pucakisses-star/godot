@@ -12,6 +12,9 @@ const ITEM_ICONS_TEXTURE := preload("res://resources/images/items/item_icons.png
 ## packed from the web game's remaining Inventory tilesheets. Entries
 ## with "sheet": 2 index into it.
 const ITEM_ICONS2_TEXTURE := preload("res://resources/images/items/item_icons2.png")
+## Third sheet: mounted fish trophies (0-19), cut from the freshwater-fish
+## poster and set on little wooden plaques. Entries with "sheet": 3.
+const ITEM_ICONS3_TEXTURE := preload("res://resources/images/items/item_icons3.png")
 const ATLAS_COLUMNS := 12
 const ICON_SIZE := 32
 
@@ -333,7 +336,29 @@ const ITEM_DEFS := {
 	"Molten Slag": {"icon": 140, "sheet": 2, "flavor": "The furnace's opinion of impurities."},
 	"Chain Links": {"icon": 141, "sheet": 2, "flavor": "Strength, one honest loop at a time."},
 	"Jade Ingot": {"icon": 142, "sheet": 2, "flavor": "Metal with a memory of stone."},
-	"Hooked Blade": {"icon": 143, "sheet": 2, "flavor": "For work that pulls back."}
+	"Hooked Blade": {"icon": 143, "sheet": 2, "flavor": "For work that pulls back."},
+
+	# --- mounted fish trophies (sheet 3) — rare catches for the wall ---
+	"Trophy Asp": {"icon": 0, "sheet": 3, "flavor": "Silver lightning, finally still."},
+	"Trophy Tench": {"icon": 1, "sheet": 3, "flavor": "The doctor fish, gold-flanked and smug."},
+	"Trophy Piranha": {"icon": 2, "sheet": 3, "flavor": "Still grinning. Keep your fingers back."},
+	"Trophy Zander": {"icon": 3, "sheet": 3, "flavor": "Glass-eyed hunter of the deep pools."},
+	"Trophy Ghost Cat": {"icon": 4, "sheet": 3, "flavor": "You can see right through it. It saw you first."},
+	"Trophy Rudd": {"icon": 5, "sheet": 3, "flavor": "Red fins bright as a festival flag."},
+	"Trophy Grayling": {"icon": 6, "sheet": 3, "flavor": "The lady of the stream, sail-finned."},
+	"Trophy Largemouth Bass": {"icon": 7, "sheet": 3, "flavor": "That mouth has swallowed better lures than yours."},
+	"Trophy Pike": {"icon": 8, "sheet": 3, "flavor": "The river wolf, all teeth and patience."},
+	"Trophy Burbot": {"icon": 9, "sheet": 3, "flavor": "The only cod that ever loved fresh water."},
+	"Trophy Zope": {"icon": 10, "sheet": 3, "flavor": "A silver platter with fins."},
+	"Trophy Alligator Gar": {"icon": 11, "sheet": 3, "flavor": "Armored like a keep, jawed like a trap."},
+	"Trophy Redtail Catfish": {"icon": 12, "sheet": 3, "flavor": "Whiskers longer than your beard."},
+	"Trophy Bluegill": {"icon": 13, "sheet": 3, "flavor": "Small, bright, and endlessly proud."},
+	"Trophy Perch": {"icon": 14, "sheet": 3, "flavor": "Striped sergeant of the reeds."},
+	"Trophy Bleak": {"icon": 15, "sheet": 3, "flavor": "A sliver of moonlight on a plaque."},
+	"Trophy Chinese Paddlefish": {"icon": 16, "sheet": 3, "flavor": "A living oar from waters far away."},
+	"Trophy Ruffe": {"icon": 17, "sheet": 3, "flavor": "Prickly little bandit of the shallows."},
+	"Trophy Beluga Sturgeon": {"icon": 18, "sheet": 3, "flavor": "River royalty older than the hold itself."},
+	"Trophy Gudgeon": {"icon": 19, "sheet": 3, "flavor": "Every angler's first, framed at last."}
 }
 
 ## Everything edible: how much it heals, and (for raw food) the dish a
@@ -484,7 +509,13 @@ static func icon_texture(item_name: String) -> Texture2D:
 	var item_def := ITEM_DEFS[item_name] as Dictionary
 	var icon_index := int(item_def.get("icon", 0))
 	var atlas := AtlasTexture.new()
-	atlas.atlas = ITEM_ICONS2_TEXTURE if int(item_def.get("sheet", 1)) == 2 else ITEM_ICONS_TEXTURE
+	match int(item_def.get("sheet", 1)):
+		3:
+			atlas.atlas = ITEM_ICONS3_TEXTURE
+		2:
+			atlas.atlas = ITEM_ICONS2_TEXTURE
+		_:
+			atlas.atlas = ITEM_ICONS_TEXTURE
 	atlas.region = Rect2(
 		(icon_index % ATLAS_COLUMNS) * ICON_SIZE,
 		(icon_index / ATLAS_COLUMNS) * ICON_SIZE,
