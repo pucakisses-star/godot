@@ -1001,15 +1001,32 @@ func _attack_creature(creature_index: int) -> void:
 func _spawn_player() -> void:
 	if _player_sprite != null:
 		_player_sprite.queue_free()
-	# Your delver wears the hero sheet matching your character's profession
-	# (warrior, mage, rogue or huntress from the SPD pack).
+	# Your delver is the dwarf chosen at character creation; characters
+	# made before the picker wear the profession hero sheet instead.
 	_player_sprite = Sprite2D.new()
-	var texture := DwarfHoldActorVisuals.resolve_hero_texture(self)
-	_player_sprite.texture = texture
-	if texture != null:
+	var composed := DwarfHoldActorVisuals.resolve_player_dwarf_texture(self)
+	var character_slot := DwarfHoldActorVisuals.resolve_player_character_slot(self)
+	if composed != null:
+		_player_sprite.texture = composed
+		_player_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		_player_sprite.scale = Vector2.ONE * (float(TILE_PX) / float(composed.get_height())) * 0.95
+	elif character_slot >= 0:
+		var dwarf_texture := DwarfHoldActorVisuals.DWARF_CHARACTERS_TEXTURE
+		var frame := Vector2i(dwarf_texture.get_width() / 12, dwarf_texture.get_height() / 8)
+		_player_sprite.texture = dwarf_texture
 		_player_sprite.region_enabled = true
-		_player_sprite.region_rect = Rect2(Vector2.ZERO, DwarfHoldActorVisuals.HERO_FRAME_SIZE)
-		_player_sprite.scale = Vector2.ONE * (float(TILE_PX) / DwarfHoldActorVisuals.HERO_FRAME_SIZE.y) * 1.05
+		_player_sprite.region_rect = Rect2(
+			((character_slot % 4) * 3 + 1) * frame.x,
+			(character_slot / 4) * 4 * frame.y,
+			frame.x, frame.y)
+		_player_sprite.scale = Vector2.ONE * (float(TILE_PX) / float(frame.y)) * 0.95
+	else:
+		var texture := DwarfHoldActorVisuals.resolve_hero_texture(self)
+		_player_sprite.texture = texture
+		if texture != null:
+			_player_sprite.region_enabled = true
+			_player_sprite.region_rect = Rect2(Vector2.ZERO, DwarfHoldActorVisuals.HERO_FRAME_SIZE)
+			_player_sprite.scale = Vector2.ONE * (float(TILE_PX) / DwarfHoldActorVisuals.HERO_FRAME_SIZE.y) * 1.05
 	_player_sprite.z_index = 10
 	_player_cell = _spawn_cell
 	_player_sprite.position = _cell_center(_player_cell)

@@ -41,6 +41,10 @@ static func create_tavern_character_sprite(character_texture: Texture2D, charact
 ## row 0 is the plain-clothes hero, frame 0 is the standing idle. Which
 ## sheet you get follows your character's profession.
 const HERO_FRAME_SIZE := Vector2(12, 15)
+## The in-world dwarf spritesheet: 8 characters, 3 walk columns x 4
+## facings each, 32x32 frames. Chosen in the character creator.
+const DWARF_CHARACTERS_TEXTURE := preload("res://resources/images/npc/dwarf_characters.png")
+
 const HERO_SHEETS := {
 	"warrior": "res://resources/images/shattered_ui/warrior.png",
 	"mage": "res://resources/images/shattered_ui/mage.png",
@@ -63,6 +67,37 @@ static func hero_class_for_profession(profession: String) -> String:
 
 ## Picks the hero sheet matching the session's player character; the
 ## warrior stands in when no character has been made yet.
+## The dwarf assembled at character creation from the DF layer sheets
+## (null when the character predates the creator's body panel; callers
+## then try the sheet slot, then the SPD hero sheet by profession).
+static func resolve_player_dwarf_texture(context: Node) -> Texture2D:
+	var session := context.get_node_or_null("/root/GameSession")
+	if session == null or not session.has_method("get_player_character"):
+		return null
+	var character: Dictionary = session.call("get_player_character")
+	var layers := DwarfSpriteComposer.layers_from_character(character)
+	if layers.is_empty():
+		return null
+	return DwarfSpriteComposer.compose(layers)
+
+static func create_composed_player_sprite(texture: Texture2D, tile_size: Vector2i) -> Sprite2D:
+	var sprite := Sprite2D.new()
+	sprite.texture = texture
+	sprite.centered = true
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.scale = Vector2(
+		float(tile_size.x) / float(maxi(texture.get_width(), 1)),
+		float(tile_size.y) / float(maxi(texture.get_height(), 1))
+	) * 0.95
+	return sprite
+
+static func resolve_player_character_slot(context: Node) -> int:
+	var session := context.get_node_or_null("/root/GameSession")
+	if session == null or not session.has_method("get_player_character"):
+		return -1
+	var character: Dictionary = session.call("get_player_character")
+	return int(character.get("character_slot", -1))
+
 static func resolve_hero_texture(context: Node) -> Texture2D:
 	var hero_class := "warrior"
 	var session := context.get_node_or_null("/root/GameSession")

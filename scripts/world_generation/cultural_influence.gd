@@ -72,14 +72,24 @@ func apply_cultural_influence(
 	seed_number: int,
 	wood_elf_territory_info: Dictionary
 ) -> void:
+	var stage_started := Time.get_ticks_msec()
 	_sources.clear()
 	_clear_existing_influence(tiles)
 	_build_settlement_sources(settlements)
 	_build_faction_sources(factions)
 	_build_ambient_sources(width, height, tiles, seed_number, wood_elf_territory_info)
+	var sources_ms := Time.get_ticks_msec() - stage_started
+	stage_started = Time.get_ticks_msec()
 	_apply_sources(width, height, tiles, is_land_base_tile_fn)
+	var apply_ms := Time.get_ticks_msec() - stage_started
+	stage_started = Time.get_ticks_msec()
 	_resolve_scores(width, height, tiles)
+	var resolve_ms := Time.get_ticks_msec() - stage_started
+	stage_started = Time.get_ticks_msec()
 	_assign_political_regions(width, height, tiles, settlements, factions, is_land_base_tile_fn, seed_number)
+	print("[CulturalInfluence] sources %d ms | apply %d ms (%d sources) | resolve %d ms | political %d ms" % [
+		sources_ms, apply_ms, _sources.size(), resolve_ms, Time.get_ticks_msec() - stage_started
+	])
 
 func add_cultural_source(
 	x: int,
@@ -520,70 +530,158 @@ func _assign_political_regions(
 	if seeds.is_empty():
 		return
 
-	var costs := {}
-	var owners := {}
-	var buckets := {}
-	var current_cost := 0
+	# Bucketed Dijkstra over packed arrays. All per-cell inputs of the
+	# step cost (terrain class, dominant culture, jitter, land mask) are
+	# precomputed in one pass so the flood's inner loop does no String
+	# work; results are identical to the old dictionary flood.
+	var cell_count := width * height
 	var max_cost := maxi(180, int((width + height) * 1.6))
+	var terrain_cost := PackedInt32Array()
+	terrain_cost.resize(cell_count)
+	var dominant_ids := PackedInt32Array()
+	dominant_ids.resize(cell_count)
+	var biome_class := PackedInt32Array()
+	biome_class.resize(cell_count)
+	var jitter := PackedInt32Array()
+	jitter.resize(cell_count)
+	var land_mask := PackedByteArray()
+	land_mask.resize(cell_count)
+	var key_ids: Dictionary = {"": 0}
+	for y in range(height):
+		var row := y * width
+		for x in range(width):
+			var index := row + x
+			var coord := Vector2i(x, y)
+			if not _is_land_tile(coord, tiles, is_land_base_tile_fn):
+				continue
+			land_mask[index] = 1
+			var tile := tiles.get(coord, {}) as Dictionary
+			var biome := String(tile.get("biome_type", tile.get("base_biome", tile.get("base", "")))).to_lower()
+			var base := String(tile.get("base_biome", tile.get("base", biome))).to_lower()
+			var overlay := String(tile.get("hill_overlay", "")).to_lower()
+			if overlay == "mountain" or base == "mountain" or biome == "mountain":
+				terrain_cost[index] = 24
+				biome_class[index] = 1
+			elif overlay == "hills" or base == "hills" or biome == "hills":
+				terrain_cost[index] = 9
+			elif base == "marsh" or biome == "marsh":
+				terrain_cost[index] = 6
+			if biome == "forest" or biome == "jungle":
+				biome_class[index] = 2
+			elif biome == "grassland":
+				biome_class[index] = 3
+			var influence_value: Variant = tile.get("cultural_influence", {})
+			if influence_value is Dictionary:
+				var dominant_key := String((influence_value as Dictionary).get("key", "")).to_lower()
+				if not dominant_key.is_empty():
+					if not key_ids.has(dominant_key):
+						key_ids[dominant_key] = key_ids.size()
+					dominant_ids[index] = int(key_ids[dominant_key])
+			jitter[index] = int(_hash_u32(seed_number, x, y, 977) % 4)
 
+	# Per-seed precomputation: interned key id and terrain-bonus class.
+	var seed_key_ids := PackedInt32Array()
+	var seed_bonus_class := PackedInt32Array()
 	for political_seed: Dictionary in seeds:
-		var coord := Vector2i(int(political_seed.get("x", -1)), int(political_seed.get("y", -1)))
-		if coord.x < 0 or coord.y < 0 or coord.x >= width or coord.y >= height:
-			continue
-		if not _is_land_tile(coord, tiles, is_land_base_tile_fn):
-			continue
-		owners[coord] = political_seed
-		costs[coord] = 0
-		var origin_bucket: Array = buckets.get(0, []) as Array
-		origin_bucket.append({"coord": coord, "seed": political_seed})
-		buckets[0] = origin_bucket
+		var owner_key := String(political_seed.get("key", "")).to_lower()
+		if not key_ids.has(owner_key):
+			key_ids[owner_key] = key_ids.size()
+		seed_key_ids.append(int(key_ids[owner_key]))
+		match owner_key:
+			"dwarves":
+				seed_bonus_class.append(1)
+			"wood_elves":
+				seed_bonus_class.append(2)
+			"humans":
+				seed_bonus_class.append(3)
+			_:
+				seed_bonus_class.append(0)
 
-	while true:
-		while true:
-			if current_cost > max_cost:
-				break
-			var existing: Variant = buckets.get(current_cost, null)
-			if existing is Array and not (existing as Array).is_empty():
-				break
-			current_cost += 1
-		if current_cost > max_cost:
-			break
-		var bucket := buckets.get(current_cost, []) as Array
-		var node := bucket.pop_back() as Dictionary
-		buckets[current_cost] = bucket
-		var coord := node.get("coord", Vector2i.ZERO) as Vector2i
-		var political_seed := node.get("seed", {}) as Dictionary
-		if int(costs.get(coord, 1_000_000)) != current_cost:
+	var costs := PackedInt32Array()
+	costs.resize(cell_count)
+	costs.fill(1_000_000)
+	var owners := PackedInt32Array()
+	owners.resize(cell_count)
+	owners.fill(-1)
+	# One bucket per cost value; entries encode (seed_index << 20) | cell.
+	var buckets: Array[PackedInt64Array] = []
+	buckets.resize(max_cost + 1)
+	for cost in range(max_cost + 1):
+		buckets[cost] = PackedInt64Array()
+
+	for seed_index in seeds.size():
+		var political_seed := seeds[seed_index]
+		var sx := int(political_seed.get("x", -1))
+		var sy := int(political_seed.get("y", -1))
+		if sx < 0 or sy < 0 or sx >= width or sy >= height:
 			continue
-		for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-			var next := coord + offset
-			if next.x < 0 or next.y < 0 or next.x >= width or next.y >= height:
+		var index := sy * width + sx
+		if land_mask[index] == 0:
+			continue
+		owners[index] = seed_index
+		costs[index] = 0
+		buckets[0].append((seed_index << 20) | index)
+
+	var neighbor_offsets := PackedInt32Array([-1, 1, -width, width])
+	var current_cost := 0
+	while current_cost <= max_cost:
+		var bucket := buckets[current_cost]
+		if bucket.is_empty():
+			current_cost += 1
+			continue
+		var encoded := bucket[bucket.size() - 1]
+		bucket.resize(bucket.size() - 1)
+		buckets[current_cost] = bucket
+		var index := int(encoded & 0xFFFFF)
+		var seed_index := int(encoded >> 20)
+		if costs[index] != current_cost:
+			continue
+		var cx := index % width
+		var owner_id := seed_key_ids[seed_index]
+		var bonus_class := seed_bonus_class[seed_index]
+		for offset_index in 4:
+			var next := index + neighbor_offsets[offset_index]
+			if offset_index == 0 and cx == 0:
 				continue
-			if not _is_land_tile(next, tiles, is_land_base_tile_fn):
+			if offset_index == 1 and cx == width - 1:
 				continue
-			var step_cost := _political_step_cost(political_seed, next, tiles, seed_number)
+			if next < 0 or next >= cell_count:
+				continue
+			if land_mask[next] == 0:
+				continue
+			var step_cost := 10 + terrain_cost[next]
+			var dominant := dominant_ids[next]
+			if dominant == owner_id:
+				step_cost -= 4
+			elif dominant != 0:
+				step_cost += 8
+			if bonus_class == 1 and biome_class[next] == 1:
+				step_cost -= 10
+			elif bonus_class == 2 and biome_class[next] == 2:
+				step_cost -= 7
+			elif bonus_class == 3 and biome_class[next] == 3:
+				step_cost -= 2
+			step_cost = maxi(3, step_cost + jitter[next])
 			var new_cost := current_cost + step_cost
 			if new_cost > max_cost:
 				continue
-			var old_cost := int(costs.get(next, 1_000_000))
-			if new_cost >= old_cost:
+			if new_cost >= costs[next]:
 				continue
 			costs[next] = new_cost
-			owners[next] = political_seed
-			var destination_bucket: Array = buckets.get(new_cost, []) as Array
-			destination_bucket.append({"coord": next, "seed": political_seed})
-			buckets[new_cost] = destination_bucket
+			owners[next] = seed_index
+			buckets[new_cost].append((seed_index << 20) | next)
 
 	for y in range(height):
+		var row := y * width
 		for x in range(width):
 			var coord := Vector2i(x, y)
 			var tile := tiles.get(coord, {}) as Dictionary
 			if tile.is_empty():
 				continue
-			var political_seed: Dictionary = owners.get(coord, {}) as Dictionary
+			var owner_index := owners[row + x]
+			var political_seed: Dictionary = seeds[owner_index] if owner_index >= 0 else {}
 			tile["political_owner"] = String(political_seed.get("key", "")).strip_edges().to_lower()
 			tile["political_state"] = String(political_seed.get("state_name", "")).strip_edges()
-			tiles[coord] = tile
 
 func _build_political_seeds(settlements: Array[Dictionary], factions: Array[Dictionary], tiles: Dictionary, seed_number: int) -> Array[Dictionary]:
 	var seeds: Array[Dictionary] = []
@@ -642,40 +740,6 @@ func _is_land_tile(coord: Vector2i, tiles: Dictionary, is_land_base_tile_fn: Cal
 		return bool(is_land_base_tile_fn.call(coord, tile))
 	return String(tile.get("base_biome", tile.get("base", ""))).to_lower() != "water"
 
-func _political_step_cost(political_seed: Dictionary, coord: Vector2i, tiles: Dictionary, seed_number: int) -> int:
-	var tile := tiles.get(coord, {}) as Dictionary
-	var biome := String(tile.get("biome_type", tile.get("base_biome", tile.get("base", "")))).to_lower()
-	var base := String(tile.get("base_biome", tile.get("base", biome))).to_lower()
-	var overlay := String(tile.get("hill_overlay", "")).to_lower()
-	var influence_value: Variant = tile.get("cultural_influence", {})
-	var influence: Dictionary = {}
-	if influence_value is Dictionary:
-		influence = influence_value as Dictionary
-	var dominant_key := String(influence.get("key", "")).to_lower()
-	var owner_key := String(political_seed.get("key", "")).to_lower()
-
-	var cost := 10
-	if dominant_key == owner_key:
-		cost -= 4
-	elif not dominant_key.is_empty():
-		cost += 8
-
-	if overlay == "mountain" or base == "mountain" or biome == "mountain":
-		cost += 24
-	elif overlay == "hills" or base == "hills" or biome == "hills":
-		cost += 9
-	elif base == "marsh" or biome == "marsh":
-		cost += 6
-
-	if owner_key == "dwarves" and (overlay == "mountain" or base == "mountain" or biome == "mountain"):
-		cost -= 10
-	elif owner_key == "wood_elves" and (biome == "forest" or biome == "jungle"):
-		cost -= 7
-	elif owner_key == "humans" and biome == "grassland":
-		cost -= 2
-
-	var jitter := int(_hash_u32(seed_number, coord.x, coord.y, 977) % 4)
-	return maxi(3, cost + jitter)
 
 func _generate_state_name(culture_key: String, x: int, y: int, seed_number: int) -> String:
 	var normalized_key := normalise_culture_key(culture_key, "humans")

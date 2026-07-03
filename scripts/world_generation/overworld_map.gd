@@ -1696,13 +1696,18 @@ func _apply_overlays_and_metadata(
 	river_tiles: Dictionary,
 	name_rng: RandomNumberGenerator
 ) -> void:
+	var overlays_started := Time.get_ticks_msec()
 	var coast_proximity_map := _build_proximity_map(base_biome_map, [BIOME_WATER], 8)
 	var marsh_proximity_map := _build_proximity_map(base_biome_map, [BIOME_MARSH], 7)
 	var desert_proximity_map := _build_proximity_map(base_biome_map, [BIOME_DESERT, BIOME_BADLANDS], 8)
 	var tree_coverage_map := _build_tree_coverage_biome_map(base_biome_map, tree_map)
 	var forest_proximity_map := _build_proximity_map(tree_coverage_map, [BIOME_FOREST, BIOME_JUNGLE], 6)
+	var proximity_ms := Time.get_ticks_msec() - overlays_started
+	overlays_started = Time.get_ticks_msec()
 	var context_size := maxi(map_size.x, map_size.y)
 	var region_names := _build_region_name_map(biome_map, name_rng, context_size)
+	print("[OverworldMap] overlays: proximity %d ms | region names %d ms" % [proximity_ms, Time.get_ticks_msec() - overlays_started])
+	overlays_started = Time.get_ticks_msec()
 	for y in range(map_size.y):
 		for x in range(map_size.x):
 			var coord := Vector2i(x, y)
@@ -1750,6 +1755,7 @@ func _apply_overlays_and_metadata(
 			}
 			if not region_name.is_empty():
 				_tile_region_names[coord] = region_name
+	print("[OverworldMap] overlays: tile-data loop %d ms" % (Time.get_ticks_msec() - overlays_started))
 
 
 func _build_river_map_buffers(
@@ -2676,13 +2682,15 @@ func _place_settlements(biome_map: Dictionary, rng: RandomNumberGenerator) -> vo
 	var ratios: Dictionary = settings.get("settlement_ratios", {}) as Dictionary
 	var settlements: Dictionary = settings.get("settlements", {}) as Dictionary
 	var base_count: int = maxi(1, int(round(float(map_size.x * map_size.y) / 4096.0)))
-	var candidates := _build_settlement_candidates(biome_map)
+
 	var min_distance := 8.0
 	# Suitability pools are scored once per faction type; placements then
 	# draw weighted samples against an O(1) blocked-area set instead of
 	# re-filtering and re-scoring every map cell per settlement.
 	var blocked_area: Dictionary = {}
 	var capital_pools: Dictionary = {}
+	var class_buckets := OverworldSettlementService.build_settlement_class_buckets(
+		biome_map, tree_layer, TREE_TILE, JUNGLE_TREE_TILE, Callable(self, "_settlement_biome_label"))
 
 	for civilization: String in DwarfholdLogic.SETTLEMENT_TYPES.keys():
 		var settlement_type := String(DwarfholdLogic.SETTLEMENT_TYPES[civilization])
@@ -2697,7 +2705,7 @@ func _place_settlements(biome_map: Dictionary, rng: RandomNumberGenerator) -> vo
 		if ratio <= 0.0:
 			continue
 		if not capital_pools.has(settlement_type):
-			capital_pools[settlement_type] = OverworldSettlementService.build_weighted_capital_pool(settlement_type, candidates)
+			capital_pools[settlement_type] = OverworldSettlementService.build_weighted_capital_pool(settlement_type, class_buckets)
 		var pool := capital_pools[settlement_type] as Dictionary
 		var count: int = maxi(1, int(round(base_count * ratio)))
 		for _i in range(count):
@@ -2771,13 +2779,25 @@ func _place_github_style_structures(
 		if tile_info.has("settlement_type") or not String(tile_info.get("structure", "")).strip_edges().is_empty():
 			occupied.append(coord)
 
+	var placer_started := Time.get_ticks_msec()
+	var placer_times := PackedStringArray()
 	_place_wizard_tower_settlements(biome_map, height_map, moisture_map, rng, occupied, map_area)
+	placer_times.append("towers %d" % (Time.get_ticks_msec() - placer_started))
+	placer_started = Time.get_ticks_msec()
 	_place_desert_cities(rng, occupied, map_area)
 	_place_evil_keeps(rng, occupied, map_area)
+	placer_times.append("desert+keeps %d" % (Time.get_ticks_msec() - placer_started))
+	placer_started = Time.get_ticks_msec()
 	_place_hostile_camps(biome_map, moisture_map, rng, occupied, map_area)
+	placer_times.append("camps %d" % (Time.get_ticks_msec() - placer_started))
+	placer_started = Time.get_ticks_msec()
 	_place_caves_and_dungeons(biome_map, height_map, moisture_map, rng, occupied, map_area)
+	placer_times.append("caves %d" % (Time.get_ticks_msec() - placer_started))
+	placer_started = Time.get_ticks_msec()
 	_place_mines_hillholds_and_dams(height_map, rng, occupied, map_area)
 	_place_clergy_and_taverns(moisture_map, rng, occupied, map_area)
+	placer_times.append("mines+clergy %d" % (Time.get_ticks_msec() - placer_started))
+	print("[OverworldMap] ambient placers ms: %s" % " | ".join(placer_times))
 
 
 func _place_wizard_tower_settlements(
@@ -2928,9 +2948,12 @@ func _place_mines_hillholds_and_dams(
 ) -> void:
 	var mountain_candidates: Array[Dictionary] = []
 	var hill_candidates: Array[Dictionary] = []
+	var occupied_set: Dictionary = {}
+	for occupied_coord: Vector2i in occupied:
+		occupied_set[occupied_coord] = true
 	for coord_variant: Variant in _tile_data.keys():
 		var coord := coord_variant as Vector2i
-		if _is_coord_occupied(coord, occupied):
+		if occupied_set.has(coord):
 			continue
 		var tile_info := _tile_data.get(coord, {}) as Dictionary
 		if tile_info.is_empty() or _tile_has_overlay_flag(tile_info, TILE_OVERLAY_RIVER):
@@ -2942,12 +2965,8 @@ func _place_mines_hillholds_and_dams(
 		elif hill_overlay == BIOME_HILLS:
 			hill_candidates.append({"coord": coord, "score": float(height_map.get(coord, 0.0)) + rng.randf() * 0.1})
 
-	mountain_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return float(a.get("score", 0.0)) > float(b.get("score", 0.0))
-	)
-	hill_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return float(a.get("score", 0.0)) > float(b.get("score", 0.0))
-	)
+	mountain_candidates = STRUCTURE_PLACER.sort_candidates_by_score(mountain_candidates)
+	hill_candidates = STRUCTURE_PLACER.sort_candidates_by_score(hill_candidates)
 
 	var max_mines := maxi(1, int(round(float(map_area) / 24000.0)))
 	var max_hillholds := maxi(1, int(round(float(map_area) / 32000.0)))
@@ -2965,6 +2984,7 @@ func _place_mines_hillholds_and_dams(
 			"settlement_classification": "Mine"
 		})
 		occupied.append(coord)
+		occupied_set[coord] = true
 		placed_dwarf_sites.append(coord)
 		max_mines -= 1
 
@@ -2979,6 +2999,7 @@ func _place_mines_hillholds_and_dams(
 			"settlement_classification": "Hillhold"
 		})
 		occupied.append(coord)
+		occupied_set[coord] = true
 		placed_dwarf_sites.append(coord)
 		max_hillholds -= 1
 
@@ -2997,7 +3018,7 @@ func _place_mines_hillholds_and_dams(
 					if max_dams <= 0:
 						break
 					var coord := Vector2i(x, y)
-					if _is_coord_occupied(coord, occupied):
+					if occupied_set.has(coord):
 						continue
 					var dam_tile_info := _tile_data.get(coord, {}) as Dictionary
 					if not _tile_has_overlay_flag(dam_tile_info, TILE_OVERLAY_RIVER):
@@ -3016,6 +3037,7 @@ func _place_mines_hillholds_and_dams(
 						continue
 					_place_structure_with_details(coord, DAM_TILE, "dam", {"region_name": "Dam"})
 					occupied.append(coord)
+					occupied_set[coord] = true
 					max_dams -= 1
 
 
@@ -3028,9 +3050,12 @@ func _place_clergy_and_taverns(
 	var monastery_candidates: Array[Dictionary] = []
 	var shrine_candidates: Array[Dictionary] = []
 	var tavern_candidates: Array[Dictionary] = []
+	var occupied_set: Dictionary = {}
+	for occupied_coord: Vector2i in occupied:
+		occupied_set[occupied_coord] = true
 	for coord_variant: Variant in _tile_data.keys():
 		var coord := coord_variant as Vector2i
-		if _is_coord_occupied(coord, occupied):
+		if occupied_set.has(coord):
 			continue
 		var tile_info := _tile_data.get(coord, {}) as Dictionary
 		if tile_info.is_empty() or _tile_has_overlay_flag(tile_info, TILE_OVERLAY_RIVER):
@@ -3046,15 +3071,9 @@ func _place_clergy_and_taverns(
 		if base != BIOME_DESERT and base != BIOME_BADLANDS:
 			tavern_candidates.append({"coord": coord, "score": score})
 
-	monastery_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return float(a.get("score", 0.0)) > float(b.get("score", 0.0))
-	)
-	shrine_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return float(a.get("score", 0.0)) > float(b.get("score", 0.0))
-	)
-	tavern_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return float(a.get("score", 0.0)) > float(b.get("score", 0.0))
-	)
+	monastery_candidates = STRUCTURE_PLACER.sort_candidates_by_score(monastery_candidates)
+	shrine_candidates = STRUCTURE_PLACER.sort_candidates_by_score(shrine_candidates)
+	tavern_candidates = STRUCTURE_PLACER.sort_candidates_by_score(tavern_candidates)
 
 	_place_scored_structure_batch(monastery_candidates, occupied, 12.0, maxi(1, int(round(float(map_area) / 45000.0))), 0.35, MONASTERY_TILE, "monastery", rng)
 	_place_scored_structure_batch(shrine_candidates, occupied, 10.0, maxi(1, int(round(float(map_area) / 36000.0))), 0.32, SAINT_SHRINE_TILE, "saintShrine", rng)
@@ -3115,12 +3134,6 @@ func _place_structure_with_details(coord: Vector2i, tile: Vector2i, structure_id
 		tile_info[key_variant] = value
 	_tile_data[coord] = tile_info
 
-
-func _is_coord_occupied(coord: Vector2i, occupied: Array[Vector2i]) -> bool:
-	for existing: Vector2i in occupied:
-		if existing == coord:
-			return true
-	return false
 
 
 func _founded_years_ago_for_settlement_type(settlement_type: String, rng: RandomNumberGenerator) -> int:
@@ -3272,6 +3285,7 @@ func _assign_cultural_groups(
 		map_seed,
 		wood_elf_territory_info
 	)
+	var ambient_started := Time.get_ticks_msec()
 	pipeline.spawn_ambient_structures(
 		map_size.x,
 		map_size.y,
@@ -3282,16 +3296,25 @@ func _assign_cultural_groups(
 		map_seed,
 		CultureTypes.AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE
 	)
+	print("[CulturalInfluence] ambient structure spawn %d ms" % (Time.get_ticks_msec() - ambient_started))
 	for coord: Vector2i in _tile_data.keys():
 		var tile_info := _tile_data.get(coord, {}) as Dictionary
 		if tile_info.is_empty():
 			continue
-		var tooltip_data := pipeline.build_tooltip_data(tile_info)
-		if not tooltip_data.is_empty():
-			tile_info["cultural_group"] = String(tooltip_data.get("label", ""))
+		# Read the resolved influence directly - building full tooltip
+		# dictionaries for all 65k tiles doubled this stage's cost.
+		var influence_value: Variant = tile_info.get("cultural_influence")
+		if influence_value is Dictionary and not (influence_value as Dictionary).is_empty():
+			var influence := influence_value as Dictionary
+			tile_info["cultural_group"] = String(influence.get("label", "Unknown"))
+			var breakdown: Array[Dictionary] = []
+			for entry_variant: Variant in (influence.get("breakdown", []) as Array):
+				if entry_variant is Dictionary:
+					breakdown.append(entry_variant as Dictionary)
+			var population_groups := pipeline.derive_population_groups(breakdown)
 			_tile_population_groups[coord] = {
-				"major_population_groups": tooltip_data.get("major_population_groups", []),
-				"minor_population_groups": tooltip_data.get("minor_population_groups", [])
+				"major_population_groups": population_groups.get("major", []),
+				"minor_population_groups": population_groups.get("minor", [])
 			}
 		var ambient_structure: Variant = tile_info.get("ambient_structure", null)
 		if ambient_structure is Dictionary:
@@ -3542,15 +3565,6 @@ func _heap_pop(heap: Array[Dictionary]) -> Dictionary:
 			heap[smallest] = temp
 			index = smallest
 	return root
-
-func _build_settlement_candidates(biome_map: Dictionary) -> Array:
-	return OverworldSettlementService.build_settlement_candidates(
-		biome_map,
-		tree_layer,
-		TREE_TILE,
-		JUNGLE_TREE_TILE,
-		Callable(self, "_settlement_biome_label")
-	)
 
 func _is_too_close(coord: Vector2i, occupied: Array[Vector2i], min_distance: float) -> bool:
 	return OverworldSettlementService.is_too_close(coord, occupied, min_distance)

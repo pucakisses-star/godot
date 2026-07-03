@@ -1,10 +1,31 @@
 extends RefCounted
 
+## Sorts candidate dictionaries by descending score without a per-compare
+## lambda: pack (-score, index) pairs, native-sort, rebuild in order.
+static func sort_candidates_by_score(candidates: Array[Dictionary]) -> Array[Dictionary]:
+	var order := PackedVector2Array()
+	order.resize(candidates.size())
+	for index in candidates.size():
+		order[index] = Vector2(-float(candidates[index].get("score", 0.0)), float(index))
+	order.sort()
+	var sorted: Array[Dictionary] = []
+	sorted.resize(candidates.size())
+	for index in order.size():
+		sorted[index] = candidates[int(order[index].y)]
+	return sorted
+
+static func _occupied_set(occupied: Array[Vector2i]) -> Dictionary:
+	var occupied_set: Dictionary = {}
+	for coord: Vector2i in occupied:
+		occupied_set[coord] = true
+	return occupied_set
+
 static func build_wizard_tower_candidates(tile_data: Dictionary, biome_map: Dictionary, height_map: Dictionary, moisture_map: Dictionary, occupied: Array[Vector2i], map_size: Vector2i, biomes: Dictionary, rng: RandomNumberGenerator) -> Array[Dictionary]:
+	var occupied_set := _occupied_set(occupied)
 	var candidates: Array[Dictionary] = []
 	for coord: Vector2i in tile_data.keys():
 		var tile_info := tile_data.get(coord, {}) as Dictionary
-		if occupied.has(coord) or bool(tile_info.get("river", false)): continue
+		if occupied_set.has(coord) or bool(tile_info.get("river", false)): continue
 		var base_biome := String(tile_info.get("base_biome", biome_map.get(coord, biomes.get("grassland", "grassland")))).to_lower()
 		if base_biome != String(biomes.get("grassland", "grassland")) and base_biome != String(biomes.get("tundra", "tundra")): continue
 		if not String(tile_info.get("overlay", "")).strip_edges().is_empty(): continue
@@ -16,14 +37,14 @@ static func build_wizard_tower_candidates(tile_data: Dictionary, biome_map: Dict
 		var terrain_bonus := 0.18 if base_biome == String(biomes.get("tundra", "tundra")) else 0.12
 		var score := clampf(height_value * 1.35, 0.0, 1.0) * 0.35 + dryness * 0.2 + edge_score * 0.15 + terrain_bonus + rng.randf_range(0.0, 0.3)
 		candidates.append({"coord": coord, "score": score, "base": base_biome})
-	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(b.get("score", 0.0)) < float(a.get("score", 0.0)))
-	return candidates
+	return sort_candidates_by_score(candidates)
 
 static func build_camp_candidates(tile_data: Dictionary, biome_map: Dictionary, moisture_map: Dictionary, occupied: Array[Vector2i], biomes: Dictionary, rng: RandomNumberGenerator) -> Array[Dictionary]:
+	var occupied_set := _occupied_set(occupied)
 	var candidates: Array[Dictionary] = []
 	for coord: Vector2i in tile_data.keys():
 		var tile_info := tile_data.get(coord, {}) as Dictionary
-		if occupied.has(coord) or bool(tile_info.get("river", false)): continue
+		if occupied_set.has(coord) or bool(tile_info.get("river", false)): continue
 		var base_biome := String(tile_info.get("base_biome", biome_map.get(coord, biomes.get("grassland", "grassland")))).to_lower()
 		if base_biome == String(biomes.get("water", "water")) or base_biome == String(biomes.get("mountain", "mountain")): continue
 		if String(tile_info.get("overlay", "")).to_lower().contains("mountain"): continue
@@ -34,15 +55,15 @@ static func build_camp_candidates(tile_data: Dictionary, biome_map: Dictionary, 
 		elif base_biome == String(biomes.get("marsh", "marsh")): score += 0.28
 		else: score += 0.2
 		candidates.append({"coord": coord, "score": score, "base_biome": base_biome})
-	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(b.get("score", 0.0)) < float(a.get("score", 0.0)))
-	return candidates
+	return sort_candidates_by_score(candidates)
 
 static func build_cave_and_dungeon_candidates(tile_data: Dictionary, biome_map: Dictionary, height_map: Dictionary, moisture_map: Dictionary, occupied: Array[Vector2i], biomes: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
+	var occupied_set := _occupied_set(occupied)
 	var caves: Array[Dictionary] = []
 	var dungeons: Array[Dictionary] = []
 	for coord: Vector2i in tile_data.keys():
 		var tile_info := tile_data.get(coord, {}) as Dictionary
-		if occupied.has(coord) or bool(tile_info.get("river", false)): continue
+		if occupied_set.has(coord) or bool(tile_info.get("river", false)): continue
 		var base_biome := String(tile_info.get("base_biome", biome_map.get(coord, biomes.get("grassland", "grassland")))).to_lower()
 		var overlay := String(tile_info.get("overlay", "")).to_lower()
 		var height_value := float(height_map.get(coord, 0.0))
@@ -53,9 +74,7 @@ static func build_cave_and_dungeon_candidates(tile_data: Dictionary, biome_map: 
 			var dungeon_score := dryness * 0.45 + rng.randf_range(0.0, 0.35)
 			if base_biome == String(biomes.get("badlands", "badlands")): dungeon_score += 0.12
 			dungeons.append({"coord": coord, "score": dungeon_score})
-	caves.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(b.get("score", 0.0)) < float(a.get("score", 0.0)))
-	dungeons.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(b.get("score", 0.0)) < float(a.get("score", 0.0)))
-	return {"caves": caves, "dungeons": dungeons}
+	return {"caves": sort_candidates_by_score(caves), "dungeons": sort_candidates_by_score(dungeons)}
 
 static func select_camp_type_from_biome(base_biome: String, rng: RandomNumberGenerator, biomes: Dictionary) -> String:
 	var biome_key := base_biome.to_lower()

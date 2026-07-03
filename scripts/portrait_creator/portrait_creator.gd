@@ -503,7 +503,7 @@ const FEMALE_NAME_POOL := [
 
 @export_group(&"Sliders")
 @export var skin_color: HSlider
-@export var eye_color: HSlider
+@export var clothing_color: HSlider
 @export var hair_color: HSlider
 @export var hair_style: HSlider
 @export var beard_color: HSlider
@@ -572,6 +572,11 @@ const ROLLING_DICE_SOUND_PATH := "res://resources/sounds/rolling-dice.mp3"
 
 var _hovered_attribute_icon: Control
 var _randomize_sound_player: AudioStreamPlayer
+
+## The pixel dwarf built from the Dwarf Fortress layer sheets, kept in
+## sync with the painted portrait: the same sliders drive both, and the
+## composed sprite is the player's in-world body.
+var _dwarf_preview: TextureRect
 var _background_zoom := 1.0
 
 func _enter_tree() -> void:
@@ -634,6 +639,9 @@ func _ready() -> void:
 	_update_gender_button_selection_visuals()
 	_clear_attribute_description()
 	_setup_animated_background()
+	_setup_clothing_slider()
+	_build_dwarf_body_panel()
+	_refresh_dwarf_preview()
 
 func _process(delta: float) -> void:
 	_position_attribute_tooltip()
@@ -643,6 +651,70 @@ func _setup_animated_background() -> void:
 	if animated_background == null:
 		return
 	animated_background.pivot_offset = animated_background.size * 0.5
+
+## --- In-world body ------------------------------------------------------
+## A framed panel on the right shows the dwarf assembled from the Dwarf
+## Fortress layer sheets at pixel scale; every slider that shapes the
+## painted portrait reshapes this dwarf too.
+
+const BODY_PANEL_TEXTURE := preload("res://resources/images/character_creator/ui/bodypanel.png")
+
+func _build_dwarf_body_panel() -> void:
+	if target_render == null:
+		return
+	# The pixel dwarf lives inside the stone face frame on the left,
+	# the low-res twin of the painted dwarf beside it.
+	var frame_holder := target_render.get_parent()
+	if frame_holder == null:
+		return
+	_dwarf_preview = TextureRect.new()
+	_dwarf_preview.name = "DwarfPreview"
+	_dwarf_preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_dwarf_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_dwarf_preview.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_dwarf_preview.position = Vector2(72.0, 40.0)
+	_dwarf_preview.size = Vector2(280.0, 280.0)
+	frame_holder.add_child(_dwarf_preview)
+
+func _setup_clothing_slider() -> void:
+	if clothing_color == null:
+		return
+	clothing_color.min_value = 0
+	clothing_color.step = 1
+	clothing_color.max_value = DwarfSpriteComposer.CLOTHES_COLOR_COUNT - 1
+	if not clothing_color.value_changed.is_connected(_on_clothing_changed):
+		clothing_color.value_changed.connect(_on_clothing_changed)
+
+func _on_clothing_changed(_value: float) -> void:
+	_refresh_dwarf_preview()
+
+## Slider fractions map onto the sheet's discrete palettes, so a nudge
+## of skin or hair color moves both views together.
+func _slider_fraction(slider: HSlider) -> float:
+	if slider == null or slider.max_value <= slider.min_value:
+		return 0.0
+	return clampf((slider.value - slider.min_value) / (slider.max_value - slider.min_value), 0.0, 1.0)
+
+func _fraction_to_index(fraction: float, count: int) -> int:
+	return clampi(int(fraction * float(count)), 0, count - 1)
+
+func _current_dwarf_layers() -> Dictionary:
+	var beardless := beard_style != null and is_equal_approx(beard_style.value, beard_style.max_value)
+	var hair_index := int(hair_style.value) if hair_style != null else 0
+	var beard_index := int(beard_style.value) if beard_style != null else 0
+	return {
+		"skin_tone": _fraction_to_index(_slider_fraction(skin_color), DwarfSpriteComposer.SKIN_TONE_ROWS.size()),
+		"hair_style": hair_index % DwarfSpriteComposer.HAIR_STYLE_ROWS.size(),
+		"hair_color": _fraction_to_index(_slider_fraction(hair_color), DwarfSpriteComposer.COLOR_COLUMN_COUNT),
+		"beard_style": -1 if beardless else beard_index % DwarfSpriteComposer.BEARD_STYLE_ROWS.size(),
+		"beard_color": _fraction_to_index(_slider_fraction(beard_color), DwarfSpriteComposer.COLOR_COLUMN_COUNT),
+		"clothes_color": int(clothing_color.value) if clothing_color != null else 7
+	}
+
+func _refresh_dwarf_preview() -> void:
+	if _dwarf_preview == null:
+		return
+	_dwarf_preview.texture = DwarfSpriteComposer.compose(_current_dwarf_layers())
 
 func _update_animated_background(delta: float) -> void:
 	if animated_background == null:
@@ -678,8 +750,6 @@ func _configure_attribute_reminder_entry(entry: Control) -> void:
 		icon.tooltip_text = ""
 		icon.mouse_entered.connect(_on_attribute_icon_hovered.bind(icon))
 		icon.mouse_exited.connect(_on_attribute_icon_unhovered.bind(icon))
-
-	_clear_attribute_description()
 
 func _on_attribute_icon_hovered(icon: Control) -> void:
 	if icon == null:
@@ -906,6 +976,7 @@ func _on_hair_style_changed(value: float) -> void:
 		return
 	var style_index := clampi(int(round(value)), 0, _available_hairs.size() - 1)
 	hair = _available_hairs[style_index]
+	_refresh_dwarf_preview()
 
 func _setup_beard_style_slider() -> void:
 	if beard_style == null:
@@ -924,6 +995,7 @@ func _on_beard_style_changed(value: float) -> void:
 		beard = null
 	else:
 		beard = _available_beards[clampi(style_index, 0, _available_beards.size() - 1)]
+	_refresh_dwarf_preview()
 	_update_attribute_reminders()
 
 func _on_profession_selected(_index: int) -> void:
@@ -978,6 +1050,7 @@ func _on_color_changed(value: float, type: Images) -> void:
 	_colors[type].x = value
 	var shader: ShaderMaterial = target_render.material
 	shader.set_shader_parameter(&"colors", _colors)
+	_refresh_dwarf_preview()
 	if type == Images.PORTRAIT:
 		_update_attribute_reminders()
 
@@ -1012,11 +1085,12 @@ func _build_character_dict() -> Dictionary:
 		"profession": profession_text,
 		"clan": clan_text,
 		"skin_color": skin_color.value if skin_color else 0.0,
-		"eye_color": eye_color.value if eye_color else 0.0,
+		"clothing_color": clothing_color.value if clothing_color else 0.0,
 		"hair_color": hair_color.value if hair_color else 0.0,
 		"hair_style": int(hair_style.value) if hair_style else 0,
 		"beard_color": beard_color.value if beard_color else 0.0,
-		"beard_style": int(beard_style.value) if beard_style else 0
+		"beard_style": int(beard_style.value) if beard_style else 0,
+		"dwarf_layers": _current_dwarf_layers()
 	}
 
 func _on_randomize_button_pressed() -> void:
@@ -1029,12 +1103,18 @@ func _on_randomize_button_pressed() -> void:
 		clan_name.select(_rng.randi_range(0, clan_name.item_count - 1))
 	if skin_color:
 		skin_color.value = _rng.randf_range(skin_color.min_value, skin_color.max_value)
-	if eye_color:
-		eye_color.value = _rng.randf_range(eye_color.min_value, eye_color.max_value)
+	if hair_color:
+		hair_color.value = _rng.randf_range(hair_color.min_value, hair_color.max_value)
+	if beard_color:
+		beard_color.value = _rng.randf_range(beard_color.min_value, beard_color.max_value)
 	if beard_style:
 		beard_style.value = _rng.randi_range(int(beard_style.min_value), int(beard_style.max_value))
 	if hair_style:
 		hair_style.value = _rng.randi_range(int(hair_style.min_value), int(hair_style.max_value))
+
+	if clothing_color:
+		clothing_color.value = _rng.randi_range(0, DwarfSpriteComposer.CLOTHES_COLOR_COUNT - 1)
+	_refresh_dwarf_preview()
 
 	character_name.text = _generate_full_name()
 	_update_attribute_reminders()
