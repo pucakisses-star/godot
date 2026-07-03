@@ -1,0 +1,116 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/world_generation/dungeon_interior.gd" id="1_dgint"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_dgpnl"]
+bg_color = Color(0.0509804, 0.0431373, 0.0627451, 1)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+
+[node name="DungeonInterior" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_dgint")
+
+[node name="Margin" type="MarginContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 24.0
+offset_top = 24.0
+offset_right = -24.0
+offset_bottom = -24.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Layout" type="HBoxContainer" parent="Margin"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 16
+
+[node name="DungeonPanel" type="PanelContainer" parent="Margin/Layout"]
+unique_name_in_owner = true
+clip_contents = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_styles/panel = SubResource("StyleBoxFlat_dgpnl")
+
+[node name="FloorTileLayer" type="TileMapLayer" parent="Margin/Layout/DungeonPanel"]
+unique_name_in_owner = true
+position = Vector2(16, 16)
+
+[node name="DecorTileLayer" type="TileMapLayer" parent="Margin/Layout/DungeonPanel"]
+unique_name_in_owner = true
+position = Vector2(16, 16)
+
+[node name="TrapLayer" type="Node2D" parent="Margin/Layout/DungeonPanel"]
+unique_name_in_owner = true
+position = Vector2(16, 16)
+
+[node name="ActorLayer" type="Node2D" parent="Margin/Layout/DungeonPanel"]
+unique_name_in_owner = true
+position = Vector2(16, 16)
+
+[node name="Controls" type="VBoxContainer" parent="Margin/Layout"]
+custom_minimum_size = Vector2(260, 0)
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="Margin/Layout/Controls"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 26
+text = "Dungeon"
+
+[node name="DungeonNameLabel" type="Label" parent="Margin/Layout/Controls"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 15
+text = "Forgotten Dungeon"
+autowrap_mode = 2
+
+[node name="HpLabel" type="Label" parent="Margin/Layout/Controls"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 13
+text = "❤ 20 / 20"
+
+[node name="CoinsLabel" type="Label" parent="Margin/Layout/Controls"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 13
+modulate = Color(0.95, 0.85, 0.5, 1)
+text = "🪙 0 coins"
+
+[node name="StatusLabel" type="Label" parent="Margin/Layout/Controls"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 12
+text = ""
+autowrap_mode = 2
+
+[node name="HintText" type="RichTextLabel" parent="Margin/Layout/Controls"]
+layout_mode = 2
+size_flags_vertical = 3
+bbcode_enabled = true
+fit_content = true
+text = "[b]Delving[/b]
+Click or use arrows/WASD to move.
+Watch for pressure plates, saw blades, fire jets and spike pits.
+Click a pedestal or chest beside you to loot it.
+Step on the staircase to leave.
+ESC pauses."
+
+[node name="LeaveButton" type="Button" parent="Margin/Layout/Controls"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Leave Dungeon"

@@ -669,6 +669,10 @@ const TOWN_SCENE_SEED_KEY := "town_scene_seed"
 const TOWN_SCENE_TILE_KEY := "town_scene_tile"
 const TOWN_SCENE_NAME_KEY := "town_scene_name"
 const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
+const TOWN_SCENE_THEME_KEY := "town_scene_theme"
+const DUNGEON_INTERIOR_SCENE_PATH := "res://scenes/dungeon_interior.tscn"
+const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
+const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
 const MORE_INFO_IMAGE_FOLDER := "res://resources/images/overworld/more_info"
 const GENERATION_YIELD_ROW_INTERVAL := 32
 const GENERATION_YIELD_CELL_INTERVAL := 1024
@@ -1009,15 +1013,47 @@ func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 
 	if _is_town_settlement(details):
 		var town_seed := _town_scene_seed_for_tile(tile_coord, details)
-		_store_selected_town_scene_context(town_seed, tile_coord, details)
+		_store_selected_town_scene_context(town_seed, tile_coord, details, _town_theme_for_details(details))
 		get_tree().change_scene_to_file(TOWN_GENERATION_SCENE_PATH)
+		return
+
+	if _is_dungeon_structure(details):
+		var dungeon_seed := _dungeon_scene_seed_for_tile(tile_coord, details)
+		_store_selected_dungeon_scene_context(dungeon_seed, tile_coord, details)
+		get_tree().change_scene_to_file(DUNGEON_INTERIOR_SCENE_PATH)
 		return
 
 	print("Begin journey is not yet available for this settlement type: %s" % tile_coord)
 
 func _is_town_settlement(details: Dictionary) -> bool:
 	var settlement_type := String(details.get("settlement_type", "")).strip_edges().to_lower()
-	return settlement_type == "town" or settlement_type == "city" or settlement_type == "hamlet"
+	return settlement_type == "town" or settlement_type == "city" or settlement_type == "hamlet" or settlement_type == "desertcity"
+
+## Desert cities reuse the town interior scene with a desert skin.
+func _town_theme_for_details(details: Dictionary) -> String:
+	var settlement_type := String(details.get("settlement_type", "")).strip_edges().to_lower()
+	return "desert" if settlement_type == "desertcity" else ""
+
+func _is_dungeon_structure(details: Dictionary) -> bool:
+	return String(details.get("structure", "")).strip_edges().to_lower() == "dungeon"
+
+func _dungeon_scene_seed_for_tile(tile_coord: Vector2i, details: Dictionary) -> String:
+	var structure_name := _tile_region_name(tile_coord, details)
+	if structure_name.is_empty():
+		structure_name = "Forgotten Dungeon"
+	var seed_basis := "dungeon|%s|%d|%d|%d" % [structure_name, tile_coord.x, tile_coord.y, map_seed]
+	return str(seed_basis.hash())
+
+func _store_selected_dungeon_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary) -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null:
+		return
+	if not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings[DUNGEON_SCENE_SEED_KEY] = seed_text
+	settings[DUNGEON_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
+	game_session.call("set_world_settings", settings)
 
 func _store_selected_dwarfhold_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary) -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -1055,7 +1091,7 @@ func _build_underdeep_sites(origin_coord: Vector2i) -> Array:
 		})
 	return sites
 
-func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary) -> void:
+func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary, theme: String = "") -> void:
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null:
 		return
@@ -1066,6 +1102,7 @@ func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i,
 	settings[TOWN_SCENE_TILE_KEY] = {"x": tile_coord.x, "y": tile_coord.y}
 	settings[TOWN_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
 	settings[TOWN_SCENE_POPULATION_KEY] = maxi(0, int(details.get("population", 0)))
+	settings[TOWN_SCENE_THEME_KEY] = theme
 	game_session.call("set_world_settings", settings)
 
 func _town_scene_seed_for_tile(tile_coord: Vector2i, details: Dictionary) -> String:
