@@ -31,6 +31,26 @@ func _ready() -> void:
 			break
 	print("MAP_CELLS ", used.size())
 
+	if OS.get_environment("SHOT_ROUTES") == "1":
+		# Wait until generation has built the route trails; the map connects
+		# its toggle buttons only after generation, so pressing earlier is a
+		# no-op that gets reset.
+		var routes_overlay := instance.get_node_or_null("MapOverlays/RoutesOverlay") as Node2D
+		for wait_attempt in 120:
+			if routes_overlay != null and routes_overlay.get_child_count() > 0:
+				break
+			for i in 5:
+				await get_tree().process_frame
+		for i in 10:
+			await get_tree().process_frame
+		var routes_button := instance.get_node_or_null("MapUi/TopBar/TopBarLayout/RoutesMapButton") as Button
+		if routes_button != null:
+			routes_button.button_pressed = true
+		await get_tree().process_frame
+		print("ROUTES_CHILDREN ", routes_overlay.get_child_count() if routes_overlay != null else -1)
+		if routes_overlay != null:
+			print("ROUTES_VISIBLE ", routes_overlay.is_visible_in_tree())
+
 	var focus_kind := OS.get_environment("SHOT_FOCUS")
 	var zoom_text := OS.get_environment("SHOT_ZOOM")
 	var focus_cell := Vector2i(-1, -1)

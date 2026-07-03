@@ -84,6 +84,7 @@ const OVERWORLD_RENDERING := preload("res://scripts/world_generation/overworld_r
 const OVERWORLD_INTERACTION := preload("res://scripts/world_generation/overworld_interaction.gd")
 const OVERWORLD_CONTENT := preload("res://scripts/world_generation/overworld_content.gd")
 const SETTLEMENT_NAMING := preload("res://scripts/world_generation/settlement_naming.gd")
+const ROUTES_SERVICE := preload("res://scripts/world_generation/overworld_routes_service.gd")
 
 const ATLAS_TEXTURE := TILE_ATLAS_DEFS.ATLAS_TEXTURE
 const SAND_TILE := TILE_ATLAS_DEFS.SAND_TILE
@@ -4737,6 +4738,7 @@ func _build_routes_overlay_from_settlements() -> void:
 	var max_distance := maxf(8.0, float(mini(map_size.x, map_size.y)) * route_overlay_max_distance_ratio)
 	var desired_connections := maxi(1, route_overlay_target_connections)
 	var edge_set: Dictionary = {}
+	var route_edges: Array = []
 
 	var connected: Dictionary = {}
 	connected[settlement_cells[0]] = true
@@ -4756,7 +4758,7 @@ func _build_routes_overlay_from_settlements() -> void:
 					best_to = candidate_coord
 		if best_to == Vector2i(-1, -1):
 			break
-		_add_route_edge(best_from, best_to, edge_set)
+		_add_route_edge(best_from, best_to, edge_set, route_edges)
 		connected[best_to] = true
 
 	for from_coord: Vector2i in settlement_cells:
@@ -4773,11 +4775,14 @@ func _build_routes_overlay_from_settlements() -> void:
 		)
 		for i in range(mini(desired_connections, nearby.size())):
 			var entry := nearby[i] as Dictionary
-			_add_route_edge(from_coord, entry.get("coord", from_coord) as Vector2i, edge_set)
+			_add_route_edge(from_coord, entry.get("coord", from_coord) as Vector2i, edge_set, route_edges)
 
+	var route_paths := ROUTES_SERVICE.build_paths(route_edges, _build_route_cost_map(), map_size, tile_size)
+	for path in route_paths:
+		_route_segments.append(path)
 	_refresh_routes_overlay_lines()
 
-func _add_route_edge(a: Vector2i, b: Vector2i, edge_set: Dictionary) -> void:
+func _add_route_edge(a: Vector2i, b: Vector2i, edge_set: Dictionary, route_edges: Array) -> void:
 	if a == b:
 		return
 	var key_a := "%d,%d" % [a.x, a.y]
@@ -4786,9 +4791,25 @@ func _add_route_edge(a: Vector2i, b: Vector2i, edge_set: Dictionary) -> void:
 	if edge_set.has(ordered_key):
 		return
 	edge_set[ordered_key] = true
-	var start := _map_cell_center(a)
-	var end := _map_cell_center(b)
-	_route_segments.append(PackedVector2Array([start, end]))
+	route_edges.append({"a": a, "b": b})
+
+func _build_route_cost_map() -> Dictionary:
+	var tile_biomes: Dictionary = {}
+	for coord_variant: Variant in _tile_data.keys():
+		var tile_info := _tile_data.get(coord_variant, {}) as Dictionary
+		tile_biomes[coord_variant] = {
+			"base": _tile_base_biome_from_data(tile_info),
+			"hill": _tile_hill_biome_from_data(tile_info),
+			"river": _tile_has_overlay_flag(tile_info, TILE_OVERLAY_RIVER)
+		}
+	return ROUTES_SERVICE.build_cost_map(tile_biomes, {
+		"water": BIOME_WATER,
+		"mountain": BIOME_MOUNTAIN,
+		"hills": BIOME_HILLS,
+		"marsh": BIOME_MARSH,
+		"forest": BIOME_FOREST,
+		"jungle": BIOME_JUNGLE
+	})
 
 func _map_cell_center(coord: Vector2i) -> Vector2:
 	return OVERWORLD_INTERACTION.map_cell_center(coord, tile_size)
@@ -4798,20 +4819,18 @@ func _refresh_routes_overlay_lines() -> void:
 		return
 	for child in routes_overlay.get_children():
 		child.queue_free()
+	var trail_paths: Array[PackedVector2Array] = []
 	for segment_variant: Variant in _route_segments:
 		var segment := segment_variant as PackedVector2Array
 		if segment.size() < 2:
 			continue
-		var line := Line2D.new()
-		line.default_color = route_overlay_line_color
-		line.width = maxf(1.0, route_overlay_line_width)
-		line.joint_mode = Line2D.LINE_JOINT_ROUND
-		line.begin_cap_mode = Line2D.LINE_CAP_ROUND
-		line.end_cap_mode = Line2D.LINE_CAP_ROUND
-		line.antialiased = true
-		line.add_point(segment[0])
-		line.add_point(segment[1])
-		routes_overlay.add_child(line)
+		trail_paths.append(segment)
+	if not trail_paths.is_empty():
+		var drawer := ROUTES_SERVICE.RouteTrailDrawer.new()
+		drawer.paths = trail_paths
+		drawer.dot_color = route_overlay_line_color
+		drawer.dot_size = maxf(3.0, route_overlay_line_width * 3.0)
+		routes_overlay.add_child(drawer)
 	_update_routes_overlay_visibility()
 
 func _biome_to_overlay_color(biome: String) -> Color:
