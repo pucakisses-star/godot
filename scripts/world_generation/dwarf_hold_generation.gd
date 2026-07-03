@@ -273,7 +273,7 @@ const CHEST_LOOT_TABLE := [
 	{"name": "Wooden Mallet", "min": 1, "max": 1},
 	{"name": "Stone Hammer", "min": 1, "max": 1},
 	{"name": "Geologist's Hammer", "min": 1, "max": 1},
-	{"name": "Oil Pot", "min": 1, "max": 2},
+	{"name": "Sledgehammer", "min": 1, "max": 1},
 	{"name": "Silver Lantern", "min": 1, "max": 1},
 	{"name": "Mason's Chisel", "min": 1, "max": 2},
 	{"name": "Jig Lures", "min": 1, "max": 2},

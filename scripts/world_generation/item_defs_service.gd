@@ -75,7 +75,7 @@ const ITEM_DEFS := {
 	# --- dishes off the cookfire ---
 	"Grilled Fish": {"icon": 109, "flavor": "Charred crisp outside, flaking sweet within."},
 	"Mushroom Skewer": {"icon": 80, "flavor": "Caps roasted on a pick haft, miner style."},
-	"Hearty Stew": {"icon": 40, "flavor": "Fish, fungus, and firelight in one bowl."},
+	"Hearty Stew": {"icon": 39, "flavor": "Fish, fungus, and firelight in one pot."},
 
 	# --- more fossils out of the dark rock ---
 	"Chalk Ammonite": {"icon": 0, "flavor": "A pale spiral pressed into soft stone."},
@@ -102,7 +102,7 @@ const ITEM_DEFS := {
 	"Wooden Mallet": {"icon": 35, "flavor": "Persuades pegs, tents, and stuck lids."},
 	"Stone Hammer": {"icon": 36, "flavor": "Old-fashioned, like the best arguments."},
 	"Geologist's Hammer": {"icon": 37, "flavor": "One end asks; the other insists."},
-	"Oil Pot": {"icon": 39, "flavor": "Clay-cased fire. Handle gently."},
+	"Sledgehammer": {"icon": 40, "flavor": "For rock that talks back."},
 	"Silver Lantern": {"icon": 41, "flavor": "Burns clean and cold, like moonlight."},
 	"Mason's Chisel": {"icon": 42, "flavor": "Every hall began with one of these."},
 
