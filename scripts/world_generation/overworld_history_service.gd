@@ -6,9 +6,12 @@ const OVERWORLD_CONTENT := preload("res://scripts/world_generation/overworld_con
 static func build_settlement_history_timeline(
 	details: Dictionary,
 	settlement_name: String,
-	founded_years_ago: int
+	founded_years_ago: int,
+	chronology_year: int = 0
 ) -> String:
-	var current_year := int(Time.get_datetime_dict_from_system().get("year", 0))
+	# Timelines anchor to the world's own chronology year (this used to
+	# read the real OS clock, which dated dwarven history in the 2020s).
+	var current_year := chronology_year
 	if current_year <= 0:
 		current_year = 1000
 	var founding_year := current_year - maxi(1, founded_years_ago)

@@ -110,6 +110,7 @@ var _trade_shop_cell := Vector2i(2147483647, 2147483647)
 var _trade_shop_type := ""
 var _shop_stocks: Dictionary = {}
 var _active_speech_bubble: PanelContainer
+var _escape_menu: EscapeMenu
 var _latest_zone_counts := {
 	"halls": 0,
 	"houses": 0,
@@ -510,7 +511,8 @@ func _update_day_night_tint() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and not _is_text_input_focused():
-		_on_back_button_pressed()
+		if _escape_menu != null:
+			_escape_menu.toggle()
 		get_viewport().set_input_as_handled()
 		return
 	if _player_sprite == null or not _player_control_enabled:
@@ -1926,6 +1928,9 @@ func _initialize_chest_popup_grids() -> void:
 	_load_player_inventory()
 	_populate_backpack_slots()
 	_setup_coins_label()
+	_escape_menu = EscapeMenu.new()
+	_escape_menu.show_return_to_map = true
+	add_child(_escape_menu)
 
 func _create_inventory_slots(target_grid: GridContainer, slot_count: int, out_panels: Array[PanelContainer], out_labels: Array[Label], out_icons: Array[TextureRect]) -> void:
 	for child in target_grid.get_children():

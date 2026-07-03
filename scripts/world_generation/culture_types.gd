@@ -179,5 +179,92 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	],
 	"dragons": [
 		{"id": "sleeping_dragon", "label": "Sleeping Dragon", "tile": Vector2i(14, 0), "requires_cave_neighbor": true}
+	],
+	# The wider folk of the world (browser AMBIENT_STRUCTURE_OPTIONS):
+	# every land culture leaves its mark on its own territory.
+	"dwarves": [
+		{"id": "prospect_camp", "label": "Prospector's Camp", "tile": Vector2i(7, 1)},
+		{"id": "homestead", "label": "Hill Homestead", "tile": Vector2i(13, 1), "requires_plain_grass": true}
+	],
+	"half_orcs": [
+		{"id": "hunting_lodge", "label": "Hunting Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true},
+		{"id": "war_camp", "label": "War Camp", "tile": Vector2i(11, 3), "requires_plain_grass": true}
+	],
+	"half_elves": [
+		{"id": "homestead", "label": "Homestead", "tile": Vector2i(13, 1), "requires_plain_grass": true},
+		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 6), "requires_tree_neighbor": true}
+	],
+	"centaurs": [
+		{"id": "centaur_camp", "label": "Centaur Camp", "tile": Vector2i(10, 2), "requires_plain_grass": true}
+	],
+	"firbolg": [
+		{"id": "great_tree", "label": "Elder Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true}
+	],
+	"gnomes": [
+		{"id": "homestead", "label": "Gnomish Burrow", "tile": Vector2i(13, 1), "requires_plain_grass": true},
+		{"id": "farm", "label": "Tinker's Plot", "tile": Vector2i(16, 2), "requires_plain_grass": true}
+	],
+	"aarakocra": [
+		{"id": "cliff_aerie", "label": "Cliff Aerie", "tile": Vector2i(2, 2)}
+	],
+	"ogres": [
+		{"id": "ogre_den", "label": "Ogre Den", "tile": Vector2i(9, 1)}
+	],
+	"trolls": [
+		{"id": "troll_mound", "label": "Troll Mound", "tile": Vector2i(9, 0)}
+	],
+	"gnolls": [
+		{"id": "gnoll_den", "label": "Gnoll Den", "tile": Vector2i(11, 0)}
+	],
+	"orc": [
+		{"id": "orc_camp", "label": "Orc Camp", "tile": Vector2i(11, 3)}
+	],
+	"hobgoblin": [
+		{"id": "war_banner", "label": "War Banner Camp", "tile": Vector2i(10, 1)}
+	],
+	"quilboar": [
+		{"id": "thorn_camp", "label": "Thorn Camp", "tile": Vector2i(11, 0)}
+	],
+	"blemaayae": [
+		{"id": "wanderer_camp", "label": "Wanderers' Camp", "tile": Vector2i(7, 1)}
+	],
+	"braxat": [
+		{"id": "raider_camp", "label": "Raider Camp", "tile": Vector2i(10, 1)}
+	],
+	"tuskar": [
+		{"id": "hunting_lodge", "label": "Tusked Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true}
+	],
+	"fimir": [
+		{"id": "bog_ruin", "label": "Bog Ruin", "tile": Vector2i(7, 2)}
+	],
+	"giants": [
+		{"id": "giant_cairn", "label": "Giant's Cairn", "tile": Vector2i(9, 0)}
+	],
+	"harpies": [
+		{"id": "harpy_roost", "label": "Harpy Roost", "tile": Vector2i(7, 2)}
+	],
+	"beastmen": [
+		{"id": "hunting_lodge", "label": "Beast Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true}
+	],
+	"demons": [
+		{"id": "profane_ruin", "label": "Profane Ruin", "tile": Vector2i(7, 2)}
+	],
+	"dryad": [
+		{"id": "great_tree", "label": "Heart Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true}
+	],
+	"leshy": [
+		{"id": "moonwell", "label": "Forest Shrine", "tile": Vector2i(2, 6), "requires_tree_neighbor": true}
+	],
+	"satyr": [
+		{"id": "revel_camp", "label": "Revel Glade", "tile": Vector2i(7, 1), "requires_tree_neighbor": true}
+	],
+	"fae": [
+		{"id": "moonwell", "label": "Fae Circle", "tile": Vector2i(2, 6), "requires_tree_neighbor": true}
+	],
+	"pygmy": [
+		{"id": "hunting_lodge", "label": "Canopy Camp", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true}
+	],
+	"snakemen": [
+		{"id": "sunken_shrine", "label": "Sunken Shrine", "tile": Vector2i(7, 2)}
 	]
 }

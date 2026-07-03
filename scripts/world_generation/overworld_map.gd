@@ -207,6 +207,9 @@ const _ID_TO_BIOME: Array[String] = [
 const TILE_OVERLAY_TREE := 1
 const TILE_OVERLAY_FOREST := 1 << 1
 const TILE_OVERLAY_RIVER := 1 << 2
+
+## Structures that join the road network alongside true settlements.
+const ROUTE_ELIGIBLE_STRUCTURE_IDS := ["roadsideTavern", "travelerCamp", "orcCamp", "tower", "evilWizardTower"]
 const _BIOME_RESOURCES_BY_ID := {
 	0: ["fish", "salt"],
 	1: ["stone", "iron", "gems"],
@@ -631,6 +634,14 @@ var _routes_overlay_enabled := false
 var _labels_overlay_enabled := true
 var _scale_bar_enabled := true
 var _route_segments: Array = []
+var _caravans_layer: Node2D
+var _caravan_states: Array[Dictionary] = []
+var _caravan_texture: Texture2D
+var _escape_menu: EscapeMenu
+var _chronology_year := 1000
+var _is_first_age := false
+var _world_name := ""
+var _world_name_label: Label
 var _overlay_dirty := {
 	"elevation": true,
 	"temperature": true,
@@ -667,6 +678,8 @@ func _ready() -> void:
 	if map_layer == null:
 		push_error("Overworld map is missing a TileMapLayer named MapLayer.")
 		return
+	_escape_menu = EscapeMenu.new()
+	add_child(_escape_menu)
 	_show_loading_screen()
 	await get_tree().process_frame
 	_apply_cached_world_settings()
@@ -764,10 +777,16 @@ func _hide_loading_screen() -> void:
 
 func _process(delta: float) -> void:
 	_update_map_tooltip()
+	_update_caravans(delta)
 	if _is_globe_view:
 		_rotate_globe(delta)
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		if _escape_menu != null:
+			_escape_menu.toggle()
+			get_viewport().set_input_as_handled()
+		return
 	if _is_globe_view and _handle_globe_input(event):
 		return
 	if _is_scene3d_view and _handle_scene3d_input(event):
@@ -1247,9 +1266,11 @@ func _set_details_tab_text(target: RichTextLabel, text: String) -> void:
 func _build_settlement_history_timeline(
 	details: Dictionary,
 	settlement_name: String,
-	founded_years_ago: int
+	founded_years_ago: int,
+	chronology_year_override: int = 0
 ) -> String:
-	return OverworldHistoryService.build_settlement_history_timeline(details, settlement_name, founded_years_ago)
+	var anchor_year := chronology_year_override if chronology_year_override > 0 else _chronology_year
+	return OverworldHistoryService.build_settlement_history_timeline(details, settlement_name, founded_years_ago, anchor_year)
 
 func _resolve_history_kind(details: Dictionary) -> String:
 	return OverworldHistoryService.resolve_history_kind(details)
@@ -1283,6 +1304,22 @@ func _tile_hill_biome_from_data(tile_data: Dictionary) -> String:
 
 func _tile_has_overlay_flag(tile_data: Dictionary, flag: int) -> bool:
 	return (int(tile_data.get("overlay_flags", 0)) & flag) != 0
+
+## Chronology ages arrive as ints ("2") or strings ("Age 1", "Age of
+## Discovery"); returns the numeric age, or 0 when it has none.
+func _chronology_age_number(age_value: Variant) -> int:
+	if age_value is int:
+		return int(age_value)
+	if age_value is float:
+		return int(age_value)
+	if age_value is String:
+		var digits := ""
+		for character in String(age_value):
+			if character >= "0" and character <= "9":
+				digits += character
+		if not digits.is_empty():
+			return int(digits)
+	return 0
 
 func _tile_region_name(coord: Vector2i, tile_data: Dictionary) -> String:
 	if tile_data.has("region_name"):
@@ -2893,22 +2930,37 @@ func _place_mines_hillholds_and_dams(
 		max_hillholds -= 1
 
 	if max_dams > 0:
-		for y in range(1, map_size.y - 1):
-			for x in range(1, map_size.x - 1):
-				if max_dams <= 0:
-					break
-				var coord := Vector2i(x, y)
-				if _is_coord_occupied(coord, occupied):
-					continue
-				if map_layer.get_cell_atlas_coords(coord) != WATER_TILE:
-					continue
-				var left := Vector2i(x - 1, y)
-				var right := Vector2i(x + 1, y)
-				var left_hill := _tile_hill_biome_from_data((_tile_data.get(left, {}) as Dictionary))
-				var right_hill := _tile_hill_biome_from_data((_tile_data.get(right, {}) as Dictionary))
-				if left_hill != BIOME_MOUNTAIN or right_hill != BIOME_MOUNTAIN:
-					continue
-				if not placed_dwarf_sites.is_empty() and _is_too_close(coord, placed_dwarf_sites, 12.0):
+		# Browser rule: dams are dwarven engineering. They sit on RIVER
+		# tiles pinched between mountains, within 10 tiles of a dwarfhold,
+		# and even then only some sites (35%) get dammed.
+		var dwarfhold_coords: Array[Vector2i] = []
+		for hold_coord_variant: Variant in _tile_data.keys():
+			var hold_info := _tile_data.get(hold_coord_variant, {}) as Dictionary
+			if String(hold_info.get("settlement_type", "")).findn("dwarfhold") >= 0:
+				dwarfhold_coords.append(hold_coord_variant as Vector2i)
+		if not dwarfhold_coords.is_empty():
+			for y in range(1, map_size.y - 1):
+				for x in range(1, map_size.x - 1):
+					if max_dams <= 0:
+						break
+					var coord := Vector2i(x, y)
+					if _is_coord_occupied(coord, occupied):
+						continue
+					var dam_tile_info := _tile_data.get(coord, {}) as Dictionary
+					if not _tile_has_overlay_flag(dam_tile_info, TILE_OVERLAY_RIVER):
+						continue
+					var west_hill := _tile_hill_biome_from_data((_tile_data.get(Vector2i(x - 1, y), {}) as Dictionary))
+					var east_hill := _tile_hill_biome_from_data((_tile_data.get(Vector2i(x + 1, y), {}) as Dictionary))
+					var north_hill := _tile_hill_biome_from_data((_tile_data.get(Vector2i(x, y - 1), {}) as Dictionary))
+					var south_hill := _tile_hill_biome_from_data((_tile_data.get(Vector2i(x, y + 1), {}) as Dictionary))
+					var pinched := (west_hill == BIOME_MOUNTAIN and east_hill == BIOME_MOUNTAIN) \
+						or (north_hill == BIOME_MOUNTAIN and south_hill == BIOME_MOUNTAIN)
+					if not pinched:
+						continue
+					if not _is_too_close(coord, dwarfhold_coords, 10.0):
+						continue
+					if rng.randf() >= 0.35:
+						continue
 					_place_structure_with_details(coord, DAM_TILE, "dam", {"region_name": "Dam"})
 					occupied.append(coord)
 					max_dams -= 1
@@ -3229,12 +3281,19 @@ func _collect_faction_sources() -> Array[Dictionary]:
 			faction_key = "wood_elves"
 		elif settlement_type.find("lizard") >= 0:
 			faction_key = "lizardmen"
+		# Browser rule: a town's reach grows with its people - hamlets of
+		# ~120 hold little ground, cities of 2000+ claim the full radius.
+		var claim_radius := 12
+		if faction_key == "humans":
+			var town_population := maxi(0, int(tile_info.get("population", 0)))
+			var population_scale := clampf(float(town_population - 120) / float(2000 - 120), 0.0, 1.0)
+			claim_radius = int(round(lerpf(8.0, 15.0, population_scale)))
 		factions.append({
 			"key": faction_key,
 			"label": String(CIVILIZATION_LABELS.get(faction_key, faction_key.capitalize())),
 			"color": CultureTypes.DEFAULT_CULTURE_COLORS.get(faction_key, Color.GRAY),
 			"capital": {"x": coord.x, "y": coord.y, "type": settlement_type},
-			"claim_radius": 12
+			"claim_radius": claim_radius
 		})
 	return factions
 
@@ -3505,6 +3564,38 @@ func _resources_for_biome_id(biome_id: int) -> Array[String]:
 	for entry: Variant in _BIOME_RESOURCES_BY_ID.get(biome_id, _BIOME_RESOURCES_BY_ID.get(_biome_to_id(BIOME_GRASSLAND), [])):
 		resolved.append(String(entry))
 	return resolved
+
+## Browser-style tile resources: the biome's base yields plus proximity
+## bonuses (coasts, marshes, deserts, volcanoes, deep canopy, cold), with
+## lakes and oceans yielding different waters. Capped at 5 per tile.
+func _resources_for_tile(coord: Vector2i, data: Dictionary) -> Array[String]:
+	var biome_id := int(data.get("biome_id", _biome_to_id(BIOME_GRASSLAND)))
+	var resolved: Array[String]
+	if biome_id == _biome_to_id(BIOME_WATER) and _is_lake_coord(coord):
+		resolved = ["freshwater catches", "boat timber", "shoreline clay"]
+	else:
+		resolved = _resources_for_biome_id(biome_id)
+	if float(data.get("coast_proximity", 0.0)) >= 0.65 and biome_id != _biome_to_id(BIOME_WATER):
+		resolved.append("coastal fisheries")
+	if float(data.get("marsh_proximity", 0.0)) >= 0.55 and biome_id != _biome_to_id(BIOME_MARSH):
+		resolved.append("peat and bog iron")
+	if float(data.get("desert_proximity", 0.0)) >= 0.55 and biome_id != _biome_to_id(BIOME_DESERT):
+		resolved.append("trade caravans")
+	if float(data.get("forest_canopy_density", 0.0)) >= 0.65:
+		resolved.append("dense lumber stands")
+	if float(data.get("temperature", 1.0)) <= 0.25:
+		resolved.append("fur-bearing game")
+	if _is_within_tiles_of_volcano(coord, 3):
+		resolved.append("volcanic glass and obsidian")
+	if resolved.size() > 5:
+		resolved = resolved.slice(0, 5)
+	return resolved
+
+func _is_lake_coord(coord: Vector2i) -> bool:
+	var lake_cells_variant: Variant = _landmass_masks.get("lake_cells", {})
+	if lake_cells_variant is Dictionary:
+		return (lake_cells_variant as Dictionary).has(coord)
+	return false
 
 func _describe_climate(temperature: float, moisture: float) -> String:
 	return OverworldPopulationService.describe_climate(temperature, moisture)
@@ -4149,7 +4240,7 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 	var biome := _tile_biome_from_data(data)
 	var temperature := float(data.get("temperature", 0.0))
 	var moisture := float(data.get("moisture", 0.0))
-	var resources := _resources_for_biome_id(int(data.get("biome_id", _biome_to_id(BIOME_GRASSLAND))))
+	var resources := _resources_for_tile(coord, data)
 	var region_name := _tile_region_name(coord, data)
 	var biome_label := _humanize_biome(biome)
 	if region_name.is_empty():
@@ -4722,7 +4813,129 @@ func _update_political_boundaries_overlay_visibility() -> void:
 		return
 	political_boundaries_overlay.visible = _political_boundaries_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
 
+## --- Caravans -------------------------------------------------------------
+## Merchant wagons ride the trade routes between settlements, ping-ponging
+## endlessly. Pure map life: they follow the same terrain-following paths
+## the routes overlay draws, and stay visible even with the overlay off.
+
+func _spawn_caravans() -> void:
+	_caravan_states.clear()
+	if _caravans_layer != null:
+		_caravans_layer.queue_free()
+		_caravans_layer = null
+	if routes_overlay == null or _route_segments.is_empty():
+		return
+	_caravans_layer = Node2D.new()
+	_caravans_layer.name = "CaravansOverlay"
+	_caravans_layer.z_index = 6
+	routes_overlay.get_parent().add_child(_caravans_layer)
+	if _caravan_texture == null:
+		_caravan_texture = _create_caravan_texture()
+	var caravan_rng := RandomNumberGenerator.new()
+	caravan_rng.seed = hash("caravans") + _route_segments.size() * 31
+	var caravan_count := mini(6, _route_segments.size())
+	for _caravan_index in range(caravan_count):
+		var path := _route_segments[caravan_rng.randi_range(0, _route_segments.size() - 1)] as PackedVector2Array
+		if path.size() < 4:
+			continue
+		var total_length := 0.0
+		for i in range(path.size() - 1):
+			total_length += path[i].distance_to(path[i + 1])
+		if total_length <= 1.0:
+			continue
+		var sprite := Sprite2D.new()
+		sprite.texture = _caravan_texture
+		sprite.centered = true
+		_caravans_layer.add_child(sprite)
+		_caravan_states.append({
+			"path": path,
+			"length": total_length,
+			"t": caravan_rng.randf_range(0.0, total_length),
+			"dir": 1.0 if caravan_rng.randf() < 0.5 else -1.0,
+			"speed": caravan_rng.randf_range(9.0, 16.0),
+			"sprite": sprite
+		})
+	_update_caravans(0.0)
+	_update_caravans_visibility()
+
+func _update_caravans(delta: float) -> void:
+	for state: Dictionary in _caravan_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var total_length := float(state.get("length", 1.0))
+		var t := float(state.get("t", 0.0)) + float(state.get("speed", 10.0)) * float(state.get("dir", 1.0)) * delta
+		if t <= 0.0:
+			t = 0.0
+			state["dir"] = 1.0
+		elif t >= total_length:
+			t = total_length
+			state["dir"] = -1.0
+		state["t"] = t
+		var path := state.get("path") as PackedVector2Array
+		var remaining := t
+		var caravan_position := path[0]
+		var heading := Vector2.RIGHT
+		for i in range(path.size() - 1):
+			var segment_length := path[i].distance_to(path[i + 1])
+			if segment_length <= 0.001:
+				continue
+			if remaining <= segment_length:
+				caravan_position = path[i].lerp(path[i + 1], remaining / segment_length)
+				heading = path[i + 1] - path[i]
+				break
+			remaining -= segment_length
+			caravan_position = path[i + 1]
+		sprite.position = caravan_position
+		sprite.flip_h = heading.x * float(state.get("dir", 1.0)) < 0.0
+
+func _update_caravans_visibility() -> void:
+	if _caravans_layer == null:
+		return
+	_caravans_layer.visible = not (_is_globe_view or _is_scene3d_view)
+
+func _create_caravan_texture() -> Texture2D:
+	var image := Image.create(14, 11, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var canopy := Color(0.92, 0.85, 0.7, 1.0)
+	var canopy_shade := Color(0.82, 0.73, 0.57, 1.0)
+	var body := Color(0.5, 0.34, 0.19, 1.0)
+	var wheel := Color(0.22, 0.16, 0.1, 1.0)
+	for x in range(3, 11):
+		image.set_pixel(x, 1, canopy_shade)
+	for y in range(2, 5):
+		for x in range(2, 12):
+			image.set_pixel(x, y, canopy)
+	for y in range(5, 8):
+		for x in range(1, 13):
+			image.set_pixel(x, y, body)
+	for wheel_x: int in [2, 9]:
+		for y in range(8, 10):
+			image.set_pixel(wheel_x, y, wheel)
+			image.set_pixel(wheel_x + 1, y, wheel)
+	return ImageTexture.create_from_image(image)
+
+## The world finally wears its name: a banner under the top bar showing
+## the embark-chosen world name and the current chronology.
+func _update_world_name_label() -> void:
+	var map_ui := get_node_or_null("MapUi")
+	if map_ui == null:
+		return
+	if _world_name_label == null:
+		_world_name_label = Label.new()
+		_world_name_label.add_theme_font_size_override("font_size", 15)
+		_world_name_label.add_theme_color_override("font_color", Color(0.95, 0.9, 0.78, 1.0))
+		_world_name_label.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.06, 0.9))
+		_world_name_label.add_theme_constant_override("outline_size", 4)
+		_world_name_label.position = Vector2(14.0, 46.0)
+		map_ui.add_child(_world_name_label)
+	var display_name := _world_name if not _world_name.is_empty() else "Unnamed World"
+	_world_name_label.text = "🌍 %s — Year %d" % [display_name, _chronology_year]
+	if _is_first_age:
+		_world_name_label.text += " of the First Age"
+
 func _update_routes_overlay_visibility() -> void:
+	_update_caravans_visibility()
 	if routes_overlay == null:
 		return
 	routes_overlay.visible = _routes_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
@@ -4791,7 +5004,10 @@ func _build_routes_overlay_from_settlements() -> void:
 		var coord := coord_variant as Vector2i
 		var tile_info := _tile_data.get(coord, {}) as Dictionary
 		if String(tile_info.get("settlement_type", "")).strip_edges().is_empty():
-			continue
+			# Browser roads also serve the wayside stops: taverns, camps,
+			# and wizard towers all join the route network.
+			if not ROUTE_ELIGIBLE_STRUCTURE_IDS.has(String(tile_info.get("structure", ""))):
+				continue
 		settlement_cells.append(coord)
 
 	if settlement_cells.size() < 2:
@@ -4844,6 +5060,8 @@ func _build_routes_overlay_from_settlements() -> void:
 	for path in route_paths:
 		_route_segments.append(path)
 	_refresh_routes_overlay_lines()
+	_spawn_caravans()
+	_update_world_name_label()
 
 func _add_route_edge(a: Vector2i, b: Vector2i, edge_set: Dictionary, route_edges: Array) -> void:
 	if a == b:
@@ -4956,5 +5174,15 @@ func _apply_cached_world_settings() -> void:
 			falloff_power = float(layout_preset.get("falloff_power", 2.4))
 		if settings.has("terrain_ratios") and settings["terrain_ratios"] is Dictionary:
 			_apply_terrain_ratio_settings(settings["terrain_ratios"])
+		_world_name = String(settings.get("world_name", "")).strip_edges()
+		var chronology := settings.get("chronology", {}) as Dictionary
+		_chronology_year = maxi(1, int(chronology.get("year", 1000)))
+		# First-age worlds (browser isFirstAge) are young and untamed:
+		# forests seed easier and are allowed to blanket far more land.
+		var age_number := _chronology_age_number(chronology.get("age"))
+		_is_first_age = age_number == 1
+		if _is_first_age:
+			forest_threshold = maxf(0.2, forest_threshold - 0.12)
+			forest_max_coverage = clampf(forest_max_coverage * 1.5, 0.2, 0.95)
 	_configure_globe_viewport()
 	_update_globe_texture()
