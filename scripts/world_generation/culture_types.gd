@@ -34,6 +34,7 @@ const DEFAULT_CULTURE_COLORS: Dictionary[String, Color] = {
 	"tuskar": Color("#6d86aa"),
 	"fimir": Color("#567572"),
 	"demons": Color("#D46A6A"),
+	"desert_folk": Color("#D9A94A"),
 	"dragons": Color("#8A6BDA"),
 	"beastmen": Color("#8D6E63"),
 	"gnolls": Color("#A77B4E"),
@@ -49,7 +50,8 @@ const SETTLEMENT_CLAIM_RADIUS_BY_TYPE: Dictionary[String, int] = {
 	"capital": 16,
 	"hamlet": 9,
 	"castle": 11,
-	"port": 11
+	"port": 11,
+	"desertcity": 11
 }
 
 const SETTLEMENT_RADIUS_MULTIPLIER_BY_TYPE: Dictionary[String, float] = {
@@ -96,6 +98,7 @@ const DEFAULT_SETTLEMENT_BREAKDOWN_BY_TYPE: Dictionary[String, Array] = {
 }
 
 const CULTURE_BIOME_LIMITS: Dictionary[String, Array] = {
+	"desert_folk": ["desert", "badlands", "grassland"],
 	"dwarves": ["mountain", "hills"],
 	"karkinos": ["ocean", "lake", "marsh", "water"],
 	"blemaayae": ["desert", "badlands", "jungle", "mountain", "hills"],
@@ -171,14 +174,19 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 			"label": "Roadside Tavern",
 			"tile": Vector2i(12, 1),
 			"requires_plain_grass": true
-		}
+		},
+		{"id": "watchtower", "label": "Watchtower", "tile": Vector2i(3, 4), "requires_plain_grass": true},
+		{"id": "farmhouse", "label": "Farmhouse", "tile": Vector2i(4, 5), "requires_plain_grass": true},
+		{"id": "hermit_hut", "label": "Hermit's Hut", "tile": Vector2i(0, 4)}
 	],
 	"wood_elves": [
 		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 5), "requires_tree_neighbor": true},
-		{"id": "great_tree", "label": "Great Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true}
+		{"id": "great_tree", "label": "Great Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true},
+		{"id": "old_growth", "label": "Old Growth", "tile": Vector2i(0, 2), "requires_tree_overlay": true, "replace_tree_overlay": true}
 	],
 	"dragons": [
-		{"id": "sleeping_dragon", "label": "Sleeping Dragon", "tile": Vector2i(14, 0), "requires_cave_neighbor": true}
+		{"id": "sleeping_dragon", "label": "Sleeping Dragon", "tile": Vector2i(14, 0), "requires_cave_neighbor": true},
+		{"id": "green_dragon", "label": "Green Dragon", "tile": Vector2i(18, 0), "requires_cave_neighbor": true}
 	],
 	# The wider folk of the world (browser AMBIENT_STRUCTURE_OPTIONS):
 	# every land culture leaves its mark on its own territory.
@@ -195,7 +203,8 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 6), "requires_tree_neighbor": true}
 	],
 	"centaurs": [
-		{"id": "centaur_camp", "label": "Centaur Camp", "tile": Vector2i(10, 2), "requires_plain_grass": true}
+		{"id": "centaur_camp", "label": "Centaur Camp", "tile": Vector2i(10, 2), "requires_plain_grass": true},
+		{"id": "tent_camp", "label": "Tent Camp", "tile": Vector2i(1, 5), "requires_plain_grass": true}
 	],
 	"firbolg": [
 		{"id": "great_tree", "label": "Elder Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true}
@@ -217,7 +226,8 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "gnoll_den", "label": "Gnoll Den", "tile": Vector2i(11, 0)}
 	],
 	"orc": [
-		{"id": "orc_camp", "label": "Orc Camp", "tile": Vector2i(11, 3)}
+		{"id": "orc_camp", "label": "Orc Camp", "tile": Vector2i(11, 3)},
+		{"id": "war_pyre", "label": "War Pyre", "tile": Vector2i(13, 3)}
 	],
 	"hobgoblin": [
 		{"id": "war_banner", "label": "War Banner Camp", "tile": Vector2i(10, 1)}
@@ -238,7 +248,8 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "bog_ruin", "label": "Bog Ruin", "tile": Vector2i(7, 2)}
 	],
 	"giants": [
-		{"id": "giant_cairn", "label": "Giant's Cairn", "tile": Vector2i(9, 0)}
+		{"id": "giant_cairn", "label": "Giant's Cairn", "tile": Vector2i(9, 0)},
+		{"id": "stone_cairn", "label": "Stone Cairn", "tile": Vector2i(5, 6)}
 	],
 	"harpies": [
 		{"id": "harpy_roost", "label": "Harpy Roost", "tile": Vector2i(7, 2)}
@@ -247,7 +258,9 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "hunting_lodge", "label": "Beast Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true}
 	],
 	"demons": [
-		{"id": "profane_ruin", "label": "Profane Ruin", "tile": Vector2i(7, 2)}
+		{"id": "profane_ruin", "label": "Profane Ruin", "tile": Vector2i(7, 2)},
+		{"id": "dark_gate", "label": "Dark Gate", "tile": Vector2i(17, 1)},
+		{"id": "dark_spire", "label": "Dark Spire", "tile": Vector2i(17, 2)}
 	],
 	"dryad": [
 		{"id": "great_tree", "label": "Heart Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true}
@@ -263,6 +276,10 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	],
 	"pygmy": [
 		{"id": "hunting_lodge", "label": "Canopy Camp", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true}
+	],
+	"desert_folk": [
+		{"id": "desert_hut", "label": "Desert Hut", "tile": Vector2i(9, 6)},
+		{"id": "serpent_statue", "label": "Serpent Statue", "tile": Vector2i(9, 3)}
 	],
 	"snakemen": [
 		{"id": "sunken_shrine", "label": "Sunken Shrine", "tile": Vector2i(7, 2)}

@@ -491,7 +491,8 @@ const CIVILIZATION_LABELS := {
 	"humans": "Humans",
 	"dwarves": "Dwarves",
 	"wood_elves": "Wood Elves",
-	"lizardmen": "Lizardmen"
+	"lizardmen": "Lizardmen",
+	"desert_folk": "Desert Folk"
 }
 
 @onready var map_layer: TileMapLayer = $MapLayer
@@ -642,6 +643,9 @@ var _chronology_year := 1000
 var _is_first_age := false
 var _world_name := ""
 var _world_name_label: Label
+var _roads_layer: TileMapLayer
+var _ships_layer: Node2D
+var _ship_states: Array[Dictionary] = []
 var _overlay_dirty := {
 	"elevation": true,
 	"temperature": true,
@@ -778,6 +782,7 @@ func _hide_loading_screen() -> void:
 func _process(delta: float) -> void:
 	_update_map_tooltip()
 	_update_caravans(delta)
+	_update_pirate_ships(delta)
 	if _is_globe_view:
 		_rotate_globe(delta)
 
@@ -2721,6 +2726,8 @@ func _place_github_style_structures(
 			occupied.append(coord)
 
 	_place_wizard_tower_settlements(biome_map, height_map, moisture_map, rng, occupied, map_area)
+	_place_desert_cities(rng, occupied, map_area)
+	_place_evil_keeps(rng, occupied, map_area)
 	_place_hostile_camps(biome_map, moisture_map, rng, occupied, map_area)
 	_place_caves_and_dungeons(biome_map, height_map, moisture_map, rng, occupied, map_area)
 	_place_mines_hillholds_and_dams(height_map, rng, occupied, map_area)
@@ -3242,6 +3249,11 @@ func _assign_cultural_groups(
 			}
 		var ambient_structure: Variant = tile_info.get("ambient_structure", null)
 		if ambient_structure is Dictionary:
+			# Roads were laid before culture ran; keep them clear of clutter.
+			if _roads_layer != null and _roads_layer.get_cell_source_id(coord) >= 0:
+				tile_info["ambient_structure"] = null
+				_tile_data[coord] = tile_info
+				continue
 			var ambient_dict := ambient_structure as Dictionary
 			tile_info["structure"] = String(ambient_dict.get("id", "ambient"))
 			if bool(ambient_dict.get("replace_tree_overlay", false)) and tree_layer != null:
@@ -3281,6 +3293,8 @@ func _collect_faction_sources() -> Array[Dictionary]:
 			faction_key = "wood_elves"
 		elif settlement_type.find("lizard") >= 0:
 			faction_key = "lizardmen"
+		elif settlement_type.find("desert") >= 0:
+			faction_key = "desert_folk"
 		# Browser rule: a town's reach grows with its people - hamlets of
 		# ~120 hold little ground, cities of 2000+ claim the full radius.
 		var claim_radius := 12
@@ -4890,9 +4904,13 @@ func _update_caravans(delta: float) -> void:
 		sprite.flip_h = heading.x * float(state.get("dir", 1.0)) < 0.0
 
 func _update_caravans_visibility() -> void:
-	if _caravans_layer == null:
-		return
-	_caravans_layer.visible = not (_is_globe_view or _is_scene3d_view)
+	var overlays_visible := not (_is_globe_view or _is_scene3d_view)
+	if _caravans_layer != null:
+		_caravans_layer.visible = overlays_visible
+	if _ships_layer != null:
+		_ships_layer.visible = overlays_visible
+	if _roads_layer != null:
+		_roads_layer.visible = overlays_visible
 
 func _create_caravan_texture() -> Texture2D:
 	var image := Image.create(14, 11, false, Image.FORMAT_RGBA8)
@@ -4914,6 +4932,298 @@ func _create_caravan_texture() -> Texture2D:
 			image.set_pixel(wheel_x, y, wheel)
 			image.set_pixel(wheel_x + 1, y, wheel)
 	return ImageTexture.create_from_image(image)
+
+## --- Road tiles -----------------------------------------------------------
+## The atlas ships a hand-drawn winding-road set (row 5); routes are laid
+## down as real road tiles, bucketed by which edges each cell connects to.
+## The dotted trail overlay stays as the toggleable route highlighter.
+
+func _build_road_tiles() -> void:
+	if map_layer == null or map_layer.tile_set == null:
+		return
+	if _roads_layer == null:
+		_roads_layer = TileMapLayer.new()
+		_roads_layer.name = "RoadsLayer"
+		_roads_layer.tile_set = map_layer.tile_set
+		var parent := map_layer.get_parent()
+		parent.add_child(_roads_layer)
+		var highland_index := highland_layer.get_index() if highland_layer != null else map_layer.get_index()
+		parent.move_child(_roads_layer, highland_index + 1)
+	_roads_layer.clear()
+	if _route_segments.is_empty():
+		return
+	# Collect road cells from the route paths, skipping unroadable ground.
+	var road_cells: Dictionary = {}
+	for path_variant: Variant in _route_segments:
+		var path := path_variant as PackedVector2Array
+		for i in range(path.size()):
+			var cell := Vector2i(int(floor(path[i].x / float(tile_size))), int(floor(path[i].y / float(tile_size))))
+			var tile_info := _tile_data.get(cell, {}) as Dictionary
+			if tile_info.is_empty():
+				continue
+			if tile_info.has("settlement_type") or not String(tile_info.get("structure", "")).strip_edges().is_empty():
+				continue
+			if _tile_base_biome_from_data(tile_info) == BIOME_WATER:
+				continue
+			if _tile_has_overlay_flag(tile_info, TILE_OVERLAY_RIVER):
+				continue
+			road_cells[cell] = true
+	for cell_variant: Variant in road_cells.keys():
+		var cell := cell_variant as Vector2i
+		var mask := 0
+		if road_cells.has(cell + Vector2i.UP) or _is_road_endpoint(cell + Vector2i.UP):
+			mask |= 1
+		if road_cells.has(cell + Vector2i.RIGHT) or _is_road_endpoint(cell + Vector2i.RIGHT):
+			mask |= 2
+		if road_cells.has(cell + Vector2i.DOWN) or _is_road_endpoint(cell + Vector2i.DOWN):
+			mask |= 4
+		if road_cells.has(cell + Vector2i.LEFT) or _is_road_endpoint(cell + Vector2i.LEFT):
+			mask |= 8
+		_roads_layer.set_cell(cell, _atlas_source_id, _road_tile_for_mask(mask, cell))
+		# Roads clear the woods they cut through, like the browser overlay.
+		if tree_layer != null and tree_layer.get_cell_source_id(cell) >= 0:
+			tree_layer.erase_cell(cell)
+
+func _is_road_endpoint(cell: Vector2i) -> bool:
+	var tile_info := _tile_data.get(cell, {}) as Dictionary
+	if tile_info.is_empty():
+		return false
+	if tile_info.has("settlement_type"):
+		return true
+	return ROUTE_ELIGIBLE_STRUCTURE_IDS.has(String(tile_info.get("structure", "")))
+
+## Buckets the 4-neighbor mask (N=1 E=2 S=4 W=8) into the organic road
+## art, picking deterministic variants per cell.
+func _road_tile_for_mask(mask: int, cell: Vector2i) -> Vector2i:
+	var bucket := "stub"
+	match mask:
+		5:
+			bucket = "ns"
+		10:
+			bucket = "we"
+		6:
+			bucket = "corner_se"
+		12:
+			bucket = "corner_sw"
+		3:
+			bucket = "corner_ne"
+		9:
+			bucket = "corner_nw"
+		1, 4:
+			bucket = "ns"
+		2, 8:
+			bucket = "we"
+		_:
+			if mask != 0:
+				bucket = "junction"
+	var variants := TILE_ATLAS_DEFS.ROAD_TILES.get(bucket, TILE_ATLAS_DEFS.ROAD_TILES["stub"]) as Array
+	var pick := absi(cell.x * 73856093 ^ cell.y * 19349663) % variants.size()
+	return variants[pick] as Vector2i
+
+## --- Desert cities ----------------------------------------------------------
+## The atlas's unshipped desert set becomes a real civilization: golden
+## palaces rise from the dunes with sandstone walls, a gate, huts, a
+## serpent statue, and palm groves around them.
+
+func _place_desert_cities(rng: RandomNumberGenerator, occupied: Array[Vector2i], map_area: int) -> void:
+	if settlement_layer == null:
+		return
+	var candidates: Array[Vector2i] = []
+	var desert_id := _biome_to_id(BIOME_DESERT)
+	for coord_variant: Variant in _tile_data.keys():
+		var coord := coord_variant as Vector2i
+		var tile_info := _tile_data.get(coord, {}) as Dictionary
+		if int(tile_info.get("base_biome_id", -1)) != desert_id:
+			continue
+		if int(tile_info.get("overlay_flags", 0)) != 0:
+			continue
+		if _tile_hill_biome_from_data(tile_info) == BIOME_MOUNTAIN:
+			continue
+		if tile_info.has("settlement_type") or not String(tile_info.get("structure", "")).strip_edges().is_empty():
+			continue
+		candidates.append(coord)
+	if candidates.is_empty():
+		return
+	# Prefer sites with open ground around them so the walls, gate, and
+	# huts of the compound have room to stand.
+	var open_biomes := [_biome_to_id(BIOME_DESERT), _biome_to_id(BIOME_BADLANDS), _biome_to_id(BIOME_GRASSLAND)]
+	var scored_candidates: Array[Dictionary] = []
+	for candidate: Vector2i in candidates:
+		var open_neighbors := 0
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				if dx == 0 and dy == 0:
+					continue
+				var neighbor_info := _tile_data.get(candidate + Vector2i(dx, dy), {}) as Dictionary
+				if neighbor_info.is_empty():
+					continue
+				if open_biomes.has(int(neighbor_info.get("base_biome_id", -1))) and int(neighbor_info.get("overlay_flags", 0)) == 0 and _tile_hill_biome_from_data(neighbor_info) != BIOME_MOUNTAIN:
+					open_neighbors += 1
+		scored_candidates.append({"coord": candidate, "open": open_neighbors + (absi(candidate.x * 73856093 ^ candidate.y * 19349663) % 100) / 1000.0})
+	scored_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return float(a.get("open", 0.0)) > float(b.get("open", 0.0))
+	)
+	candidates.clear()
+	for scored: Dictionary in scored_candidates:
+		candidates.append(scored.get("coord", Vector2i.ZERO) as Vector2i)
+	var max_cities := clampi(int(round(float(map_area) / 26000.0)), 1, 8)
+	var placed := 0
+	for coord: Vector2i in candidates:
+		if placed >= max_cities:
+			break
+		if _is_too_close(coord, occupied, 12.0):
+			continue
+		var city_name: String = SETTLEMENT_NAMING.desert_city_name(rng)
+		settlement_layer.set_cell(coord, _atlas_source_id, TILE_ATLAS_DEFS.DESERT_CITY_TILE)
+		var tile_info := _tile_data.get(coord, {}) as Dictionary
+		tile_info["settlement_type"] = "desertCity"
+		tile_info["settlement_classification"] = "Desert City"
+		tile_info["population"] = rng.randi_range(700, 4500)
+		tile_info["founded_years_ago"] = rng.randi_range(100, 1500)
+		_tile_data[coord] = tile_info
+		_tile_region_names[coord] = city_name
+		_tile_population_groups[coord] = {"major_population_groups": ["Desert Folk"], "minor_population_groups": ["Humans"]}
+		occupied.append(coord)
+		_stamp_desert_city_compound(coord, rng, occupied)
+		placed += 1
+
+## Sandstone walls flank a gate below the palace; a hut and the serpent
+## statue stand beside it, and palms take root in the surrounding dunes.
+func _stamp_desert_city_compound(center: Vector2i, rng: RandomNumberGenerator, occupied: Array[Vector2i]) -> void:
+	var decorations := [
+		{"offset": Vector2i(-1, 1), "tile": TILE_ATLAS_DEFS.DESERT_WALL_A_TILE},
+		{"offset": Vector2i(0, 1), "tile": TILE_ATLAS_DEFS.DESERT_GATE_TILE},
+		{"offset": Vector2i(1, 1), "tile": TILE_ATLAS_DEFS.DESERT_WALL_B_TILE},
+		{"offset": Vector2i(1, 0), "tile": TILE_ATLAS_DEFS.DESERT_HUT_TILE},
+		{"offset": Vector2i(-1, 0), "tile": TILE_ATLAS_DEFS.DESERT_SERPENT_STATUE_TILE}
+	]
+	# Seeded deserts can be small; the compound spreads onto any open dry
+	# ground beside the palace (desert, badlands, or grassland).
+	var compound_biomes := [_biome_to_id(BIOME_DESERT), _biome_to_id(BIOME_BADLANDS), _biome_to_id(BIOME_GRASSLAND)]
+	for decoration: Dictionary in decorations:
+		var cell: Vector2i = center + (decoration.get("offset", Vector2i.ZERO) as Vector2i)
+		var tile_info := _tile_data.get(cell, {}) as Dictionary
+		if tile_info.is_empty() or tile_info.has("settlement_type"):
+			continue
+		if not compound_biomes.has(int(tile_info.get("base_biome_id", -1))) or int(tile_info.get("overlay_flags", 0)) != 0:
+			continue
+		if _tile_hill_biome_from_data(tile_info) == BIOME_MOUNTAIN:
+			continue
+		if not String(tile_info.get("structure", "")).strip_edges().is_empty():
+			continue
+		if settlement_layer.get_cell_source_id(cell) >= 0:
+			continue
+		settlement_layer.set_cell(cell, _atlas_source_id, decoration.get("tile") as Vector2i)
+		occupied.append(cell)
+	# palm groves and cacti in the nearby dunes
+	var desert_id := _biome_to_id(BIOME_DESERT)
+	for dy in range(-3, 4):
+		for dx in range(-3, 4):
+			var cell := center + Vector2i(dx, dy)
+			if absi(dx) <= 1 and absi(dy) <= 1:
+				continue
+			var tile_info := _tile_data.get(cell, {}) as Dictionary
+			if tile_info.is_empty() or tile_info.has("settlement_type"):
+				continue
+			if int(tile_info.get("base_biome_id", -1)) != desert_id or int(tile_info.get("overlay_flags", 0)) != 0:
+				continue
+			if not String(tile_info.get("structure", "")).strip_edges().is_empty():
+				continue
+			if tree_layer == null or tree_layer.get_cell_source_id(cell) >= 0:
+				continue
+			if rng.randf() < 0.16:
+				tree_layer.set_cell(cell, _atlas_source_id, TILE_ATLAS_DEFS.DESERT_PALMS_TILE if rng.randf() < 0.6 else TILE_ATLAS_DEFS.DESERT_CACTI_TILE)
+
+## --- Evil keeps -------------------------------------------------------------
+## Villain strongholds on open ground, well away from honest settlements.
+
+func _place_evil_keeps(rng: RandomNumberGenerator, occupied: Array[Vector2i], map_area: int) -> void:
+	var candidates: Array[Dictionary] = []
+	var allowed_biomes := [_biome_to_id(BIOME_GRASSLAND), _biome_to_id(BIOME_BADLANDS), _biome_to_id(BIOME_TUNDRA)]
+	for coord_variant: Variant in _tile_data.keys():
+		var coord := coord_variant as Vector2i
+		var tile_info := _tile_data.get(coord, {}) as Dictionary
+		if not allowed_biomes.has(int(tile_info.get("base_biome_id", -1))):
+			continue
+		if int(tile_info.get("overlay_flags", 0)) != 0:
+			continue
+		if _tile_hill_biome_from_data(tile_info) == BIOME_MOUNTAIN:
+			continue
+		if tile_info.has("settlement_type") or not String(tile_info.get("structure", "")).strip_edges().is_empty():
+			continue
+		var score := 0.3 + float(absi(coord.x * 73856093 ^ coord.y * 19349663) % 100) / 200.0
+		candidates.append({"coord": coord, "score": score})
+	_place_scored_structure_batch(candidates, occupied, 12.0, maxi(1, int(round(float(map_area) / 40000.0))), 0.35, TILE_ATLAS_DEFS.EVIL_KEEP_TILE, "evilKeep", rng)
+
+## --- Pirate ships -----------------------------------------------------------
+## Sails on the horizon: ships drift across open ocean, turning away from
+## coasts, giving the seas the same life caravans give the roads.
+
+func _spawn_pirate_ships() -> void:
+	_ship_states.clear()
+	if _ships_layer != null:
+		_ships_layer.queue_free()
+		_ships_layer = null
+	var ocean_cells_variant: Variant = _landmass_masks.get("ocean_cells", {})
+	if not (ocean_cells_variant is Dictionary):
+		return
+	var ocean_cells := ocean_cells_variant as Dictionary
+	if ocean_cells.size() < 60 or routes_overlay == null:
+		return
+	_ships_layer = Node2D.new()
+	_ships_layer.name = "PirateShipsOverlay"
+	_ships_layer.z_index = 6
+	routes_overlay.get_parent().add_child(_ships_layer)
+	var atlas_texture := load(TILE_ATLAS_DEFS.ATLAS_TEXTURE) as Texture2D
+	if atlas_texture == null:
+		return
+	var ship_rng := RandomNumberGenerator.new()
+	ship_rng.seed = hash("pirates") + ocean_cells.size()
+	var ocean_list := ocean_cells.keys()
+	var ship_count := clampi(ocean_cells.size() / 4000, 2, 5)
+	for _ship_index in range(ship_count):
+		var start_cell := ocean_list[ship_rng.randi_range(0, ocean_list.size() - 1)] as Vector2i
+		var sprite := Sprite2D.new()
+		sprite.texture = atlas_texture
+		sprite.region_enabled = true
+		sprite.region_rect = Rect2(TILE_ATLAS_DEFS.PIRATE_SHIP_TILE.x * tile_size, TILE_ATLAS_DEFS.PIRATE_SHIP_TILE.y * tile_size, tile_size, tile_size)
+		sprite.centered = true
+		sprite.position = (Vector2(start_cell) + Vector2(0.5, 0.5)) * float(tile_size)
+		_ships_layer.add_child(sprite)
+		_ship_states.append({
+			"sprite": sprite,
+			"heading": ship_rng.randf_range(0.0, TAU),
+			"speed": ship_rng.randf_range(7.0, 13.0),
+			"turn_timer": ship_rng.randf_range(2.0, 6.0)
+		})
+	_update_caravans_visibility()
+
+func _update_pirate_ships(delta: float) -> void:
+	if _ship_states.is_empty():
+		return
+	var ocean_cells_variant: Variant = _landmass_masks.get("ocean_cells", {})
+	if not (ocean_cells_variant is Dictionary):
+		return
+	var ocean_cells := ocean_cells_variant as Dictionary
+	for state: Dictionary in _ship_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var heading := float(state.get("heading", 0.0))
+		state["turn_timer"] = float(state.get("turn_timer", 3.0)) - delta
+		if float(state.get("turn_timer", 0.0)) <= 0.0:
+			heading += randf_range(-0.7, 0.7)
+			state["turn_timer"] = randf_range(2.0, 6.0)
+		var velocity := Vector2(cos(heading), sin(heading)) * float(state.get("speed", 10.0))
+		var ahead := sprite.position + velocity * maxf(delta, 0.5) * 2.0
+		var ahead_cell := Vector2i(int(floor(ahead.x / float(tile_size))), int(floor(ahead.y / float(tile_size))))
+		if not ocean_cells.has(ahead_cell):
+			heading += PI * 0.5 + randf_range(-0.4, 0.4)
+			state["heading"] = heading
+			continue
+		state["heading"] = heading
+		sprite.position += velocity * delta
+		sprite.flip_h = velocity.x < 0.0
 
 ## The world finally wears its name: a banner under the top bar showing
 ## the embark-chosen world name and the current chronology.
@@ -5060,7 +5370,9 @@ func _build_routes_overlay_from_settlements() -> void:
 	for path in route_paths:
 		_route_segments.append(path)
 	_refresh_routes_overlay_lines()
+	_build_road_tiles()
 	_spawn_caravans()
+	_spawn_pirate_ships()
 	_update_world_name_label()
 
 func _add_route_edge(a: Vector2i, b: Vector2i, edge_set: Dictionary, route_edges: Array) -> void:
