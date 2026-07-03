@@ -435,13 +435,17 @@ func _apply_sources(width: int, height: int, tiles: Dictionary, is_land_base_til
 				var influence_factor := pow(proximity, falloff)
 				if influence_factor <= 0.0:
 					continue
+				# Accumulate into the tile's existing scores dictionary in
+				# place; rebuilding it per overlapping source is what made
+				# worldgen crawl.
 				var tile := tiles[coord] as Dictionary
-				var scores_value: Variant = tile.get("cultural_influence_scores", {})
-				var scores: Dictionary[String, float] = {}
+				var scores_value: Variant = tile.get("cultural_influence_scores")
+				var scores: Dictionary
 				if scores_value is Dictionary:
-					for key_variant: Variant in (scores_value as Dictionary).keys():
-						var score_key := String(key_variant)
-						scores[score_key] = float((scores_value as Dictionary).get(key_variant, 0.0))
+					scores = scores_value as Dictionary
+				else:
+					scores = {}
+					tile["cultural_influence_scores"] = scores
 				for entry: Dictionary in entries:
 					var key := String(entry.get("key", "humans"))
 					if not _culture_matches_tile_biome(key, tile):
@@ -450,8 +454,6 @@ func _apply_sources(width: int, height: int, tiles: Dictionary, is_land_base_til
 					if score <= 0.0:
 						continue
 					scores[key] = float(scores.get(key, 0.0)) + score
-				tile["cultural_influence_scores"] = scores
-				tiles[coord] = tile
 
 func _resolve_scores(width: int, height: int, tiles: Dictionary) -> void:
 	for y in range(height):
@@ -461,11 +463,7 @@ func _resolve_scores(width: int, height: int, tiles: Dictionary) -> void:
 			if tile.is_empty():
 				continue
 			var scores_value: Variant = tile.get("cultural_influence_scores", {})
-			var scores: Dictionary[String, float] = {}
-			if scores_value is Dictionary:
-				for key_variant: Variant in (scores_value as Dictionary).keys():
-					var score_key := String(key_variant)
-					scores[score_key] = float((scores_value as Dictionary).get(key_variant, 0.0))
+			var scores: Dictionary = scores_value as Dictionary if scores_value is Dictionary else {}
 			if scores.is_empty():
 				tile["cultural_influence"] = null
 				tile["cultural_influence_scores"] = null

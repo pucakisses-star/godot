@@ -123,12 +123,6 @@ var _latest_requested_zone_counts := {
 	"buildings": 0,
 	"plazas": 0
 }
-var _lighting_mask_image: Image
-var _lighting_mask_texture: ImageTexture
-var _lighting_mask_sprite: Sprite2D
-var _lighting_bounds := Rect2i()
-var _revealed_cells: Dictionary = {}
-var _visible_cells: Dictionary = {}
 var _tavern_character_texture: Texture2D
 var _shattered_player_texture: Texture2D
 var _placeholder_actor_texture: Texture2D
@@ -166,6 +160,10 @@ var _desert_decor_textures: Dictionary = {}
 var _furnishing_sprites: Array[Node2D] = []
 var _furnishing_blocked_cells: Dictionary = {}
 var _glow_sprites: Array[Node2D] = []
+var _passable_atlas_set: Dictionary = {}
+var _actor_passable_cache: Dictionary = {}
+var _last_clock_stamp := -1
+var _applied_day_night_tint := Color(-1.0, -1.0, -1.0, -1.0)
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
 const PLAYER_MOVE_REPEAT_INTERVAL := 0.10
@@ -208,10 +206,6 @@ const MIN_ZOOM := 0.1
 const MAX_ZOOM := 2.5
 const ZOOM_STEP := 0.1
 
-const SHATTERED_VISION_RADIUS := 7
-const SHATTERED_UNSEEN_ALPHA := 1.0
-const SHATTERED_REVEALED_ALPHA := 0.72
-const SHATTERED_VISIBLE_ALPHA := 0.0
 
 const CHEST_SLOT_COLUMNS := 8
 const CHEST_SLOT_ROWS := 4
@@ -474,9 +468,6 @@ func _ready() -> void:
 	_apply_cached_town_scene_seed()
 	_configure_tile_layer()
 	global_darkness.color = Color(1.0, 1.0, 1.0, 1.0)
-	_lighting_mask_sprite = Sprite2D.new()
-	_lighting_mask_sprite.centered = false
-	lighting_layer.add_child(_lighting_mask_sprite)
 	fog_of_war.visible = false
 	_tavern_character_texture = load(tavern_vehicle_sprite_path) as Texture2D
 	if _tavern_character_texture == null:
@@ -534,6 +525,10 @@ func _update_clock_label() -> void:
 		return
 	var hour := int(_game_hour)
 	var minute := int((_game_hour - float(hour)) * 60.0)
+	var clock_stamp := (_game_day * 24 + hour) * 60 + minute
+	if clock_stamp == _last_clock_stamp:
+		return
+	_last_clock_stamp = clock_stamp
 	var is_night := _game_hour >= 20.0 or _game_hour < 6.0
 	clock_label.text = "%s %02d:%02d — %s (%s)" % [
 		"🌙" if is_night else "☀",
@@ -564,6 +559,9 @@ func _day_night_tint(hour: float) -> Color:
 func _update_day_night_tint() -> void:
 	# Tint only the map layers so the side panel stays readable at night.
 	var tint := _day_night_tint(_game_hour)
+	if tint.is_equal_approx(_applied_day_night_tint):
+		return
+	_applied_day_night_tint = tint
 	if city_layer != null:
 		city_layer.modulate = tint
 	if decor_layer != null:
@@ -681,9 +679,6 @@ func _update_player_turn_movement(delta: float) -> void:
 		_player_is_moving = false
 		if _try_use_stairs_at_player_cell():
 			return
-		if not _latest_grid.is_empty():
-			_update_shattered_visibility(_latest_grid)
-			_refresh_lighting(_latest_grid)
 
 	if _player_move_path.is_empty():
 		if _player_pending_chest_interaction.x != 2147483647:
@@ -771,12 +766,24 @@ func _configure_tile_layer() -> void:
 	decor_layer.tile_set = tile_set
 
 func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
-	for tile_key: String in PASSABLE_TILE_KEYS:
-		if TILE_ATLAS.get(tile_key, Vector2i(-1, -1)) == atlas_coords:
-			return true
-	return false
+	if _passable_atlas_set.is_empty():
+		for tile_key: String in PASSABLE_TILE_KEYS:
+			var coords := TILE_ATLAS.get(tile_key, Vector2i(-1, -1)) as Vector2i
+			if coords != Vector2i(-1, -1):
+				_passable_atlas_set[coords] = true
+	return _passable_atlas_set.has(atlas_coords)
 
 func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
+	# NPCs test candidate cells every step, so verdicts are cached; any
+	# tile write or blocked-cell change invalidates the affected entry.
+	var cached: Variant = _actor_passable_cache.get(cell)
+	if cached != null:
+		return bool(cached)
+	var passable := _compute_passable_cell_for_actor(cell)
+	_actor_passable_cache[cell] = passable
+	return passable
+
+func _compute_passable_cell_for_actor(cell: Vector2i) -> bool:
 	if _farm_blocked_cells.has(cell) or _furnishing_blocked_cells.has(cell):
 		return false
 	if city_layer.get_cell_source_id(cell) < 0:
@@ -1366,8 +1373,6 @@ func _on_overlay_toggle_toggled(toggled_on: bool) -> void:
 func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
 	_lighting_enabled = toggled_on
 	_apply_lighting_state()
-	if not _latest_grid.is_empty():
-		_refresh_lighting(_latest_grid)
 
 ## Towns are open-air: the Shattered cave-fog mask that once rode this
 ## toggle blacked out the whole surface map, so it is permanently retired
@@ -1375,8 +1380,6 @@ func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
 ## now governs the hearth and candle glow pools instead.
 func _apply_lighting_state() -> void:
 	lighting_layer.visible = true
-	if _lighting_mask_sprite != null:
-		_lighting_mask_sprite.visible = false
 	for glow: Node2D in _glow_sprites:
 		if is_instance_valid(glow):
 			glow.visible = _lighting_enabled
@@ -1776,8 +1779,7 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 			continue
 		_place_tile(city_layer, stair_cell, "stairway_up" if stair_key == "up" else "stairway_down")
 		decor_layer.erase_cell(stair_cell)
-	_initialize_shattered_lighting(grid)
-	_refresh_lighting(grid)
+		_actor_passable_cache.erase(stair_cell)
 	_reset_view(bounds)
 
 func _pick_level_stair_cells(grid: Dictionary, level_index: int, level_count: int) -> Dictionary:
@@ -1851,64 +1853,6 @@ func _stair_candidates_for_level(grid: Dictionary) -> Array[Vector2i]:
 		candidates = _collect_walkable_cells(grid)
 	return candidates
 
-
-func _initialize_shattered_lighting(grid: Dictionary) -> void:
-	if grid.is_empty():
-		_lighting_bounds = Rect2i(Vector2i.ZERO, Vector2i.ONE)
-		_revealed_cells.clear()
-		_visible_cells.clear()
-		if _lighting_mask_sprite != null:
-			_lighting_mask_sprite.visible = false
-		return
-
-	_lighting_bounds = _find_bounds(grid).grow(1)
-	if _lighting_mask_sprite != null:
-		_lighting_mask_sprite.visible = false
-	_revealed_cells.clear()
-	_visible_cells.clear()
-
-func _refresh_lighting(_grid: Dictionary) -> void:
-	# The daylight town never draws the black vision mask.
-	if _lighting_mask_sprite != null:
-		_lighting_mask_sprite.visible = false
-
-func _draw_lighting_alpha_for_cell(cell: Vector2i, alpha: float) -> void:
-	if _lighting_mask_image == null:
-		return
-	var local_cell := cell - _lighting_bounds.position
-	if local_cell.x < 0 or local_cell.y < 0 or local_cell.x >= _lighting_bounds.size.x or local_cell.y >= _lighting_bounds.size.y:
-		return
-	var pixel_origin := Vector2i(local_cell.x * tile_size.x, local_cell.y * tile_size.y)
-	_lighting_mask_image.fill_rect(Rect2i(pixel_origin, tile_size), Color(0, 0, 0, clampf(alpha, 0.0, 1.0)))
-
-func _update_shattered_visibility(grid: Dictionary) -> void:
-	_visible_cells.clear()
-	if grid.is_empty() or _player_sprite == null:
-		return
-
-	for dy in range(-SHATTERED_VISION_RADIUS, SHATTERED_VISION_RADIUS + 1):
-		for dx in range(-SHATTERED_VISION_RADIUS, SHATTERED_VISION_RADIUS + 1):
-			var cell := _player_cell + Vector2i(dx, dy)
-			if not grid.has(cell):
-				continue
-			if Vector2(dx, dy).length() > SHATTERED_VISION_RADIUS + 0.25:
-				continue
-			if not _has_line_of_sight_to_cell(_player_cell, cell):
-				continue
-			_visible_cells[cell] = true
-			_revealed_cells[cell] = true
-
-func _has_line_of_sight_to_cell(from_cell: Vector2i, to_cell: Vector2i) -> bool:
-	return DwarfHoldLightingService.has_line_of_sight_to_cell(
-		from_cell,
-		to_cell,
-		Callable(self, "_is_transparent_lighting_cell")
-	)
-
-func _is_transparent_lighting_cell(cell: Vector2i) -> bool:
-	if city_layer.get_cell_source_id(cell) < 0:
-		return false
-	return _is_passable_atlas_tile(city_layer.get_cell_atlas_coords(cell))
 
 func _ensure_chest_inventory(cell: Vector2i) -> void:
 	DwarfHoldChestService.ensure_chest_inventory(_chest_inventories, cell, _rng, CHEST_LOOT_TABLE)
@@ -2081,6 +2025,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 	_furnishing_sprites.clear()
 	_furnishing_blocked_cells.clear()
 	_glow_sprites.clear()
+	_actor_passable_cache.clear()
 	if actor_layer == null:
 		return
 	var is_occupied := func(cell: Vector2i) -> bool:
@@ -2121,6 +2066,7 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 		if int((RoomFurnishingService.PIECES.get(piece_name, {}) as Dictionary).get("rows_block", 1)) > 0:
 			for cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
 				_furnishing_blocked_cells[cell] = true
+				_actor_passable_cache.erase(cell)
 		if RoomFurnishingService.piece_emits_light(piece_name):
 			_spawn_hearth_glow(base_cell, 2.4)
 
@@ -2179,6 +2125,7 @@ func _build_farmsteads() -> void:
 	_farm_pens.clear()
 	_farm_blocked_cells.clear()
 	_windmill_sails.clear()
+	_actor_passable_cache.clear()
 	if actor_layer == null or _town_theme == "desert" or _green_cells.is_empty():
 		return
 	var farm_target := clampi(_green_cells.size() / 260, 1, 3)
@@ -2202,6 +2149,7 @@ func _build_farmsteads() -> void:
 		for y in range(FARMSTEAD_SITE.y):
 			for x in range(FARMSTEAD_SITE.x):
 				decor_layer.erase_cell(origin + Vector2i(x, y))
+				_actor_passable_cache.erase(origin + Vector2i(x, y))
 		origins.append(origin)
 		_stamp_farmstead(origin, origins.size() == 1)
 	# Farmstead ground is spoken for: animals and future farms keep off it.
@@ -2246,6 +2194,7 @@ func _stamp_farmstead(origin: Vector2i, with_windmill: bool) -> void:
 	for y in range(mini(building_cells.y, 5)):
 		for x in range(building_cells.x):
 			_farm_blocked_cells[origin + Vector2i(x, 5 - 1 - y)] = true
+			_actor_passable_cache.erase(origin + Vector2i(x, 5 - 1 - y))
 
 	# Windmill tower with spinning sails to the building's right.
 	if with_windmill:
@@ -2254,6 +2203,7 @@ func _stamp_farmstead(origin: Vector2i, with_windmill: bool) -> void:
 		for y in range(5):
 			for x in range(2):
 				_farm_blocked_cells[origin + Vector2i(7 + x, y)] = true
+				_actor_passable_cache.erase(origin + Vector2i(7 + x, y))
 		var sails := Sprite2D.new()
 		sails.texture = FARM_SAILS_TEXTURE
 		sails.region_enabled = true
@@ -2799,7 +2749,6 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_assign_npc_identities()
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
-	_refresh_lighting(grid)
 
 func _assign_npc_daily_lives(grid: Dictionary) -> void:
 	if _npc_states.is_empty():
@@ -3099,6 +3048,7 @@ func _cell_center_position(cell: Vector2i) -> Vector2:
 
 func _place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -> void:
 	DwarfHoldTileService.place_tile(target_layer, cell, tile_key, TILE_ATLAS)
+	_actor_passable_cache.erase(cell)
 
 func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 	var tile_key := TownTileService.pick_base_tile(grid, x, y, cell, _door_cells)

@@ -202,35 +202,55 @@ static func build_proximity_map(
 	max_distance: int,
 	map_size: Vector2i
 ) -> Dictionary:
+	# Multi-source ring BFS: seed every target cell at distance 0, then grow
+	# outward one Chebyshev ring at a time. Equivalent to scanning a
+	# (2r+1)^2 window per cell, but visits each cell once.
 	var proximity_map: Dictionary = {}
 	if max_distance <= 0 or target_biomes.is_empty():
 		return proximity_map
-	for y in range(map_size.y):
-		for x in range(map_size.x):
-			var coord := Vector2i(x, y)
-			var nearest := max_distance + 1
-			for oy in range(-max_distance, max_distance + 1):
-				var ny := y + oy
-				if ny < 0 or ny >= map_size.y:
+	var target_set: Dictionary = {}
+	for biome: String in target_biomes:
+		target_set[biome] = true
+	var width := map_size.x
+	var height := map_size.y
+	var distances := PackedInt32Array()
+	distances.resize(width * height)
+	distances.fill(max_distance + 1)
+	var frontier := PackedInt32Array()
+	for y in range(height):
+		var row := y * width
+		for x in range(width):
+			if target_set.has(String(biome_map.get(Vector2i(x, y), BIOME_GRASSLAND))):
+				distances[row + x] = 0
+				frontier.append(row + x)
+	var ring := 0
+	while ring < max_distance and not frontier.is_empty():
+		ring += 1
+		var next_frontier := PackedInt32Array()
+		for index in frontier:
+			var cx := index % width
+			var cy := index / width
+			for oy in range(-1, 2):
+				var ny := cy + oy
+				if ny < 0 or ny >= height:
 					continue
-				for ox in range(-max_distance, max_distance + 1):
-					var nx := x + ox
-					if nx < 0 or nx >= map_size.x:
+				for ox in range(-1, 2):
+					var nx := cx + ox
+					if nx < 0 or nx >= width:
 						continue
-					var sample_coord := Vector2i(nx, ny)
-					if not target_biomes.has(String(biome_map.get(sample_coord, BIOME_GRASSLAND))):
-						continue
-					var distance := maxi(absi(ox), absi(oy))
-					if distance < nearest:
-						nearest = distance
-						if nearest == 0:
-							break
-				if nearest == 0:
-					break
+					var neighbor_index := ny * width + nx
+					if distances[neighbor_index] > ring:
+						distances[neighbor_index] = ring
+						next_frontier.append(neighbor_index)
+		frontier = next_frontier
+	for y in range(height):
+		var row := y * width
+		for x in range(width):
+			var nearest := distances[row + x]
 			if nearest > max_distance:
-				proximity_map[coord] = 0.0
+				proximity_map[Vector2i(x, y)] = 0.0
 			else:
-				proximity_map[coord] = clampf(1.0 - float(nearest) / float(max_distance), 0.0, 1.0)
+				proximity_map[Vector2i(x, y)] = clampf(1.0 - float(nearest) / float(max_distance), 0.0, 1.0)
 	return proximity_map
 
 
