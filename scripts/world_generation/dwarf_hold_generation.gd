@@ -105,6 +105,12 @@ var _player_hp := 20.0
 var _player_attack_timer := 0.0
 var _hp_label: Label
 var _fishing_state: Dictionary = {}
+var _player_coins := 0
+var _coins_label: Label
+var _trade_shop_cell := Vector2i(2147483647, 2147483647)
+var _trade_shop_type := ""
+var _shop_stocks: Dictionary = {}
+var _active_speech_bubble: PanelContainer
 var _torch_sprites: Array = []
 var _player_glow: Sprite2D
 var _glow_texture: Texture2D
@@ -240,6 +246,17 @@ const ROLE_WORKPLACES := {
 	ROLE_RUNESCRIBE: ["runesmith_sanctum", "enchanting_study", "archives", "alchemy_laboratory"],
 	ROLE_DWARF_WOMAN: ["kitchen", "bakery", "tavern", "infirmary", "tailoring_shop", "general_goods_shop", "mushroom_farm", "butchery", "millhouse"],
 	ROLE_GOLDSMITH: ["gemcutters_studio", "bank_vaults", "auction_house", "merchants_counting_house", "trade_supply_store"]
+}
+
+const ROLE_TITLES := {
+	ROLE_MINER: "Miner",
+	ROLE_WARRIOR: "Warrior of the Watch",
+	ROLE_SMITH: "Smith",
+	ROLE_HOLD_ELDER: "Hold Elder",
+	ROLE_BREWER: "Brewer",
+	ROLE_RUNESCRIBE: "Runescribe",
+	ROLE_DWARF_WOMAN: "Homesteader",
+	ROLE_GOLDSMITH: "Goldsmith"
 }
 
 const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
@@ -759,6 +776,7 @@ func _ready() -> void:
 	_update_clock_label()
 	_setup_inventory_label()
 	_setup_hp_label()
+	_setup_coins_label()
 	_glow_texture = _create_glow_texture()
 	_player_glow = _create_glow_sprite(7.0)
 	lighting_layer.add_child(_player_glow)
@@ -1110,6 +1128,7 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 		(_sites_by_chunk[site_chunk_key] as Array).append(site)
 	var inventory_variant: Variant = settings.get("player_inventory", {})
 	_player_inventory = (inventory_variant as Dictionary).duplicate() if inventory_variant is Dictionary else {}
+	_player_coins = int(settings.get("player_coins", 0))
 	if scene_seed.is_empty():
 		return
 	seed_input.text = scene_seed
@@ -2316,6 +2335,7 @@ func _handle_chest_click(mouse_position: Vector2) -> void:
 	if not _is_chest_cell(clicked_cell):
 		_clear_chest_selection()
 		return
+	_end_trade_mode()
 	_selected_chest_cell = clicked_cell
 	_update_chest_inventory_panel()
 
@@ -2326,6 +2346,9 @@ func _update_chest_inventory_panel() -> void:
 	var loot_entries := _chest_inventories.get(_selected_chest_cell, []) as Array
 	chest_popup.visible = true
 	chest_popup_title.text = "Chest (%d, %d)" % [_selected_chest_cell.x, _selected_chest_cell.y]
+	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
+	if section_label != null:
+		section_label.text = "Chest Storage"
 	_populate_chest_slots(loot_entries)
 	if loot_entries.is_empty():
 		chest_popup_status_label.text = "This chest is empty."
@@ -2335,6 +2358,7 @@ func _update_chest_inventory_panel() -> void:
 	chest_popup_take_all_button.disabled = false
 
 func _clear_chest_selection() -> void:
+	_end_trade_mode()
 	_selected_chest_cell = Vector2i(2147483647, 2147483647)
 	chest_popup_title.text = "Chest"
 	chest_popup_status_label.text = "Select a chest tile to view contents"
@@ -2392,10 +2416,13 @@ func _create_inventory_slots(target_grid: GridContainer, slot_count: int, out_pa
 		label.text = ""
 		panel.add_child(label)
 		if target_grid == backpack_grid:
-			# Backpack slots are clickable (eat food). out_panels.size() is
-			# this slot's index; panels are freed and rebuilt together, so
-			# the connection never stacks.
+			# Backpack slots are clickable (eat food, or sell while trading).
+			# out_panels.size() is this slot's index; panels are freed and
+			# rebuilt together, so the connection never stacks.
 			panel.gui_input.connect(_on_backpack_slot_gui_input.bind(out_panels.size()))
+		elif target_grid == chest_grid:
+			# Chest slots buy wares while a shop trade is open.
+			panel.gui_input.connect(_on_chest_slot_gui_input.bind(out_panels.size()))
 		target_grid.add_child(panel)
 		out_panels.append(panel)
 		out_labels.append(label)
@@ -2439,6 +2466,8 @@ func _populate_backpack_slots() -> void:
 		var item_name := String(item_names[i])
 		_backpack_slot_items.append(item_name)
 		_fill_inventory_slot(i, _backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons, item_name, int(_player_inventory[item_name]))
+		if _is_trade_mode():
+			_backpack_slot_panels[i].tooltip_text += "\nSell for %d coins" % SettlementEconomyService.sell_price(item_name)
 
 ## Clicking a backpack slot that holds something edible eats one of it.
 func _on_backpack_slot_gui_input(event: InputEvent, slot_index: int) -> void:
@@ -2448,6 +2477,9 @@ func _on_backpack_slot_gui_input(event: InputEvent, slot_index: int) -> void:
 	if slot_index < 0 or slot_index >= _backpack_slot_items.size():
 		return
 	var item_name := _backpack_slot_items[slot_index]
+	if _is_trade_mode():
+		_sell_item(item_name)
+		return
 	if not ItemDefsService.is_edible(item_name):
 		return
 	_eat_item(item_name)
@@ -2655,10 +2687,11 @@ func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 			for site_variant: Variant in (_sites_by_chunk.get(key, []) as Array):
 				var site := site_variant as Dictionary
 				UndergroundWorldService.stamp_settlement_site(_latest_grid, _latest_floor_decor, site)
-				_latest_district_labels.append({"name": String(site.get("name", "")), "center": site.get("cell", Vector2i.ZERO)})
+				_latest_district_labels.append({"name": String(site.get("name", "")), "center": site.get("cell", Vector2i.ZERO), "wild": true})
 				stamped_site = true
 			var discovery: Dictionary = UndergroundWorldService.stamp_chunk_discovery(_latest_grid, _latest_floor_decor, chunk, _world_seed_hash)
 			if not discovery.is_empty():
+				discovery["wild"] = true
 				_latest_district_labels.append(discovery)
 			var rect: Rect2i = UndergroundWorldService.generate_chunk(_latest_grid, _latest_floor_decor, chunk, _world_noise)
 			_render_world_rect(rect.grow(14 if stamped_site else 1))
@@ -2781,6 +2814,195 @@ func _create_torch_texture() -> Texture2D:
 			image.set_pixel(x, y, flame)
 	image.resize(16, 32, Image.INTERPOLATE_NEAREST)
 	return ImageTexture.create_from_image(image)
+
+## --- The living world: coins, shops, and talk ----------------------------
+## Coins buy goods at shop buildings (click an adjacent bakery, forge,
+## tavern...); anything in the backpack sells for half its worth. NPCs
+## chat when clicked and pass on rumors that point at real discoveries.
+
+func _adjust_coins(amount: int) -> void:
+	_player_coins = maxi(_player_coins + amount, 0)
+	_update_coins_label()
+	_save_player_inventory()
+
+func _setup_coins_label() -> void:
+	var controls := get_node_or_null("Margin/Layout/Controls")
+	if controls == null:
+		return
+	_coins_label = Label.new()
+	_coins_label.add_theme_font_size_override("font_size", 13)
+	_coins_label.modulate = Color(0.95, 0.85, 0.5, 1.0)
+	controls.add_child(_coins_label)
+	var clock := controls.get_node_or_null("ClockLabel")
+	if clock != null:
+		controls.move_child(_coins_label, clock.get_index() + 1)
+	_update_coins_label()
+
+func _update_coins_label() -> void:
+	if _coins_label == null:
+		return
+	_coins_label.text = "🪙 %d coins" % _player_coins
+
+func _shop_type_at_cell(cell: Vector2i) -> String:
+	var building_type := String(_latest_civic_building_type_map.get(cell, ""))
+	if SettlementEconomyService.is_shop_building_type(building_type):
+		return building_type
+	return ""
+
+## One stock per building: flood-fill the contiguous same-type cells and
+## key the shop by its smallest cell.
+func _shop_anchor_for_cell(cell: Vector2i) -> Vector2i:
+	var shop_type := String(_latest_civic_building_type_map.get(cell, ""))
+	var anchor := cell
+	var queue: Array[Vector2i] = [cell]
+	var visited := {cell: true}
+	var head := 0
+	while head < queue.size():
+		var current := queue[head]
+		head += 1
+		if current.y < anchor.y or (current.y == anchor.y and current.x < anchor.x):
+			anchor = current
+		for offset: Vector2i in SPD_NEIGHBOR_OFFSETS:
+			var next := current + offset
+			if visited.has(next):
+				continue
+			if String(_latest_civic_building_type_map.get(next, "")) != shop_type:
+				continue
+			visited[next] = true
+			queue.append(next)
+	return anchor
+
+func _price_scale() -> float:
+	return 1.0 + float(absi(_world_seed_hash) % 40) / 100.0
+
+func _is_trade_mode() -> bool:
+	return _trade_shop_cell.x != 2147483647
+
+func _open_trade_popup(cell: Vector2i, shop_type: String) -> void:
+	var anchor := _shop_anchor_for_cell(cell)
+	if not _shop_stocks.has(anchor):
+		var stock_rng := RandomNumberGenerator.new()
+		stock_rng.seed = _world_seed_hash ^ hash(anchor)
+		_shop_stocks[anchor] = SettlementEconomyService.generate_shop_stock(shop_type, stock_rng)
+	_selected_chest_cell = Vector2i(2147483647, 2147483647)
+	_trade_shop_cell = anchor
+	_trade_shop_type = shop_type
+	chest_popup.visible = true
+	chest_popup_title.text = "Trade — %s" % _display_name_for_building_type(shop_type)
+	chest_popup_take_all_button.disabled = true
+	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
+	if section_label != null:
+		section_label.text = "Wares for sale"
+	_refresh_trade_panel()
+
+func _refresh_trade_panel() -> void:
+	if not _is_trade_mode():
+		return
+	var stock := _shop_stocks.get(_trade_shop_cell, []) as Array
+	_clear_inventory_slots(_chest_slot_panels, _chest_slot_labels, _chest_slot_icons)
+	for i in range(mini(stock.size(), _chest_slot_labels.size())):
+		var entry := stock[i] as Dictionary
+		var item_name := String(entry.get("name", "Supplies"))
+		var quantity := int(entry.get("quantity", 1))
+		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, item_name, quantity)
+		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.buy_price(item_name, _price_scale())
+	_populate_backpack_slots()
+	chest_popup_status_label.text = "🪙 %d coins — click wares to buy, click your pack to sell" % _player_coins
+	if stock.is_empty():
+		chest_popup_status_label.text = "🪙 %d coins — the shelves are bare; come back later" % _player_coins
+
+func _buy_trade_item(slot_index: int) -> void:
+	var stock := _shop_stocks.get(_trade_shop_cell, []) as Array
+	if slot_index < 0 or slot_index >= stock.size():
+		return
+	var entry := stock[slot_index] as Dictionary
+	var item_name := String(entry.get("name", "Supplies"))
+	var price := SettlementEconomyService.buy_price(item_name, _price_scale())
+	if _player_coins < price:
+		chest_popup_status_label.text = "Not enough coins for %s (%d needed)" % [item_name, price]
+		return
+	_adjust_coins(-price)
+	entry["quantity"] = int(entry.get("quantity", 1)) - 1
+	if int(entry.get("quantity", 0)) <= 0:
+		stock.remove_at(slot_index)
+	_add_to_inventory(item_name, 1)
+	_refresh_trade_panel()
+	chest_popup_status_label.text = "Bought %s for %d coins (🪙 %d left)" % [item_name, price, _player_coins]
+
+func _sell_item(item_name: String) -> void:
+	if int(_player_inventory.get(item_name, 0)) < 1:
+		return
+	var price := SettlementEconomyService.sell_price(item_name)
+	_add_to_inventory(item_name, -1)
+	_adjust_coins(price)
+	_refresh_trade_panel()
+	chest_popup_status_label.text = "Sold %s for %d coins (🪙 %d)" % [item_name, price, _player_coins]
+
+func _on_chest_slot_gui_input(event: InputEvent, slot_index: int) -> void:
+	if not _is_trade_mode():
+		return
+	var mouse_event := event as InputEventMouseButton
+	if mouse_event == null or not mouse_event.pressed or mouse_event.button_index != MOUSE_BUTTON_LEFT:
+		return
+	_buy_trade_item(slot_index)
+
+func _end_trade_mode() -> void:
+	_trade_shop_cell = Vector2i(2147483647, 2147483647)
+	_trade_shop_type = ""
+
+func _npc_state_at_cell(cell: Vector2i) -> Dictionary:
+	for state: Dictionary in _npc_states:
+		if (state.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i) == cell:
+			return state
+	return {}
+
+func _show_npc_dialogue(state: Dictionary) -> void:
+	if not state.has("npc_name"):
+		state["npc_name"] = SettlementEconomyService.dwarf_npc_name(_rng)
+	var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Dwarf"))
+	var rumor: String = SettlementEconomyService.rumor_from_labels(
+		_latest_district_labels, _latest_district_cell_map, _player_cell, _rng
+	)
+	var line: String = SettlementEconomyService.dialogue_line(role_title, rumor, _rng)
+	var sprite := state.get("sprite") as Sprite2D
+	var anchor_position: Vector2 = sprite.position if sprite != null else _player_sprite.position
+	_spawn_speech_bubble("%s, %s\n%s" % [String(state.get("npc_name", "A dwarf")), role_title, line], anchor_position)
+
+func _spawn_speech_bubble(text: String, world_position: Vector2) -> void:
+	if _active_speech_bubble != null and is_instance_valid(_active_speech_bubble):
+		_active_speech_bubble.queue_free()
+	var bubble := PanelContainer.new()
+	var bubble_style := StyleBoxFlat.new()
+	bubble_style.bg_color = Color(0.12, 0.1, 0.09, 0.92)
+	bubble_style.border_color = Color(0.75, 0.65, 0.45, 1.0)
+	bubble_style.border_width_left = 2
+	bubble_style.border_width_top = 2
+	bubble_style.border_width_right = 2
+	bubble_style.border_width_bottom = 2
+	bubble_style.corner_radius_top_left = 6
+	bubble_style.corner_radius_top_right = 6
+	bubble_style.corner_radius_bottom_left = 6
+	bubble_style.corner_radius_bottom_right = 6
+	bubble_style.content_margin_left = 8
+	bubble_style.content_margin_right = 8
+	bubble_style.content_margin_top = 5
+	bubble_style.content_margin_bottom = 5
+	bubble.add_theme_stylebox_override("panel", bubble_style)
+	var label := Label.new()
+	label.text = text
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	label.custom_minimum_size = Vector2(230, 0)
+	label.add_theme_font_size_override("font_size", 13)
+	label.add_theme_color_override("font_color", Color(0.94, 0.9, 0.8, 1.0))
+	bubble.add_child(label)
+	bubble.z_index = 40
+	bubble.position = world_position + Vector2(-115.0, -86.0)
+	city_layer.add_child(bubble)
+	_active_speech_bubble = bubble
+	var tween := create_tween()
+	tween.tween_interval(4.5)
+	tween.tween_property(bubble, "modulate:a", 0.0, 0.5)
+	tween.tween_callback(bubble.queue_free)
 
 ## --- Fishing ------------------------------------------------------------
 ## Cast next to a lake with F. The bobber drifts, dips on a bite ("!"),
@@ -3280,6 +3502,10 @@ func _spawn_floating_text(text: String, world_position: Vector2, color: Color) -
 	tween.chain().tween_callback(label.queue_free)
 
 func _add_to_inventory(item_name: String, amount: int) -> void:
+	# Coins are currency, not cargo: they go to the purse, not the pack.
+	if item_name == "Copper Coins":
+		_adjust_coins(amount)
+		return
 	_player_inventory[item_name] = int(_player_inventory.get(item_name, 0)) + amount
 	if int(_player_inventory.get(item_name, 0)) <= 0:
 		_player_inventory.erase(item_name)
@@ -3292,6 +3518,7 @@ func _save_player_inventory() -> void:
 		return
 	var settings: Dictionary = game_session.call("get_world_settings")
 	settings["player_inventory"] = _player_inventory.duplicate()
+	settings["player_coins"] = _player_coins
 	game_session.call("set_world_settings", settings)
 
 func _update_inventory_label() -> void:
@@ -3352,6 +3579,14 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	var clicked_cell := _cell_from_mouse_position(mouse_position)
 	if _is_chest_cell(clicked_cell):
 		_request_chest_interaction(clicked_cell)
+		return
+	var npc_state := _npc_state_at_cell(clicked_cell)
+	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
+		_show_npc_dialogue(npc_state)
+		return
+	var shop_type := _shop_type_at_cell(clicked_cell)
+	if not shop_type.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
+		_open_trade_popup(clicked_cell, shop_type)
 		return
 	if _try_harvest_decor(clicked_cell):
 		return
