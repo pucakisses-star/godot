@@ -19,7 +19,7 @@ const ITEM_DEFS := {
 	"Gold Nugget": {"icon": 12, "flavor": "Enough to turn a merchant's head."},
 	"Gem Shard": {"icon": 88, "flavor": "A splinter of buried starlight."},
 	"Iron Ingot": {"icon": 30, "flavor": "Smelted and stamped by hold smiths."},
-	"Stone Block": {"icon": 0, "flavor": "Quarried square and true."},
+	"Stone Block": {"icon": 44, "flavor": "Quarried square and true."},
 	"Leather Strap": {"icon": 46, "flavor": "Keeps armor, packs, and promises together."},
 
 	# --- fossils & relics dug from the rock ---
