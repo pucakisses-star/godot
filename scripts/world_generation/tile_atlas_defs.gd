@@ -1,16 +1,20 @@
 extends RefCounted
 
 const ATLAS_TEXTURE := "res://resources/images/overworld/atlas/overworld.png"
+# Rivers use their own sheet: RIVER_TILES coordinates index into the
+# world-map details tilesheet (16px tiles), not the overworld atlas.
+const RIVER_ATLAS_TEXTURE := "res://resources/images/overworld/atlas/world_map_details.png"
+const RIVER_ATLAS_TILE_SIZE := 16
 const SAND_TILE := Vector2i(0, 0)
 const GRASS_TILE := Vector2i(1, 0)
 const BADLANDS_TILE := Vector2i(2, 1)
 const MINE_TILE := Vector2i(3, 1)
-const MARSH_TILE := Vector2i(2, 2)
+const MARSH_TILE := Vector2i(2, 4)
 const SNOW_TILE := Vector2i(3, 2)
 const TREE_TILE := Vector2i(0, 1)
-const TREE_LONE_TILE := Vector2i(0, 2)
+const TREE_LONE_TILE := Vector2i(6, 5)
 const JUNGLE_TREE_TILE := Vector2i(0, 3)
-const CUT_TREES_TILE := Vector2i(1, 5)
+const CUT_TREES_TILE := Vector2i(1, 6)
 const AMBIENT_LUMBER_MILL_TILE := Vector2i(0, 6)
 const WATER_TILE := Vector2i(4, 1)
 const RIVER_TILES := {
@@ -77,7 +81,7 @@ const WOOD_ELF_GROVES_GRAND_TILE := Vector2i(6, 2)
 const HILLS_TILE := Vector2i(1, 3)
 const HILLS_BADLANDS_TILE := Vector2i(1, 4)
 const HILLS_VARIANT_A_TILE := Vector2i(4, 4)
-const HILLS_VARIANT_B_TILE := Vector2i(9, 3)
+const HILLS_VARIANT_B_TILE := Vector2i(2, 5)
 const HILLS_SNOW_TILE := Vector2i(2, 3)
 const TOWN_TILE := Vector2i(1, 2)
 const PORT_TOWN_TILE := Vector2i(5, 4)
@@ -93,7 +97,7 @@ const HAMLET_SNOW_TILE := Vector2i(13, 0)
 const AMBIENT_SLEEPING_DRAGON_TILE := Vector2i(14, 0)
 const AMBIENT_HUNTING_LODGE_TILE := Vector2i(16, 0)
 const AMBIENT_HOMESTEAD_TILE := Vector2i(13, 1)
-const AMBIENT_MOONWELL_TILE := Vector2i(10, 3)
+const AMBIENT_MOONWELL_TILE := Vector2i(2, 6)
 const AMBIENT_FARM_TILE := Vector2i(15, 1)
 const FARM_CROPS_TILE := Vector2i(15, 0)
 const AMBIENT_FARM_VARIANT_TILE := Vector2i(16, 2)
