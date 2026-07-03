@@ -4250,6 +4250,10 @@ func _update_map_tooltip() -> void:
 func _refresh_map_tooltip(coord: Vector2i) -> void:
 	if tooltip_panel == null:
 		return
+	# The panel must never grab the mouse: if it slides under the cursor
+	# near a screen edge it would steal hover and blink on and off.
+	if tooltip_panel.mouse_filter != Control.MOUSE_FILTER_IGNORE:
+		tooltip_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var data: Dictionary = _tile_data.get(coord, {})
 	var biome := _tile_biome_from_data(data)
 	var temperature := float(data.get("temperature", 0.0))
@@ -4433,8 +4437,10 @@ func _position_map_tooltip() -> void:
 	if viewport == null:
 		return
 	var cursor_pos := viewport.get_mouse_position()
-	var tooltip_size := tooltip_panel.get_combined_minimum_size()
-	tooltip_panel.size = tooltip_size
+	# Never resize here: doing it every frame used the one-frame-stale
+	# minimum size and made the tooltip flicker on each tile crossing.
+	# _refresh_map_tooltip resizes once when the content changes.
+	var tooltip_size := tooltip_panel.size
 	var offset := Vector2(16, 16)
 	var viewport_size := viewport.get_visible_rect().size
 	var max_pos := Vector2(
