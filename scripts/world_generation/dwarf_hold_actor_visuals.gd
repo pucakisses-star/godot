@@ -41,6 +41,10 @@ static func create_tavern_character_sprite(character_texture: Texture2D, charact
 ## row 0 is the plain-clothes hero, frame 0 is the standing idle. Which
 ## sheet you get follows your character's profession.
 const HERO_FRAME_SIZE := Vector2(12, 15)
+## The in-world dwarf spritesheet: 8 characters, 3 walk columns x 4
+## facings each, 32x32 frames. Chosen in the character creator.
+const DWARF_CHARACTERS_TEXTURE := preload("res://resources/images/npc/dwarf_characters.png")
+
 const HERO_SHEETS := {
 	"warrior": "res://resources/images/shattered_ui/warrior.png",
 	"mage": "res://resources/images/shattered_ui/mage.png",
@@ -63,6 +67,16 @@ static func hero_class_for_profession(profession: String) -> String:
 
 ## Picks the hero sheet matching the session's player character; the
 ## warrior stands in when no character has been made yet.
+## The dwarf the player picked at character creation (-1 when the
+## character predates the picker; callers then fall back to the SPD
+## hero sheet by profession).
+static func resolve_player_character_slot(context: Node) -> int:
+	var session := context.get_node_or_null("/root/GameSession")
+	if session == null or not session.has_method("get_player_character"):
+		return -1
+	var character: Dictionary = session.call("get_player_character")
+	return int(character.get("character_slot", -1))
+
 static func resolve_hero_texture(context: Node) -> Texture2D:
 	var hero_class := "warrior"
 	var session := context.get_node_or_null("/root/GameSession")

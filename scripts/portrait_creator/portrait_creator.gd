@@ -572,6 +572,18 @@ const ROLLING_DICE_SOUND_PATH := "res://resources/sounds/rolling-dice.mp3"
 
 var _hovered_attribute_icon: Control
 var _randomize_sound_player: AudioStreamPlayer
+
+## In-world appearance: which dwarf from the dwarfhold spritesheet walks
+## the world as this character.
+const WORLD_SPRITE_SHEET := preload("res://resources/images/npc/dwarf_characters.png")
+const WORLD_SPRITE_SLOT_COUNT := 8
+const WORLD_SPRITE_FRAME := Vector2i(32, 32)
+const WORLD_SPRITE_FRAME_SECONDS := 0.22
+var _world_slot := 0
+var _world_preview: TextureRect
+var _world_preview_atlas: AtlasTexture
+var _world_walk_frame := 0
+var _world_frame_elapsed := 0.0
 var _background_zoom := 1.0
 
 func _enter_tree() -> void:
@@ -634,15 +646,88 @@ func _ready() -> void:
 	_update_gender_button_selection_visuals()
 	_clear_attribute_description()
 	_setup_animated_background()
+	_build_world_appearance_picker()
+	_world_slot = _rng.randi_range(0, WORLD_SPRITE_SLOT_COUNT - 1)
+	_update_world_preview()
 
 func _process(delta: float) -> void:
 	_position_attribute_tooltip()
 	_update_animated_background(delta)
+	_animate_world_preview(delta)
 
 func _setup_animated_background() -> void:
 	if animated_background == null:
 		return
 	animated_background.pivot_offset = animated_background.size * 0.5
+
+## --- In-world appearance -------------------------------------------------
+## The dwarves of the hold sheet, walking in place under the portrait;
+## arrows cycle through the eight of them.
+
+func _build_world_appearance_picker() -> void:
+	if target_render == null:
+		return
+	var portrait_holder := target_render.get_parent() as Control
+	if portrait_holder == null or portrait_holder.get_parent() == null:
+		return
+	var column := portrait_holder.get_parent()
+	var picker := VBoxContainer.new()
+	picker.name = "WorldAppearancePicker"
+	picker.alignment = BoxContainer.ALIGNMENT_CENTER
+	var title := Label.new()
+	title.text = "In-World Appearance"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 13)
+	picker.add_child(title)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	var previous_button := Button.new()
+	previous_button.text = "◀"
+	previous_button.focus_mode = Control.FOCUS_NONE
+	previous_button.pressed.connect(_on_world_slot_step.bind(-1))
+	row.add_child(previous_button)
+	_world_preview_atlas = AtlasTexture.new()
+	_world_preview_atlas.atlas = WORLD_SPRITE_SHEET
+	_world_preview = TextureRect.new()
+	_world_preview.texture = _world_preview_atlas
+	_world_preview.custom_minimum_size = Vector2(96, 96)
+	_world_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_world_preview.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	row.add_child(_world_preview)
+	var next_button := Button.new()
+	next_button.text = "▶"
+	next_button.focus_mode = Control.FOCUS_NONE
+	next_button.pressed.connect(_on_world_slot_step.bind(1))
+	row.add_child(next_button)
+	picker.add_child(row)
+	column.add_child(picker)
+	column.move_child(picker, portrait_holder.get_index() + 1)
+
+func _on_world_slot_step(step: int) -> void:
+	_world_slot = posmod(_world_slot + step, WORLD_SPRITE_SLOT_COUNT)
+	_update_world_preview()
+
+func _update_world_preview() -> void:
+	if _world_preview_atlas == null:
+		return
+	var slot_column := _world_slot % 4
+	var slot_row := _world_slot / 4
+	_world_preview_atlas.region = Rect2(
+		(slot_column * 3 + _world_walk_frame) * WORLD_SPRITE_FRAME.x,
+		slot_row * 4 * WORLD_SPRITE_FRAME.y,
+		WORLD_SPRITE_FRAME.x,
+		WORLD_SPRITE_FRAME.y
+	)
+
+func _animate_world_preview(delta: float) -> void:
+	if _world_preview_atlas == null:
+		return
+	_world_frame_elapsed += delta
+	if _world_frame_elapsed < WORLD_SPRITE_FRAME_SECONDS:
+		return
+	_world_frame_elapsed = 0.0
+	_world_walk_frame = (_world_walk_frame + 1) % 3
+	_update_world_preview()
 
 func _update_animated_background(delta: float) -> void:
 	if animated_background == null:
@@ -1016,7 +1101,8 @@ func _build_character_dict() -> Dictionary:
 		"hair_color": hair_color.value if hair_color else 0.0,
 		"hair_style": int(hair_style.value) if hair_style else 0,
 		"beard_color": beard_color.value if beard_color else 0.0,
-		"beard_style": int(beard_style.value) if beard_style else 0
+		"beard_style": int(beard_style.value) if beard_style else 0,
+		"character_slot": _world_slot
 	}
 
 func _on_randomize_button_pressed() -> void:
@@ -1035,6 +1121,9 @@ func _on_randomize_button_pressed() -> void:
 		beard_style.value = _rng.randi_range(int(beard_style.min_value), int(beard_style.max_value))
 	if hair_style:
 		hair_style.value = _rng.randi_range(int(hair_style.min_value), int(hair_style.max_value))
+
+	_world_slot = _rng.randi_range(0, WORLD_SPRITE_SLOT_COUNT - 1)
+	_update_world_preview()
 
 	character_name.text = _generate_full_name()
 	_update_attribute_reminders()

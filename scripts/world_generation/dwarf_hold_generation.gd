@@ -3939,6 +3939,12 @@ func _create_tavern_character_sprite(character_slot: int) -> Sprite2D:
 	return DwarfHoldTavernService.create_tavern_character_sprite(_placeholder_actor_texture, character_slot, tile_size)
 
 func _create_player_character_sprite() -> Sprite2D:
+	# The dwarf chosen at character creation walks the world; older
+	# characters keep the profession hero sheet.
+	var character_slot := DwarfHoldActorVisuals.resolve_player_character_slot(self)
+	if character_slot >= 0:
+		return DwarfHoldTavernService.create_tavern_character_sprite(
+			DwarfHoldActorVisuals.DWARF_CHARACTERS_TEXTURE, character_slot, tile_size)
 	return DwarfHoldTavernService.create_player_character_sprite(
 		_shattered_player_texture,
 		tile_size,
