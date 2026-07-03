@@ -83,6 +83,7 @@ const OVERWORLD_GENERATION := preload("res://scripts/world_generation/overworld_
 const OVERWORLD_RENDERING := preload("res://scripts/world_generation/overworld_rendering.gd")
 const OVERWORLD_INTERACTION := preload("res://scripts/world_generation/overworld_interaction.gd")
 const OVERWORLD_CONTENT := preload("res://scripts/world_generation/overworld_content.gd")
+const SETTLEMENT_NAMING := preload("res://scripts/world_generation/settlement_naming.gd")
 
 const ATLAS_TEXTURE := TILE_ATLAS_DEFS.ATLAS_TEXTURE
 const SAND_TILE := TILE_ATLAS_DEFS.SAND_TILE
@@ -2566,6 +2567,10 @@ func _place_settlements(biome_map: Dictionary, rng: RandomNumberGenerator) -> vo
 				settlement_name = DWARFHOLD_NAMES[rng.randi_range(0, DWARFHOLD_NAMES.size() - 1)]
 			elif civilization == "lizardmen":
 				settlement_name = OVERWORLD_CONTENT.generate_lizardmen_city_name(rng)
+			elif civilization == "humans":
+				settlement_name = SETTLEMENT_NAMING.town_name(rng)
+			elif civilization == "wood_elves":
+				settlement_name = SETTLEMENT_NAMING.grove_name(rng)
 			_tile_region_names[chosen] = settlement_name
 			var civilization_label := String(CIVILIZATION_LABELS.get(civilization, civilization.capitalize()))
 			_tile_population_groups[chosen] = {"major_population_groups": [civilization_label], "minor_population_groups": []}
@@ -2655,7 +2660,7 @@ func _place_wizard_tower_settlements(
 			continue
 		var is_evil := settlements_created % 2 == 0
 		var settlement_type := "evilWizardTower" if is_evil else "wizardTower"
-		var settlement_name := "Evil Wizard Tower" if is_evil else "Wizard Tower"
+		var settlement_name := SETTLEMENT_NAMING.evil_wizard_tower_name(rng) if is_evil else SETTLEMENT_NAMING.tower_name(rng)
 		_place_structure_with_details(
 			coord,
 			EVIL_WIZARDS_TOWER_TILE if is_evil else TOWER_TILE,
@@ -2722,7 +2727,7 @@ func _place_hostile_camps(
 			camp_def.get("tile", ORC_CAMP_TILE) as Vector2i,
 			camp_id,
 			{
-				"region_name": camp_id.capitalize(),
+				"region_name": SETTLEMENT_NAMING.camp_name(camp_id, rng),
 				"settlement_classification": camp_id.capitalize()
 			}
 		)
@@ -2757,8 +2762,8 @@ func _place_caves_and_dungeons(
 
 	var max_caves := maxi(1, int(round(float(map_area) / 18000.0)))
 	var max_dungeons := maxi(1, int(round(float(map_area) / 22000.0)))
-	_place_scored_structure_batch(cave_candidates, occupied, 7.0, max_caves, 0.3, CAVE_TILE, "cave")
-	_place_scored_structure_batch(dungeon_candidates, occupied, 9.0, max_dungeons, 0.32, DUNGEON_TILE, "dungeon")
+	_place_scored_structure_batch(cave_candidates, occupied, 7.0, max_caves, 0.3, CAVE_TILE, "cave", rng)
+	_place_scored_structure_batch(dungeon_candidates, occupied, 9.0, max_dungeons, 0.32, DUNGEON_TILE, "dungeon", rng)
 
 
 func _place_mines_hillholds_and_dams(
@@ -2801,7 +2806,10 @@ func _place_mines_hillholds_and_dams(
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
 		if _is_too_close(coord, occupied, 7.0):
 			continue
-		_place_structure_with_details(coord, MINE_TILE, "mine", {"region_name": "Mine"})
+		_place_structure_with_details(coord, MINE_TILE, "mine", {
+			"region_name": SETTLEMENT_NAMING.mine_name(rng),
+			"settlement_classification": "Mine"
+		})
 		occupied.append(coord)
 		placed_dwarf_sites.append(coord)
 		max_mines -= 1
@@ -2812,7 +2820,10 @@ func _place_mines_hillholds_and_dams(
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
 		if _is_too_close(coord, occupied, 10.0):
 			continue
-		_place_structure_with_details(coord, HILLHOLD_TILE, "hillhold", {"region_name": "Hillhold"})
+		_place_structure_with_details(coord, HILLHOLD_TILE, "hillhold", {
+			"region_name": SETTLEMENT_NAMING.hillhold_name(rng),
+			"settlement_classification": "Hillhold"
+		})
 		occupied.append(coord)
 		placed_dwarf_sites.append(coord)
 		max_hillholds -= 1
@@ -2876,9 +2887,9 @@ func _place_clergy_and_taverns(
 		return float(a.get("score", 0.0)) > float(b.get("score", 0.0))
 	)
 
-	_place_scored_structure_batch(monastery_candidates, occupied, 12.0, maxi(1, int(round(float(map_area) / 45000.0))), 0.35, MONASTERY_TILE, "monastery")
-	_place_scored_structure_batch(shrine_candidates, occupied, 10.0, maxi(1, int(round(float(map_area) / 36000.0))), 0.32, SAINT_SHRINE_TILE, "saintShrine")
-	_place_scored_structure_batch(tavern_candidates, occupied, 9.0, maxi(1, int(round(float(map_area) / 28000.0))), 0.3, ROADSIDE_TAVERN_TILE, "roadsideTavern")
+	_place_scored_structure_batch(monastery_candidates, occupied, 12.0, maxi(1, int(round(float(map_area) / 45000.0))), 0.35, MONASTERY_TILE, "monastery", rng)
+	_place_scored_structure_batch(shrine_candidates, occupied, 10.0, maxi(1, int(round(float(map_area) / 36000.0))), 0.32, SAINT_SHRINE_TILE, "saintShrine", rng)
+	_place_scored_structure_batch(tavern_candidates, occupied, 9.0, maxi(1, int(round(float(map_area) / 28000.0))), 0.3, ROADSIDE_TAVERN_TILE, "roadsideTavern", rng)
 
 
 
@@ -2889,7 +2900,8 @@ func _place_scored_structure_batch(
 	max_count: int,
 	min_score: float,
 	tile: Vector2i,
-	structure_id: String
+	structure_id: String,
+	rng: RandomNumberGenerator
 ) -> void:
 	var placed := 0
 	for candidate: Dictionary in candidates:
@@ -2900,7 +2912,13 @@ func _place_scored_structure_batch(
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
 		if _is_too_close(coord, occupied, min_distance):
 			continue
-		_place_structure_with_details(coord, tile, structure_id, {"region_name": structure_id.capitalize()})
+		var region_name := SETTLEMENT_NAMING.structure_name(structure_id, rng)
+		if region_name.is_empty():
+			region_name = structure_id.capitalize()
+		_place_structure_with_details(coord, tile, structure_id, {
+			"region_name": region_name,
+			"settlement_classification": structure_id.capitalize()
+		})
 		occupied.append(coord)
 		placed += 1
 
