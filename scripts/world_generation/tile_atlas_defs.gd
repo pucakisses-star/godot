@@ -168,6 +168,74 @@ const DWARFHOLD_TILE_ATLAS := {
 }
 const DWARFHOLD_PASSABLE_TILE_KEYS := ["floor", "door", "stairway_up", "stairway_down"]
 
+## Above-ground human town interiors. Coordinates index the 32px grid of
+## resources/images/town/town_tileset.png (a 2x upscale of the village
+## interior sheet so it matches the rest of the game's 32px tiles).
+const TOWN_TILE_ATLAS_TEXTURE := "res://resources/images/town/town_tileset.png"
+const TOWN_TILE_ATLAS := {
+	"grass": Vector2i(1, 1),
+	"grass_dark": Vector2i(5, 1),
+	"grass_tuft": Vector2i(2, 3),
+	"flowers_white": Vector2i(4, 17),
+	"flowers_yellow": Vector2i(5, 18),
+	"road": Vector2i(14, 4),
+	"road_twig": Vector2i(13, 4),
+	"plaza": Vector2i(17, 2),
+	"plaza_alt": Vector2i(18, 3),
+	"wall": Vector2i(1, 7),
+	"wall_alt": Vector2i(2, 7),
+	"plank_wall": Vector2i(25, 0),
+	"floor": Vector2i(25, 1),
+	"door": Vector2i(26, 1),
+	"rug": Vector2i(33, 2),
+	"fence": Vector2i(10, 8),
+	"fence_post": Vector2i(9, 8),
+	"hedge": Vector2i(15, 7),
+	"hedge_alt": Vector2i(16, 7),
+	"tree": Vector2i(1, 17),
+	"tree_dark": Vector2i(1, 20),
+	"bed": Vector2i(28, 22),
+	"bed_top": Vector2i(28, 21),
+	"bed_alt": Vector2i(31, 22),
+	"bed_alt_top": Vector2i(31, 21),
+	"chest": Vector2i(31, 17),
+	"wardrobe": Vector2i(25, 18),
+	"wardrobe_top": Vector2i(25, 17),
+	"dresser": Vector2i(21, 18),
+	"dresser_top": Vector2i(21, 17),
+	"shelf": Vector2i(27, 18),
+	"shelf_top": Vector2i(27, 17),
+	"table": Vector2i(3, 11),
+	"bench": Vector2i(0, 11),
+	"counter": Vector2i(16, 11),
+	"stall": Vector2i(3, 13),
+	"stall_alt": Vector2i(4, 13),
+	"barrel": Vector2i(12, 17),
+	"barrel_open": Vector2i(13, 17),
+	"pot": Vector2i(23, 20),
+	"jug": Vector2i(12, 15),
+	"sack": Vector2i(12, 14),
+	"bucket": Vector2i(13, 19),
+	"plant": Vector2i(24, 20),
+	"plant_tall": Vector2i(26, 20),
+	"flowers_pot": Vector2i(28, 20),
+	"brazier": Vector2i(21, 20),
+	"armor_stand": Vector2i(16, 19),
+	"forge": Vector2i(20, 22),
+	"forge_top": Vector2i(20, 21),
+	"oven": Vector2i(23, 22),
+	"oven_top": Vector2i(23, 21)
+}
+## The *_top keys are the upper halves of two-tile-tall furniture sprites.
+## They render as visual caps over the cell above the furniture, so they
+## stay passable — the blocking cell is the furniture base itself.
+const TOWN_PASSABLE_TILE_KEYS := [
+	"grass", "grass_dark", "grass_tuft", "flowers_white", "flowers_yellow",
+	"road", "road_twig", "plaza", "plaza_alt", "floor", "door", "rug",
+	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",
+	"forge_top", "oven_top"
+]
+
 static func validate_atlas_no_duplicates(atlas_name: String, atlas: Dictionary) -> bool:
 	var seen: Dictionary = {}
 	var valid := true
@@ -183,6 +251,8 @@ static func validate_atlas_no_duplicates(atlas_name: String, atlas: Dictionary) 
 static func validate_all_atlases() -> bool:
 	var valid := true
 	if not validate_atlas_no_duplicates("DWARFHOLD_TILE_ATLAS", DWARFHOLD_TILE_ATLAS):
+		valid = false
+	if not validate_atlas_no_duplicates("TOWN_TILE_ATLAS", TOWN_TILE_ATLAS):
 		valid = false
 	var overworld_atlas: Dictionary = {
 		"SAND_TILE": SAND_TILE, "GRASS_TILE": GRASS_TILE, "BADLANDS_TILE": BADLANDS_TILE,

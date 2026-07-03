@@ -1,5 +1,12 @@
 extends Control
 
+## Above-ground human town interior, entered from the overworld via
+## right-click "Begin Journey" on a town tile. Forked from the dwarfhold
+## generator: the same zone-grid pipeline (plazas, streets, residences,
+## shops with guaranteed doors and connectivity) reinterpreted for the
+## surface - grass instead of rock, dirt streets instead of halls, a
+## cobbled market square, and timber-walled buildings.
+
 const CELL_ROCK := 0
 const CELL_HALL := 1
 const CELL_HOUSE := 2
@@ -11,27 +18,27 @@ const CELL_PLAZA := 4
 @export var civic_building_zone_count_range := Vector2i(45, 95)
 @export var plaza_zone_count_range := Vector2i(6, 14)
 @export var tile_size := Vector2i(32, 32)
-@export var tilesheet_path := "res://resources/images/dwarfhold/map.png"
+@export var tilesheet_path := "res://resources/images/town/town_tileset.png"
 @export var structure_fallback_max_extra_radius := 240
 @export var tavern_vehicle_sprite_path := "res://resources/images/dwarfhold/very_epic_taverner_vehicle.png"
 @export var shattered_player_sprite_path := "res://resources/images/shattered_ui/warrior.png"
 @export var tavern_npc_count := 5
 @export var tavern_npc_speed_range := Vector2(38.0, 62.0)
-@export var enable_fog_of_war := true
-@export var underground_level_count_range := Vector2i(3, 7)
+@export var enable_fog_of_war := false
+@export var underground_level_count_range := Vector2i(1, 1)
 
 # Residence variety: footprints are half-extents (rooms span 2*radius+1
 # tiles). Houses sleep one dwarf; dormitories and barracks pack bed rows so
 # large populations don't need hundreds of tiny homes.
 const RESIDENCE_TYPES := {
-	"house": {"weight": 0.62, "radius_min": Vector2i(2, 2), "radius_max": Vector2i(6, 5)},
-	"dormitory": {"weight": 0.24, "radius_min": Vector2i(4, 3), "radius_max": Vector2i(6, 5)},
-	"barracks": {"weight": 0.14, "radius_min": Vector2i(4, 3), "radius_max": Vector2i(5, 4)}
+	"house": {"weight": 0.72, "radius_min": Vector2i(2, 2), "radius_max": Vector2i(4, 3)},
+	"dormitory": {"weight": 0.16, "radius_min": Vector2i(3, 3), "radius_max": Vector2i(5, 4)},
+	"barracks": {"weight": 0.12, "radius_min": Vector2i(3, 3), "radius_max": Vector2i(4, 4)}
 }
 
 const TILE_ATLAS_DEFS := preload("res://scripts/world_generation/tile_atlas_defs.gd")
-const TILE_ATLAS := TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS
-const PASSABLE_TILE_KEYS := TILE_ATLAS_DEFS.DWARFHOLD_PASSABLE_TILE_KEYS
+const TILE_ATLAS := TILE_ATLAS_DEFS.TOWN_TILE_ATLAS
+const PASSABLE_TILE_KEYS := TILE_ATLAS_DEFS.TOWN_PASSABLE_TILE_KEYS
 const COLLISION_LAYER_WORLD := 1
 
 
@@ -123,6 +130,8 @@ var _last_move_direction := Vector2i.ZERO
 var _move_repeat_timer := 0.0
 var _npc_states: Array[Dictionary] = []
 var _hold_state := DwarfHoldStateModel.new()
+var _town_name := ""
+var _town_details: Dictionary = {}
 var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
@@ -147,19 +156,19 @@ const ZONE_OVERLAY_COLORS := {
 }
 
 const ZONE_LEGEND_ORDER := [
-	{"tile": CELL_HALL, "name": "Hall"},
+	{"tile": CELL_HALL, "name": "Street"},
 	{"tile": CELL_HOUSE, "name": "House"},
 	{"tile": CELL_BUILDING, "name": "Building"},
-	{"tile": CELL_PLAZA, "name": "Plaza"}
+	{"tile": CELL_PLAZA, "name": "Market Square"}
 ]
 
 const BUILDING_SUBTYPE_FLAVOR := {
-	"forge": "The air rings with hammer blows and quenched steel.",
-	"brewery": "Warm casks and sour mash scent the stone halls.",
-	"armory": "Weapon racks and sparring marks line the walls.",
-	"granary": "Stores of grain and flour are stacked for lean winters.",
-	"mushroom_farm": "Low beds of mushrooms thrive in cool, damp soil.",
-	"archives": "Tablet shelves and ledgers preserve clan memory."
+	"smithy": "The air rings with hammer blows and quenched steel.",
+	"tavern": "Laughter and the smell of roast and ale spill into the street.",
+	"bakery": "Warm bread and honey cakes scent the morning air.",
+	"chapel": "Candles gutter before a quiet roadside altar.",
+	"guardhouse": "Polished pikes and watch rosters line the walls.",
+	"market_stall": "Hawkers cry their wares over the market din."
 }
 
 const MIN_ZOOM := 0.1
@@ -176,370 +185,174 @@ const CHEST_SLOT_ROWS := 4
 const BACKPACK_SLOT_ROWS := 3
 
 
-const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
-const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
+const TOWN_SCENE_SEED_KEY := "town_scene_seed"
+const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
+const TOWN_SCENE_NAME_KEY := "town_scene_name"
+
+## Upper halves of two-tile-tall furniture, drawn over the cell above the
+## furniture base at render time (passable visual caps).
+const TALL_DECOR_TOPS := {
+	"bed": "bed_top",
+	"bed_alt": "bed_alt_top",
+	"wardrobe": "wardrobe_top",
+	"dresser": "dresser_top",
+	"shelf": "shelf_top",
+	"forge": "forge_top",
+	"oven": "oven_top"
+}
 
 const CHEST_LOOT_TABLE := [
-	{"name": "Iron Ingot", "min": 1, "max": 5},
-	{"name": "Gold Nugget", "min": 1, "max": 3},
-	{"name": "Mushroom Ration", "min": 2, "max": 6},
-	{"name": "Runed Tablet", "min": 1, "max": 2},
-	{"name": "Ale Keg", "min": 1, "max": 2},
-	{"name": "Stone Block", "min": 3, "max": 8},
-	{"name": "Leather Strap", "min": 2, "max": 7},
-	{"name": "Gem Shard", "min": 1, "max": 4}
+	{"name": "Copper Coins", "min": 4, "max": 18},
+	{"name": "Wheel of Cheese", "min": 1, "max": 2},
+	{"name": "Bolt of Cloth", "min": 1, "max": 3},
+	{"name": "Loaf of Bread", "min": 1, "max": 4},
+	{"name": "Jar of Honey", "min": 1, "max": 2},
+	{"name": "Iron Horseshoes", "min": 2, "max": 6},
+	{"name": "Wax Candles", "min": 2, "max": 8},
+	{"name": "Skein of Wool", "min": 1, "max": 5}
 ]
 
 const CIVIC_BUILDING_TYPES := {
-	"forge": {
-		"placement_weight": 1.25,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["anvil", "workbench", "armor_stand", "water_bucket"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.7
-		}
-	},
-	"engineering_workshop": {
-		"placement_weight": 0.8,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
-		"decor_tile_pool": ["workbench", "anvil", "desk", "water_bucket"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.35
-		}
-	},
-	"leatherworking_shop": {
-		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["workbench", "table", "chest", "water_bucket"],
-		"adjacency_preferences": {}
-	},
-	"tailoring_shop": {
-		"placement_weight": 0.5,
+	"smithy": {
+		"placement_weight": 1.1,
 		"preferred_footprint_min": Vector2i(2, 2),
 		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["table", "stool", "shelf", "chest"],
-		"adjacency_preferences": {}
-	},
-	"enchanting_study": {
-		"placement_weight": 0.42,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["sign", "desk", "shelf", "table_alt"],
-		"adjacency_preferences": {}
-	},
-	"alchemy_laboratory": {
-		"placement_weight": 0.5,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["water_bucket", "table_alt", "desk", "chest"],
-		"adjacency_preferences": {}
-	},
-	"auction_house": {
-		"placement_weight": 0.45,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
-		"decor_tile_pool": ["desk", "table_alt", "sign", "chest"],
+		"decor_tile_pool": ["forge", "armor_stand", "barrel", "bucket"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.15
-		}
-	},
-	"general_goods_shop": {
-		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["shelf", "table", "chest", "grain_bag"],
-		"adjacency_preferences": {}
-	},
-	"weapon_shop": {
-		"placement_weight": 0.65,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["target", "anvil", "workbench", "armor_stand"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.25
-		}
-	},
-	"armor_shop": {
-		"placement_weight": 0.62,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["armor_stand", "workbench", "chest", "table"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.2
-		}
-	},
-	"trade_supply_store": {
-		"placement_weight": 0.6,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["grain_bag", "keg", "chest", "table"],
-		"adjacency_preferences": {}
-	},
-	"bank_vaults": {
-		"placement_weight": 0.35,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["chest", "desk", "sign", "table_alt"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.1
+			"hall_artery_bonus_weight": 0.6
 		}
 	},
 	"tavern": {
-		"placement_weight": 0.9,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
-		"decor_tile_pool": ["keg", "mug", "table_alt", "stool"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.2
-		}
-	},
-	"barber_shop": {
-		"placement_weight": 0.35,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["stool", "table", "desk", "water_bucket"],
-		"adjacency_preferences": {}
-	},
-	"guild_hall": {
-		"placement_weight": 0.5,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
-		"decor_tile_pool": ["table", "table_alt", "sign", "chest"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.2
-		}
-	},
-	"storage_warehouse": {
-		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
-		"decor_tile_pool": ["chest", "grain_bag", "keg", "shelf"],
-		"adjacency_preferences": {}
-	},
-	"brewery": {
-		"placement_weight": 1.05,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["keg", "winepress", "mug", "table_alt"],
-		"adjacency_preferences": {}
-	},
-	"granary": {
-		"placement_weight": 0.95,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["grain_bag", "flour", "shelf", "table"],
-		"adjacency_preferences": {}
-	},
-	"armory": {
-		"placement_weight": 0.9,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["armor_stand", "target", "anvil", "workbench"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.45
-		}
-	},
-	"workshop": {
-		"placement_weight": 1.1,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["workbench", "desk", "shelf", "butcher_table"],
-		"adjacency_preferences": {}
-	},
-	"kitchen": {
-		"placement_weight": 0.85,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["butcher_table", "table", "stool", "water_bucket"],
-		"adjacency_preferences": {}
-	},
-	"barracks": {
-		"placement_weight": 0.8,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
-		"decor_tile_pool": ["bed", "chest", "armor_stand", "target"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.35
-		}
-	},
-	"temple": {
-		"placement_weight": 0.65,
+		"placement_weight": 1.2,
 		"preferred_footprint_min": Vector2i(3, 2),
 		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["table_alt", "sign", "mug", "stool"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.2
-		}
-	},
-	"mushroom_farm": {
-		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(3, 3),
-		"preferred_footprint_max": Vector2i(5, 4),
-		"decor_tile_pool": ["mushroom_crops", "mushroom_crop_wild", "grain_bag", "water_bucket"],
-		"adjacency_preferences": {}
-	},
-	"archives": {
-		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["shelf", "desk", "sign", "chest"],
-		"adjacency_preferences": {}
-	},
-	"infirmary": {
-		"placement_weight": 0.6,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["bed", "table", "water_bucket", "chest"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.25
-		}
-	},
-	"miners_guild": {
-		"placement_weight": 0.75,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
-		"decor_tile_pool": ["stone", "target", "workbench", "chest"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.3
-		}
-	},
-	"mason_lodge": {
-		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["stone", "table", "desk", "workbench"],
-		"adjacency_preferences": {}
-	},
-	"engineers_foundry": {
-		"placement_weight": 0.65,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["anvil", "workbench", "desk", "water_bucket"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.4
-		}
-	},
-	"gemcutters_studio": {
-		"placement_weight": 0.6,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["table_alt", "chest", "sign", "desk"],
-		"adjacency_preferences": {}
-	},
-	"runesmith_sanctum": {
-		"placement_weight": 0.5,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["anvil", "sign", "shelf", "desk"],
-		"adjacency_preferences": {
-			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.2
-		}
-	},
-	"smeltery": {
-		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
-		"decor_tile_pool": ["anvil", "water_bucket", "stone", "workbench"],
+		"decor_tile_pool": ["barrel", "jug", "bench", "counter"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
 			"hall_artery_bonus_weight": 0.5
 		}
 	},
-	"cartographers_office": {
-		"placement_weight": 0.45,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["desk", "sign", "table", "shelf"],
-		"adjacency_preferences": {}
-	},
-	"explorers_guild": {
-		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(2, 2),
+	"inn": {
+		"placement_weight": 0.8,
+		"preferred_footprint_min": Vector2i(3, 2),
 		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["target", "table", "chest", "water_bucket"],
+		"decor_tile_pool": ["bed", "counter", "barrel", "table"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
-			"hall_artery_bonus_weight": 0.15
+			"hall_artery_bonus_weight": 0.4
 		}
 	},
-	"merchants_counting_house": {
-		"placement_weight": 0.55,
+	"bakery": {
+		"placement_weight": 0.9,
+		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_max": Vector2i(3, 3),
+		"decor_tile_pool": ["oven", "sack", "counter", "table"],
+		"adjacency_preferences": {}
+	},
+	"general_store": {
+		"placement_weight": 1.0,
 		"preferred_footprint_min": Vector2i(2, 2),
 		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["desk", "chest", "table_alt", "shelf"],
-		"adjacency_preferences": {}
+		"decor_tile_pool": ["counter", "shelf", "sack", "pot"],
+		"adjacency_preferences": {
+			"prefers_hall_arteries": true,
+			"hall_artery_bonus_weight": 0.45
+		}
 	},
-	"butchery": {
-		"placement_weight": 0.75,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["butcher_table", "table", "water_bucket", "chest"],
-		"adjacency_preferences": {}
+	"market_stall": {
+		"placement_weight": 1.15,
+		"preferred_footprint_min": Vector2i(1, 1),
+		"preferred_footprint_max": Vector2i(2, 2),
+		"decor_tile_pool": ["stall", "stall_alt", "sack", "barrel_open"],
+		"adjacency_preferences": {
+			"prefers_hall_arteries": true,
+			"hall_artery_bonus_weight": 0.7
+		}
 	},
-	"bakery": {
-		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["table_alt", "flour", "grain_bag", "stool"],
-		"adjacency_preferences": {}
-	},
-	"cooperage": {
+	"chapel": {
 		"placement_weight": 0.6,
 		"preferred_footprint_min": Vector2i(2, 2),
 		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["keg", "workbench", "chest", "table"],
+		"decor_tile_pool": ["brazier", "flowers_pot", "bench", "plant_tall"],
 		"adjacency_preferences": {}
 	},
-	"tannery": {
+	"guild_hall": {
+		"placement_weight": 0.55,
+		"preferred_footprint_min": Vector2i(3, 2),
+		"preferred_footprint_max": Vector2i(4, 3),
+		"decor_tile_pool": ["table", "bench", "shelf", "chest"],
+		"adjacency_preferences": {
+			"prefers_hall_arteries": true,
+			"hall_artery_bonus_weight": 0.2
+		}
+	},
+	"town_hall": {
+		"placement_weight": 0.4,
+		"preferred_footprint_min": Vector2i(3, 2),
+		"preferred_footprint_max": Vector2i(4, 3),
+		"decor_tile_pool": ["table", "bench", "brazier", "shelf"],
+		"adjacency_preferences": {
+			"prefers_hall_arteries": true,
+			"hall_artery_bonus_weight": 0.3
+		}
+	},
+	"warehouse": {
+		"placement_weight": 0.75,
+		"preferred_footprint_min": Vector2i(3, 2),
+		"preferred_footprint_max": Vector2i(4, 3),
+		"decor_tile_pool": ["sack", "barrel", "chest", "barrel_open"],
+		"adjacency_preferences": {}
+	},
+	"carpenter": {
+		"placement_weight": 0.7,
+		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_max": Vector2i(3, 3),
+		"decor_tile_pool": ["bench", "table", "barrel", "bucket"],
+		"adjacency_preferences": {}
+	},
+	"tailor": {
+		"placement_weight": 0.6,
+		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_max": Vector2i(3, 3),
+		"decor_tile_pool": ["table", "dresser", "chest", "plant"],
+		"adjacency_preferences": {}
+	},
+	"apothecary": {
 		"placement_weight": 0.55,
 		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["water_bucket", "workbench", "chest", "table_alt"],
+		"preferred_footprint_max": Vector2i(3, 3),
+		"decor_tile_pool": ["pot", "jug", "plant_tall", "shelf"],
 		"adjacency_preferences": {}
 	},
-	"millhouse": {
+	"guardhouse": {
 		"placement_weight": 0.65,
 		"preferred_footprint_min": Vector2i(2, 2),
 		"preferred_footprint_max": Vector2i(4, 3),
-		"decor_tile_pool": ["flour", "grain_bag", "table", "shelf"],
+		"decor_tile_pool": ["armor_stand", "bed_alt", "chest", "bench"],
+		"adjacency_preferences": {
+			"prefers_hall_arteries": true,
+			"hall_artery_bonus_weight": 0.35
+		}
+	},
+	"stable": {
+		"placement_weight": 0.5,
+		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_max": Vector2i(4, 3),
+		"decor_tile_pool": ["bucket", "sack", "bench", "barrel_open"],
 		"adjacency_preferences": {}
 	},
-	"cobblers_shop": {
-		"placement_weight": 0.45,
+	"workshop": {
+		"placement_weight": 0.8,
 		"preferred_footprint_min": Vector2i(2, 2),
 		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["stool", "chest", "table", "desk"],
-		"adjacency_preferences": {}
-	},
-	"ropemakers_hall": {
-		"placement_weight": 0.45,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["table", "workbench", "chest", "stool"],
+		"decor_tile_pool": ["bench", "table", "bucket", "barrel"],
 		"adjacency_preferences": {}
 	}
 }
 
 func _ready() -> void:
-	_apply_cached_dwarfhold_scene_seed()
+	_apply_cached_town_scene_seed()
 	_configure_tile_layer()
 	global_darkness.color = Color(1.0, 1.0, 1.0, 1.0)
 	_lighting_mask_sprite = Sprite2D.new()
@@ -631,7 +444,7 @@ func _update_player_character_label() -> void:
 		parts.append(display_name)
 	if not clan.is_empty():
 		parts.append("of %s" % clan)
-	var header := " ".join(parts) if not parts.is_empty() else "Unnamed Dwarf"
+	var header := " ".join(parts) if not parts.is_empty() else "Unnamed Traveler"
 	if not profession.is_empty():
 		header += " — %s" % profession
 	player_character_label.text = header
@@ -735,11 +548,11 @@ func _configure_tile_layer() -> void:
 	if OS.is_debug_build():
 		TILE_ATLAS_DEFS.validate_all_atlases()
 	if not FileAccess.file_exists(tilesheet_path):
-		push_error("Missing dwarf hold tilesheet at %s" % tilesheet_path)
+		push_error("Missing town tilesheet at %s" % tilesheet_path)
 		return
 	var texture := load(tilesheet_path) as Texture2D
 	if texture == null:
-		push_error("Unable to load dwarf hold tilesheet texture at %s" % tilesheet_path)
+		push_error("Unable to load town tilesheet texture at %s" % tilesheet_path)
 		return
 
 	var atlas := TileSetAtlasSource.new()
@@ -792,12 +605,13 @@ func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
 		return true
 	return _is_passable_atlas_tile(decor_layer.get_cell_atlas_coords(cell))
 
-func _apply_cached_dwarfhold_scene_seed() -> void:
+func _apply_cached_town_scene_seed() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null or not game_session.has_method("get_world_settings"):
 		return
 	var settings: Dictionary = game_session.call("get_world_settings")
-	var scene_seed := _hold_state.apply_world_settings(settings, DWARFHOLD_SCENE_SEED_KEY, DWARFHOLD_SCENE_POPULATION_KEY)
+	var scene_seed := _hold_state.apply_world_settings(settings, TOWN_SCENE_SEED_KEY, TOWN_SCENE_POPULATION_KEY)
+	_town_name = String(settings.get(TOWN_SCENE_NAME_KEY, "")).strip_edges()
 	if scene_seed.is_empty():
 		return
 	seed_input.text = scene_seed
@@ -820,6 +634,11 @@ func _generate_city() -> void:
 
 	_rng.seed = hash(seed_text)
 	_hold_state.generated_levels.clear()
+
+	var details_rng := RandomNumberGenerator.new()
+	details_rng.seed = hash("%s::town_details" % seed_text)
+	var display_name := _town_name if not _town_name.is_empty() else "Unnamed Town"
+	_town_details = TownDetailsGenerator.generate(display_name, _hold_state.selected_hold_population, details_rng)
 
 	var minimum_levels := mini(underground_level_count_range.x, underground_level_count_range.y)
 	var maximum_levels := maxi(underground_level_count_range.x, underground_level_count_range.y)
@@ -849,9 +668,9 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	var requested_plaza_count: int
 	if population_scaled:
 		requested_bed_count = target_npcs_for_level
-		requested_building_count = maxi(2, int(ceil(float(target_npcs_for_level) / 6.0)))
+		requested_building_count = maxi(2, int(ceil(float(target_npcs_for_level) / 12.0)))
 		requested_hall_count = maxi(3, int(ceil(float(target_npcs_for_level) / 24.0)))
-		requested_plaza_count = clampi(1 + target_npcs_for_level / 60, 1, 14)
+		requested_plaza_count = clampi(1 + target_npcs_for_level / 140, 1, 4)
 	else:
 		requested_hall_count = _pick_seeded_zone_target(hall_zone_count_range)
 		requested_bed_count = 0 if is_additional_layer else _pick_seeded_zone_target(housing_zone_count_range)
@@ -878,8 +697,8 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	_latest_residence_type_map = {}
 	var plaza_layouts: Array[Dictionary] = []
 	var central_plaza_radius := Vector2i(
-		maxi(4, roundi(float(_rng.randi_range(12, 18)) * footprint_scale)),
-		maxi(3, roundi(float(_rng.randi_range(10, 16)) * footprint_scale))
+		maxi(3, roundi(float(_rng.randi_range(6, 10)) * footprint_scale)),
+		maxi(3, roundi(float(_rng.randi_range(5, 8)) * footprint_scale))
 	)
 	var central_plaza_shape := _roll_plaza_shape()
 	var central_plaza := {"center": Vector2i.ZERO, "radius": central_plaza_radius, "shape": central_plaza_shape}
@@ -894,17 +713,17 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 
 	for _plaza_index in maxi(0, requested_plaza_count - 1):
 		var plaza_radius := Vector2i(
-			maxi(3, roundi(float(_rng.randi_range(10, 18)) * footprint_scale)),
-			maxi(3, roundi(float(_rng.randi_range(8, 15)) * footprint_scale))
+			maxi(2, roundi(float(_rng.randi_range(4, 8)) * footprint_scale)),
+			maxi(2, roundi(float(_rng.randi_range(3, 6)) * footprint_scale))
 		)
 		var plaza_shape := _roll_plaza_shape()
 		var plaza_center := Vector2i.ZERO
 		var found_location := false
-		var plaza_spacing := maxi(8, roundi(22.0 * footprint_scale))
+		var plaza_spacing := maxi(6, roundi(14.0 * footprint_scale))
 		for _placement_attempt in 24:
 			var plaza_anchor := (plaza_layouts[_rng.randi_range(0, plaza_layouts.size() - 1)] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
 			var plaza_direction := [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN][_rng.randi_range(0, 3)] as Vector2i
-			var plaza_offset_distance := maxi(18, roundi(float(_rng.randi_range(56, 120)) * footprint_scale))
+			var plaza_offset_distance := maxi(12, roundi(float(_rng.randi_range(24, 56)) * footprint_scale))
 			var candidate_center := plaza_anchor + plaza_direction * plaza_offset_distance
 			candidate_center += Vector2i(_rng.randi_range(-14, 14), _rng.randi_range(-14, 14))
 			if _is_plaza_too_close(candidate_center, plaza_radius, plaza_layouts, plaza_spacing):
@@ -913,7 +732,7 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 			found_location = true
 			break
 		if not found_location:
-			var fallback_spread := maxi(40, roundi(160.0 * footprint_scale))
+			var fallback_spread := maxi(24, roundi(80.0 * footprint_scale))
 			plaza_center = (plaza_layouts[_rng.randi_range(0, plaza_layouts.size() - 1)] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
 			plaza_center += Vector2i(_rng.randi_range(-fallback_spread, fallback_spread), _rng.randi_range(-fallback_spread, fallback_spread))
 		_dig_plaza_zone(grid, plaza_center, plaza_radius, plaza_shape, CELL_PLAZA)
@@ -1723,13 +1542,12 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	var house_decor_overrides := _build_house_decor_layouts(grid)
 	_latest_bed_count = 0
 	for decor_value: Variant in house_decor_overrides.values():
-		if String(decor_value) == "bed":
+		var decor_key := String(decor_value)
+		if decor_key == "bed" or decor_key == "bed_alt":
 			_latest_bed_count += 1
 	for y in range(bounds.position.y, bounds.end.y):
 		for x in range(bounds.position.x, bounds.end.x):
 			var cell := _cell_at(grid, x, y)
-			if cell == CELL_ROCK and not _is_hall_border_rock_cell(grid, x, y):
-				continue
 			var base_tile := _pick_base_tile(grid, x, y, cell)
 			var render_cell := Vector2i(x, y)
 			_place_tile(city_layer, render_cell, base_tile)
@@ -1738,6 +1556,10 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 				_place_tile(decor_layer, render_cell, decor_tile)
 				if decor_tile == "chest":
 					_ensure_chest_inventory(render_cell)
+				if TALL_DECOR_TOPS.has(decor_tile):
+					var top_cell := render_cell + Vector2i.UP
+					if decor_layer.get_cell_source_id(top_cell) < 0:
+						_place_tile(decor_layer, top_cell, String(TALL_DECOR_TOPS[decor_tile]))
 	for stair_key: String in ["up", "down"]:
 		if not stair_cells.has(stair_key):
 			continue
@@ -2005,7 +1827,7 @@ func _item_abbreviation(item_name: String) -> String:
 	return DwarfHoldChestService.item_abbreviation(item_name)
 
 func _build_house_decor_layouts(grid: Dictionary) -> Dictionary:
-	return DwarfHoldTileService.build_house_decor_layouts(grid, _latest_residence_type_map, _door_cells)
+	return TownTileService.build_house_decor_layouts(grid, _latest_residence_type_map, _door_cells)
 
 func _on_city_panel_gui_input(event: InputEvent) -> void:
 	_is_panning = DwarfHoldUiInputHandler.handle_city_panel_event(
@@ -2199,9 +2021,9 @@ func _stair_direction_at_cell(cell: Vector2i) -> String:
 		if layer == null or layer.get_cell_source_id(cell) < 0:
 			continue
 		var atlas := layer.get_cell_atlas_coords(cell)
-		if atlas == TILE_ATLAS["stairway_up"]:
+		if atlas == TILE_ATLAS.get("stairway_up", Vector2i(-1000, -1000)):
 			return "up"
-		if atlas == TILE_ATLAS["stairway_down"]:
+		if atlas == TILE_ATLAS.get("stairway_down", Vector2i(-1000, -1000)):
 			return "down"
 	return ""
 
@@ -2318,15 +2140,15 @@ func _create_placeholder_tavern_character_texture() -> Texture2D:
 	return DwarfHoldTavernService.create_placeholder_tavern_character_texture()
 
 func _is_walkable_cell(cell: Vector2i) -> bool:
+	# Above ground the green is open terrain: any rendered passable tile is
+	# walkable, so building walls and furniture are the only barriers and a
+	# street severed by later construction is still reachable across grass.
 	if _latest_grid.is_empty():
-		return false
-	var zone := int(_latest_grid.get(cell, CELL_ROCK))
-	if zone != CELL_HALL and zone != CELL_HOUSE and zone != CELL_BUILDING and zone != CELL_PLAZA:
 		return false
 	return _is_passable_cell_for_actor(cell)
 
 func _is_npc_walkable_cell(cell: Vector2i) -> bool:
-	return DwarfHoldTavernService.is_npc_walkable_cell(cell, Callable(self, "_is_walkable_cell"), decor_layer, TILE_ATLAS["stone"])
+	return DwarfHoldTavernService.is_npc_walkable_cell(cell, Callable(self, "_is_walkable_cell"), decor_layer, TILE_ATLAS.get("wall", Vector2i(-1000, -1000)))
 
 func _actor_sprite_to_cell(sprite: Sprite2D, cell: Vector2i) -> void:
 	sprite.position = _cell_center_position(cell)
@@ -2338,16 +2160,13 @@ func _place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -
 	DwarfHoldTileService.place_tile(target_layer, cell, tile_key, TILE_ATLAS)
 
 func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
-	return DwarfHoldTileService.pick_base_tile(grid, x, y, cell, _door_cells, TILE_ATLAS)
-
-func _is_hall_border_rock_cell(grid: Dictionary, x: int, y: int) -> bool:
-	return DwarfHoldTileService.is_hall_border_rock_cell(grid, x, y)
+	return TownTileService.pick_base_tile(grid, x, y, cell, _door_cells)
 
 func _building_type_for_cell(cell: Vector2i) -> String:
 	return String(_latest_civic_building_type_map.get(cell, "workshop"))
 
 func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: String, house_decor_overrides: Dictionary) -> String:
-	return DwarfHoldTileService.pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, _latest_civic_building_type_map, CIVIC_BUILDING_TYPES, _rng, _door_cells)
+	return TownTileService.pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, _latest_civic_building_type_map, CIVIC_BUILDING_TYPES, _rng, _door_cells)
 
 
 func _update_summary(grid: Dictionary, seed_text: String) -> void:
@@ -2385,8 +2204,23 @@ func _update_summary(grid: Dictionary, seed_text: String) -> void:
 			_hold_state.current_level_index,
 			maxi(_hold_state.generated_levels.size(), 1)
 		)
-		city_summary.text += "\nHold Population: %d (target residents in-scene: %d at 10:1)" % [_hold_state.selected_hold_population, expected_npcs]
-		city_summary.text += "\nBeds this level: %d (level resident target: %d)" % [_latest_bed_count, level_npc_target]
+		city_summary.text += "\nTown Population: %d (target residents in-scene: %d at 10:1)" % [_hold_state.selected_hold_population, expected_npcs]
+		city_summary.text += "\nBeds: %d (resident target: %d)" % [_latest_bed_count, level_npc_target]
+	if not _town_details.is_empty():
+		city_summary.text += "\n\n%s — %s" % [String(_town_details.get("name", "Town")), String(_town_details.get("classification", "Town"))]
+		city_summary.text += "\nRuler: %s %s" % [String(_town_details.get("ruler_title", "Mayor")), String(_town_details.get("ruler_name", ""))]
+		city_summary.text += "\n%s: %s" % ["Prominent House", String(_town_details.get("prominent_house", ""))]
+		var guild_names := PackedStringArray()
+		for guild_variant: Variant in (_town_details.get("major_guilds", []) as Array):
+			guild_names.append(String(guild_variant))
+		if not guild_names.is_empty():
+			city_summary.text += "\nGuilds: %s" % ", ".join(guild_names)
+		var export_names := PackedStringArray()
+		for export_variant: Variant in (_town_details.get("major_exports", []) as Array):
+			export_names.append(String(export_variant))
+		if not export_names.is_empty():
+			city_summary.text += "\nExports: %s" % ", ".join(export_names)
+		city_summary.text += "\n%s" % String(_town_details.get("hallmark", ""))
 	if not building_subtype_summary.is_empty():
 		city_summary.text += "\nBuilding Types: %s" % building_subtype_summary
 
@@ -2430,19 +2264,19 @@ func _hide_hover_tooltip() -> void:
 	_hover_tooltip_layer = null
 
 func _tile_name_from_atlas(atlas_coords: Vector2i) -> String:
-	return DwarfHoldTileService.tile_name_from_atlas(atlas_coords, TILE_ATLAS)
+	return TownTileService.tile_name_from_atlas(atlas_coords, TILE_ATLAS)
 
 func _zone_name_for_cell(cell: Vector2i) -> String:
-	return DwarfHoldTileService.zone_name_for_cell(cell, _latest_grid, _latest_civic_building_type_map)
+	return TownTileService.zone_name_for_cell(cell, _latest_grid, _latest_civic_building_type_map)
 
 func _building_type_for_cell_or_empty(cell: Vector2i) -> String:
-	return DwarfHoldTileService.building_type_for_cell_or_empty(cell, _latest_civic_building_type_map)
+	return TownTileService.building_type_for_cell_or_empty(cell, _latest_civic_building_type_map)
 
 func _display_name_for_building_type(building_type: String) -> String:
-	return DwarfHoldTileService.display_name_for_building_type(building_type)
+	return TownTileService.display_name_for_building_type(building_type)
 
 func _building_subtype_summary_text() -> String:
-	return DwarfHoldTileService.building_subtype_summary_text(_latest_civic_buildings_by_id)
+	return TownTileService.building_subtype_summary_text(_latest_civic_buildings_by_id)
 
 func _clamp_tooltip_position(desired_position: Vector2) -> Vector2:
 	var tooltip_size := tile_hover_tooltip.size

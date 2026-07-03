@@ -1,0 +1,315 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/world_generation/town_generation.gd" id="1_8mfx7"]
+[ext_resource type="Script" uid="uid://b5i1lqmpjx0au" path="res://scripts/world_generation/zone_overlay_layer.gd" id="3_wd6by"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_1prb4"]
+bg_color = Color(0.0745098, 0.0588235, 0.054902, 1)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+
+[node name="TownGeneration" type="Control" unique_id=2014620824]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_8mfx7")
+shattered_player_sprite_path = "res://resources/images/shattered_ui/warrior.png"
+
+[node name="Margin" type="MarginContainer" parent="." unique_id=1137079699]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 24.0
+offset_top = 24.0
+offset_right = -24.0
+offset_bottom = -24.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Layout" type="HBoxContainer" parent="Margin" unique_id=148521347]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 16
+
+[node name="CityPanel" type="PanelContainer" parent="Margin/Layout" unique_id=470817688]
+unique_name_in_owner = true
+clip_contents = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_styles/panel = SubResource("StyleBoxFlat_1prb4")
+
+[node name="CityTileLayer" type="TileMapLayer" parent="Margin/Layout/CityPanel" unique_id=151351120]
+unique_name_in_owner = true
+position = Vector2(16, 16)
+
+[node name="DecorTileLayer" type="TileMapLayer" parent="Margin/Layout/CityPanel" unique_id=703697700]
+unique_name_in_owner = true
+position = Vector2(16, 16)
+
+[node name="LightingLayer" type="Node2D" parent="Margin/Layout/CityPanel" unique_id=2078856892]
+unique_name_in_owner = true
+position = Vector2(16, 16)
+
+[node name="GlobalDarkness" type="CanvasModulate" parent="Margin/Layout/CityPanel/LightingLayer" unique_id=1617555623]
+unique_name_in_owner = true
+color = Color(0.2, 0.2, 0.24, 1)
+
+[node name="TorchLights" type="Node2D" parent="Margin/Layout/CityPanel/LightingLayer" unique_id=1613704201]
+unique_name_in_owner = true
+
+[node name="PlayerLight" type="PointLight2D" parent="Margin/Layout/CityPanel/LightingLayer" unique_id=740158831]
+unique_name_in_owner = true
+visible = false
+
+[node name="FogOfWar" type="Sprite2D" parent="Margin/Layout/CityPanel/LightingLayer" unique_id=930498142]
+unique_name_in_owner = true
+modulate = Color(0.02, 0.02, 0.03, 0.78)
+centered = false
+
+[node name="ActorLayer" type="Node2D" parent="Margin/Layout/CityPanel" unique_id=493696719]
+unique_name_in_owner = true
+position = Vector2(16, 16)
+
+[node name="ZoneOverlay" type="Control" parent="Margin/Layout/CityPanel" unique_id=816640221]
+unique_name_in_owner = true
+layout_mode = 2
+mouse_filter = 2
+script = ExtResource("3_wd6by")
+
+[node name="TileHoverTooltip" type="PanelContainer" parent="Margin/Layout/CityPanel" unique_id=206020702]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_1prb4")
+
+[node name="TileHoverLabel" type="Label" parent="Margin/Layout/CityPanel/TileHoverTooltip" unique_id=1038601715]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 14
+
+[node name="Controls" type="VBoxContainer" parent="Margin/Layout" unique_id=715080455]
+custom_minimum_size = Vector2(260, 0)
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="Margin/Layout/Controls" unique_id=1777287391]
+layout_mode = 2
+theme_override_font_sizes/font_size = 26
+text = "Town"
+
+
+[node name="PlayerCharacterLabel" type="Label" parent="Margin/Layout/Controls" unique_id=1919191919]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 14
+text = ""
+autowrap_mode = 3
+
+
+[node name="TopActions" type="HBoxContainer" parent="Margin/Layout/Controls" unique_id=1818181818]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+
+[node name="BackButton" type="Button" parent="Margin/Layout/Controls/TopActions" unique_id=1717171717]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "← Back (Esc)"
+
+
+[node name="SaveGameButton" type="Button" parent="Margin/Layout/Controls/TopActions" unique_id=1616161616]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Save Game"
+
+
+[node name="SaveStatusLabel" type="Label" parent="Margin/Layout/Controls" unique_id=1515151515]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 12
+text = ""
+
+
+[node name="Description" type="Label" parent="Margin/Layout/Controls" unique_id=2013604842]
+layout_mode = 2
+text = "A procedurally generated town with a market square, streets, homes, and shops. Click to walk; hover tiles for details."
+autowrap_mode = 3
+
+[node name="SeedInput" type="LineEdit" parent="Margin/Layout/Controls" unique_id=1809044796]
+unique_name_in_owner = true
+layout_mode = 2
+placeholder_text = "Optional seed"
+
+[node name="GenerateButton" type="Button" parent="Margin/Layout/Controls" unique_id=1308803337]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Generate New Town"
+
+[node name="DepthControls" type="HBoxContainer" parent="Margin/Layout/Controls" unique_id=170009992]
+visible = false
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="DepthDownButton" type="Button" parent="Margin/Layout/Controls/DepthControls" unique_id=93990912]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Depth -"
+
+[node name="DepthLabel" type="Label" parent="Margin/Layout/Controls/DepthControls" unique_id=16041918]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+horizontal_alignment = 1
+text = "Level 1 / 1"
+
+[node name="DepthUpButton" type="Button" parent="Margin/Layout/Controls/DepthControls" unique_id=1321381987]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Depth +"
+
+
+[node name="OverlayToggle" type="CheckButton" parent="Margin/Layout/Controls" unique_id=195430028]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Show zone overlay"
+
+[node name="LightingToggle" type="CheckButton" parent="Margin/Layout/Controls" unique_id=1664598420]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Enable lighting"
+
+[node name="ZoneLegend" type="RichTextLabel" parent="Margin/Layout/Controls" unique_id=1078314459]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 260)
+layout_mode = 2
+bbcode_enabled = true
+fit_content = true
+scroll_active = false
+
+[node name="ChestInventorySection" type="VBoxContainer" parent="Margin/Layout/Controls" unique_id=765229013]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="ChestInventoryTitle" type="Label" parent="Margin/Layout/Controls/ChestInventorySection" unique_id=1132940581]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Chest Inventory"
+
+[node name="ChestInventoryList" type="RichTextLabel" parent="Margin/Layout/Controls/ChestInventorySection" unique_id=185531805]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 120)
+layout_mode = 2
+bbcode_enabled = true
+text = "Click a chest tile to inspect its contents."
+fit_content = true
+
+[node name="LootChestButton" type="Button" parent="Margin/Layout/Controls/ChestInventorySection" unique_id=1255507888]
+unique_name_in_owner = true
+layout_mode = 2
+disabled = true
+text = "Take All"
+
+[node name="CitySummary" type="Label" parent="Margin/Layout/Controls" unique_id=951096892]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+text = "Awaiting generation"
+vertical_alignment = 1
+autowrap_mode = 3
+
+[node name="ChestPopup" type="PanelContainer" parent="." unique_id=1508123063]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -250.0
+offset_top = -220.0
+offset_right = 250.0
+offset_bottom = 220.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_1prb4")
+
+[node name="Content" type="VBoxContainer" parent="ChestPopup" unique_id=245478585]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Header" type="HBoxContainer" parent="ChestPopup/Content" unique_id=170299281]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="ChestPopupTitle" type="Label" parent="ChestPopup/Content/Header" unique_id=152842586]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 22
+text = "Chest"
+
+[node name="ChestPopupCloseButton" type="Button" parent="ChestPopup/Content/Header" unique_id=515005198]
+unique_name_in_owner = true
+layout_mode = 2
+text = "✕"
+
+[node name="ChestSectionLabel" type="Label" parent="ChestPopup/Content" unique_id=72388914]
+layout_mode = 2
+text = "Chest Storage"
+
+[node name="ChestGrid" type="GridContainer" parent="ChestPopup/Content" unique_id=336791203]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 160)
+layout_mode = 2
+theme_override_constants/h_separation = 6
+theme_override_constants/v_separation = 6
+columns = 8
+
+[node name="ChestPopupStatusLabel" type="Label" parent="ChestPopup/Content" unique_id=143800192]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Select a chest tile to view contents"
+
+[node name="Divider" type="HSeparator" parent="ChestPopup/Content" unique_id=117610458]
+layout_mode = 2
+
+[node name="BackpackSectionLabel" type="Label" parent="ChestPopup/Content" unique_id=909011322]
+layout_mode = 2
+text = "Backpack (visual placeholder)"
+
+[node name="BackpackGrid" type="GridContainer" parent="ChestPopup/Content" unique_id=892333642]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 120)
+layout_mode = 2
+theme_override_constants/h_separation = 6
+theme_override_constants/v_separation = 6
+columns = 8
+
+[node name="Actions" type="HBoxContainer" parent="ChestPopup/Content" unique_id=148199261]
+layout_mode = 2
+theme_override_constants/separation = 8
+alignment = 2
+
+[node name="ChestPopupTakeAllButton" type="Button" parent="ChestPopup/Content/Actions" unique_id=154842991]
+unique_name_in_owner = true
+layout_mode = 2
+disabled = true
+text = "Take All"
+
+[node name="ChestPopupCloseFooterButton" type="Button" parent="ChestPopup/Content/Actions" unique_id=621122801]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Close"
