@@ -574,6 +574,7 @@ const CIVILIZATION_LABELS := {
 	"MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipPopulationBreakdown/PopulationBreakdownContent/PopulationPieChart"
 )
 var _atlas_source_id := -1
+var _river_atlas_source_id := -1
 var _temperature_noise: FastNoiseLite
 var _rainfall_noise: FastNoiseLite
 var _vegetation_noise: FastNoiseLite
@@ -1635,7 +1636,8 @@ func _apply_river_tiles(
 	tree_map: Dictionary,
 	edge_connected_water: Dictionary
 ) -> Dictionary:
-	return OverworldRiverService.apply_river_tiles(river_map, base_biome_map, highland_map, tree_map, edge_connected_water, map_size, river_layer, highland_layer, tree_layer, _atlas_source_id)
+	var river_source_id := _river_atlas_source_id if _river_atlas_source_id >= 0 else _atlas_source_id
+	return OverworldRiverService.apply_river_tiles(river_map, base_biome_map, highland_map, tree_map, edge_connected_water, map_size, river_layer, highland_layer, tree_layer, river_source_id)
 
 func _resolve_river_tile(
 	river_map: Dictionary,
@@ -4633,6 +4635,7 @@ func _configure_tileset() -> void:
 			continue
 		overworld_atlas.create_tile(tile_coords)
 	_atlas_source_id = tile_set.add_source(overworld_atlas)
+	_river_atlas_source_id = _configure_river_atlas_source(tile_set)
 	map_layer.tile_set = tile_set
 	map_layer.position = Vector2.ZERO
 	if tree_layer != null:
@@ -4647,6 +4650,47 @@ func _configure_tileset() -> void:
 	if settlement_layer != null:
 		settlement_layer.tile_set = tile_set
 		settlement_layer.position = Vector2.ZERO
+
+func _configure_river_atlas_source(tile_set: TileSet) -> int:
+	var river_texture := load(TILE_ATLAS_DEFS.RIVER_ATLAS_TEXTURE) as Texture2D
+	if river_texture == null:
+		push_warning(
+			"River atlas texture could not be loaded: %s. Rivers will fall back to the overworld atlas." %
+			TILE_ATLAS_DEFS.RIVER_ATLAS_TEXTURE
+		)
+		return -1
+	var cell_size := int(tile_set.tile_size.x)
+	var source_tile_size := int(TILE_ATLAS_DEFS.RIVER_ATLAS_TILE_SIZE)
+	var river_image := river_texture.get_image()
+	if river_image == null:
+		return -1
+	# The river sheet uses smaller tiles than the overworld atlas; upscale it
+	# (nearest neighbour, pixel art) so its tiles fill the map grid cells.
+	if source_tile_size != cell_size and source_tile_size > 0:
+		var upscale := float(cell_size) / float(source_tile_size)
+		river_image.resize(
+			int(round(river_image.get_width() * upscale)),
+			int(round(river_image.get_height() * upscale)),
+			Image.INTERPOLATE_NEAREST
+		)
+	var river_atlas := TileSetAtlasSource.new()
+	river_atlas.texture = ImageTexture.create_from_image(river_image)
+	river_atlas.texture_region_size = Vector2i(cell_size, cell_size)
+	var max_columns := int(river_image.get_width() / cell_size)
+	var max_rows := int(river_image.get_height() / cell_size)
+	for tile_key: String in TILE_ATLAS_DEFS.RIVER_TILES.keys():
+		var tile_coords: Vector2i = TILE_ATLAS_DEFS.RIVER_TILES[tile_key]
+		if tile_coords.x < 0 or tile_coords.y < 0 or tile_coords.x >= max_columns or tile_coords.y >= max_rows:
+			push_warning(
+				"Skipping river tile %s %s because it is outside the river atlas bounds (%s x %s)." %
+				[tile_key, tile_coords, max_columns, max_rows]
+			)
+			continue
+		if river_atlas.has_tile(tile_coords):
+			continue
+		river_atlas.create_tile(tile_coords)
+	return tile_set.add_source(river_atlas)
+
 
 func _build_fallback_overworld_atlas(tile_coords_list: Array[Vector2i]) -> Texture2D:
 	if tile_coords_list.is_empty():

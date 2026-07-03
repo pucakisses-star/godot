@@ -1,6 +1,10 @@
 extends RefCounted
 
 const ATLAS_TEXTURE := "res://resources/images/overworld/atlas/overworld.png"
+# Rivers use their own sheet: RIVER_TILES coordinates index into the
+# world-map details tilesheet (16px tiles), not the overworld atlas.
+const RIVER_ATLAS_TEXTURE := "res://resources/images/overworld/atlas/world_map_details.png"
+const RIVER_ATLAS_TILE_SIZE := 16
 const SAND_TILE := Vector2i(0, 0)
 const GRASS_TILE := Vector2i(1, 0)
 const BADLANDS_TILE := Vector2i(2, 1)
