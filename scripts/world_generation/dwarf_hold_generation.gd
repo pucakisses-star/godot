@@ -120,6 +120,7 @@ var _chest_slot_icons: Array[TextureRect] = []
 var _backpack_slot_panels: Array[PanelContainer] = []
 var _backpack_slot_labels: Array[Label] = []
 var _backpack_slot_icons: Array[TextureRect] = []
+var _backpack_slot_items: Array[String] = []
 var _latest_zone_counts := {
 	"halls": 0,
 	"houses": 0,
@@ -171,6 +172,7 @@ const PLAYER_ATTACK_COOLDOWN := 0.45
 const CREATURE_CAP := 24
 const CREATURE_DESPAWN_DISTANCE := 90
 const CITY_REGEN_PER_SECOND := 2.0
+const COOKING_HEAT_BUILDING_TYPES := ["forge", "smeltery", "tavern", "brewery", "grand_kitchens"]
 const SPD_NEIGHBOR_OFFSETS := [
 	Vector2i(-1, -1),
 	Vector2i(0, -1),
@@ -260,13 +262,40 @@ const CHEST_LOOT_TABLE := [
 	{"name": "Dynamite Stick", "min": 1, "max": 2},
 	{"name": "Skeleton Keys", "min": 1, "max": 1},
 	{"name": "Rusty Pickaxe", "min": 1, "max": 1},
-	{"name": "Old Fishing Rod", "min": 1, "max": 1}
+	{"name": "Old Fishing Rod", "min": 1, "max": 1},
+	{"name": "Miner's Pickaxe", "min": 1, "max": 1},
+	{"name": "Copper Pick", "min": 1, "max": 1},
+	{"name": "Worn Pickaxe", "min": 1, "max": 1},
+	{"name": "Steel Pickaxe", "min": 1, "max": 1},
+	{"name": "Prospector's Trowel", "min": 1, "max": 1},
+	{"name": "Spade", "min": 1, "max": 1},
+	{"name": "Steel Trowel", "min": 1, "max": 1},
+	{"name": "Wooden Mallet", "min": 1, "max": 1},
+	{"name": "Stone Hammer", "min": 1, "max": 1},
+	{"name": "Geologist's Hammer", "min": 1, "max": 1},
+	{"name": "Sledgehammer", "min": 1, "max": 1},
+	{"name": "Silver Lantern", "min": 1, "max": 1},
+	{"name": "Mason's Chisel", "min": 1, "max": 2},
+	{"name": "Jig Lures", "min": 1, "max": 2},
+	{"name": "Painted Lure", "min": 1, "max": 1},
+	{"name": "Willow Rod", "min": 1, "max": 1},
+	{"name": "Oak Rod", "min": 1, "max": 1},
+	{"name": "Fishing Spear", "min": 1, "max": 1},
+	{"name": "Casting Net", "min": 1, "max": 1},
+	{"name": "Fish Trap", "min": 1, "max": 1},
+	{"name": "Barbed Hook", "min": 1, "max": 3},
+	{"name": "Grappling Hook", "min": 1, "max": 1},
+	{"name": "Silk Line Spool", "min": 1, "max": 2},
+	{"name": "Cork Bobber", "min": 1, "max": 3}
 ]
 
 ## Digging rock occasionally turns up a fossil alongside the Stone.
 const DIG_FOSSIL_FINDS := [
 	"Amber", "Spider Amber", "Fossil Leaf", "Ancient Skull",
-	"Fossil Claw", "Ammonite Shell", "Old Bone", "Serpent Spine"
+	"Fossil Claw", "Ammonite Shell", "Old Bone", "Serpent Spine",
+	"Chalk Ammonite", "Beast-Claw Charm", "Fossil Ribs", "Beast Skull",
+	"Petrified Bone", "Fossil Fish", "Skeletal Paw", "Moss Agate",
+	"Fossil Antler", "Fern Amber", "Fossil Cluster", "Fin Spines"
 ]
 const DIG_FOSSIL_CHANCE_PERCENT := 7
 
@@ -281,7 +310,16 @@ const ORE_VEIN_DROPS := [
 ## Wild fungal growth sometimes includes a rarer species.
 const WILD_MUSHROOM_VARIETIES := [
 	"Glowcap", "Frostcap", "Emberspore", "Violet Veil",
-	"King Bolete", "Fairy Bells", "Scarlet Cap"
+	"King Bolete", "Fairy Bells", "Scarlet Cap",
+	"Chanterelle", "Wine Cap", "Honey Fungus", "Rosegill", "Porcini",
+	"Sunshelf", "Bloodbolete", "Oyster Cap", "Inkcap", "Deep Puffball",
+	"Scarlet Stem", "Gilded Parasol", "Firegill Shelf", "Flamecrest",
+	"Umber Dapperling", "Violet Coral", "Wyrm's Tongue", "Ghost Funnel",
+	"Cauliflower Fungus", "Black Morel", "Ash Parasol", "Pink Bonnet",
+	"Chestnut Bonnet", "Verdigris Shelf", "Weeping Olive", "Coral Frill",
+	"Pale Umbrella", "Star Fungus", "Mahogany Cap", "Nightgill",
+	"Amber Shelf", "Rose Puff", "Fire Coral", "Seafoam Parasol",
+	"Dragonmane", "Banded Stalk"
 ]
 const MUSHROOM_VARIETY_CHANCE_PERCENT := 30
 
@@ -299,7 +337,31 @@ const FISH_CATCH_TABLE := [
 	{"name": "Cave Crab", "weight": 6},
 	{"name": "Golden Koi", "weight": 5},
 	{"name": "Coral Snail", "weight": 5},
+	{"name": "Striped Bass", "weight": 12},
+	{"name": "Cobalt Chub", "weight": 12},
+	{"name": "Marigold Carp", "weight": 10},
+	{"name": "Sapphire Perch", "weight": 10},
+	{"name": "Copperback Trout", "weight": 10},
+	{"name": "Jade Carp", "weight": 8},
+	{"name": "Crimson Carp", "weight": 8},
+	{"name": "Flicker Minnow", "weight": 8},
+	{"name": "Frilled Loach", "weight": 6},
+	{"name": "Duskfin", "weight": 6},
+	{"name": "Bloodfin", "weight": 5},
+	{"name": "Speckled Prawn", "weight": 5},
+	{"name": "Silverfry", "weight": 5},
+	{"name": "Amethyst Angelfish", "weight": 4},
+	{"name": "Blossom Koi", "weight": 4},
+	{"name": "Cave Lobster", "weight": 4},
+	{"name": "Pale Squid", "weight": 3},
+	{"name": "Gloom Octopus", "weight": 3},
+	{"name": "Ember Squid", "weight": 3},
+	{"name": "Bloodworm", "weight": 4},
+	{"name": "Mud Grub", "weight": 4},
 	{"name": "Rusted Hook", "weight": 6},
+	{"name": "Cork Bobber", "weight": 2},
+	{"name": "Painted Lure", "weight": 2},
+	{"name": "Rusty Anchor", "weight": 1},
 	{"name": "Skeleton Keys", "weight": 1}
 ]
 
@@ -803,6 +865,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_F and not _is_text_input_focused():
 		_handle_fish_action()
+		get_viewport().set_input_as_handled()
+		return
+	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_C and not _is_text_input_focused():
+		_handle_cook_action()
+		get_viewport().set_input_as_handled()
+		return
+	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_E and not _is_text_input_focused():
+		_handle_quick_eat_action()
 		get_viewport().set_input_as_handled()
 		return
 	if _player_sprite == null or not _player_control_enabled:
@@ -2321,6 +2391,11 @@ func _create_inventory_slots(target_grid: GridContainer, slot_count: int, out_pa
 		label.add_theme_constant_override("outline_size", 3)
 		label.text = ""
 		panel.add_child(label)
+		if target_grid == backpack_grid:
+			# Backpack slots are clickable (eat food). out_panels.size() is
+			# this slot's index; panels are freed and rebuilt together, so
+			# the connection never stacks.
+			panel.gui_input.connect(_on_backpack_slot_gui_input.bind(out_panels.size()))
 		target_grid.add_child(panel)
 		out_panels.append(panel)
 		out_labels.append(label)
@@ -2357,11 +2432,25 @@ func _populate_backpack_slots() -> void:
 	if _backpack_slot_labels.is_empty():
 		return
 	_clear_inventory_slots(_backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons)
+	_backpack_slot_items.clear()
 	var item_names := _player_inventory.keys()
 	item_names.sort()
 	for i in range(mini(item_names.size(), _backpack_slot_labels.size())):
 		var item_name := String(item_names[i])
+		_backpack_slot_items.append(item_name)
 		_fill_inventory_slot(i, _backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons, item_name, int(_player_inventory[item_name]))
+
+## Clicking a backpack slot that holds something edible eats one of it.
+func _on_backpack_slot_gui_input(event: InputEvent, slot_index: int) -> void:
+	var mouse_event := event as InputEventMouseButton
+	if mouse_event == null or not mouse_event.pressed or mouse_event.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if slot_index < 0 or slot_index >= _backpack_slot_items.size():
+		return
+	var item_name := _backpack_slot_items[slot_index]
+	if not ItemDefsService.is_edible(item_name):
+		return
+	_eat_item(item_name)
 
 func _item_abbreviation(item_name: String) -> String:
 	return DwarfHoldChestService.item_abbreviation(item_name)
@@ -2801,6 +2890,104 @@ func _create_bobber_texture() -> Texture2D:
 				image.set_pixel(x, y, Color(0.15, 0.1, 0.1, 1.0))
 	image.resize(20, 20, Image.INTERPOLATE_NEAREST)
 	return ImageTexture.create_from_image(image)
+
+## --- Cooking & eating -----------------------------------------------------
+## Press C beside a torch or a hearth building to cook raw food: a raw fish
+## and a raw mushroom together become Hearty Stew, otherwise each cooks into
+## its own dish. Press E (or click a backpack slot) to eat; the quick-eat
+## always picks the smallest meal that still helps.
+
+## True when the player stands within one cell of a placed torch or of a
+## civic building that keeps a fire burning.
+func _is_heat_source_nearby() -> bool:
+	if _hold_state.current_level_index >= 0 and _hold_state.current_level_index < _hold_state.generated_levels.size():
+		var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+		for torch_cell_variant: Variant in (level_data.get("torches", []) as Array):
+			var torch_cell := torch_cell_variant as Vector2i
+			if maxi(absi(torch_cell.x - _player_cell.x), absi(torch_cell.y - _player_cell.y)) <= 1:
+				return true
+	for offset_y: int in range(-1, 2):
+		for offset_x: int in range(-1, 2):
+			var candidate := _player_cell + Vector2i(offset_x, offset_y)
+			var building_type := String(_latest_civic_building_type_map.get(candidate, ""))
+			if COOKING_HEAT_BUILDING_TYPES.has(building_type):
+				return true
+	return false
+
+## The first inventory item (alphabetically) that cooks into the given dish.
+func _first_raw_ingredient_for(dish_name: String) -> String:
+	var item_names := _player_inventory.keys()
+	item_names.sort()
+	for item_variant: Variant in item_names:
+		var item_name := String(item_variant)
+		if ItemDefsService.cooked_result(item_name) == dish_name and int(_player_inventory.get(item_name, 0)) >= 1:
+			return item_name
+	return ""
+
+func _handle_cook_action() -> void:
+	if _player_sprite == null:
+		return
+	if not _is_heat_source_nearby():
+		_set_save_status("You need a fire — stand by a torch or a hearth", Color(0.95, 0.75, 0.45, 1.0))
+		return
+	var raw_fish := _first_raw_ingredient_for("Grilled Fish")
+	var raw_mushroom := _first_raw_ingredient_for("Mushroom Skewer")
+	var dish := ""
+	if not raw_fish.is_empty() and not raw_mushroom.is_empty():
+		_add_to_inventory(raw_fish, -1)
+		_add_to_inventory(raw_mushroom, -1)
+		dish = "Hearty Stew"
+	elif not raw_fish.is_empty():
+		_add_to_inventory(raw_fish, -1)
+		dish = "Grilled Fish"
+	elif not raw_mushroom.is_empty():
+		_add_to_inventory(raw_mushroom, -1)
+		dish = "Mushroom Skewer"
+	else:
+		_set_save_status("Nothing raw to cook", Color(0.8, 0.85, 0.95, 1.0))
+		return
+	_add_to_inventory(dish, 1)
+	_spawn_floating_text("Cooked %s!" % dish, _player_sprite.position, Color(1.0, 0.8, 0.45, 1.0))
+	_set_save_status(ItemDefsService.flavor_text(dish), Color(0.95, 0.85, 0.6, 1.0))
+
+## Quick-eat: pick the smallest-heal edible in the pack so nothing big is
+## wasted on a scratch.
+func _handle_quick_eat_action() -> void:
+	if _player_hp >= PLAYER_MAX_HP:
+		_set_save_status("You're at full health", Color(0.7, 0.9, 0.7, 1.0))
+		return
+	var choice := ""
+	var choice_heal := 2147483647
+	var item_names := _player_inventory.keys()
+	item_names.sort()
+	for item_variant: Variant in item_names:
+		var item_name := String(item_variant)
+		if not ItemDefsService.is_edible(item_name):
+			continue
+		var heal := ItemDefsService.heal_amount(item_name)
+		if heal < choice_heal:
+			choice_heal = heal
+			choice = item_name
+	if choice.is_empty():
+		_set_save_status("Nothing edible in your pack", Color(0.8, 0.85, 0.95, 1.0))
+		return
+	_eat_item(choice)
+
+## Eats one of the named item: heals, refreshes the HP label, and lets
+## _add_to_inventory refresh the backpack UI and persist the change.
+func _eat_item(item_name: String) -> void:
+	if not ItemDefsService.is_edible(item_name) or int(_player_inventory.get(item_name, 0)) < 1:
+		return
+	if _player_hp >= PLAYER_MAX_HP:
+		_set_save_status("You're at full health", Color(0.7, 0.9, 0.7, 1.0))
+		return
+	var heal := ItemDefsService.heal_amount(item_name)
+	_add_to_inventory(item_name, -1)
+	_player_hp = minf(_player_hp + float(heal), PLAYER_MAX_HP)
+	_update_hp_label()
+	if _player_sprite != null:
+		_spawn_floating_text("+%d" % heal, _player_sprite.position, Color(0.5, 0.95, 0.5, 1.0))
+	_set_save_status("Ate %s (+%d)" % [item_name, heal], Color(0.7, 0.95, 0.6, 1.0))
 
 ## --- Creatures & combat -------------------------------------------------
 ## The wild dark bites back: chunks roll ambient spawns, the deep repopulates
