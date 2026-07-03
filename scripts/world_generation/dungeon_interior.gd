@@ -922,45 +922,16 @@ func _update_creatures(delta: float) -> void:
 		_creatures.remove_at(removals[removal_index])
 
 func _creature_step_toward(from_cell: Vector2i, target_cell: Vector2i) -> Vector2i:
-	var best := Vector2i.ZERO
-	var best_distance := Vector2(from_cell).distance_squared_to(Vector2(target_cell))
-	for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-		var next := from_cell + direction
-		if not _creature_can_step_to(next):
-			continue
-		var distance := Vector2(next).distance_squared_to(Vector2(target_cell))
-		if distance < best_distance:
-			best_distance = distance
-			best = direction
-	return best
+	return CreatureCombatService.step_toward(from_cell, target_cell, Callable(self, "_creature_can_step_to"))
 
 func _direction_between_cells(from_cell: Vector2i, to_cell: Vector2i) -> Vector2i:
-	var delta := to_cell - from_cell
-	if absi(delta.x) >= absi(delta.y):
-		return Vector2i.RIGHT if delta.x >= 0 else Vector2i.LEFT
-	return Vector2i.DOWN if delta.y >= 0 else Vector2i.UP
+	return CreatureCombatService.direction_between_cells(from_cell, to_cell)
 
 func _set_creature_anim(state: Dictionary, anim_name: String) -> void:
-	if String(state.get("anim", "")) == anim_name:
-		return
-	state["anim"] = anim_name
-	state["anim_time"] = 0.0
+	CreatureCombatService.set_creature_anim(state, anim_name)
 
 func _animate_creature(state: Dictionary, sprite: Sprite2D, def: Dictionary) -> void:
-	var facing_dir := state.get("facing_dir", Vector2i(0, 1)) as Vector2i
-	var facing_row := 0
-	if facing_dir == Vector2i.RIGHT:
-		facing_row = 1
-	elif facing_dir == Vector2i.LEFT:
-		facing_row = 2
-	elif facing_dir == Vector2i.UP:
-		facing_row = 3
-	UndergroundCreatureService.update_creature_frame(
-		sprite, int(def.get("slot", 0)),
-		String(state.get("anim", "idle")),
-		float(state.get("anim_time", 0.0)),
-		facing_row
-	)
+	CreatureCombatService.animate_creature(state, sprite, def)
 
 func _attack_creature(creature_index: int) -> void:
 	if creature_index < 0 or creature_index >= _creatures.size():
