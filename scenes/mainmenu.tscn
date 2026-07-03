@@ -115,13 +115,6 @@ texture_normal = ExtResource("5_h52vu")
 ignore_texture_size = true
 stretch_mode = 5
 
-[node name="ShatteredPixelDungeonButton" type="Button" parent="MenuPanel/VBoxContainer"]
-custom_minimum_size = Vector2(190, 36)
-layout_mode = 2
-size_flags_horizontal = 4
-theme_override_font_sizes/font_size = 15
-text = "Shattered UI"
-
 [node name="ReturnButton" type="Button" parent="MenuPanel/VBoxContainer"]
 custom_minimum_size = Vector2(190, 36)
 layout_mode = 2
@@ -132,5 +125,4 @@ text = "Quit"
 [connection signal="pressed" from="MenuPanel/VBoxContainer/StartButton" to="." method="_on_start_button_pressed"]
 [connection signal="pressed" from="MenuPanel/VBoxContainer/LoadGameButton" to="." method="_on_load_game_button_pressed"]
 [connection signal="pressed" from="MenuPanel/VBoxContainer/OptionsButton" to="." method="_on_options_button_pressed"]
-[connection signal="pressed" from="MenuPanel/VBoxContainer/ShatteredPixelDungeonButton" to="." method="_on_shattered_pixel_dungeon_button_pressed"]
 [connection signal="pressed" from="MenuPanel/VBoxContainer/ReturnButton" to="." method="_on_return_button_pressed"]

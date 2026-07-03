@@ -183,6 +183,14 @@ const WORLD_NAMES := [
 @onready var summary_layout: Label = %SummaryLayout
 @onready var summary_seed: Label = %SummarySeed
 @onready var summary_chronology: Label = %SummaryChronology
+@onready var map_preview: TextureRect = get_node_or_null("%MapPreview")
+@onready var background_map: TextureRect = get_node_or_null("BackgroundMap")
+
+## The preview thumbnail runs the real terrain math (same noises, same
+## layout preset, same landmass centers) at postcard resolution, so what
+## you see is the world you get: pick Twin Continents and two lobes
+## appear. The same image, stretched soft, becomes the page backdrop.
+const PREVIEW_RESOLUTION := Vector2i(176, 124)
 func _ready() -> void:
 	randomize()
 	_populate_options()
@@ -231,6 +239,104 @@ func _refresh_summary() -> void:
 	summary_layout.text = world_layout_select.get_item_text(world_layout_select.selected)
 	summary_seed.text = seed_input.text.strip_edges() if not seed_input.text.strip_edges().is_empty() else "Random"
 	summary_chronology.text = "Year %d of the %d Age" % [int(year_input.value), int(age_input.value)]
+	_update_map_preview()
+
+func _update_map_preview() -> void:
+	if map_preview == null:
+		return
+	var layout_name := world_layout_select.get_item_text(maxi(world_layout_select.selected, 0))
+	var preset: Dictionary = WorldSettings.layout_generation_preset(layout_name)
+	var dims := (MAP_SIZES[maxi(map_size_select.selected, 0)] as Dictionary).get("size", Vector2i(455, 256)) as Vector2i
+	var seed_text := seed_input.text.strip_edges()
+	var preview_seed := 0
+	if seed_text.is_valid_int():
+		preview_seed = int(seed_text)
+	elif not seed_text.is_empty():
+		preview_seed = int(seed_text.hash())
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = preview_seed
+	var centers: Array[Vector2] = TerrainGenerator.configure_landmass_centers(
+		rng,
+		int(preset.get("landmass_center_count", 4)),
+		0.12,
+		float(preset.get("landmass_center_min_separation", 0.0))
+	)
+	# Mirrors the overworld's noise setup exactly (overworld_map.gd).
+	var divisor := maxf(1.0, float(dims.x))
+	var continent_noise := FastNoiseLite.new()
+	continent_noise.seed = preview_seed
+	continent_noise.frequency = (2.0 * 0.35) / divisor
+	continent_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	continent_noise.fractal_octaves = 4
+	continent_noise.fractal_lacunarity = 2.1
+	continent_noise.fractal_gain = 0.52
+	continent_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	var detail_noise := FastNoiseLite.new()
+	detail_noise.seed = preview_seed + 37
+	detail_noise.frequency = (2.0 * 2.2) / divisor
+	detail_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	detail_noise.fractal_octaves = 4
+	detail_noise.fractal_lacunarity = 2.3
+	detail_noise.fractal_gain = 0.55
+	detail_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	var ridge_noise := FastNoiseLite.new()
+	ridge_noise.seed = preview_seed + 83
+	ridge_noise.frequency = (2.0 * 1.1) / divisor
+	ridge_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	ridge_noise.fractal_octaves = 3
+	ridge_noise.fractal_lacunarity = 2.0
+	ridge_noise.fractal_gain = 0.6
+	ridge_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+
+	var water_level := float(preset.get("water_level", 0.45))
+	var terrain_settings := {
+		"map_size": dims,
+		"map_seed": preview_seed,
+		"water_level": water_level,
+		"falloff_strength": float(preset.get("falloff_strength", 0.08)),
+		"falloff_power": float(preset.get("falloff_power", 2.4)),
+		"landmass_falloff_scale": float(preset.get("landmass_falloff_scale", 1.35)),
+		"landmass_mask_strength": float(preset.get("landmass_mask_strength", 0.24)),
+		"landmass_mask_power": 0.82,
+		"landmass_mask_threshold": float(preset.get("landmass_mask_threshold", 0.47)),
+		"landmass_mask_scale": float(preset.get("landmass_mask_scale", 1.0)),
+		"landmass_mask_edge_falloff": float(preset.get("landmass_mask_edge_falloff", 0.26)),
+		"center_shape_strength": float(preset.get("center_shape_strength", 1.0)),
+		"edge_ocean_strength": float(preset.get("edge_ocean_strength", 0.2)),
+		"edge_ocean_falloff": float(preset.get("edge_ocean_falloff", 0.32)),
+		"edge_ocean_curve": 1.6
+	}
+	var image := Image.create(PREVIEW_RESOLUTION.x, PREVIEW_RESOLUTION.y, false, Image.FORMAT_RGB8)
+	for py in range(PREVIEW_RESOLUTION.y):
+		var y := int(float(py) * float(dims.y) / float(PREVIEW_RESOLUTION.y))
+		for px in range(PREVIEW_RESOLUTION.x):
+			var x := int(float(px) * float(dims.x) / float(PREVIEW_RESOLUTION.x))
+			var height := float(TerrainGenerator.sample_height(continent_noise, detail_noise, ridge_noise, x, y, terrain_settings, centers))
+			image.set_pixel(px, py, _preview_height_color(height, water_level))
+	var texture := ImageTexture.create_from_image(image)
+	map_preview.texture = texture
+	if background_map != null:
+		background_map.texture = texture
+
+func _preview_height_color(height: float, water_level: float) -> Color:
+	if height < water_level - 0.10:
+		return Color8(22, 48, 92)
+	if height < water_level - 0.03:
+		return Color8(34, 72, 126)
+	if height < water_level:
+		return Color8(52, 102, 156)
+	if height < water_level + 0.012:
+		return Color8(197, 178, 128)
+	if height < water_level + 0.14:
+		return Color8(98, 138, 70)
+	if height < water_level + 0.26:
+		return Color8(72, 110, 56)
+	if height < water_level + 0.35:
+		return Color8(118, 110, 88)
+	if height < water_level + 0.44:
+		return Color8(142, 138, 130)
+	return Color8(224, 227, 232)
 
 func _on_randomise_chronology_pressed() -> void:
 	year_input.value = random_chronology_year()

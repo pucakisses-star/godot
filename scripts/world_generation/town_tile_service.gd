@@ -53,6 +53,10 @@ static func wall_or_floor_tile(grid: Dictionary, x: int, y: int, cell: int, door
 	var top_cell := _cell_at(grid, x, y - 1)
 	var bottom_cell := _cell_at(grid, x, y + 1)
 	if left_cell != cell or right_cell != cell or top_cell != cell or bottom_cell != cell:
+		# North walls show their timber face into the room (the interior
+		# lies below them); the rest read as wall tops.
+		if bottom_cell == cell and top_cell != cell:
+			return "plank_wall"
 		return "wall"
 	return "floor"
 

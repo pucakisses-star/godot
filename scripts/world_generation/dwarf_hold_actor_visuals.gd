@@ -37,6 +37,40 @@ static func create_tavern_character_sprite(character_texture: Texture2D, charact
 	sprite.scale = Vector2(float(tile_size.x), float(tile_size.y)) * 0.45
 	return sprite
 
+## The player wears a Shattered Pixel Dungeon hero sheet: 12x15 frames,
+## row 0 is the plain-clothes hero, frame 0 is the standing idle. Which
+## sheet you get follows your character's profession.
+const HERO_FRAME_SIZE := Vector2(12, 15)
+const HERO_SHEETS := {
+	"warrior": "res://resources/images/shattered_ui/warrior.png",
+	"mage": "res://resources/images/shattered_ui/mage.png",
+	"rogue": "res://resources/images/shattered_ui/rogue.png",
+	"huntress": "res://resources/images/shattered_ui/huntress.png"
+}
+const HERO_CLASS_KEYWORDS := {
+	"mage": ["scholar", "alchemist", "runescribe", "runesmith", "corpsebinder", "architect", "engineer"],
+	"huntress": ["ranger", "hunter", "herder", "shepard", "shepherd", "farmer", "butcher"],
+	"rogue": ["merchant", "banker", "gemcutter", "goldsmith", "jewelsmith", "distiller", "lamplighter", "cooper", "ropemaker"]
+}
+
+static func hero_class_for_profession(profession: String) -> String:
+	var lowered := profession.strip_edges().to_lower()
+	for hero_class: String in HERO_CLASS_KEYWORDS.keys():
+		for keyword: String in (HERO_CLASS_KEYWORDS[hero_class] as Array):
+			if lowered.contains(String(keyword)):
+				return hero_class
+	return "warrior"
+
+## Picks the hero sheet matching the session's player character; the
+## warrior stands in when no character has been made yet.
+static func resolve_hero_texture(context: Node) -> Texture2D:
+	var hero_class := "warrior"
+	var session := context.get_node_or_null("/root/GameSession")
+	if session != null and session.has_method("get_player_character"):
+		var character: Dictionary = session.call("get_player_character")
+		hero_class = hero_class_for_profession(String(character.get("profession", "")))
+	return load(String(HERO_SHEETS.get(hero_class, HERO_SHEETS["warrior"]))) as Texture2D
+
 static func create_player_character_sprite(shattered_player_texture: Texture2D, tile_size: Vector2i, fallback_creator: Callable) -> Sprite2D:
 	if shattered_player_texture == null:
 		var fallback_sprite := fallback_creator.call(0) as Sprite2D
@@ -48,13 +82,11 @@ static func create_player_character_sprite(shattered_player_texture: Texture2D, 
 	sprite.region_enabled = true
 	sprite.centered = true
 	sprite.modulate = Color.WHITE
-	var source_size := shattered_player_texture.get_size()
-	var source_tile_size := Vector2i(16, 16)
-	if source_size.x > 0 and source_size.y > 0:
-		source_tile_size.x = maxi(1, mini(16, source_size.x))
-		source_tile_size.y = maxi(1, mini(16, source_size.y))
-	sprite.region_rect = Rect2(Vector2.ZERO, Vector2(source_tile_size))
-	sprite.scale = Vector2(float(tile_size.x) / float(source_tile_size.x), float(tile_size.y) / float(source_tile_size.y)) * 0.9
+	sprite.region_rect = Rect2(Vector2.ZERO, HERO_FRAME_SIZE)
+	sprite.scale = Vector2(
+		float(tile_size.x) / HERO_FRAME_SIZE.x,
+		float(tile_size.y) / HERO_FRAME_SIZE.y
+	) * 0.9
 	return sprite
 
 static func create_placeholder_actor_texture() -> Texture2D:

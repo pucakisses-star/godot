@@ -163,6 +163,9 @@ var _farm_pens: Array = []
 var _farm_blocked_cells: Dictionary = {}
 var _windmill_sails: Array[Dictionary] = []
 var _desert_decor_textures: Dictionary = {}
+var _furnishing_sprites: Array[Node2D] = []
+var _furnishing_blocked_cells: Dictionary = {}
+var _glow_sprites: Array[Node2D] = []
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
 const PLAYER_MOVE_REPEAT_INTERVAL := 0.10
@@ -478,7 +481,9 @@ func _ready() -> void:
 	_tavern_character_texture = load(tavern_vehicle_sprite_path) as Texture2D
 	if _tavern_character_texture == null:
 		_tavern_character_texture = _create_placeholder_tavern_character_texture()
-	_shattered_player_texture = load(shattered_player_sprite_path) as Texture2D
+	_shattered_player_texture = DwarfHoldActorVisuals.resolve_hero_texture(self)
+	if _shattered_player_texture == null:
+		_shattered_player_texture = load(shattered_player_sprite_path) as Texture2D
 	_placeholder_actor_texture = _create_placeholder_actor_texture()
 	generate_button.pressed.connect(_on_generate_pressed)
 	depth_down_button.pressed.connect(_on_depth_down_pressed)
@@ -772,7 +777,7 @@ func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 	return false
 
 func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
-	if _farm_blocked_cells.has(cell):
+	if _farm_blocked_cells.has(cell) or _furnishing_blocked_cells.has(cell):
 		return false
 	if city_layer.get_cell_source_id(cell) < 0:
 		return false
@@ -1047,6 +1052,8 @@ func _show_level(target_level_index: int) -> void:
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
 	_spawn_tavern_characters(grid)
+	# After the NPC spawn (which rebuilds the actor layer's children).
+	_furnish_interiors(grid)
 	_build_farmsteads()
 	_scatter_desert_decor()
 	_spawn_farm_animals()
@@ -1362,10 +1369,17 @@ func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
 	if not _latest_grid.is_empty():
 		_refresh_lighting(_latest_grid)
 
+## Towns are open-air: the Shattered cave-fog mask that once rode this
+## toggle blacked out the whole surface map, so it is permanently retired
+## here (the dwarfhold keeps its underground darkness). "Enable lighting"
+## now governs the hearth and candle glow pools instead.
 func _apply_lighting_state() -> void:
 	lighting_layer.visible = true
 	if _lighting_mask_sprite != null:
-		_lighting_mask_sprite.visible = _lighting_enabled
+		_lighting_mask_sprite.visible = false
+	for glow: Node2D in _glow_sprites:
+		if is_instance_valid(glow):
+			glow.visible = _lighting_enabled
 
 func _update_zone_overlay() -> void:
 	if zone_overlay.has_method("set_overlay_state"):
@@ -1848,40 +1862,15 @@ func _initialize_shattered_lighting(grid: Dictionary) -> void:
 		return
 
 	_lighting_bounds = _find_bounds(grid).grow(1)
-	var image_size := Vector2i(
-		maxi(_lighting_bounds.size.x * tile_size.x, 1),
-		maxi(_lighting_bounds.size.y * tile_size.y, 1)
-	)
-	_lighting_mask_image = Image.create(image_size.x, image_size.y, false, Image.FORMAT_RGBA8)
-	_lighting_mask_image.fill(Color(0, 0, 0, SHATTERED_UNSEEN_ALPHA))
-	_lighting_mask_texture = ImageTexture.create_from_image(_lighting_mask_image)
 	if _lighting_mask_sprite != null:
-		_lighting_mask_sprite.texture = _lighting_mask_texture
-		_lighting_mask_sprite.position = Vector2(_lighting_bounds.position * tile_size)
-		_lighting_mask_sprite.visible = _lighting_enabled
+		_lighting_mask_sprite.visible = false
 	_revealed_cells.clear()
 	_visible_cells.clear()
-	_update_shattered_visibility(grid)
 
-func _refresh_lighting(grid: Dictionary) -> void:
-	if _lighting_mask_sprite == null:
-		return
-	if not _lighting_enabled or grid.is_empty() or _lighting_mask_image == null or _lighting_mask_texture == null:
+func _refresh_lighting(_grid: Dictionary) -> void:
+	# The daylight town never draws the black vision mask.
+	if _lighting_mask_sprite != null:
 		_lighting_mask_sprite.visible = false
-		return
-
-	_lighting_mask_sprite.visible = true
-	_lighting_mask_sprite.position = Vector2(_lighting_bounds.position * tile_size)
-	for cell_variant: Variant in grid.keys():
-		var cell := cell_variant as Vector2i
-		var alpha := SHATTERED_UNSEEN_ALPHA
-		if _visible_cells.has(cell):
-			alpha = SHATTERED_VISIBLE_ALPHA
-		elif _revealed_cells.has(cell):
-			alpha = SHATTERED_REVEALED_ALPHA
-		_draw_lighting_alpha_for_cell(cell, alpha)
-
-	_lighting_mask_texture.update(_lighting_mask_image)
 
 func _draw_lighting_alpha_for_cell(cell: Vector2i, alpha: float) -> void:
 	if _lighting_mask_image == null:
@@ -2079,6 +2068,104 @@ const FARM_ANIMAL_DEFS := [
 	{"id": "pig", "path": "res://resources/images/webgame_tiles/Farm/Tiled_files/Pig_animation.png", "frame": 32, "speed": 22.0, "rows": 6},
 	{"id": "cow", "path": "res://resources/images/webgame_tiles/Farm/Tiled_files/Cow_animation.png", "frame": 64, "speed": 16.0, "rows": 6}
 ]
+
+## --- Interior furnishing: lived-in homes and stocked shops ------------------
+## After the tile pass, every house gets template furniture (dining sets,
+## pantries, cabinets, rugs, candles) and every shopfront gets stocked
+## shelves and crates, as layered sprites from the web game's interior
+## sheets. Hearths and candles cast warm light pools.
+
+func _furnish_interiors(grid: Dictionary) -> void:
+	for sprite: Node2D in _furnishing_sprites:
+		sprite.queue_free()
+	_furnishing_sprites.clear()
+	_furnishing_blocked_cells.clear()
+	_glow_sprites.clear()
+	if actor_layer == null:
+		return
+	var is_occupied := func(cell: Vector2i) -> bool:
+		return decor_layer.get_cell_source_id(cell) >= 0
+	# Houses get home comforts.
+	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_HOUSE):
+		var component: Array[Vector2i] = []
+		for cell_variant: Variant in (component_variant as Array):
+			component.append(cell_variant as Vector2i)
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_house_furnishing(component, is_occupied, _door_cells, _rng)
+		_apply_furnishing_placements(placements)
+		_place_house_hearth(component, is_occupied)
+	# Shops get stock on the shelves.
+	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_BUILDING):
+		var component: Array[Vector2i] = []
+		for cell_variant: Variant in (component_variant as Array):
+			component.append(cell_variant as Vector2i)
+		if component.is_empty():
+			continue
+		var building_type := String(_latest_civic_building_type_map.get(component[0], ""))
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_shop_dressing(component, building_type, is_occupied, _door_cells, _rng)
+		_apply_furnishing_placements(placements)
+	# Fire-bearing furniture anywhere on the map casts a warm pool.
+	for cell: Vector2i in decor_layer.get_used_cells():
+		var decor_key := _tile_name_from_atlas(decor_layer.get_cell_atlas_coords(cell))
+		if ["forge", "oven", "brazier"].has(decor_key):
+			_spawn_hearth_glow(cell, 3.4)
+
+func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
+	for placement: Dictionary in placements:
+		var piece_name := String(placement.get("piece", ""))
+		var base_cell := placement.get("cell", Vector2i.ZERO) as Vector2i
+		var sprite: Sprite2D = RoomFurnishingService.create_piece_sprite(piece_name, base_cell, tile_size)
+		if sprite == null:
+			continue
+		actor_layer.add_child(sprite)
+		_furnishing_sprites.append(sprite)
+		if int((RoomFurnishingService.PIECES.get(piece_name, {}) as Dictionary).get("rows_block", 1)) > 0:
+			for cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
+				_furnishing_blocked_cells[cell] = true
+		if RoomFurnishingService.piece_emits_light(piece_name):
+			_spawn_hearth_glow(base_cell, 2.4)
+
+## Every roomy house earns a hearth on its north wall row: an oven tile,
+## its chimney cap, and firelight.
+func _place_house_hearth(component: Array[Vector2i], is_occupied: Callable) -> void:
+	var interior: Array[Vector2i] = RoomFurnishingService.interior_cells(component)
+	if interior.size() < 9:
+		return
+	var north_row := interior[0].y
+	for cell: Vector2i in interior:
+		north_row = mini(north_row, cell.y)
+	for cell: Vector2i in interior:
+		if cell.y != north_row:
+			continue
+		if bool(is_occupied.call(cell)) or _furnishing_blocked_cells.has(cell):
+			continue
+		var door_adjacent := false
+		for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			if _door_cells.has(cell + direction):
+				door_adjacent = true
+				break
+		if door_adjacent:
+			continue
+		var occupied_or_furnished := func(check_cell: Vector2i) -> bool:
+			return _furnishing_blocked_cells.has(check_cell) or bool(is_occupied.call(check_cell))
+		var oven_block: Array[Vector2i] = [cell]
+		if not RoomFurnishingService.block_keeps_room_open(oven_block, interior, occupied_or_furnished, _door_cells):
+			continue
+		_place_tile(decor_layer, cell, "oven")
+		if decor_layer.get_cell_source_id(cell + Vector2i.UP) < 0:
+			_place_tile(decor_layer, cell + Vector2i.UP, "oven_top")
+		_spawn_hearth_glow(cell, 3.4)
+		return
+
+func _spawn_hearth_glow(cell: Vector2i, radius_cells: float) -> void:
+	var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(
+		_cell_center_position(cell),
+		radius_cells * float(tile_size.x),
+		Color(1.0, 0.72, 0.35, 1.0)
+	)
+	glow.visible = _lighting_enabled
+	actor_layer.add_child(glow)
+	_furnishing_sprites.append(glow)
+	_glow_sprites.append(glow)
 
 ## --- Farmsteads: real farm buildings on the town greens -------------------
 ## Each farmstead stakes out a rectangle of open grass and raises a
@@ -2522,15 +2609,31 @@ func _npc_state_at_cell(cell: Vector2i) -> Dictionary:
 			return state
 	return {}
 
+## Every villager is somebody: identities are rolled once at spawn from
+## the town's seeded rng, so the same seed always houses the same folk.
+func _assign_npc_identities() -> void:
+	for state: Dictionary in _npc_states:
+		var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
+		var identity: Dictionary = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		state["identity"] = identity
+		state["npc_name"] = String(identity.get("name", "A villager"))
+
 func _show_npc_dialogue(state: Dictionary) -> void:
-	if not state.has("npc_name"):
-		state["npc_name"] = TownDetailsGenerator.npc_name(_rng)
 	var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
-	var rumor: String = SettlementEconomyService.rumor_from_town_details(_town_details, _rng)
-	var line: String = SettlementEconomyService.dialogue_line(role_title, rumor, _rng)
+	if not state.has("identity"):
+		state["identity"] = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		state["npc_name"] = String((state["identity"] as Dictionary).get("name", "A villager"))
+	var identity := state.get("identity", {}) as Dictionary
+	# Sometimes they talk about themselves instead of the news.
+	var line: String
+	if _rng.randf() < 0.4:
+		line = SettlementEconomyService.dialogue_line(role_title, NpcIdentityService.personal_line(identity, _rng), _rng)
+	else:
+		var rumor: String = SettlementEconomyService.rumor_from_town_details(_town_details, _rng)
+		line = SettlementEconomyService.dialogue_line(role_title, rumor, _rng)
 	var sprite := state.get("sprite") as Sprite2D
 	var anchor_position: Vector2 = sprite.position if sprite != null else _player_sprite.position
-	_spawn_speech_bubble("%s, %s\n%s" % [String(state.get("npc_name", "A villager")), role_title, line], anchor_position)
+	_spawn_speech_bubble("%s\n%s" % [NpcIdentityService.summary_line(identity), line], anchor_position)
 
 func _spawn_speech_bubble(text: String, world_position: Vector2) -> void:
 	if _active_speech_bubble != null and is_instance_valid(_active_speech_bubble):
@@ -2693,6 +2796,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_cell = result.get("player_cell", _player_cell)
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	_assign_npc_daily_lives(grid)
+	_assign_npc_identities()
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
 	_refresh_lighting(grid)
@@ -3088,7 +3192,17 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	var atlas_coords := hovered_layer.get_cell_atlas_coords(hovered_cell)
 	var tile_name := _tile_name_from_atlas(atlas_coords)
 	var zone_name := _zone_name_for_cell(hovered_cell)
-	var tooltip_lines: PackedStringArray = ["Tile: %s" % tile_name, "Zone: %s" % zone_name]
+	var tooltip_lines: PackedStringArray = []
+	# A villager under the cursor introduces themselves, Dwarf Fortress style.
+	var hovered_npc := _npc_state_at_cell(hovered_cell)
+	if not hovered_npc.is_empty() and hovered_npc.has("identity"):
+		var identity := hovered_npc.get("identity", {}) as Dictionary
+		tooltip_lines.append(NpcIdentityService.summary_line(identity))
+		for detail: String in NpcIdentityService.detail_lines(identity):
+			tooltip_lines.append(detail)
+		tooltip_lines.append("")
+	tooltip_lines.append("Tile: %s" % tile_name)
+	tooltip_lines.append("Zone: %s" % zone_name)
 	var subtype := _building_type_for_cell_or_empty(hovered_cell)
 	if not subtype.is_empty():
 		tooltip_lines.append("Subtype: %s" % _display_name_for_building_type(subtype))

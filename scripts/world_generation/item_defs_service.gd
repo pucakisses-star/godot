@@ -358,7 +358,31 @@ const ITEM_DEFS := {
 	"Trophy Chinese Paddlefish": {"icon": 16, "sheet": 3, "flavor": "A living oar from waters far away."},
 	"Trophy Ruffe": {"icon": 17, "sheet": 3, "flavor": "Prickly little bandit of the shallows."},
 	"Trophy Beluga Sturgeon": {"icon": 18, "sheet": 3, "flavor": "River royalty older than the hold itself."},
-	"Trophy Gudgeon": {"icon": 19, "sheet": 3, "flavor": "Every angler's first, framed at last."}
+	"Trophy Gudgeon": {"icon": 19, "sheet": 3, "flavor": "Every angler's first, framed at last."},
+
+	# --- Baltic trophies (sheet 3, icons 20-41) ---
+	"Trophy Baltic Whitefish": {"icon": 20, "sheet": 3, "flavor": "Pale gold from cold grey water."},
+	"Trophy Baltic Anchovy": {"icon": 21, "sheet": 3, "flavor": "Small fish, long bragging rights."},
+	"Trophy Sandlance": {"icon": 22, "sheet": 3, "flavor": "A silver needle that swims."},
+	"Trophy Pipefish": {"icon": 23, "sheet": 3, "flavor": "A seahorse that gave up on posture."},
+	"Trophy Baltic Flounder": {"icon": 24, "sheet": 3, "flavor": "Both eyes on you, always."},
+	"Trophy Turbot": {"icon": 25, "sheet": 3, "flavor": "A pebbled platter with opinions."},
+	"Trophy Baltic Roach": {"icon": 26, "sheet": 3, "flavor": "Red-finned regular of every net."},
+	"Trophy Eelpout": {"icon": 27, "sheet": 3, "flavor": "Grumpy face, loyal to the bottom."},
+	"Trophy Baltic Sprat": {"icon": 28, "sheet": 3, "flavor": "The sea's small change."},
+	"Trophy Belone": {"icon": 29, "sheet": 3, "flavor": "The garfish: a fencing foil with fins."},
+	"Trophy Spiny Dogfish": {"icon": 30, "sheet": 3, "flavor": "The littlest shark still counts as a shark."},
+	"Trophy Baltic Herring": {"icon": 31, "sheet": 3, "flavor": "Backbone of a hundred harbors."},
+	"Trophy Baltic Cod": {"icon": 32, "sheet": 3, "flavor": "The fish wars were fought over."},
+	"Trophy Sole": {"icon": 33, "sheet": 3, "flavor": "Flat, humble, and worth its weight."},
+	"Trophy Sand Goby": {"icon": 34, "sheet": 3, "flavor": "Barely bigger than the hook."},
+	"Trophy Lumpfish": {"icon": 35, "sheet": 3, "flavor": "A cheerful cobblestone of the sea."},
+	"Trophy Round Goby": {"icon": 36, "sheet": 3, "flavor": "The uninvited guest of every shore."},
+	"Trophy Baltic Stickleback": {"icon": 37, "sheet": 3, "flavor": "Three spines and infinite courage."},
+	"Trophy Baltic Eel": {"icon": 38, "sheet": 3, "flavor": "It crossed an ocean twice for this wall."},
+	"Trophy Sea Trout": {"icon": 39, "sheet": 3, "flavor": "Silver as the tide it rode in on."},
+	"Trophy Emerald Piranha": {"icon": 40, "sheet": 3, "flavor": "Its grin outshines its scales."},
+	"Trophy Sardine": {"icon": 41, "sheet": 3, "flavor": "One escaped the tin, into legend."}
 }
 
 ## Everything edible: how much it heals, and (for raw food) the dish a

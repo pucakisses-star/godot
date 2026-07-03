@@ -25,7 +25,7 @@ grow_vertical = 2
 texture = ExtResource("3_3m0a0")
 expand_mode = 3
 stretch_mode = 6
-modulate = Color(0.35, 0.4, 0.35, 1)
+modulate = Color(0.82, 0.84, 0.88, 1)
 
 [node name="Backdrop" type="ColorRect" parent="."]
 layout_mode = 1
@@ -193,11 +193,13 @@ theme_override_constants/margin_right = 10
 theme_override_constants/margin_bottom = 10
 
 [node name="MapPreview" type="TextureRect" parent="PanelContainer/MarginContainer/MainVBox/ContentRow/SummaryColumn/MapPreviewCard/MapPreviewMargin"]
+unique_name_in_owner = true
 custom_minimum_size = Vector2(240, 170)
 layout_mode = 2
 texture = ExtResource("3_3m0a0")
 expand_mode = 1
-stretch_mode = 6
+stretch_mode = 5
+texture_filter = 1
 
 [node name="FormColumn" type="VBoxContainer" parent="PanelContainer/MarginContainer/MainVBox/ContentRow"]
 layout_mode = 2
