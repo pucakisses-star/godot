@@ -15,6 +15,7 @@ const CELL_HALL := 1
 const CELL_HOUSE := 2
 const CELL_BUILDING := 3
 const CELL_PLAZA := 4
+const CELL_WATER := 5
 
 ## Overworld tiles project into the underground at this many cells per
 ## overworld tile, so the whole surface map exists as one continuous
@@ -27,6 +28,7 @@ const DISCOVERY_CHANCE_PERCENT := 5
 const CAVE_THRESHOLD := 0.34
 const FUNGAL_THRESHOLD := 0.45
 const RUBBLE_THRESHOLD := 0.52
+const WATER_THRESHOLD := 0.46
 
 static func make_noise_set(world_seed: int) -> Dictionary:
 	var caves := FastNoiseLite.new()
@@ -44,7 +46,12 @@ static func make_noise_set(world_seed: int) -> Dictionary:
 	rubble.seed = world_seed + 202
 	rubble.frequency = 0.09
 
-	return {"caves": caves, "fungal": fungal, "rubble": rubble}
+	var water := FastNoiseLite.new()
+	water.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	water.seed = world_seed + 303
+	water.frequency = 0.02
+
+	return {"caves": caves, "fungal": fungal, "rubble": rubble, "water": water}
 
 ## Carves one chunk into the shared grid. Returns the chunk's cell rect so
 ## the caller can render it. Existing grid cells are left untouched.
@@ -52,6 +59,7 @@ static func generate_chunk(grid: Dictionary, floor_decor: Dictionary, chunk: Vec
 	var caves := noise_set.get("caves") as FastNoiseLite
 	var fungal := noise_set.get("fungal") as FastNoiseLite
 	var rubble := noise_set.get("rubble") as FastNoiseLite
+	var water := noise_set.get("water") as FastNoiseLite
 	var origin := chunk * CHUNK_SIZE
 	for y in range(origin.y, origin.y + CHUNK_SIZE):
 		for x in range(origin.x, origin.x + CHUNK_SIZE):
@@ -60,6 +68,11 @@ static func generate_chunk(grid: Dictionary, floor_decor: Dictionary, chunk: Vec
 				continue
 			var cave_value := caves.get_noise_2d(float(x), float(y))
 			if cave_value <= CAVE_THRESHOLD:
+				continue
+			# Low-frequency water noise floods parts of the carved caverns
+			# into still, fishable lakes.
+			if water != null and water.get_noise_2d(float(x), float(y)) > WATER_THRESHOLD:
+				grid[cell] = CELL_WATER
 				continue
 			grid[cell] = CELL_HALL
 			if floor_decor.has(cell):

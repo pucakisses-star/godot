@@ -5,6 +5,7 @@ const CELL_HALL := 1
 const CELL_HOUSE := 2
 const CELL_BUILDING := 3
 const CELL_PLAZA := 4
+const CELL_WATER := 5
 
 @export var hall_zone_count_range := Vector2i(14, 22)
 @export var housing_zone_count_range := Vector2i(80, 140)
@@ -103,6 +104,7 @@ var _creature_repop_timer := 0.0
 var _player_hp := 20.0
 var _player_attack_timer := 0.0
 var _hp_label: Label
+var _fishing_state: Dictionary = {}
 var _torch_sprites: Array = []
 var _player_glow: Sprite2D
 var _glow_texture: Texture2D
@@ -114,6 +116,10 @@ var _chest_inventories: Dictionary = {}
 var _selected_chest_cell := Vector2i(2147483647, 2147483647)
 var _chest_slot_panels: Array[PanelContainer] = []
 var _chest_slot_labels: Array[Label] = []
+var _chest_slot_icons: Array[TextureRect] = []
+var _backpack_slot_panels: Array[PanelContainer] = []
+var _backpack_slot_labels: Array[Label] = []
+var _backpack_slot_icons: Array[TextureRect] = []
 var _latest_zone_counts := {
 	"halls": 0,
 	"houses": 0,
@@ -245,7 +251,56 @@ const CHEST_LOOT_TABLE := [
 	{"name": "Ale Keg", "min": 1, "max": 2},
 	{"name": "Stone Block", "min": 3, "max": 8},
 	{"name": "Leather Strap", "min": 2, "max": 7},
-	{"name": "Gem Shard", "min": 1, "max": 4}
+	{"name": "Gem Shard", "min": 1, "max": 4},
+	{"name": "Amber", "min": 1, "max": 2},
+	{"name": "Copper Ore", "min": 2, "max": 5},
+	{"name": "Dried Fish", "min": 1, "max": 3},
+	{"name": "Cave Crab", "min": 1, "max": 2},
+	{"name": "Miner's Lantern", "min": 1, "max": 1},
+	{"name": "Dynamite Stick", "min": 1, "max": 2},
+	{"name": "Skeleton Keys", "min": 1, "max": 1},
+	{"name": "Rusty Pickaxe", "min": 1, "max": 1},
+	{"name": "Old Fishing Rod", "min": 1, "max": 1}
+]
+
+## Digging rock occasionally turns up a fossil alongside the Stone.
+const DIG_FOSSIL_FINDS := [
+	"Amber", "Spider Amber", "Fossil Leaf", "Ancient Skull",
+	"Fossil Claw", "Ammonite Shell", "Old Bone", "Serpent Spine"
+]
+const DIG_FOSSIL_CHANCE_PERCENT := 7
+
+## Ore veins yield more than iron now and then.
+const ORE_VEIN_DROPS := [
+	{"name": "Iron Ore", "weight": 55, "min": 2, "max": 4},
+	{"name": "Copper Ore", "weight": 25, "min": 1, "max": 3},
+	{"name": "Gold Nugget", "weight": 12, "min": 1, "max": 2},
+	{"name": "Gem Shard", "weight": 8, "min": 1, "max": 1}
+]
+
+## Wild fungal growth sometimes includes a rarer species.
+const WILD_MUSHROOM_VARIETIES := [
+	"Glowcap", "Frostcap", "Emberspore", "Violet Veil",
+	"King Bolete", "Fairy Bells", "Scarlet Cap"
+]
+const MUSHROOM_VARIETY_CHANCE_PERCENT := 30
+
+## Core-Keeper-style fishing in the underdeep's still lakes: cast with F
+## next to water (rod required), wait for the bite, reel on the "!".
+const FISHING_ROD_ITEM := "Old Fishing Rod"
+const FISH_CATCH_TABLE := [
+	{"name": "Cave Perch", "weight": 20},
+	{"name": "Silver Darter", "weight": 16},
+	{"name": "Emerald Trout", "weight": 14},
+	{"name": "Ruby Snapper", "weight": 10},
+	{"name": "Blindcave Fish", "weight": 10},
+	{"name": "Deep Eel", "weight": 8},
+	{"name": "Violet Grouper", "weight": 8},
+	{"name": "Cave Crab", "weight": 6},
+	{"name": "Golden Koi", "weight": 5},
+	{"name": "Coral Snail", "weight": 5},
+	{"name": "Rusted Hook", "weight": 6},
+	{"name": "Skeleton Keys", "weight": 1}
 ]
 
 const CIVIC_BUILDING_TYPES := {
@@ -692,6 +747,7 @@ func _process(delta: float) -> void:
 	_update_creature_spawning(delta)
 	_update_creatures(delta)
 	_update_player_regen(delta)
+	_update_fishing(delta)
 
 ## The city and deep levels stay lit; the wild underground is dark, held
 ## back by the player's lantern glow and any placed torches.
@@ -743,6 +799,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	var key_event := event as InputEventKey
 	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_T and not _is_text_input_focused():
 		_place_torch()
+		get_viewport().set_input_as_handled()
+		return
+	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_F and not _is_text_input_focused():
+		_handle_fish_action()
 		get_viewport().set_input_as_handled()
 		return
 	if _player_sprite == null or not _player_control_enabled:
@@ -2225,16 +2285,15 @@ func _on_chest_popup_close_button_pressed() -> void:
 	_clear_chest_selection()
 
 func _initialize_chest_popup_grids() -> void:
-	_create_inventory_slots(chest_grid, CHEST_SLOT_COLUMNS * CHEST_SLOT_ROWS, _chest_slot_panels, _chest_slot_labels)
-	var backpack_panels: Array[PanelContainer] = []
-	var backpack_labels: Array[Label] = []
-	_create_inventory_slots(backpack_grid, CHEST_SLOT_COLUMNS * BACKPACK_SLOT_ROWS, backpack_panels, backpack_labels)
+	_create_inventory_slots(chest_grid, CHEST_SLOT_COLUMNS * CHEST_SLOT_ROWS, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons)
+	_create_inventory_slots(backpack_grid, CHEST_SLOT_COLUMNS * BACKPACK_SLOT_ROWS, _backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons)
 
-func _create_inventory_slots(target_grid: GridContainer, slot_count: int, out_panels: Array[PanelContainer], out_labels: Array[Label]) -> void:
+func _create_inventory_slots(target_grid: GridContainer, slot_count: int, out_panels: Array[PanelContainer], out_labels: Array[Label], out_icons: Array[TextureRect]) -> void:
 	for child in target_grid.get_children():
 		child.queue_free()
 	out_panels.clear()
 	out_labels.clear()
+	out_icons.clear()
 	for _slot in slot_count:
 		var panel := PanelContainer.new()
 		panel.custom_minimum_size = Vector2(36, 36)
@@ -2246,27 +2305,63 @@ func _create_inventory_slots(target_grid: GridContainer, slot_count: int, out_pa
 		slot_style.border_width_bottom = 2
 		slot_style.border_color = Color(0.34, 0.22, 0.12, 1.0) if target_grid == chest_grid else Color(0.52, 0.56, 0.54, 1.0)
 		panel.add_theme_stylebox_override("panel", slot_style)
+		var icon_rect := TextureRect.new()
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		icon_rect.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		icon_rect.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		panel.add_child(icon_rect)
 		var label := Label.new()
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		label.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		label.add_theme_font_size_override("font_size", 11)
+		label.add_theme_color_override("font_outline_color", Color(0.08, 0.06, 0.05, 0.9))
+		label.add_theme_constant_override("outline_size", 3)
 		label.text = ""
 		panel.add_child(label)
 		target_grid.add_child(panel)
 		out_panels.append(panel)
 		out_labels.append(label)
+		out_icons.append(icon_rect)
+
+## Fills one slot with an item: icon + count when the catalog knows the
+## item, the old abbreviation text otherwise.
+func _fill_inventory_slot(slot_index: int, panels: Array[PanelContainer], labels: Array[Label], icons: Array[TextureRect], item_name: String, quantity: int) -> void:
+	if ItemDefsService.has_icon(item_name):
+		icons[slot_index].texture = ItemDefsService.icon_texture(item_name)
+		labels[slot_index].text = "×%d" % quantity
+		labels[slot_index].horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		labels[slot_index].vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	else:
+		labels[slot_index].text = "%s\n%d" % [_item_abbreviation(item_name), quantity]
+		labels[slot_index].horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		labels[slot_index].vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	panels[slot_index].tooltip_text = ItemDefsService.slot_tooltip(item_name, quantity)
+
+func _clear_inventory_slots(panels: Array[PanelContainer], labels: Array[Label], icons: Array[TextureRect]) -> void:
+	for i in range(labels.size()):
+		labels[i].text = ""
+		panels[i].tooltip_text = ""
+		icons[i].texture = null
 
 func _populate_chest_slots(loot_entries: Array) -> void:
-	for i in range(_chest_slot_labels.size()):
-		_chest_slot_labels[i].text = ""
-		_chest_slot_panels[i].tooltip_text = ""
+	_clear_inventory_slots(_chest_slot_panels, _chest_slot_labels, _chest_slot_icons)
 	for i in range(mini(loot_entries.size(), _chest_slot_labels.size())):
 		var entry := loot_entries[i] as Dictionary
-		var item_name := String(entry.get("name", "Supplies"))
-		var quantity := int(entry.get("quantity", 1))
-		_chest_slot_labels[i].text = "%s\n%d" % [_item_abbreviation(item_name), quantity]
-		_chest_slot_panels[i].tooltip_text = "%s x%d" % [item_name, quantity]
+		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, String(entry.get("name", "Supplies")), int(entry.get("quantity", 1)))
+
+## The backpack grid mirrors the player's persistent inventory.
+func _populate_backpack_slots() -> void:
+	if _backpack_slot_labels.is_empty():
+		return
+	_clear_inventory_slots(_backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons)
+	var item_names := _player_inventory.keys()
+	item_names.sort()
+	for i in range(mini(item_names.size(), _backpack_slot_labels.size())):
+		var item_name := String(item_names[i])
+		_fill_inventory_slot(i, _backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons, item_name, int(_player_inventory[item_name]))
 
 func _item_abbreviation(item_name: String) -> String:
 	return DwarfHoldChestService.item_abbreviation(item_name)
@@ -2364,6 +2459,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_assign_npc_daily_lives(grid)
 	_clear_torch_sprites()
 	_clear_creatures()
+	_end_fishing("")
 	var shown_level := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	for torch_cell_variant: Variant in (shown_level.get("torches", []) as Array):
 		_spawn_torch_at(torch_cell_variant as Vector2i)
@@ -2523,14 +2619,31 @@ func _try_harvest_decor(cell: Vector2i) -> bool:
 	if atlas == TILE_ATLAS.get("stone", Vector2i(-1000, -1000)):
 		decor_layer.erase_cell(cell)
 		_latest_floor_decor.erase(cell)
-		_add_to_inventory("Iron Ore", _rng.randi_range(2, 4))
+		var vein_drop := _roll_weighted_drop(ORE_VEIN_DROPS)
+		_add_to_inventory(
+			String(vein_drop.get("name", "Iron Ore")),
+			_rng.randi_range(int(vein_drop.get("min", 1)), int(vein_drop.get("max", 2)))
+		)
 		return true
 	if atlas == TILE_ATLAS.get("mushroom_wild", Vector2i(-1000, -1000)) or atlas == TILE_ATLAS.get("mushroom_crop_wild", Vector2i(-1000, -1000)) or atlas == TILE_ATLAS.get("mushroom_crops", Vector2i(-1000, -1000)):
 		decor_layer.erase_cell(cell)
 		_latest_floor_decor.erase(cell)
 		_add_to_inventory("Mushrooms", _rng.randi_range(1, 2))
+		if _rng.randi_range(1, 100) <= MUSHROOM_VARIETY_CHANCE_PERCENT:
+			_add_to_inventory(WILD_MUSHROOM_VARIETIES[_rng.randi_range(0, WILD_MUSHROOM_VARIETIES.size() - 1)], 1)
 		return true
 	return false
+
+func _roll_weighted_drop(drop_table: Array) -> Dictionary:
+	var total_weight := 0
+	for entry_variant: Variant in drop_table:
+		total_weight += int((entry_variant as Dictionary).get("weight", 1))
+	var roll := _rng.randi_range(1, maxi(total_weight, 1))
+	for entry_variant: Variant in drop_table:
+		roll -= int((entry_variant as Dictionary).get("weight", 1))
+		if roll <= 0:
+			return entry_variant as Dictionary
+	return drop_table[0] as Dictionary
 
 func _place_torch() -> void:
 	if _player_sprite == null or _world_noise.is_empty():
@@ -2578,6 +2691,115 @@ func _create_torch_texture() -> Texture2D:
 				continue
 			image.set_pixel(x, y, flame)
 	image.resize(16, 32, Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(image)
+
+## --- Fishing ------------------------------------------------------------
+## Cast next to a lake with F. The bobber drifts, dips on a bite ("!"),
+## and pressing F inside the bite window reels in the catch. Moving
+## snaps the line; reeling early scares the fish off.
+
+func _handle_fish_action() -> void:
+	if not _fishing_state.is_empty():
+		if String(_fishing_state.get("phase", "")) == "bite":
+			_catch_fish()
+		else:
+			_end_fishing("You reel in too early — nothing on the hook")
+		return
+	if _player_sprite == null or not _player_control_enabled:
+		return
+	var water_cell := _find_nearby_water_cell()
+	if water_cell.x == 2147483647:
+		_set_save_status("No still water within casting reach", Color(0.8, 0.85, 0.95, 1.0))
+		return
+	if int(_player_inventory.get(FISHING_ROD_ITEM, 0)) < 1:
+		_set_save_status("You need an Old Fishing Rod — search chests and camps", Color(0.95, 0.75, 0.45, 1.0))
+		return
+	var bobber := Sprite2D.new()
+	bobber.texture = _create_bobber_texture()
+	bobber.position = _cell_center_position(water_cell)
+	bobber.z_index = 13
+	actor_layer.add_child(bobber)
+	_fishing_state = {
+		"cell": water_cell,
+		"phase": "waiting",
+		"timer": _rng.randf_range(2.5, 6.0),
+		"bobber": bobber,
+		"anchor": _player_cell,
+		"bob_time": 0.0
+	}
+	_set_save_status("You cast your line into the dark water…", Color(0.75, 0.85, 0.95, 1.0))
+
+func _find_nearby_water_cell() -> Vector2i:
+	var best := Vector2i(2147483647, 2147483647)
+	var best_distance := 999
+	for offset_y in range(-2, 3):
+		for offset_x in range(-2, 3):
+			var candidate := _player_cell + Vector2i(offset_x, offset_y)
+			if int(_latest_grid.get(candidate, CELL_ROCK)) != CELL_WATER:
+				continue
+			var distance := maxi(absi(offset_x), absi(offset_y))
+			if distance < best_distance:
+				best_distance = distance
+				best = candidate
+	return best
+
+func _update_fishing(delta: float) -> void:
+	if _fishing_state.is_empty():
+		return
+	if _player_cell != (_fishing_state.get("anchor", _player_cell) as Vector2i):
+		_end_fishing("The line snaps as you move")
+		return
+	var bobber := _fishing_state.get("bobber") as Sprite2D
+	if bobber == null:
+		_fishing_state = {}
+		return
+	_fishing_state["bob_time"] = float(_fishing_state.get("bob_time", 0.0)) + delta
+	_fishing_state["timer"] = float(_fishing_state.get("timer", 0.0)) - delta
+	var rest_position: Vector2 = _cell_center_position(_fishing_state.get("cell", _player_cell) as Vector2i)
+	var phase := String(_fishing_state.get("phase", "waiting"))
+	if phase == "waiting":
+		bobber.position = rest_position + Vector2(0.0, sin(float(_fishing_state.get("bob_time", 0.0)) * 3.0) * 1.5)
+		if float(_fishing_state.get("timer", 0.0)) <= 0.0:
+			_fishing_state["phase"] = "bite"
+			_fishing_state["timer"] = 1.4
+			_spawn_floating_text("!", bobber.position + Vector2(0, -10), Color(1.0, 0.9, 0.4, 1.0))
+	else:
+		bobber.position = rest_position + Vector2(0.0, 4.0 + sin(float(_fishing_state.get("bob_time", 0.0)) * 18.0) * 3.0)
+		if float(_fishing_state.get("timer", 0.0)) <= 0.0:
+			# The bite slips away; the bobber settles and waits again.
+			_fishing_state["phase"] = "waiting"
+			_fishing_state["timer"] = _rng.randf_range(2.0, 5.0)
+			_set_save_status("The bite slips away…", Color(0.8, 0.85, 0.95, 1.0))
+
+func _catch_fish() -> void:
+	var bobber := _fishing_state.get("bobber") as Sprite2D
+	var catch_position: Vector2 = bobber.position if bobber != null else _player_sprite.position
+	var caught := _roll_weighted_drop(FISH_CATCH_TABLE)
+	var item_name := String(caught.get("name", "Cave Perch"))
+	_add_to_inventory(item_name, 1)
+	_spawn_floating_text("Caught %s!" % item_name, catch_position, Color(0.6, 0.95, 1.0, 1.0))
+	var flavor: String = ItemDefsService.flavor_text(item_name)
+	_end_fishing("Caught %s!%s" % [item_name, (" " + flavor) if not flavor.is_empty() else ""])
+
+func _end_fishing(message: String) -> void:
+	var bobber := _fishing_state.get("bobber") as Sprite2D
+	if bobber != null:
+		bobber.queue_free()
+	_fishing_state = {}
+	if not message.is_empty():
+		_set_save_status(message, Color(0.75, 0.85, 0.95, 1.0))
+
+func _create_bobber_texture() -> Texture2D:
+	var image := Image.create(10, 10, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	for y in range(10):
+		for x in range(10):
+			var distance := Vector2(x - 4.5, y - 4.5).length()
+			if distance <= 4.0:
+				image.set_pixel(x, y, Color(0.85, 0.2, 0.15, 1.0) if y < 5 else Color(0.95, 0.93, 0.88, 1.0))
+			elif distance <= 4.8:
+				image.set_pixel(x, y, Color(0.15, 0.1, 0.1, 1.0))
+	image.resize(20, 20, Image.INTERPOLATE_NEAREST)
 	return ImageTexture.create_from_image(image)
 
 ## --- Creatures & combat -------------------------------------------------
@@ -2890,6 +3112,7 @@ func _update_inventory_label() -> void:
 		return
 	if _player_inventory.is_empty():
 		_inventory_label.text = "🎒 Backpack empty — dig rock, mine ore, pick mushrooms"
+		_populate_backpack_slots()
 		return
 	var parts := PackedStringArray()
 	var item_names := _player_inventory.keys()
@@ -2897,11 +3120,17 @@ func _update_inventory_label() -> void:
 	for item_variant: Variant in item_names:
 		parts.append("%s ×%d" % [String(item_variant), int(_player_inventory[item_variant])])
 	_inventory_label.text = "🎒 " + ", ".join(parts)
+	_populate_backpack_slots()
 
 func _dig_cell(cell: Vector2i) -> void:
 	_latest_grid[cell] = CELL_HALL
 	_dug_cells[cell] = true
 	_add_to_inventory("Stone", 1)
+	if _rng.randi_range(1, 100) <= DIG_FOSSIL_CHANCE_PERCENT:
+		var fossil: String = DIG_FOSSIL_FINDS[_rng.randi_range(0, DIG_FOSSIL_FINDS.size() - 1)]
+		_add_to_inventory(fossil, 1)
+		if _player_sprite != null:
+			_spawn_floating_text("Found %s!" % fossil, _player_sprite.position, Color(0.95, 0.9, 0.6, 1.0))
 	_render_world_rect(Rect2i(cell - Vector2i(1, 1), Vector2i(3, 3)))
 	if _lighting_enabled:
 		_update_shattered_visibility(_latest_grid)
@@ -3166,6 +3395,8 @@ func _place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -
 	DwarfHoldTileService.place_tile(target_layer, cell, tile_key, TILE_ATLAS)
 
 func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
+	if cell == CELL_WATER:
+		return "water"
 	return DwarfHoldTileService.pick_base_tile(grid, x, y, cell, _door_cells, TILE_ATLAS)
 
 func _is_hall_border_rock_cell(grid: Dictionary, x: int, y: int) -> bool:

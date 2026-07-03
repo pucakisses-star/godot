@@ -98,6 +98,11 @@ var _chest_inventories: Dictionary = {}
 var _selected_chest_cell := Vector2i(2147483647, 2147483647)
 var _chest_slot_panels: Array[PanelContainer] = []
 var _chest_slot_labels: Array[Label] = []
+var _chest_slot_icons: Array[TextureRect] = []
+var _backpack_slot_panels: Array[PanelContainer] = []
+var _backpack_slot_labels: Array[Label] = []
+var _backpack_slot_icons: Array[TextureRect] = []
+var _player_inventory: Dictionary = {}
 var _latest_zone_counts := {
 	"halls": 0,
 	"houses": 0,
@@ -238,7 +243,15 @@ const CHEST_LOOT_TABLE := [
 	{"name": "Jar of Honey", "min": 1, "max": 2},
 	{"name": "Iron Horseshoes", "min": 2, "max": 6},
 	{"name": "Wax Candles", "min": 2, "max": 8},
-	{"name": "Skein of Wool", "min": 1, "max": 5}
+	{"name": "Skein of Wool", "min": 1, "max": 5},
+	{"name": "Dried Fish", "min": 1, "max": 4},
+	{"name": "Cave Crab", "min": 1, "max": 2},
+	{"name": "Coral Snail", "min": 1, "max": 2},
+	{"name": "Old Fishing Rod", "min": 1, "max": 1},
+	{"name": "Amber", "min": 1, "max": 2},
+	{"name": "Scarlet Cap", "min": 1, "max": 3},
+	{"name": "King Bolete", "min": 1, "max": 2},
+	{"name": "Gold Trinket", "min": 1, "max": 1}
 ]
 
 const CIVIC_BUILDING_TYPES := {
@@ -1867,6 +1880,13 @@ func _clear_chest_selection() -> void:
 func _on_loot_chest_button_pressed() -> void:
 	if _selected_chest_cell.x == 2147483647:
 		return
+	# Loot flows into the same persistent backpack the underdeep uses.
+	for entry_variant: Variant in (_chest_inventories.get(_selected_chest_cell, []) as Array):
+		var entry := entry_variant as Dictionary
+		var item_name := String(entry.get("name", "Supplies"))
+		_player_inventory[item_name] = int(_player_inventory.get(item_name, 0)) + int(entry.get("quantity", 1))
+	_save_player_inventory()
+	_populate_backpack_slots()
 	_chest_inventories[_selected_chest_cell] = []
 	_update_chest_inventory_panel()
 
@@ -1874,16 +1894,17 @@ func _on_chest_popup_close_button_pressed() -> void:
 	_clear_chest_selection()
 
 func _initialize_chest_popup_grids() -> void:
-	_create_inventory_slots(chest_grid, CHEST_SLOT_COLUMNS * CHEST_SLOT_ROWS, _chest_slot_panels, _chest_slot_labels)
-	var backpack_panels: Array[PanelContainer] = []
-	var backpack_labels: Array[Label] = []
-	_create_inventory_slots(backpack_grid, CHEST_SLOT_COLUMNS * BACKPACK_SLOT_ROWS, backpack_panels, backpack_labels)
+	_create_inventory_slots(chest_grid, CHEST_SLOT_COLUMNS * CHEST_SLOT_ROWS, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons)
+	_create_inventory_slots(backpack_grid, CHEST_SLOT_COLUMNS * BACKPACK_SLOT_ROWS, _backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons)
+	_load_player_inventory()
+	_populate_backpack_slots()
 
-func _create_inventory_slots(target_grid: GridContainer, slot_count: int, out_panels: Array[PanelContainer], out_labels: Array[Label]) -> void:
+func _create_inventory_slots(target_grid: GridContainer, slot_count: int, out_panels: Array[PanelContainer], out_labels: Array[Label], out_icons: Array[TextureRect]) -> void:
 	for child in target_grid.get_children():
 		child.queue_free()
 	out_panels.clear()
 	out_labels.clear()
+	out_icons.clear()
 	for _slot in slot_count:
 		var panel := PanelContainer.new()
 		panel.custom_minimum_size = Vector2(36, 36)
@@ -1895,27 +1916,77 @@ func _create_inventory_slots(target_grid: GridContainer, slot_count: int, out_pa
 		slot_style.border_width_bottom = 2
 		slot_style.border_color = Color(0.34, 0.22, 0.12, 1.0) if target_grid == chest_grid else Color(0.52, 0.56, 0.54, 1.0)
 		panel.add_theme_stylebox_override("panel", slot_style)
+		var icon_rect := TextureRect.new()
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		icon_rect.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		icon_rect.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		panel.add_child(icon_rect)
 		var label := Label.new()
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		label.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		label.add_theme_font_size_override("font_size", 11)
+		label.add_theme_color_override("font_outline_color", Color(0.08, 0.06, 0.05, 0.9))
+		label.add_theme_constant_override("outline_size", 3)
 		label.text = ""
 		panel.add_child(label)
 		target_grid.add_child(panel)
 		out_panels.append(panel)
 		out_labels.append(label)
+		out_icons.append(icon_rect)
+
+func _fill_inventory_slot(slot_index: int, panels: Array[PanelContainer], labels: Array[Label], icons: Array[TextureRect], item_name: String, quantity: int) -> void:
+	if ItemDefsService.has_icon(item_name):
+		icons[slot_index].texture = ItemDefsService.icon_texture(item_name)
+		labels[slot_index].text = "×%d" % quantity
+		labels[slot_index].horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		labels[slot_index].vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	else:
+		labels[slot_index].text = "%s\n%d" % [_item_abbreviation(item_name), quantity]
+		labels[slot_index].horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		labels[slot_index].vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	panels[slot_index].tooltip_text = ItemDefsService.slot_tooltip(item_name, quantity)
+
+func _clear_inventory_slots(panels: Array[PanelContainer], labels: Array[Label], icons: Array[TextureRect]) -> void:
+	for i in range(labels.size()):
+		labels[i].text = ""
+		panels[i].tooltip_text = ""
+		icons[i].texture = null
 
 func _populate_chest_slots(loot_entries: Array) -> void:
-	for i in range(_chest_slot_labels.size()):
-		_chest_slot_labels[i].text = ""
-		_chest_slot_panels[i].tooltip_text = ""
+	_clear_inventory_slots(_chest_slot_panels, _chest_slot_labels, _chest_slot_icons)
 	for i in range(mini(loot_entries.size(), _chest_slot_labels.size())):
 		var entry := loot_entries[i] as Dictionary
-		var item_name := String(entry.get("name", "Supplies"))
-		var quantity := int(entry.get("quantity", 1))
-		_chest_slot_labels[i].text = "%s\n%d" % [_item_abbreviation(item_name), quantity]
-		_chest_slot_panels[i].tooltip_text = "%s x%d" % [item_name, quantity]
+		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, String(entry.get("name", "Supplies")), int(entry.get("quantity", 1)))
+
+## Towns share the same persistent backpack as the underdeep.
+func _load_player_inventory() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	var inventory_variant: Variant = settings.get("player_inventory", {})
+	_player_inventory = (inventory_variant as Dictionary).duplicate() if inventory_variant is Dictionary else {}
+
+func _save_player_inventory() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings["player_inventory"] = _player_inventory.duplicate()
+	game_session.call("set_world_settings", settings)
+
+func _populate_backpack_slots() -> void:
+	if _backpack_slot_labels.is_empty():
+		return
+	_clear_inventory_slots(_backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons)
+	var item_names := _player_inventory.keys()
+	item_names.sort()
+	for i in range(mini(item_names.size(), _backpack_slot_labels.size())):
+		var item_name := String(item_names[i])
+		_fill_inventory_slot(i, _backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons, item_name, int(_player_inventory[item_name]))
 
 func _item_abbreviation(item_name: String) -> String:
 	return DwarfHoldChestService.item_abbreviation(item_name)

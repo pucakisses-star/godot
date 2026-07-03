@@ -164,7 +164,8 @@ const DWARFHOLD_TILE_ATLAS := {
 	"keg": Vector2i(5, 5),
 	"target": Vector2i(6, 3),
 	"anvil": Vector2i(6, 4),
-	"stairway_down": Vector2i(6, 7)
+	"stairway_down": Vector2i(6, 7),
+	"water": Vector2i(6, 0)
 }
 const DWARFHOLD_PASSABLE_TILE_KEYS := ["floor", "dirt", "door", "stairway_up", "stairway_down"]
 
