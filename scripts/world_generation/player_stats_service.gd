@@ -41,6 +41,9 @@ const CLASS_STATS := {
 
 static func _modifiers(character: Dictionary) -> Dictionary:
 	var profession := String(character.get("profession", "")).strip_edges().to_lower()
+	if profession.is_empty():
+		# Legacy saves without a profession keep the plain base values.
+		return {"hp": 0, "attack": 0}
 	if PROFESSION_STATS.has(profession):
 		return PROFESSION_STATS[profession] as Dictionary
 	var hero_class := DwarfHoldActorVisuals.hero_class_for_profession(profession)
