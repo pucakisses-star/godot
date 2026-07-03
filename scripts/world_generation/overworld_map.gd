@@ -4976,6 +4976,7 @@ func _rebuild_labels_overlay() -> void:
 		label.add_theme_color_override("font_outline_color", labels_overlay_outline_color)
 		label.add_theme_constant_override("outline_size", int(round(labels_overlay_outline_size)))
 		label.set_meta("base_font_size", font_size)
+		label.set_meta("anchor_center", center)
 
 		var group_key := "major" if int(entry.get("priority", 0)) >= 2 else "minor"
 		var target_group := grouped_settlements[group_key] as Node2D
@@ -5001,6 +5002,14 @@ func _update_labels_overlay_zoom_behavior() -> void:
 			if labels_overlay_rescale_on_zoom:
 				scaled_font_size = maxf(8.0, (base_font_size + (base_font_size * zoom_factor)) * 0.5)
 			label.add_theme_font_size_override("font_size", int(round(scaled_font_size)))
+
+			# Re-derive the label rect from the scaled font so the text is
+			# never clipped by a stale, smaller rect after zooming in.
+			var anchor := label.get_meta("anchor_center", Vector2.ZERO) as Vector2
+			var scaled_width := maxf(22.0, label.text.length() * scaled_font_size * 0.52)
+			var scaled_height := scaled_font_size * 1.2
+			label.position = anchor + Vector2(-scaled_width * 0.5, -float(tile_size) * 0.72 - scaled_height)
+			label.size = Vector2(scaled_width, scaled_height)
 
 			if labels_overlay_auto_visibility:
 				var screen_size := scaled_font_size / zoom_factor
