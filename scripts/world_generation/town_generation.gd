@@ -26,6 +26,9 @@ const CELL_PLAZA := 4
 @export var tavern_npc_speed_range := Vector2(38.0, 62.0)
 @export var enable_fog_of_war := false
 @export var underground_level_count_range := Vector2i(1, 1)
+## Real minutes for one full in-game day.
+@export var minutes_per_game_day := 6.0
+@export var clock_start_hour := 9.0
 
 # Residence variety: footprints are half-extents (rooms span 2*radius+1
 # tiles). Houses sleep one dwarf; dormitories and barracks pack bed rows so
@@ -51,6 +54,7 @@ const COLLISION_LAYER_WORLD := 1
 @onready var overlay_toggle: CheckButton = %OverlayToggle
 @onready var lighting_toggle: CheckButton = %LightingToggle
 @onready var city_summary: Label = %CitySummary
+@onready var clock_label: Label = get_node_or_null("%ClockLabel")
 @onready var city_panel: PanelContainer = %CityPanel
 @onready var city_layer: TileMapLayer = %CityTileLayer
 @onready var decor_layer: TileMapLayer = %DecorTileLayer
@@ -132,6 +136,10 @@ var _npc_states: Array[Dictionary] = []
 var _hold_state := DwarfHoldStateModel.new()
 var _town_name := ""
 var _town_details: Dictionary = {}
+var _game_hour := 9.0
+var _game_day := 1
+var _bed_cells: Array[Vector2i] = []
+var _green_cells: Array[Vector2i] = []
 var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
@@ -385,12 +393,62 @@ func _ready() -> void:
 	_apply_lighting_state()
 	_clear_chest_selection()
 	_update_player_character_label()
+	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
+	_update_day_night_tint()
+	_update_clock_label()
 	_generate_city()
 
 func _process(delta: float) -> void:
+	_advance_game_clock(delta)
 	_update_player_turn_movement(delta)
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
+
+func _advance_game_clock(delta: float) -> void:
+	if minutes_per_game_day <= 0.0:
+		return
+	_game_hour += delta * 24.0 / (minutes_per_game_day * 60.0)
+	while _game_hour >= 24.0:
+		_game_hour -= 24.0
+		_game_day += 1
+	_update_day_night_tint()
+	_update_clock_label()
+
+func _update_clock_label() -> void:
+	if clock_label == null:
+		return
+	var hour := int(_game_hour)
+	var minute := int((_game_hour - float(hour)) * 60.0)
+	var is_night := _game_hour >= 20.0 or _game_hour < 6.0
+	clock_label.text = "%s Day %d — %02d:%02d" % ["🌙" if is_night else "☀", _game_day, hour, minute]
+
+## Sky tint over the whole scene: white at noon, deep blue at night, warm
+## sunrise/sunset shoulders.
+func _day_night_tint(hour: float) -> Color:
+	var night := Color(0.42, 0.46, 0.68, 1.0)
+	var warm := Color(1.0, 0.83, 0.66, 1.0)
+	var day := Color(1.0, 1.0, 1.0, 1.0)
+	if hour < 5.0 or hour >= 21.5:
+		return night
+	if hour < 6.5:
+		return night.lerp(warm, (hour - 5.0) / 1.5)
+	if hour < 8.0:
+		return warm.lerp(day, (hour - 6.5) / 1.5)
+	if hour < 17.5:
+		return day
+	if hour < 19.5:
+		return day.lerp(warm, (hour - 17.5) / 2.0)
+	return warm.lerp(night, (hour - 19.5) / 2.0)
+
+func _update_day_night_tint() -> void:
+	# Tint only the map layers so the side panel stays readable at night.
+	var tint := _day_night_tint(_game_hour)
+	if city_layer != null:
+		city_layer.modulate = tint
+	if decor_layer != null:
+		decor_layer.modulate = tint
+	if actor_layer != null:
+		actor_layer.modulate = tint
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and not _is_text_input_focused():
@@ -1176,7 +1234,9 @@ func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
 		_refresh_lighting(_latest_grid)
 
 func _apply_lighting_state() -> void:
-	lighting_layer.visible = _lighting_enabled
+	lighting_layer.visible = true
+	if _lighting_mask_sprite != null:
+		_lighting_mask_sprite.visible = _lighting_enabled
 
 func _update_zone_overlay() -> void:
 	if zone_overlay.has_method("set_overlay_state"):
@@ -1541,10 +1601,13 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	var bounds := _find_bounds(grid).grow(1)
 	var house_decor_overrides := _build_house_decor_layouts(grid)
 	_latest_bed_count = 0
-	for decor_value: Variant in house_decor_overrides.values():
-		var decor_key := String(decor_value)
+	_bed_cells = []
+	_green_cells = []
+	for decor_cell_variant: Variant in house_decor_overrides.keys():
+		var decor_key := String(house_decor_overrides[decor_cell_variant])
 		if decor_key == "bed" or decor_key == "bed_alt":
 			_latest_bed_count += 1
+			_bed_cells.append(decor_cell_variant as Vector2i)
 	for y in range(bounds.position.y, bounds.end.y):
 		for x in range(bounds.position.x, bounds.end.x):
 			var cell := _cell_at(grid, x, y)
@@ -1552,6 +1615,8 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 			var render_cell := Vector2i(x, y)
 			_place_tile(city_layer, render_cell, base_tile)
 			var decor_tile := _pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides)
+			if cell == CELL_ROCK and decor_tile.is_empty():
+				_green_cells.append(render_cell)
 			if not decor_tile.is_empty():
 				_place_tile(decor_layer, render_cell, decor_tile)
 				if decor_tile == "chest":
@@ -1915,9 +1980,48 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_sprite = result.get("player_sprite")
 	_player_cell = result.get("player_cell", _player_cell)
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
+	_assign_npc_daily_lives(grid)
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
 	_refresh_lighting(grid)
+
+func _assign_npc_daily_lives(grid: Dictionary) -> void:
+	if _npc_states.is_empty():
+		return
+	var building_cells_by_type: Dictionary = {}
+	for building_cell_variant: Variant in _latest_civic_building_type_map.keys():
+		var building_type := String(_latest_civic_building_type_map[building_cell_variant])
+		if not building_cells_by_type.has(building_type):
+			building_cells_by_type[building_type] = []
+		(building_cells_by_type[building_type] as Array).append(building_cell_variant)
+	var street_cells: Array[Vector2i] = []
+	for grid_cell_variant: Variant in grid.keys():
+		var zone := int(grid[grid_cell_variant])
+		if zone != CELL_HALL and zone != CELL_PLAZA:
+			continue
+		var street_cell := grid_cell_variant as Vector2i
+		if _is_walkable_cell(street_cell):
+			street_cells.append(street_cell)
+	TownNpcScheduler.assign_daily_lives(_npc_states, {
+		"bed_cells": _bed_cells,
+		"building_cells_by_type": building_cells_by_type,
+		"street_cells": street_cells,
+		"green_cells": _green_cells,
+		"is_walkable": Callable(self, "_is_walkable_cell"),
+		"rng": _rng
+	})
+	# Start everyone where their schedule already puts them.
+	for state: Dictionary in _npc_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var mode: String = TownNpcScheduler.mode_for_hour(state, _game_hour)
+		var anchor: Vector2i = TownNpcScheduler.anchor_for_mode(state, mode)
+		if anchor.x != 2147483647 and _is_walkable_cell(anchor):
+			sprite.position = _cell_center_position(anchor)
+			state["cell"] = anchor
+			state["target"] = sprite.position
+		DwarfHoldTavernService.update_character_frame(sprite, int(state.get("slot", 0)), 1, 0)
 
 func _collect_walkable_cells(grid: Dictionary) -> Array[Vector2i]:
 	return DwarfHoldLayoutService.collect_walkable_cells(grid, [CELL_HALL, CELL_HOUSE, CELL_BUILDING, CELL_PLAZA])
@@ -2129,9 +2233,9 @@ func _center_view_on_world_position(local_position: Vector2) -> void:
 	_update_city_layer_transform()
 
 func _update_npc_movement(delta: float) -> void:
-	DwarfHoldTavernService.update_npc_movement(
+	TownNpcScheduler.update_scheduled_npcs(
 		delta, _npc_states, city_layer, _rng,
-		tavern_npc_speed_range, tile_size,
+		tile_size, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),
 		Callable(self, "_cell_center_position")
 	)
