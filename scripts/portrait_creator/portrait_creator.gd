@@ -577,6 +577,7 @@ var _randomize_sound_player: AudioStreamPlayer
 ## sync with the painted portrait: the same sliders drive both, and the
 ## composed sprite is the player's in-world body.
 var _dwarf_preview: TextureRect
+var _stats_label: Label
 var _background_zoom := 1.0
 
 func _enter_tree() -> void:
@@ -641,6 +642,7 @@ func _ready() -> void:
 	_setup_animated_background()
 	_setup_clothing_slider()
 	_build_dwarf_body_panel()
+	_build_stats_label()
 	_refresh_dwarf_preview()
 
 func _process(delta: float) -> void:
@@ -999,7 +1001,29 @@ func _on_beard_style_changed(value: float) -> void:
 	_update_attribute_reminders()
 
 func _on_profession_selected(_index: int) -> void:
+	_update_stats_label()
 	_update_attribute_reminders()
+
+## The profession's combat stats, shown right under the dropdown so the
+## choice visibly matters.
+func _build_stats_label() -> void:
+	if profession_choice == null:
+		return
+	_stats_label = Label.new()
+	_stats_label.add_theme_font_size_override("font_size", 13)
+	_stats_label.modulate = Color(0.95, 0.85, 0.6, 1.0)
+	var host := profession_choice.get_parent()
+	host.add_child(_stats_label)
+	host.move_child(_stats_label, profession_choice.get_index() + 1)
+	_update_stats_label()
+
+func _update_stats_label() -> void:
+	if _stats_label == null:
+		return
+	var profession := ""
+	if profession_choice != null and profession_choice.selected >= 0:
+		profession = profession_choice.get_item_text(profession_choice.selected)
+	_stats_label.text = PlayerStatsService.stat_summary({"profession": profession})
 
 func _update_attribute_reminders() -> void:
 	if banker_reminder:
@@ -1115,6 +1139,7 @@ func _on_randomize_button_pressed() -> void:
 	if clothing_color:
 		clothing_color.value = _rng.randi_range(0, DwarfSpriteComposer.CLOTHES_COLOR_COUNT - 1)
 	_refresh_dwarf_preview()
+	_update_stats_label()
 
 	character_name.text = _generate_full_name()
 	_update_attribute_reminders()
