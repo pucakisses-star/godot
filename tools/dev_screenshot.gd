@@ -9,6 +9,7 @@ func _ready() -> void:
 		session.set("world_settings", {
 			"map_size_key": "mini",
 			"world_seed": OS.get_environment("SHOT_SEED"),
+			"world_layout": OS.get_environment("SHOT_LAYOUT") if not OS.get_environment("SHOT_LAYOUT").is_empty() else "Normal",
 			"terrain": {"forest": 50, "mountain": 40, "river": 60}
 		})
 	var viewport := SubViewport.new()
