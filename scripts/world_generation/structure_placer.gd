@@ -2,7 +2,7 @@ extends RefCounted
 
 ## Sorts candidate dictionaries by descending score without a per-compare
 ## lambda: pack (-score, index) pairs, native-sort, rebuild in order.
-static func _sort_by_score(candidates: Array[Dictionary]) -> Array[Dictionary]:
+static func sort_candidates_by_score(candidates: Array[Dictionary]) -> Array[Dictionary]:
 	var order := PackedVector2Array()
 	order.resize(candidates.size())
 	for index in candidates.size():
@@ -37,7 +37,7 @@ static func build_wizard_tower_candidates(tile_data: Dictionary, biome_map: Dict
 		var terrain_bonus := 0.18 if base_biome == String(biomes.get("tundra", "tundra")) else 0.12
 		var score := clampf(height_value * 1.35, 0.0, 1.0) * 0.35 + dryness * 0.2 + edge_score * 0.15 + terrain_bonus + rng.randf_range(0.0, 0.3)
 		candidates.append({"coord": coord, "score": score, "base": base_biome})
-	return _sort_by_score(candidates)
+	return sort_candidates_by_score(candidates)
 
 static func build_camp_candidates(tile_data: Dictionary, biome_map: Dictionary, moisture_map: Dictionary, occupied: Array[Vector2i], biomes: Dictionary, rng: RandomNumberGenerator) -> Array[Dictionary]:
 	var occupied_set := _occupied_set(occupied)
@@ -55,7 +55,7 @@ static func build_camp_candidates(tile_data: Dictionary, biome_map: Dictionary, 
 		elif base_biome == String(biomes.get("marsh", "marsh")): score += 0.28
 		else: score += 0.2
 		candidates.append({"coord": coord, "score": score, "base_biome": base_biome})
-	return _sort_by_score(candidates)
+	return sort_candidates_by_score(candidates)
 
 static func build_cave_and_dungeon_candidates(tile_data: Dictionary, biome_map: Dictionary, height_map: Dictionary, moisture_map: Dictionary, occupied: Array[Vector2i], biomes: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
 	var occupied_set := _occupied_set(occupied)
@@ -74,7 +74,7 @@ static func build_cave_and_dungeon_candidates(tile_data: Dictionary, biome_map: 
 			var dungeon_score := dryness * 0.45 + rng.randf_range(0.0, 0.35)
 			if base_biome == String(biomes.get("badlands", "badlands")): dungeon_score += 0.12
 			dungeons.append({"coord": coord, "score": dungeon_score})
-	return {"caves": _sort_by_score(caves), "dungeons": _sort_by_score(dungeons)}
+	return {"caves": sort_candidates_by_score(caves), "dungeons": sort_candidates_by_score(dungeons)}
 
 static func select_camp_type_from_biome(base_biome: String, rng: RandomNumberGenerator, biomes: Dictionary) -> String:
 	var biome_key := base_biome.to_lower()
