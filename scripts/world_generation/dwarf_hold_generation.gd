@@ -427,7 +427,29 @@ const FISH_CATCH_TABLE := [
 	{"name": "Trophy Chinese Paddlefish", "weight": 1},
 	{"name": "Trophy Ruffe", "weight": 1},
 	{"name": "Trophy Beluga Sturgeon", "weight": 1},
-	{"name": "Trophy Gudgeon", "weight": 1}
+	{"name": "Trophy Gudgeon", "weight": 1},
+	{"name": "Trophy Baltic Whitefish", "weight": 1},
+	{"name": "Trophy Baltic Anchovy", "weight": 1},
+	{"name": "Trophy Sandlance", "weight": 1},
+	{"name": "Trophy Pipefish", "weight": 1},
+	{"name": "Trophy Baltic Flounder", "weight": 1},
+	{"name": "Trophy Turbot", "weight": 1},
+	{"name": "Trophy Baltic Roach", "weight": 1},
+	{"name": "Trophy Eelpout", "weight": 1},
+	{"name": "Trophy Baltic Sprat", "weight": 1},
+	{"name": "Trophy Belone", "weight": 1},
+	{"name": "Trophy Spiny Dogfish", "weight": 1},
+	{"name": "Trophy Baltic Herring", "weight": 1},
+	{"name": "Trophy Baltic Cod", "weight": 1},
+	{"name": "Trophy Sole", "weight": 1},
+	{"name": "Trophy Sand Goby", "weight": 1},
+	{"name": "Trophy Lumpfish", "weight": 1},
+	{"name": "Trophy Round Goby", "weight": 1},
+	{"name": "Trophy Baltic Stickleback", "weight": 1},
+	{"name": "Trophy Baltic Eel", "weight": 1},
+	{"name": "Trophy Sea Trout", "weight": 1},
+	{"name": "Trophy Emerald Piranha", "weight": 1},
+	{"name": "Trophy Sardine", "weight": 1}
 ]
 
 const CIVIC_BUILDING_TYPES := {

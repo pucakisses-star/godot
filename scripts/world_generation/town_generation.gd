@@ -165,6 +165,7 @@ var _windmill_sails: Array[Dictionary] = []
 var _desert_decor_textures: Dictionary = {}
 var _furnishing_sprites: Array[Node2D] = []
 var _furnishing_blocked_cells: Dictionary = {}
+var _glow_sprites: Array[Node2D] = []
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
 const PLAYER_MOVE_REPEAT_INTERVAL := 0.10
@@ -1368,10 +1369,17 @@ func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
 	if not _latest_grid.is_empty():
 		_refresh_lighting(_latest_grid)
 
+## Towns are open-air: the Shattered cave-fog mask that once rode this
+## toggle blacked out the whole surface map, so it is permanently retired
+## here (the dwarfhold keeps its underground darkness). "Enable lighting"
+## now governs the hearth and candle glow pools instead.
 func _apply_lighting_state() -> void:
 	lighting_layer.visible = true
 	if _lighting_mask_sprite != null:
-		_lighting_mask_sprite.visible = _lighting_enabled
+		_lighting_mask_sprite.visible = false
+	for glow: Node2D in _glow_sprites:
+		if is_instance_valid(glow):
+			glow.visible = _lighting_enabled
 
 func _update_zone_overlay() -> void:
 	if zone_overlay.has_method("set_overlay_state"):
@@ -1854,40 +1862,15 @@ func _initialize_shattered_lighting(grid: Dictionary) -> void:
 		return
 
 	_lighting_bounds = _find_bounds(grid).grow(1)
-	var image_size := Vector2i(
-		maxi(_lighting_bounds.size.x * tile_size.x, 1),
-		maxi(_lighting_bounds.size.y * tile_size.y, 1)
-	)
-	_lighting_mask_image = Image.create(image_size.x, image_size.y, false, Image.FORMAT_RGBA8)
-	_lighting_mask_image.fill(Color(0, 0, 0, SHATTERED_UNSEEN_ALPHA))
-	_lighting_mask_texture = ImageTexture.create_from_image(_lighting_mask_image)
 	if _lighting_mask_sprite != null:
-		_lighting_mask_sprite.texture = _lighting_mask_texture
-		_lighting_mask_sprite.position = Vector2(_lighting_bounds.position * tile_size)
-		_lighting_mask_sprite.visible = _lighting_enabled
+		_lighting_mask_sprite.visible = false
 	_revealed_cells.clear()
 	_visible_cells.clear()
-	_update_shattered_visibility(grid)
 
-func _refresh_lighting(grid: Dictionary) -> void:
-	if _lighting_mask_sprite == null:
-		return
-	if not _lighting_enabled or grid.is_empty() or _lighting_mask_image == null or _lighting_mask_texture == null:
+func _refresh_lighting(_grid: Dictionary) -> void:
+	# The daylight town never draws the black vision mask.
+	if _lighting_mask_sprite != null:
 		_lighting_mask_sprite.visible = false
-		return
-
-	_lighting_mask_sprite.visible = true
-	_lighting_mask_sprite.position = Vector2(_lighting_bounds.position * tile_size)
-	for cell_variant: Variant in grid.keys():
-		var cell := cell_variant as Vector2i
-		var alpha := SHATTERED_UNSEEN_ALPHA
-		if _visible_cells.has(cell):
-			alpha = SHATTERED_VISIBLE_ALPHA
-		elif _revealed_cells.has(cell):
-			alpha = SHATTERED_REVEALED_ALPHA
-		_draw_lighting_alpha_for_cell(cell, alpha)
-
-	_lighting_mask_texture.update(_lighting_mask_image)
 
 func _draw_lighting_alpha_for_cell(cell: Vector2i, alpha: float) -> void:
 	if _lighting_mask_image == null:
@@ -2097,6 +2080,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 		sprite.queue_free()
 	_furnishing_sprites.clear()
 	_furnishing_blocked_cells.clear()
+	_glow_sprites.clear()
 	if actor_layer == null:
 		return
 	var is_occupied := func(cell: Vector2i) -> bool:
@@ -2178,8 +2162,10 @@ func _spawn_hearth_glow(cell: Vector2i, radius_cells: float) -> void:
 		radius_cells * float(tile_size.x),
 		Color(1.0, 0.72, 0.35, 1.0)
 	)
+	glow.visible = _lighting_enabled
 	actor_layer.add_child(glow)
 	_furnishing_sprites.append(glow)
+	_glow_sprites.append(glow)
 
 ## --- Farmsteads: real farm buildings on the town greens -------------------
 ## Each farmstead stakes out a rectangle of open grass and raises a

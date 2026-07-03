@@ -11,6 +11,7 @@ class_name RoomFurnishingService
 
 const HOUSE_INTERIOR_TEXTURE := preload("res://resources/images/webgame_tiles/Farm/Tiled_files/House_interior.png")
 const BARN_INTERIOR_TEXTURE := preload("res://resources/images/webgame_tiles/Farm/Tiled_files/Barn_interior.png")
+const TAVERN_BAR_TEXTURE := preload("res://resources/images/webgame_tiles/extra/tavern_bar.png")
 
 ## rect: source pixels (16px art). cells_w: floor cells wide at 2x.
 ## rows_block: floor rows that block movement (0 = walk-through decor).
@@ -29,7 +30,10 @@ const PIECES := {
 	"produce_shelf": {"sheet": "barn", "rect": Rect2(16, 24, 96, 40), "cells_w": 6, "rows_block": 1, "z": 8},
 	"barrel_shelf": {"sheet": "barn", "rect": Rect2(128, 32, 64, 48), "cells_w": 4, "rows_block": 1, "z": 8},
 	"crate_cluster": {"sheet": "barn", "rect": Rect2(160, 144, 64, 48), "cells_w": 4, "rows_block": 2, "z": 8},
-	"crate_floor": {"sheet": "barn", "rect": Rect2(32, 240, 64, 48), "cells_w": 4, "rows_block": 0, "z": 6}
+	"crate_floor": {"sheet": "barn", "rect": Rect2(32, 240, 64, 48), "cells_w": 4, "rows_block": 0, "z": 6},
+	## The tavern bar: counter with candle, mug and bottle, stool out front.
+	"bar_counter": {"sheet": "bar", "rect": Rect2(0, 0, 64, 48), "cells_w": 4, "rows_block": 2, "z": 8, "light": true},
+	"bar_barrel": {"sheet": "bar", "rect": Rect2(66, 0, 11, 15), "cells_w": 1, "rows_block": 1, "z": 8}
 }
 
 ## Building types whose interiors read as stocked shops.
@@ -292,6 +296,23 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 			claimed[cell] = true
 		return true
 
+	# Taverns get the bar itself, front and center, with spare kegs.
+	if building_type == "tavern" and box.size.x >= 5 and box.size.y >= 3:
+		# Prefer the north wall, but a busy taproom takes any row with
+		# space for the counter.
+		var bar_done := false
+		for y in range(box.position.y, box.end.y - 1):
+			if try_place.call("bar_counter", Vector2i(box.position.x + (box.size.x - 4) / 2, y)):
+				bar_done = true
+				break
+			for x in range(box.position.x, box.end.x - 3):
+				if try_place.call("bar_counter", Vector2i(x, y)):
+					bar_done = true
+					break
+			if bar_done:
+				break
+		try_place.call("bar_barrel", Vector2i(box.end.x - 1, box.end.y - 1))
+		try_place.call("bar_barrel", Vector2i(box.position.x, box.end.y - 1))
 	for x in range(box.position.x, box.end.x):
 		if box.size.x >= 7 and try_place.call("produce_shelf", Vector2i(x, box.position.y)):
 			break
@@ -309,7 +330,13 @@ static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_si
 	if piece.is_empty():
 		return null
 	var sprite := Sprite2D.new()
-	sprite.texture = BARN_INTERIOR_TEXTURE if String(piece.get("sheet", "house")) == "barn" else HOUSE_INTERIOR_TEXTURE
+	match String(piece.get("sheet", "house")):
+		"barn":
+			sprite.texture = BARN_INTERIOR_TEXTURE
+		"bar":
+			sprite.texture = TAVERN_BAR_TEXTURE
+		_:
+			sprite.texture = HOUSE_INTERIOR_TEXTURE
 	sprite.region_enabled = true
 	sprite.centered = false
 	var rect := piece.get("rect", Rect2()) as Rect2
