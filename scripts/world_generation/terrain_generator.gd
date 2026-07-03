@@ -147,17 +147,20 @@ static func sample_landmass_mask(nx: float, ny: float, settings: Dictionary) -> 
 	var sx := nx + warp_x
 	var sy := ny + warp_y
 
-	var macro := sample_fbm(sx * CONTINENT_MACRO_SCALE, sy * CONTINENT_MACRO_SCALE, base_seed + 0xc2b2ae35, 4, 2.05, 0.52)
-	var ridge_source := sample_fbm(sx * CONTINENT_RIDGE_SCALE, sy * CONTINENT_RIDGE_SCALE, base_seed + 0x27d4eb2f, 3, 2.0, 0.58)
+	var mask_scale := maxf(float(settings.get("landmass_mask_scale", 1.0)), 0.05)
+	var macro := sample_fbm(sx * CONTINENT_MACRO_SCALE * mask_scale, sy * CONTINENT_MACRO_SCALE * mask_scale, base_seed + 0xc2b2ae35, 4, 2.05, 0.52)
+	var ridge_source := sample_fbm(sx * CONTINENT_RIDGE_SCALE * mask_scale, sy * CONTINENT_RIDGE_SCALE * mask_scale, base_seed + 0x27d4eb2f, 3, 2.0, 0.58)
 	var ridges := 1.0 - absf(ridge_source * 2.0 - 1.0)
-	var micro := sample_fbm(sx * CONTINENT_MICRO_SCALE, sy * CONTINENT_MICRO_SCALE, base_seed + 0x165667b1, 2, 2.35, 0.5)
+	var micro := sample_fbm(sx * CONTINENT_MICRO_SCALE * mask_scale, sy * CONTINENT_MICRO_SCALE * mask_scale, base_seed + 0x165667b1, 2, 2.35, 0.5)
 
 	var raw := macro * 0.82 + ridges * 0.24 + (micro - 0.5) * 0.14
-	var thresholded := clampf((raw - 0.47) / 0.45, 0.0, 1.0)
+	var threshold := float(settings.get("landmass_mask_threshold", 0.47))
+	var thresholded := clampf((raw - threshold) / 0.45, 0.0, 1.0)
 	var value := pow(thresholded, float(settings.get("landmass_mask_power", 0.82)))
 
 	var edge_distance := minf(minf(nx, 1.0 - nx), minf(ny, 1.0 - ny))
-	var edge_falloff := clampf(edge_distance / 0.26, 0.0, 1.0)
+	var edge_band := maxf(float(settings.get("landmass_mask_edge_falloff", 0.26)), 0.001)
+	var edge_falloff := clampf(edge_distance / edge_band, 0.0, 1.0)
 	value *= edge_falloff
 
 	value += (value_noise(nx * 12.5 + 3.1, ny * 12.5 + 7.9, base_seed) - 0.5) * 0.12

@@ -13,6 +13,9 @@ extends Node2D
 @export var landmass_falloff_scale: float = 1.35
 @export var landmass_mask_strength: float = 0.24
 @export var landmass_mask_power: float = 0.82
+@export var landmass_mask_threshold: float = 0.47
+@export_range(0.1, 4.0, 0.05) var landmass_mask_scale: float = 1.0
+@export_range(0.01, 0.5, 0.01) var landmass_mask_edge_falloff: float = 0.26
 @export_range(0.0, 0.5, 0.01) var edge_ocean_strength: float = 0.2
 @export_range(0.05, 1.0, 0.01) var edge_ocean_falloff: float = 0.32
 @export_range(0.5, 4.0, 0.1) var edge_ocean_curve: float = 1.6
@@ -1884,6 +1887,9 @@ func _terrain_settings() -> Dictionary:
 		"landmass_falloff_scale": landmass_falloff_scale,
 		"landmass_mask_strength": landmass_mask_strength,
 		"landmass_mask_power": landmass_mask_power,
+		"landmass_mask_threshold": landmass_mask_threshold,
+		"landmass_mask_scale": landmass_mask_scale,
+		"landmass_mask_edge_falloff": landmass_mask_edge_falloff,
 		"edge_ocean_strength": edge_ocean_strength,
 		"edge_ocean_falloff": edge_ocean_falloff,
 		"edge_ocean_curve": edge_ocean_curve
@@ -5135,10 +5141,19 @@ func _update_biome_overlay_visibility() -> void:
 func _get_layout_generation_preset(layout_label: String) -> Dictionary:
 	var layout_presets := {
 		"normal": {
-			"landmass_center_count": 4,
-			"landmass_mask_strength": 0.24,
-			"falloff_strength": 0.08,
-			"edge_ocean_strength": 0.2
+			# DF-style geography: several ragged landmasses split by channels
+			# and inland seas, land running close to the map edges. The fBm
+			# landmass mask leads shape-making; radial/center falloff is off.
+			"landmass_center_count": 7,
+			"landmass_mask_strength": 0.55,
+			"falloff_strength": 0.0,
+			"edge_ocean_strength": 0.06,
+			"edge_ocean_falloff": 0.1,
+			"landmass_falloff_scale": 2.0,
+			"landmass_mask_threshold": 0.45,
+			"landmass_mask_scale": 1.6,
+			"landmass_mask_edge_falloff": 0.07,
+			"water_level": 0.45
 		},
 		"major continent": {
 			"landmass_center_count": 2,
@@ -5214,6 +5229,16 @@ func _apply_cached_world_settings() -> void:
 			edge_ocean_strength = float(layout_preset["edge_ocean_strength"])
 			if layout_preset.has("water_level"):
 				water_level = float(layout_preset["water_level"])
+			if layout_preset.has("edge_ocean_falloff"):
+				edge_ocean_falloff = float(layout_preset["edge_ocean_falloff"])
+			if layout_preset.has("landmass_falloff_scale"):
+				landmass_falloff_scale = float(layout_preset["landmass_falloff_scale"])
+			if layout_preset.has("landmass_mask_threshold"):
+				landmass_mask_threshold = float(layout_preset["landmass_mask_threshold"])
+			if layout_preset.has("landmass_mask_scale"):
+				landmass_mask_scale = float(layout_preset["landmass_mask_scale"])
+			if layout_preset.has("landmass_mask_edge_falloff"):
+				landmass_mask_edge_falloff = float(layout_preset["landmass_mask_edge_falloff"])
 		if settings.has("terrain_ratios") and settings["terrain_ratios"] is Dictionary:
 			_apply_terrain_ratio_settings(settings["terrain_ratios"])
 	_configure_globe_viewport()
