@@ -20,6 +20,15 @@ const CELL_PLAZA := 4
 @export var enable_fog_of_war := true
 @export var underground_level_count_range := Vector2i(3, 7)
 
+# Residence variety: footprints are half-extents (rooms span 2*radius+1
+# tiles). Houses sleep one dwarf; dormitories and barracks pack bed rows so
+# large populations don't need hundreds of tiny homes.
+const RESIDENCE_TYPES := {
+	"house": {"weight": 0.62, "radius_min": Vector2i(2, 2), "radius_max": Vector2i(6, 5)},
+	"dormitory": {"weight": 0.24, "radius_min": Vector2i(4, 3), "radius_max": Vector2i(6, 5)},
+	"barracks": {"weight": 0.14, "radius_min": Vector2i(4, 3), "radius_max": Vector2i(5, 4)}
+}
+
 const TILE_ATLAS_DEFS := preload("res://scripts/world_generation/tile_atlas_defs.gd")
 const TILE_ATLAS := TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS
 const PASSABLE_TILE_KEYS := TILE_ATLAS_DEFS.DWARFHOLD_PASSABLE_TILE_KEYS
@@ -70,6 +79,8 @@ var _door_cells: Dictionary = {}
 var _latest_grid: Dictionary = {}
 var _latest_civic_buildings_by_id: Dictionary = {}
 var _latest_civic_building_type_map: Dictionary = {}
+var _latest_residence_type_map: Dictionary = {}
+var _latest_bed_count := 0
 var _show_zone_overlay := false
 var _lighting_enabled := true
 var _chest_inventories: Dictionary = {}
@@ -811,7 +822,9 @@ func _generate_city() -> void:
 
 	var minimum_levels := mini(underground_level_count_range.x, underground_level_count_range.y)
 	var maximum_levels := maxi(underground_level_count_range.x, underground_level_count_range.y)
-	var level_count := maxi(1, _rng.randi_range(minimum_levels, maximum_levels))
+	var level_count := _hold_state.population_scaled_level_count(maximum_levels)
+	if level_count <= 0:
+		level_count = maxi(1, _rng.randi_range(minimum_levels, maximum_levels))
 	for level_index in range(level_count):
 		var level_seed := "%s::depth_%d" % [seed_text, level_index]
 		_hold_state.generated_levels.append(_generate_single_level(level_seed, level_index, level_count))
@@ -823,18 +836,37 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	var is_additional_layer := level_index > 0
 
 	var target_npcs_for_level := _target_npcs_for_level(level_index, level_count)
-	var minimum_halls_for_level := int(ceil(float(target_npcs_for_level) / 24.0))
-	var minimum_houses_for_level := target_npcs_for_level
-	var minimum_buildings_for_level := int(ceil(float(target_npcs_for_level) / 6.0))
-	var minimum_plazas_for_level := int(ceil(float(target_npcs_for_level) / 80.0))
+	var population_scaled := _hold_state.target_resident_npcs > 0
 
-	var requested_hall_count := maxi(_pick_seeded_zone_target(hall_zone_count_range), minimum_halls_for_level)
-	var requested_house_count := 0 if is_additional_layer else maxi(_pick_seeded_zone_target(housing_zone_count_range), minimum_houses_for_level)
-	var requested_building_count := 0 if is_additional_layer else maxi(_pick_seeded_zone_target(civic_building_zone_count_range), minimum_buildings_for_level)
-	var requested_plaza_count := maxi(_pick_seeded_zone_target(plaza_zone_count_range), minimum_plazas_for_level)
+	# 10:1 rule: a hold with population 5,000 hosts 500 resident NPCs, so it
+	# digs 500 beds and enough job sites, halls and plazas to support them.
+	# Without population data (standalone testing, abandoned ruins) fall back
+	# to the legacy fixed ranges.
+	var requested_bed_count: int
+	var requested_hall_count: int
+	var requested_building_count: int
+	var requested_plaza_count: int
+	if population_scaled:
+		requested_bed_count = target_npcs_for_level
+		requested_building_count = maxi(2, int(ceil(float(target_npcs_for_level) / 6.0)))
+		requested_hall_count = maxi(3, int(ceil(float(target_npcs_for_level) / 24.0)))
+		requested_plaza_count = clampi(1 + target_npcs_for_level / 60, 1, 14)
+	else:
+		requested_hall_count = _pick_seeded_zone_target(hall_zone_count_range)
+		requested_bed_count = 0 if is_additional_layer else _pick_seeded_zone_target(housing_zone_count_range)
+		requested_building_count = 0 if is_additional_layer else _pick_seeded_zone_target(civic_building_zone_count_range)
+		requested_plaza_count = _pick_seeded_zone_target(plaza_zone_count_range)
+
+	# Physical spread follows the level's bed target: ~110 beds matches the
+	# legacy footprint, a 50-resident hold shrinks, a great hold sprawls.
+	var footprint_scale := 1.0
+	if population_scaled:
+		footprint_scale = clampf(sqrt(float(maxi(target_npcs_for_level, 1)) / 110.0), 0.35, 1.8)
+
 	var requested_zone_counts := {
 		"halls": requested_hall_count,
-		"houses": requested_house_count,
+		"houses": requested_bed_count,
+		"beds": requested_bed_count,
 		"buildings": requested_building_count,
 		"plazas": requested_plaza_count
 	}
@@ -842,8 +874,12 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	var grid: Dictionary = {}
 	_latest_civic_buildings_by_id = {}
 	_latest_civic_building_type_map = {}
+	_latest_residence_type_map = {}
 	var plaza_layouts: Array[Dictionary] = []
-	var central_plaza_radius := Vector2i(_rng.randi_range(12, 18), _rng.randi_range(10, 16))
+	var central_plaza_radius := Vector2i(
+		maxi(4, roundi(float(_rng.randi_range(12, 18)) * footprint_scale)),
+		maxi(3, roundi(float(_rng.randi_range(10, 16)) * footprint_scale))
+	)
 	var central_plaza_shape := _roll_plaza_shape()
 	var central_plaza := {"center": Vector2i.ZERO, "radius": central_plaza_radius, "shape": central_plaza_shape}
 	_dig_plaza_zone(
@@ -856,24 +892,29 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	plaza_layouts.append(central_plaza)
 
 	for _plaza_index in maxi(0, requested_plaza_count - 1):
-		var plaza_radius := Vector2i(_rng.randi_range(10, 18), _rng.randi_range(8, 15))
+		var plaza_radius := Vector2i(
+			maxi(3, roundi(float(_rng.randi_range(10, 18)) * footprint_scale)),
+			maxi(3, roundi(float(_rng.randi_range(8, 15)) * footprint_scale))
+		)
 		var plaza_shape := _roll_plaza_shape()
 		var plaza_center := Vector2i.ZERO
 		var found_location := false
+		var plaza_spacing := maxi(8, roundi(22.0 * footprint_scale))
 		for _placement_attempt in 24:
 			var plaza_anchor := (plaza_layouts[_rng.randi_range(0, plaza_layouts.size() - 1)] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
 			var plaza_direction := [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN][_rng.randi_range(0, 3)] as Vector2i
-			var plaza_offset_distance := _rng.randi_range(56, 120)
+			var plaza_offset_distance := maxi(18, roundi(float(_rng.randi_range(56, 120)) * footprint_scale))
 			var candidate_center := plaza_anchor + plaza_direction * plaza_offset_distance
 			candidate_center += Vector2i(_rng.randi_range(-14, 14), _rng.randi_range(-14, 14))
-			if _is_plaza_too_close(candidate_center, plaza_radius, plaza_layouts, 22):
+			if _is_plaza_too_close(candidate_center, plaza_radius, plaza_layouts, plaza_spacing):
 				continue
 			plaza_center = candidate_center
 			found_location = true
 			break
 		if not found_location:
+			var fallback_spread := maxi(40, roundi(160.0 * footprint_scale))
 			plaza_center = (plaza_layouts[_rng.randi_range(0, plaza_layouts.size() - 1)] as Dictionary).get("center", Vector2i.ZERO) as Vector2i
-			plaza_center += Vector2i(_rng.randi_range(-160, 160), _rng.randi_range(-160, 160))
+			plaza_center += Vector2i(_rng.randi_range(-fallback_spread, fallback_spread), _rng.randi_range(-fallback_spread, fallback_spread))
 		_dig_plaza_zone(grid, plaza_center, plaza_radius, plaza_shape, CELL_PLAZA)
 		plaza_layouts.append({"center": plaza_center, "radius": plaza_radius, "shape": plaza_shape})
 
@@ -907,25 +948,37 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 			to_index += 1
 		_dig_branching_hall_between_plazas(grid, plaza_layouts[from_index] as Dictionary, plaza_layouts[to_index] as Dictionary)
 
-	for i in requested_house_count:
-		var house_footprint := (func() -> Vector2i:
-			var home_size_min := Vector2i(2, 2)
-			var home_size_max := Vector2i(6, 5)
-			var home_size_x := maxi(_rng.randi_range(home_size_min.x, home_size_max.x), _rng.randi_range(home_size_min.x, home_size_max.x))
-			var home_size_y := maxi(_rng.randi_range(home_size_min.y, home_size_max.y), _rng.randi_range(home_size_min.y, home_size_max.y))
-			return Vector2i(home_size_x, home_size_y)
-		).call() as Vector2i
-		if _place_structure_along_halls(grid, CELL_HOUSE, house_footprint):
-			continue
-		_place_structure_zone(
-			grid,
-			hubs,
-			CELL_HOUSE,
-			func() -> Vector2i:
-				return Vector2i(_rng.randi_range(-14, 14), _rng.randi_range(-9, 9)),
-			func() -> Vector2i:
-				return house_footprint
-		)
+	# Place residences until the level's bed budget is met: mostly houses
+	# (one bed each), with dormitories and barracks packing bed rows for
+	# larger populations.
+	var beds_planned := 0
+	var residences_placed := 0
+	var max_residence_attempts := requested_bed_count * 2 + 60
+	for _residence_attempt in max_residence_attempts:
+		if beds_planned >= requested_bed_count:
+			break
+		var residence_type := _roll_residence_type()
+		# Small remainders shouldn't burn the budget on one huge barracks.
+		if requested_bed_count - beds_planned < 6 and residence_type != "house":
+			residence_type = "house"
+		var residence_footprint := _roll_residence_footprint(residence_type)
+		var estimated_beds := _estimate_residence_beds(residence_type, residence_footprint)
+		var placed := _place_structure_along_halls(grid, CELL_HOUSE, residence_footprint, residence_type)
+		if not placed:
+			placed = _place_structure_zone(
+				grid,
+				hubs,
+				CELL_HOUSE,
+				func() -> Vector2i:
+					return Vector2i(_rng.randi_range(-14, 14), _rng.randi_range(-9, 9)),
+				func() -> Vector2i:
+					return residence_footprint,
+				residence_type
+			)
+		if placed:
+			beds_planned += estimated_beds
+			residences_placed += 1
+	requested_zone_counts["houses"] = residences_placed
 
 	for i in requested_building_count:
 		var civic_type := _pick_civic_building_type()
@@ -963,6 +1016,7 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 		"requested_zone_counts": requested_zone_counts,
 		"civic_buildings_by_id": civic_buildings_by_id,
 		"civic_building_type_map": civic_building_type_map,
+		"residence_type_map": _latest_residence_type_map,
 		"stair_cells": stair_cells
 	}
 
@@ -982,6 +1036,7 @@ func _show_level(target_level_index: int) -> void:
 	_latest_requested_zone_counts = level_data.get("requested_zone_counts", {}) as Dictionary
 	_latest_civic_buildings_by_id = level_data.get("civic_buildings_by_id", {}) as Dictionary
 	_latest_civic_building_type_map = level_data.get("civic_building_type_map", {}) as Dictionary
+	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
 	_chest_inventories.clear()
@@ -1006,6 +1061,36 @@ func _update_depth_controls() -> void:
 
 func _pick_seeded_zone_target(count_range: Vector2i) -> int:
 	return DwarfHoldGenerationRules.pick_seeded_zone_target(_rng, count_range)
+
+func _roll_residence_type() -> String:
+	var roll := _rng.randf()
+	var cumulative := 0.0
+	for type_name: String in RESIDENCE_TYPES.keys():
+		cumulative += float((RESIDENCE_TYPES[type_name] as Dictionary).get("weight", 0.0))
+		if roll <= cumulative:
+			return type_name
+	return "house"
+
+func _roll_residence_footprint(residence_type: String) -> Vector2i:
+	var residence_def := RESIDENCE_TYPES.get(residence_type, RESIDENCE_TYPES["house"]) as Dictionary
+	var radius_min := residence_def.get("radius_min", Vector2i(2, 2)) as Vector2i
+	var radius_max := residence_def.get("radius_max", Vector2i(6, 5)) as Vector2i
+	return Vector2i(
+		_rng.randi_range(radius_min.x, radius_max.x),
+		_rng.randi_range(radius_min.y, radius_max.y)
+	)
+
+## Mirrors the decor templates in DwarfHoldTileService: houses sleep one
+## dwarf, dormitories fill alternating cells with bunks, barracks lay bed
+## rows every third rank.
+func _estimate_residence_beds(residence_type: String, footprint: Vector2i) -> int:
+	match residence_type:
+		"dormitory":
+			return maxi(2, footprint.x * footprint.y)
+		"barracks":
+			return maxi(2, footprint.x * (((footprint.y * 2 - 1) / 3) + 1))
+		_:
+			return 1
 
 func _target_npcs_for_level(level_index: int, level_count: int) -> int:
 	return _hold_state.target_npcs_for_level(level_index, level_count)
@@ -1165,13 +1250,14 @@ func _place_structure_in_open_space(grid: Dictionary, structure_tile: int, ancho
 
 
 func _register_building_type_metadata(center: Vector2i, footprint: Vector2i, structure_tile: int, building_type: String) -> void:
-	if structure_tile != CELL_BUILDING:
-		return
 	if building_type.is_empty():
 		return
+	if structure_tile != CELL_BUILDING and structure_tile != CELL_HOUSE:
+		return
+	var target_map := _latest_civic_building_type_map if structure_tile == CELL_BUILDING else _latest_residence_type_map
 	for y in range(center.y - footprint.y, center.y + footprint.y + 1):
 		for x in range(center.x - footprint.x, center.x + footprint.x + 1):
-			_latest_civic_building_type_map[Vector2i(x, y)] = building_type
+			target_map[Vector2i(x, y)] = building_type
 
 func _compute_civic_buildings_by_id(grid: Dictionary) -> Dictionary:
 	var visited: Dictionary = {}
@@ -1634,6 +1720,10 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	decor_layer.clear()
 	var bounds := _find_bounds(grid).grow(1)
 	var house_decor_overrides := _build_house_decor_layouts(grid)
+	_latest_bed_count = 0
+	for decor_value: Variant in house_decor_overrides.values():
+		if String(decor_value) == "bed":
+			_latest_bed_count += 1
 	for y in range(bounds.position.y, bounds.end.y):
 		for x in range(bounds.position.x, bounds.end.x):
 			var cell := _cell_at(grid, x, y)
@@ -1914,7 +2004,7 @@ func _item_abbreviation(item_name: String) -> String:
 	return DwarfHoldChestService.item_abbreviation(item_name)
 
 func _build_house_decor_layouts(grid: Dictionary) -> Dictionary:
-	return DwarfHoldTileService.build_house_decor_layouts(grid)
+	return DwarfHoldTileService.build_house_decor_layouts(grid, _latest_residence_type_map)
 
 func _on_city_panel_gui_input(event: InputEvent) -> void:
 	_is_panning = DwarfHoldUiInputHandler.handle_city_panel_event(
@@ -1978,6 +2068,13 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_is_moving = false
 	_player_pending_chest_interaction = Vector2i(2147483647, 2147483647)
 	_walkable_cells = _collect_walkable_cells(grid)
+	# Resident count follows the hold's population at 10:1, split across
+	# levels; the export count is only the floor for population-less holds.
+	var level_npc_target := _target_npcs_for_level(
+		_hold_state.current_level_index,
+		maxi(_hold_state.generated_levels.size(), 1)
+	)
+	var npc_spawn_count := maxi(tavern_npc_count, mini(level_npc_target, 250))
 	var result := DwarfHoldTavernService.spawn_tavern_characters(
 		actor_layer, city_layer, _npc_states, _rng, _walkable_cells,
 		_tavern_character_texture, _pending_player_spawn_cell,
@@ -1985,7 +2082,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 		Callable(self, "_cell_center_position"),
 		Callable(self, "_create_player_character_sprite"),
 		Callable(self, "_actor_sprite_to_cell"),
-		tavern_npc_count, tavern_npc_speed_range,
+		npc_spawn_count, tavern_npc_speed_range,
 		_placeholder_actor_texture, tile_size
 	)
 	_player_sprite = result.get("player_sprite")
@@ -2261,7 +2358,12 @@ func _update_summary(grid: Dictionary, seed_text: String) -> void:
 		requested_plazas
 	]
 	if expected_npcs > 0:
+		var level_npc_target := _target_npcs_for_level(
+			_hold_state.current_level_index,
+			maxi(_hold_state.generated_levels.size(), 1)
+		)
 		city_summary.text += "\nHold Population: %d (target residents in-scene: %d at 10:1)" % [_hold_state.selected_hold_population, expected_npcs]
+		city_summary.text += "\nBeds this level: %d (level resident target: %d)" % [_latest_bed_count, level_npc_target]
 	if not building_subtype_summary.is_empty():
 		city_summary.text += "\nBuilding Types: %s" % building_subtype_summary
 
