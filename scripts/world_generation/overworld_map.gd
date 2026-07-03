@@ -1006,7 +1006,30 @@ func _store_selected_dwarfhold_scene_context(seed_text: String, tile_coord: Vect
 	settings[DWARFHOLD_SCENE_TILE_KEY] = {"x": tile_coord.x, "y": tile_coord.y}
 	settings[DWARFHOLD_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
 	settings[DWARFHOLD_SCENE_POPULATION_KEY] = maxi(0, int(details.get("population", 0)))
+	settings["underdeep_sites"] = _build_underdeep_sites(tile_coord)
 	game_session.call("set_world_settings", settings)
+
+## Every other settlement on the overworld, projected into the entered
+## hold's continuous underground at a fixed cells-per-overworld-tile
+## scale, so the underdeep contains the whole world.
+func _build_underdeep_sites(origin_coord: Vector2i) -> Array:
+	var sites: Array = []
+	for coord_variant: Variant in _tile_data.keys():
+		var coord := coord_variant as Vector2i
+		if coord == origin_coord:
+			continue
+		var info := _tile_data.get(coord_variant, {}) as Dictionary
+		var settlement_type := String(info.get("settlement_type", "")).strip_edges()
+		if settlement_type.is_empty():
+			continue
+		var offset := (coord - origin_coord) * UndergroundWorldService.CELLS_PER_OVERWORLD_TILE
+		sites.append({
+			"name": _tile_region_name(coord, info),
+			"type": settlement_type,
+			"x": offset.x,
+			"y": offset.y
+		})
+	return sites
 
 func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary) -> void:
 	var game_session := get_node_or_null("/root/GameSession")
