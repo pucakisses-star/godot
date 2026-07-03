@@ -282,6 +282,17 @@ const CHEST_LOOT_TABLE := [
 	{"name": "Skeleton Keys", "min": 1, "max": 1},
 	{"name": "Rusty Pickaxe", "min": 1, "max": 1},
 	{"name": "Old Fishing Rod", "min": 1, "max": 1},
+	{"name": "Steel Ingot", "min": 1, "max": 3},
+	{"name": "Copper Ingot", "min": 1, "max": 4},
+	{"name": "Tin Ingot", "min": 1, "max": 3},
+	{"name": "Silver Ore", "min": 1, "max": 2},
+	{"name": "Iron Nails", "min": 2, "max": 8},
+	{"name": "Chain Links", "min": 1, "max": 4},
+	{"name": "Whetstone", "min": 1, "max": 1},
+	{"name": "Smith's Tongs", "min": 1, "max": 1},
+	{"name": "Jerky Strip", "min": 1, "max": 4},
+	{"name": "Cured Ham", "min": 1, "max": 1},
+	{"name": "Aged Sausage", "min": 1, "max": 2},
 	{"name": "Miner's Pickaxe", "min": 1, "max": 1},
 	{"name": "Copper Pick", "min": 1, "max": 1},
 	{"name": "Worn Pickaxe", "min": 1, "max": 1},
@@ -3265,11 +3276,15 @@ func _handle_cook_action() -> void:
 		return
 	var raw_fish := _first_raw_ingredient_for("Grilled Fish")
 	var raw_mushroom := _first_raw_ingredient_for("Mushroom Skewer")
+	var raw_meat := _first_raw_ingredient_for("Roast Meat")
 	var dish := ""
 	if not raw_fish.is_empty() and not raw_mushroom.is_empty():
 		_add_to_inventory(raw_fish, -1)
 		_add_to_inventory(raw_mushroom, -1)
 		dish = "Hearty Stew"
+	elif not raw_meat.is_empty():
+		_add_to_inventory(raw_meat, -1)
+		dish = "Roast Meat"
 	elif not raw_fish.is_empty():
 		_add_to_inventory(raw_fish, -1)
 		dish = "Grilled Fish"

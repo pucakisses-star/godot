@@ -32,3 +32,5 @@ resources/images/npc/dwarf_characters.png -filter -diff -merge -text
 resources/images/npc/creature_characters.png -filter -diff -merge -text
 resources/images/items/item_icons.png -filter -diff -merge -text
 resources/images/dwarfhold/map.png -filter -diff -merge -text
+resources/images/webgame_tiles/** -filter -diff -merge -text
+resources/images/items/item_icons2.png -filter -diff -merge -text

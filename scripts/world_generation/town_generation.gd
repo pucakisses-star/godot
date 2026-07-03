@@ -154,6 +154,8 @@ var _game_day := 1
 var _calendar_start_year := 250
 var _bed_cells: Array[Vector2i] = []
 var _green_cells: Array[Vector2i] = []
+var _farm_animals: Array[Dictionary] = []
+var _farm_animal_textures: Dictionary = {}
 var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
 
 const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
@@ -456,6 +458,7 @@ func _process(delta: float) -> void:
 	_update_player_turn_movement(delta)
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
+	_update_farm_animals(delta)
 
 func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
@@ -983,6 +986,7 @@ func _show_level(target_level_index: int) -> void:
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
 	_spawn_tavern_characters(grid)
+	_spawn_farm_animals()
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
 	_update_depth_controls()
@@ -2002,6 +2006,102 @@ func _populate_chest_slots(loot_entries: Array) -> void:
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, String(entry.get("name", "Supplies")), int(entry.get("quantity", 1)))
 
 ## Towns share the same persistent backpack as the underdeep.
+## --- Farm animals ---------------------------------------------------------
+## Chickens, pigs, and cows from the web game's Farm tileset wander the
+## town greens. Sheets: columns 0=down 1=up 2=right (left is mirrored),
+## rows are walk frames.
+
+const FARM_ANIMAL_DEFS := [
+	{"id": "chicken", "path": "res://resources/images/webgame_tiles/Farm/Tiled_files/Chicken_animation.png", "frame": 32, "speed": 26.0, "rows": 6},
+	{"id": "pig", "path": "res://resources/images/webgame_tiles/Farm/Tiled_files/Pig_animation.png", "frame": 32, "speed": 22.0, "rows": 6},
+	{"id": "cow", "path": "res://resources/images/webgame_tiles/Farm/Tiled_files/Cow_animation.png", "frame": 64, "speed": 16.0, "rows": 6}
+]
+
+func _spawn_farm_animals() -> void:
+	for state: Dictionary in _farm_animals:
+		var old_sprite := state.get("sprite") as Sprite2D
+		if old_sprite != null:
+			old_sprite.queue_free()
+	_farm_animals.clear()
+	if actor_layer == null or _green_cells.is_empty():
+		return
+	var animal_count := clampi(_green_cells.size() / 14, 4, 10)
+	for _animal_index in range(animal_count):
+		var def := FARM_ANIMAL_DEFS[_rng.randi_range(0, FARM_ANIMAL_DEFS.size() - 1)] as Dictionary
+		var animal_id := String(def.get("id", "chicken"))
+		if not _farm_animal_textures.has(animal_id):
+			_farm_animal_textures[animal_id] = load(String(def.get("path", ""))) as Texture2D
+		var texture := _farm_animal_textures.get(animal_id) as Texture2D
+		if texture == null:
+			continue
+		var cell := _green_cells[_rng.randi_range(0, _green_cells.size() - 1)]
+		var frame_px := int(def.get("frame", 32))
+		var sprite := Sprite2D.new()
+		sprite.texture = texture
+		sprite.region_enabled = true
+		sprite.centered = true
+		sprite.region_rect = Rect2(0, 0, frame_px, frame_px)
+		sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px)) * 0.9
+		sprite.position = _cell_center_position(cell)
+		sprite.z_index = 11
+		actor_layer.add_child(sprite)
+		_farm_animals.append({
+			"def": def,
+			"sprite": sprite,
+			"cell": cell,
+			"moving": false,
+			"facing": Vector2i(0, 1),
+			"wander_timer": _rng.randf_range(0.5, 4.0),
+			"anim_time": _rng.randf_range(0.0, 2.0)
+		})
+
+func _update_farm_animals(delta: float) -> void:
+	for state: Dictionary in _farm_animals:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var def := state.get("def", {}) as Dictionary
+		state["anim_time"] = float(state.get("anim_time", 0.0)) + delta
+		if bool(state.get("moving", false)):
+			var target := state.get("move_target", sprite.position) as Vector2
+			sprite.position = sprite.position.move_toward(target, float(def.get("speed", 20.0)) * delta)
+			if sprite.position.distance_to(target) <= 0.5:
+				sprite.position = target
+				state["cell"] = state.get("move_cell", state.get("cell", Vector2i.ZERO)) as Vector2i
+				state["moving"] = false
+		else:
+			state["wander_timer"] = float(state.get("wander_timer", 0.0)) - delta
+			if float(state.get("wander_timer", 0.0)) <= 0.0:
+				state["wander_timer"] = _rng.randf_range(1.5, 5.0)
+				var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
+				var step := directions[_rng.randi_range(0, 3)]
+				var next_cell := (state.get("cell", Vector2i.ZERO) as Vector2i) + step
+				# Animals keep to the greens: they only step between grass cells.
+				if _green_cells.has(next_cell) and not bool(state.get("moving", false)):
+					state["moving"] = true
+					state["move_cell"] = next_cell
+					state["move_target"] = _cell_center_position(next_cell)
+					state["facing"] = step
+		_animate_farm_animal(state, sprite, def)
+
+func _animate_farm_animal(state: Dictionary, sprite: Sprite2D, def: Dictionary) -> void:
+	var frame_px := int(def.get("frame", 32))
+	var facing := state.get("facing", Vector2i(0, 1)) as Vector2i
+	var column := 0
+	sprite.flip_h = false
+	if facing == Vector2i.UP:
+		column = 1
+	elif facing == Vector2i.RIGHT:
+		column = 2
+	elif facing == Vector2i.LEFT:
+		column = 2
+		sprite.flip_h = true
+	var row_count := int(def.get("rows", 6))
+	var row := 0
+	if bool(state.get("moving", false)):
+		row = int(float(state.get("anim_time", 0.0)) * 8.0) % row_count
+	sprite.region_rect = Rect2(column * frame_px, row * frame_px, frame_px, frame_px)
+
 ## --- The living world: coins, shops, and talk ----------------------------
 ## Same economy as the underdeep: coins buy from shop buildings (smithy,
 ## bakery, tavern, general store, market stall, apothecary...), the
