@@ -17,6 +17,10 @@ const TAVERN_BAR_TEXTURE := preload("res://resources/images/webgame_tiles/extra/
 ## rows_block: floor rows that block movement (0 = walk-through decor).
 const DF_FURNITURE_TEXTURE := preload("res://resources/images/dwarfhold/df_furniture_atlas.png")
 
+## The rustic interior sheet: rugs, hearths, anvils, armor stands,
+## stocked counters and houseplants (16px art like the house sheets).
+const INTERIOR_TILESET_TEXTURE := preload("res://resources/images/dwarfhold/Interior_Tileset.png")
+
 const PIECES := {
 	"round_rug": {"sheet": "house", "rect": Rect2(0, 0, 52, 52), "cells_w": 4, "rows_block": 0, "z": 4},
 	"cabinet": {"sheet": "house", "rect": Rect2(48, 8, 48, 48), "cells_w": 3, "rows_block": 1, "z": 8},
@@ -35,13 +39,84 @@ const PIECES := {
 	"crate_floor": {"sheet": "barn", "rect": Rect2(32, 240, 64, 48), "cells_w": 4, "rows_block": 0, "z": 6},
 	## The tavern bar: counter with candle, mug and bottle, stool out front.
 	"bar_counter": {"sheet": "bar", "rect": Rect2(0, 0, 64, 48), "cells_w": 4, "rows_block": 2, "z": 8, "light": true},
-	"bar_barrel": {"sheet": "bar", "rect": Rect2(66, 0, 11, 15), "cells_w": 1, "rows_block": 1, "z": 8}
+	"bar_barrel": {"sheet": "bar", "rect": Rect2(66, 0, 11, 15), "cells_w": 1, "rows_block": 1, "z": 8},
+	## Rustic interior sheet: rugs underfoot...
+	"int_rug_red_square": {"sheet": "interior", "rect": Rect2(469, 36, 39, 39), "cells_w": 2, "rows_block": 0, "z": 3},
+	"int_rug_red_long": {"sheet": "interior", "rect": Rect2(471, 82, 35, 43), "cells_w": 2, "rows_block": 0, "z": 3},
+	"int_rug_green_square": {"sheet": "interior", "rect": Rect2(469, 132, 39, 39), "cells_w": 2, "rows_block": 0, "z": 3},
+	"int_rug_green_long": {"sheet": "interior", "rect": Rect2(471, 178, 35, 43), "cells_w": 2, "rows_block": 0, "z": 3},
+	## ...the working fires of smithies, bakeries and taprooms...
+	"int_hearth_arch": {"sheet": "interior", "rect": Rect2(321, 336, 30, 30), "cells_w": 2, "rows_block": 1, "z": 8, "light": true},
+	"int_kiln_beehive": {"sheet": "interior", "rect": Rect2(355, 339, 26, 27), "cells_w": 2, "rows_block": 1, "z": 8, "light": true},
+	"int_fireplace_dark": {"sheet": "interior", "rect": Rect2(386, 339, 28, 28), "cells_w": 2, "rows_block": 1, "z": 8, "light": true},
+	"int_anvil": {"sheet": "interior", "rect": Rect2(304, 336, 16, 14), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_weapon_rack_axes": {"sheet": "interior", "rect": Rect2(242, 345, 27, 21), "cells_w": 2, "rows_block": 1, "z": 8},
+	"int_weapon_rack_pikes": {"sheet": "interior", "rect": Rect2(275, 346, 26, 20), "cells_w": 2, "rows_block": 1, "z": 8},
+	"int_armor_stand_wood": {"sheet": "interior", "rect": Rect2(242, 306, 12, 14), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_armor_stand_silver": {"sheet": "interior", "rect": Rect2(242, 321, 12, 15), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_armor_stand_dark": {"sheet": "interior", "rect": Rect2(257, 306, 14, 14), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_armor_stand_plate": {"sheet": "interior", "rect": Rect2(257, 321, 14, 15), "cells_w": 1, "rows_block": 1, "z": 8},
+	## ...stocked kitchen counters and tavern fare...
+	"int_counter_crockery": {"sheet": "interior", "rect": Rect2(273, 315, 30, 19), "cells_w": 2, "rows_block": 1, "z": 8},
+	"int_counter_linens": {"sheet": "interior", "rect": Rect2(305, 315, 30, 19), "cells_w": 2, "rows_block": 1, "z": 8},
+	"int_counter_jugs": {"sheet": "interior", "rect": Rect2(337, 314, 30, 20), "cells_w": 2, "rows_block": 1, "z": 8},
+	"int_roast_bird": {"sheet": "interior", "rect": Rect2(304, 355, 16, 11), "cells_w": 1, "rows_block": 1, "z": 8},
+	## ...cabinets, shelves and seats...
+	"int_dresser_drawers": {"sheet": "interior", "rect": Rect2(385, 279, 14, 19), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_cupboard_doors": {"sheet": "interior", "rect": Rect2(400, 276, 16, 22), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_shelf_flowerpot": {"sheet": "interior", "rect": Rect2(417, 276, 14, 20), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_shelf_small": {"sheet": "interior", "rect": Rect2(433, 281, 14, 15), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_bookshelf_red": {"sheet": "interior", "rect": Rect2(449, 276, 14, 20), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_bookshelf_wide": {"sheet": "interior", "rect": Rect2(466, 276, 28, 20), "cells_w": 2, "rows_block": 1, "z": 8},
+	"int_cabinet_tall": {"sheet": "interior", "rect": Rect2(497, 276, 14, 20), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_stool_cushion": {"sheet": "interior", "rect": Rect2(306, 284, 12, 14), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_chair_cushion": {"sheet": "interior", "rect": Rect2(322, 282, 12, 16), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_chair_cushion_red": {"sheet": "interior", "rect": Rect2(338, 282, 12, 16), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_candle_stand": {"sheet": "interior", "rect": Rect2(354, 280, 12, 18), "cells_w": 1, "rows_block": 1, "z": 8, "light": true},
+	"int_stool_low": {"sheet": "interior", "rect": Rect2(370, 283, 12, 15), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_bench_rough": {"sheet": "interior", "rect": Rect2(7, 171, 34, 13), "cells_w": 2, "rows_block": 1, "z": 8},
+	"int_stump_table": {"sheet": "interior", "rect": Rect2(0, 208, 16, 16), "cells_w": 1, "rows_block": 1, "z": 8},
+	## ...and greenery to soften the stone.
+	"int_urn_basket": {"sheet": "interior", "rect": Rect2(384, 313, 16, 21), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_plant_potted": {"sheet": "interior", "rect": Rect2(402, 313, 12, 21), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_plant_tree": {"sheet": "interior", "rect": Rect2(416, 310, 15, 24), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_pot_clay": {"sheet": "interior", "rect": Rect2(370, 321, 12, 13), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_pot_crate": {"sheet": "interior", "rect": Rect2(434, 321, 12, 13), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_table_flower_blue": {"sheet": "interior", "rect": Rect2(450, 317, 12, 17), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_table_flower_white": {"sheet": "interior", "rect": Rect2(466, 317, 12, 17), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_table_flower_pot": {"sheet": "interior", "rect": Rect2(482, 319, 12, 15), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_table_plant_fern": {"sheet": "interior", "rect": Rect2(497, 317, 15, 17), "cells_w": 1, "rows_block": 1, "z": 8}
 }
 
 ## Building types whose interiors read as stocked shops.
 const SHOP_DRESSING_TYPES := [
 	"market_stall", "general_store", "warehouse", "bakery", "tavern", "brewery"
 ]
+
+## Trades share a dressing theme: the same hearth-and-anvil kit fits a
+## forge, a smeltery or a weapon shop; books and long rugs fit a temple
+## as well as a counting house. Types not listed here (and not shops)
+## keep their bare tile decor.
+const DRESSING_THEME_BY_TYPE := {
+	"forge": "smithy", "smeltery": "smithy", "engineers_foundry": "smithy",
+	"armory": "smithy", "weapon_shop": "smithy", "armor_shop": "smithy", "smithy": "smithy",
+	"bakery": "kitchen", "kitchen": "kitchen", "granary": "kitchen",
+	"butchery": "kitchen", "millhouse": "kitchen",
+	"temple": "stately", "chapel": "stately", "high_kings_palace": "stately",
+	"guild_hall": "stately", "archives": "stately", "enchanting_study": "stately",
+	"runesmith_sanctum": "stately", "town_hall": "stately", "bank_vaults": "stately",
+	"auction_house": "stately", "merchants_counting_house": "stately",
+	"cartographers_office": "stately", "explorers_guild": "stately",
+	"barracks": "guard", "guardhouse": "guard",
+	"infirmary": "herbal", "apothecary": "herbal", "alchemy_laboratory": "herbal",
+	"mushroom_farm": "herbal",
+	"tavern": "hearthside", "inn": "hearthside", "brewery": "hearthside",
+	"workshop": "craft", "engineering_workshop": "craft", "leatherworking_shop": "craft",
+	"tailoring_shop": "craft", "carpenter": "craft", "tailor": "craft",
+	"cooperage": "craft", "tannery": "craft", "cobblers_shop": "craft",
+	"ropemakers_hall": "craft", "mason_lodge": "craft", "gemcutters_studio": "craft",
+	"miners_guild": "craft", "storage_warehouse": "stockroom"
+}
 
 ## Flood-fills the grid into connected components of one zone value,
 ## walls included (the zone's edge cells render as walls).
@@ -228,7 +303,7 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 		for cell: Vector2i in interior:
 			if try_place.call("plant_palm", cell):
 				break
-		var small_pool: Array[String] = ["df_box_1_0", "df_box_2_0", "df_tool_20_0", "df_tool_11_0", "df_toy_0_0", "df_chair_0_0", "df_food_0_0"]
+		var small_pool: Array[String] = ["df_box_1_0", "df_box_2_0", "df_tool_20_0", "df_tool_11_0", "df_toy_0_0", "df_chair_0_0", "df_food_0_0", "int_stool_cushion", "int_pot_clay", "int_stump_table", "int_table_flower_pot"]
 		var small_count := rng.randi_range(1, 2)
 		for _small in range(small_count * 5):
 			if small_count <= 0:
@@ -242,7 +317,8 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 	if box.size.x >= 5 and box.size.y >= 4:
 		var set_cell := Vector2i(box.position.x + (box.size.x - 4) / 2, box.position.y + (box.size.y - 2) / 2)
 		if try_place.call("dining_set", set_cell):
-			placements.insert(0, {"piece": "round_rug", "cell": set_cell + Vector2i(0, -1)})
+			var rug_pool: Array[String] = ["round_rug", "int_rug_red_square", "int_rug_green_square", "int_rug_red_long"]
+			placements.insert(0, {"piece": rug_pool[rng.randi_range(0, rug_pool.size() - 1)], "cell": set_cell + Vector2i(0, -1)})
 			for candle_offset: Vector2i in [Vector2i(-1, 0), Vector2i(4, 0), Vector2i(-1, 1), Vector2i(4, 1)]:
 				if try_place.call("candles", set_cell + candle_offset):
 					break
@@ -266,6 +342,12 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 				if try_place.call("cabinet", north_candidates[(start_index + offset * 3) % north_candidates.size()]):
 					break
 
+	# A hearth fire warms the bigger homes from the north wall.
+	if interior.size() >= 14:
+		for x in range(box.position.x, box.end.x - 1):
+			if try_place.call("int_fireplace_dark" if rng.randf() < 0.6 else "int_hearth_arch", Vector2i(x, box.position.y)):
+				break
+
 	# A kitchen counter for the bigger homes, greenery for everyone.
 	if box.size.x >= 6 and rng.randf() < 0.7:
 		try_place.call("counter_veg", Vector2i(box.position.x, box.end.y - 1))
@@ -288,7 +370,12 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 		"df_tool_12_0", "df_tool_12_1",
 		"df_toy_0_0", "df_toy_0_1", "df_toy_1_0", "df_toy_1_1",
 		"df_chair_0_0", "df_chair_1_0", "df_chair_2_0",
-		"df_food_0_0", "df_food_1_0", "df_food_2_0"
+		"df_food_0_0", "df_food_1_0", "df_food_2_0",
+		"int_stool_cushion", "int_chair_cushion", "int_chair_cushion_red", "int_candle_stand",
+		"int_dresser_drawers", "int_cupboard_doors", "int_shelf_flowerpot", "int_shelf_small",
+		"int_bookshelf_red", "int_plant_potted", "int_plant_tree", "int_pot_clay",
+		"int_table_flower_blue", "int_table_flower_white", "int_table_plant_fern",
+		"int_stump_table", "int_urn_basket"
 	]
 	var clutter_count := rng.randi_range(3, mini(7, 3 + interior.size() / 6))
 	var edge_cells: Array[Vector2i] = []
@@ -312,7 +399,7 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 ## wall, crates of goods in the corners, loose produce by the counter.
 static func plan_shop_dressing(component: Array[Vector2i], building_type: String, is_occupied: Callable, door_cells: Dictionary, rng: RandomNumberGenerator) -> Array[Dictionary]:
 	var placements: Array[Dictionary] = []
-	if not SHOP_DRESSING_TYPES.has(building_type):
+	if not SHOP_DRESSING_TYPES.has(building_type) and not DRESSING_THEME_BY_TYPE.has(building_type):
 		return placements
 	var interior := interior_cells(component)
 	if interior.size() < 6:
@@ -335,42 +422,133 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 			claimed[cell] = true
 		return true
 
-	# Taverns get the bar itself, front and center, with spare kegs.
-	if building_type == "tavern" and box.size.x >= 5 and box.size.y >= 3:
-		# Prefer the north wall, but a busy taproom takes any row with
-		# space for the counter.
-		var bar_done := false
-		for y in range(box.position.y, box.end.y - 1):
-			if try_place.call("bar_counter", Vector2i(box.position.x + (box.size.x - 4) / 2, y)):
-				bar_done = true
-				break
-			for x in range(box.position.x, box.end.x - 3):
-				if try_place.call("bar_counter", Vector2i(x, y)):
+	# Trade-theme dressing goes first so the signature pieces claim the
+	# room's prime spots: the forge fire on the north wall, the temple
+	# rug in the center, racks and stands along the edges.
+	var theme := String(DRESSING_THEME_BY_TYPE.get(building_type, ""))
+	var center_top := Vector2i(
+		box.position.x + maxi((box.size.x - 2) / 2, 0),
+		box.position.y + maxi((box.size.y - 2) / 2, 0)
+	)
+	match theme:
+		"smithy":
+			for x in range(box.position.x, box.end.x - 1):
+				if try_place.call("int_hearth_arch", Vector2i(x, box.position.y)):
+					break
+			try_place.call("int_anvil", center_top)
+			for x in range(box.end.x - 2, box.position.x - 1, -1):
+				if try_place.call("int_weapon_rack_axes" if rng.randf() < 0.5 else "int_weapon_rack_pikes", Vector2i(x, box.position.y)):
+					break
+			var stand_pool: Array[String] = ["int_armor_stand_wood", "int_armor_stand_silver", "int_armor_stand_dark", "int_armor_stand_plate"]
+			var stand_corners: Array[Vector2i] = [
+				Vector2i(box.position.x, box.end.y - 1), Vector2i(box.end.x - 1, box.end.y - 1),
+				Vector2i(box.position.x, box.position.y), Vector2i(box.end.x - 1, box.position.y)
+			]
+			for corner: Vector2i in stand_corners:
+				if try_place.call(stand_pool[rng.randi_range(0, stand_pool.size() - 1)], corner) and rng.randf() < 0.4:
+					break
+		"kitchen":
+			for x in range(box.position.x, box.end.x - 1):
+				if try_place.call("int_kiln_beehive", Vector2i(x, box.position.y)):
+					break
+			var counter_run: Array[String] = ["int_counter_crockery", "int_counter_linens", "int_counter_jugs"]
+			for step in range(rng.randi_range(2, 3)):
+				try_place.call(counter_run[rng.randi_range(0, counter_run.size() - 1)], Vector2i(box.position.x + step * 2, box.end.y - 1))
+			try_place.call("int_roast_bird", center_top + Vector2i(1, 0))
+		"stately":
+			placements.append({"piece": "int_rug_red_long" if rng.randf() < 0.5 else "int_rug_green_long", "cell": center_top})
+			for candle_offset: Vector2i in [Vector2i(-1, 0), Vector2i(2, 0)]:
+				try_place.call("int_candle_stand", center_top + candle_offset)
+			var book_run: Array[String] = ["int_bookshelf_wide", "int_bookshelf_red", "int_cabinet_tall"]
+			var books_placed := 0
+			for x in range(box.position.x, box.end.x):
+				if try_place.call(book_run[rng.randi_range(0, book_run.size() - 1)], Vector2i(x, box.position.y)):
+					books_placed += 1
+					if books_placed >= 3:
+						break
+			try_place.call("int_plant_tree", Vector2i(box.end.x - 1, box.end.y - 1))
+		"guard":
+			for x in range(box.position.x, box.end.x - 1):
+				if try_place.call("int_weapon_rack_pikes", Vector2i(x, box.position.y)):
+					break
+			var stands: Array[String] = ["int_armor_stand_silver", "int_armor_stand_plate", "int_armor_stand_dark", "int_armor_stand_wood"]
+			var stand_count := rng.randi_range(2, 3)
+			for _stand in range(stand_count * 4):
+				if stand_count <= 0:
+					break
+				if try_place.call(stands[rng.randi_range(0, stands.size() - 1)], interior[rng.randi_range(0, interior.size() - 1)]):
+					stand_count -= 1
+			placements.append({"piece": "int_rug_green_square", "cell": center_top})
+		"herbal":
+			var green_pool: Array[String] = ["int_plant_potted", "int_plant_tree", "int_urn_basket", "int_table_flower_blue", "int_table_flower_white", "int_table_plant_fern", "int_shelf_flowerpot"]
+			var green_count := rng.randi_range(3, 5)
+			for _green in range(green_count * 4):
+				if green_count <= 0:
+					break
+				if try_place.call(green_pool[rng.randi_range(0, green_pool.size() - 1)], interior[rng.randi_range(0, interior.size() - 1)]):
+					green_count -= 1
+			for x in range(box.position.x, box.end.x):
+				if try_place.call("int_shelf_small", Vector2i(x, box.position.y)):
+					break
+		"hearthside":
+			for x in range(box.position.x, box.end.x - 1):
+				if try_place.call("int_fireplace_dark", Vector2i(x, box.position.y)):
+					break
+			placements.append({"piece": "int_rug_red_square", "cell": center_top})
+			try_place.call("int_roast_bird", center_top + Vector2i(-1, 1))
+		"craft":
+			for x in range(box.position.x, box.end.x - 1):
+				if try_place.call("int_bench_rough", Vector2i(x, box.position.y)):
+					break
+			try_place.call("int_urn_basket", Vector2i(box.end.x - 1, box.end.y - 1))
+			try_place.call("int_stool_low", center_top + Vector2i(-1, 1))
+		"stockroom":
+			var stock_pool: Array[String] = ["int_pot_crate", "int_urn_basket", "int_pot_clay", "int_counter_jugs"]
+			var stock_count := rng.randi_range(3, 5)
+			for _stock in range(stock_count * 4):
+				if stock_count <= 0:
+					break
+				if try_place.call(stock_pool[rng.randi_range(0, stock_pool.size() - 1)], interior[rng.randi_range(0, interior.size() - 1)]):
+					stock_count -= 1
+
+	# Shopfront staples stay exclusive to the storefront types.
+	if SHOP_DRESSING_TYPES.has(building_type):
+		# Taverns get the bar itself, front and center, with spare kegs.
+		if building_type == "tavern" and box.size.x >= 5 and box.size.y >= 3:
+			# Prefer the north wall, but a busy taproom takes any row with
+			# space for the counter.
+			var bar_done := false
+			for y in range(box.position.y, box.end.y - 1):
+				if try_place.call("bar_counter", Vector2i(box.position.x + (box.size.x - 4) / 2, y)):
 					bar_done = true
 					break
-			if bar_done:
+				for x in range(box.position.x, box.end.x - 3):
+					if try_place.call("bar_counter", Vector2i(x, y)):
+						bar_done = true
+						break
+				if bar_done:
+					break
+			try_place.call("bar_barrel", Vector2i(box.end.x - 1, box.end.y - 1))
+			try_place.call("bar_barrel", Vector2i(box.position.x, box.end.y - 1))
+		for x in range(box.position.x, box.end.x):
+			if box.size.x >= 7 and try_place.call("produce_shelf", Vector2i(x, box.position.y)):
 				break
-		try_place.call("bar_barrel", Vector2i(box.end.x - 1, box.end.y - 1))
-		try_place.call("bar_barrel", Vector2i(box.position.x, box.end.y - 1))
-	for x in range(box.position.x, box.end.x):
-		if box.size.x >= 7 and try_place.call("produce_shelf", Vector2i(x, box.position.y)):
-			break
-		if box.size.x < 7 and try_place.call("barrel_shelf", Vector2i(x, box.position.y)):
-			break
-	try_place.call("crate_cluster", Vector2i(box.end.x - 4, box.end.y - 2))
-	if rng.randf() < 0.7:
-		try_place.call("crate_floor", Vector2i(box.position.x, box.end.y - 1))
+			if box.size.x < 7 and try_place.call("barrel_shelf", Vector2i(x, box.position.y)):
+				break
+		try_place.call("crate_cluster", Vector2i(box.end.x - 4, box.end.y - 2))
+		if rng.randf() < 0.7:
+			try_place.call("crate_floor", Vector2i(box.position.x, box.end.y - 1))
 
-	# Reference look: continuous stocked shelf runs along the walls.
-	var shelf_run: Array[String] = ["df_tool_23_0", "df_tool_23_1", "df_tool_23_2", "df_tool_23_3", "df_bookcase_2_0", "df_cabinet_1_0"]
-	var run_length := rng.randi_range(2, 4)
-	var run_start := Vector2i(box.position.x + 1, box.position.y)
-	for step in range(run_length):
-		try_place.call(shelf_run[rng.randi_range(0, shelf_run.size() - 1)], run_start + Vector2i(step, 0))
+		# Reference look: continuous stocked shelf runs along the walls.
+		var shelf_run: Array[String] = ["df_tool_23_0", "df_tool_23_1", "df_tool_23_2", "df_tool_23_3", "df_bookcase_2_0", "df_cabinet_1_0"]
+		var run_length := rng.randi_range(2, 4)
+		var run_start := Vector2i(box.position.x + 1, box.position.y)
+		for step in range(run_length):
+			try_place.call(shelf_run[rng.randi_range(0, shelf_run.size() - 1)], run_start + Vector2i(step, 0))
 
 	# The tools of the trade, scattered where they were last used.
 	var trade_pools := {
-		"tavern": ["df_tool_11_0", "df_tool_11_1", "df_tool_11_2", "df_tool_12_0", "df_tool_12_1", "df_tool_0_0", "df_food_0_0", "df_food_1_0", "df_food_2_0", "df_tool_21_0", "df_chair_0_0"],
+		"tavern": ["df_tool_11_0", "df_tool_11_1", "df_tool_11_2", "df_tool_12_0", "df_tool_12_1", "df_tool_0_0", "df_food_0_0", "df_food_1_0", "df_food_2_0", "df_tool_21_0", "df_chair_0_0", "int_stool_cushion", "int_chair_cushion_red", "int_bench_rough"],
 		"brewery": ["df_tool_11_0", "df_tool_11_1", "df_tool_12_0", "df_tool_12_1", "df_tool_12_2", "df_tool_27_0", "df_tool_27_1", "df_tool_18_0"],
 		"bakery": ["df_tool_21_0", "df_tool_21_1", "df_tool_14_0", "df_food_0_0", "df_food_1_0", "df_tool_12_0"],
 		"warehouse": ["df_box_0_0", "df_box_0_1", "df_tool_16_0", "df_tool_16_1", "df_tool_17_0", "df_tool_17_1", "df_tool_18_0", "df_tool_18_1", "df_tool_10_0", "df_tool_10_1"],
@@ -424,6 +602,8 @@ static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_si
 			sprite.texture = BARN_INTERIOR_TEXTURE
 		"bar":
 			sprite.texture = TAVERN_BAR_TEXTURE
+		"interior":
+			sprite.texture = INTERIOR_TILESET_TEXTURE
 		_:
 			sprite.texture = HOUSE_INTERIOR_TEXTURE
 	sprite.region_enabled = true
