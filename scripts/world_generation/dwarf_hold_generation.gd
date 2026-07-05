@@ -2018,7 +2018,7 @@ func _update_city_layer_transform() -> void:
 	actor_layer.scale = city_layer.scale
 	actor_layer.position = city_layer.position
 	if tile_hover_tooltip.visible:
-		tile_hover_tooltip.position = _clamp_tooltip_position(tile_hover_tooltip.position)
+		_place_hover_tooltip(tile_hover_tooltip.position - city_panel.global_position)
 	lighting_layer.scale = city_layer.scale
 	lighting_layer.position = city_layer.position
 	_update_zone_overlay()
@@ -3935,9 +3935,8 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	if hovered_layer.get_cell_source_id(hovered_cell) < 0:
 		_hide_hover_tooltip()
 		return
-	var tooltip_position := _clamp_tooltip_position(mouse_position + Vector2(16, 16))
 	if tile_hover_tooltip.visible and hovered_cell == _hover_tooltip_cell and hovered_layer == _hover_tooltip_layer:
-		tile_hover_tooltip.position = tooltip_position
+		_place_hover_tooltip(mouse_position + Vector2(16, 16))
 		return
 
 	var atlas_coords := hovered_layer.get_cell_atlas_coords(hovered_cell)
@@ -3971,7 +3970,7 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 			tooltip_lines.append(flavor)
 	tile_hover_label.text = "\n".join(tooltip_lines)
 	tile_hover_tooltip.reset_size()
-	tile_hover_tooltip.position = _clamp_tooltip_position(mouse_position + Vector2(16, 16))
+	_place_hover_tooltip(mouse_position + Vector2(16, 16))
 	tile_hover_tooltip.visible = true
 	_hover_tooltip_cell = hovered_cell
 	_hover_tooltip_layer = hovered_layer
@@ -3995,6 +3994,12 @@ func _display_name_for_building_type(building_type: String) -> String:
 
 func _building_subtype_summary_text() -> String:
 	return DwarfHoldTileService.building_subtype_summary_text(_latest_civic_buildings_by_id)
+
+## The tooltip is top_level so the CityPanel container cannot stretch it
+## across the whole panel; top_level positions are canvas-space, so the
+## panel-local clamp result gets offset by the panel's global origin.
+func _place_hover_tooltip(panel_local_position: Vector2) -> void:
+	tile_hover_tooltip.position = city_panel.global_position + _clamp_tooltip_position(panel_local_position)
 
 func _clamp_tooltip_position(desired_position: Vector2) -> Vector2:
 	var tooltip_size := tile_hover_tooltip.size
