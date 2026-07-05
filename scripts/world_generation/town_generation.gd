@@ -120,6 +120,7 @@ var _player_move_target_cell := Vector2i.ZERO
 var _player_move_target_position := Vector2.ZERO
 var _player_pending_chest_interaction := Vector2i(2147483647, 2147483647)
 var _hover_tooltip_cell := Vector2i(2147483647, 2147483647)
+var _hover_tooltip_npc := ""
 var _hover_tooltip_layer: TileMapLayer
 var _last_move_direction := Vector2i.ZERO
 var _move_repeat_timer := 0.0
@@ -2647,7 +2648,13 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	if hovered_layer.get_cell_source_id(hovered_cell) < 0:
 		_hide_hover_tooltip()
 		return
-	if tile_hover_tooltip.visible and hovered_cell == _hover_tooltip_cell and hovered_layer == _hover_tooltip_layer:
+	# A villager under the cursor introduces themselves, matched against the
+	# sprite bodies so a walker mid-step still counts as hovered.
+	var hovered_npc := _npc_state_near_mouse(mouse_position)
+	if hovered_npc.is_empty():
+		hovered_npc = _npc_state_at_cell(hovered_cell)
+	var hovered_npc_name := String((hovered_npc.get("identity", {}) as Dictionary).get("name", ""))
+	if tile_hover_tooltip.visible and hovered_cell == _hover_tooltip_cell and hovered_layer == _hover_tooltip_layer and hovered_npc_name == _hover_tooltip_npc:
 		_place_hover_tooltip(mouse_position + Vector2(16, 16))
 		return
 
@@ -2655,8 +2662,6 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	var tile_name := _tile_name_from_atlas(atlas_coords)
 	var zone_name := _zone_name_for_cell(hovered_cell)
 	var tooltip_lines: PackedStringArray = []
-	# A villager under the cursor introduces themselves, Dwarf Fortress style.
-	var hovered_npc := _npc_state_at_cell(hovered_cell)
 	if not hovered_npc.is_empty() and hovered_npc.has("identity"):
 		var identity := hovered_npc.get("identity", {}) as Dictionary
 		tooltip_lines.append(NpcIdentityService.summary_line(identity))
@@ -2679,11 +2684,30 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	tile_hover_tooltip.visible = true
 	_hover_tooltip_cell = hovered_cell
 	_hover_tooltip_layer = hovered_layer
+	_hover_tooltip_npc = hovered_npc_name
+
+## The NPC whose sprite body sits under the cursor, nearest first.
+func _npc_state_near_mouse(mouse_position: Vector2) -> Dictionary:
+	if city_layer == null:
+		return {}
+	var local_point := (mouse_position - city_layer.position) / maxf(city_layer.scale.x, 0.001)
+	var best: Dictionary = {}
+	var best_distance := float(tile_size.x) * 0.75
+	for state: Dictionary in _npc_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null or not sprite.visible:
+			continue
+		var distance := sprite.position.distance_to(local_point)
+		if distance < best_distance:
+			best_distance = distance
+			best = state
+	return best
 
 func _hide_hover_tooltip() -> void:
 	tile_hover_tooltip.visible = false
 	_hover_tooltip_cell = Vector2i(2147483647, 2147483647)
 	_hover_tooltip_layer = null
+	_hover_tooltip_npc = ""
 
 func _tile_name_from_atlas(atlas_coords: Vector2i) -> String:
 	return TownTileService.tile_name_from_atlas(atlas_coords, TILE_ATLAS)
