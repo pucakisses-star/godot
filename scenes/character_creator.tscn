@@ -1198,24 +1198,19 @@ offset_bottom = 130.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
-theme_override_styles/panel = SubResource("StyleBoxTexture_fantasy_border")
+theme_override_styles/panel = SubResource("StyleBoxFlat_fantasy_fill")
 
 [node name="TooltipMargin" type="MarginContainer" parent="AttributeTooltipPanel" unique_id=2001887124]
 layout_mode = 2
-theme_override_constants/margin_left = 24
-theme_override_constants/margin_top = 22
-theme_override_constants/margin_right = 24
-theme_override_constants/margin_bottom = 22
-
-[node name="TooltipFill" type="Panel" parent="AttributeTooltipPanel/TooltipMargin" unique_id=2001887128]
-layout_mode = 2
-mouse_filter = 2
-theme_override_styles/panel = SubResource("StyleBoxFlat_fantasy_fill")
+theme_override_constants/margin_left = 14
+theme_override_constants/margin_top = 10
+theme_override_constants/margin_right = 14
+theme_override_constants/margin_bottom = 12
 
 [node name="TooltipVBox" type="VBoxContainer" parent="AttributeTooltipPanel/TooltipMargin" unique_id=2001887125]
-custom_minimum_size = Vector2(320, 0)
+custom_minimum_size = Vector2(300, 0)
 layout_mode = 2
-theme_override_constants/separation = 10
+theme_override_constants/separation = 6
 
 [node name="AttributeReminderTitle" type="Label" parent="AttributeTooltipPanel/TooltipMargin/TooltipVBox" unique_id=2001887126]
 layout_mode = 2
