@@ -4595,9 +4595,13 @@ func _position_map_tooltip() -> void:
 	if viewport == null:
 		return
 	var cursor_pos := viewport.get_mouse_position()
-	# Never resize here: doing it every frame used the one-frame-stale
-	# minimum size and made the tooltip flicker on each tile crossing.
-	# _refresh_map_tooltip resizes once when the content changes.
+	# The autowrap labels carry fixed wrap widths, so the combined minimum
+	# is stable; snapping to it here heals the screen-tall panel that a
+	# pre-layout measurement (autowrap heights taken before widths settled)
+	# used to leave behind without reintroducing per-frame flicker.
+	var min_size := tooltip_panel.get_combined_minimum_size()
+	if absf(tooltip_panel.size.y - min_size.y) > 1.0 or absf(tooltip_panel.size.x - min_size.x) > 1.0:
+		tooltip_panel.size = min_size
 	var tooltip_size := tooltip_panel.size
 	var offset := Vector2(16, 16)
 	var viewport_size := viewport.get_visible_rect().size
