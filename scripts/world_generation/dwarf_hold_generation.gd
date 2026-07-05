@@ -105,6 +105,7 @@ var _torch_sprites: Dictionary = {}
 ## Streamed wild chunks currently resident, chunk coords -> true. The
 ## city core never appears here and is never evicted.
 var _streamed_chunks: Dictionary = {}
+var _discovery_chunks: Dictionary = {}
 var _city_bounds := Rect2i()
 var _player_glow: Sprite2D
 var _glow_texture: Texture2D
@@ -1509,7 +1510,12 @@ func _show_level(target_level_index: int) -> void:
 		_dug_cells = {}
 	_last_player_chunk = Vector2i(2147483647, 2147483647)
 	_streamed_chunks = {}
-	_city_bounds = _find_bounds(grid).grow(2)
+	var stored_bounds: Variant = level_data.get("city_bounds")
+	if stored_bounds is Rect2i:
+		_city_bounds = stored_bounds
+	else:
+		_city_bounds = _find_bounds(grid).grow(2)
+		level_data["city_bounds"] = _city_bounds
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
 	_chest_inventories.clear()
@@ -2140,6 +2146,27 @@ func _stream_world_chunks() -> void:
 ## recorded diffs when walked back into. The city core is never evicted.
 const EVICT_CHUNK_RADIUS := 4
 
+## Sites and discoveries stamp structures that spill past their chunk;
+## evicting any chunk they touch would tear holes in them.
+func _chunk_neighborhood_has_stamp(chunk: Vector2i) -> bool:
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			var neighbor := chunk + Vector2i(dx, dy)
+			if _discovery_chunks.has(neighbor):
+				return true
+			if not (_sites_by_chunk.get(UndergroundWorldService.chunk_key(neighbor), []) as Array).is_empty():
+				return true
+	return false
+
+func _append_district_label_once(label: Dictionary) -> void:
+	var center: Variant = label.get("center", Vector2i.ZERO)
+	var label_name := String(label.get("name", ""))
+	for existing_variant: Variant in _latest_district_labels:
+		var existing := existing_variant as Dictionary
+		if String(existing.get("name", "")) == label_name and existing.get("center", Vector2i(-1, -1)) == center:
+			return
+	_latest_district_labels.append(label)
+
 func _evict_far_chunks(player_chunk: Vector2i) -> void:
 	var to_evict: Array[Vector2i] = []
 	for chunk_variant: Variant in _streamed_chunks.keys():
@@ -2149,6 +2176,8 @@ func _evict_far_chunks(player_chunk: Vector2i) -> void:
 	for chunk: Vector2i in to_evict:
 		var rect: Rect2i = UndergroundWorldService.chunk_rect(chunk)
 		if rect.intersects(_city_bounds):
+			continue
+		if _chunk_neighborhood_has_stamp(chunk):
 			continue
 		for y in range(rect.position.y, rect.end.y):
 			for x in range(rect.position.x, rect.end.x):
@@ -2196,15 +2225,18 @@ func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 			for site_variant: Variant in (_sites_by_chunk.get(key, []) as Array):
 				var site := site_variant as Dictionary
 				UndergroundWorldService.stamp_settlement_site(_latest_grid, _latest_floor_decor, site)
-				_latest_district_labels.append({"name": String(site.get("name", "")), "center": site.get("cell", Vector2i.ZERO), "wild": true})
+				_append_district_label_once({"name": String(site.get("name", "")), "center": site.get("cell", Vector2i.ZERO), "wild": true})
 				stamped_site = true
 			var discovery: Dictionary = UndergroundWorldService.stamp_chunk_discovery(_latest_grid, _latest_floor_decor, chunk, _world_seed_hash)
 			if not discovery.is_empty():
 				discovery["wild"] = true
-				_latest_district_labels.append(discovery)
+				_discovery_chunks[chunk] = true
+				_append_district_label_once(discovery)
 			var rect: Rect2i = UndergroundWorldService.generate_chunk(_latest_grid, _latest_floor_decor, chunk, _world_noise)
 			_streamed_chunks[chunk] = true
-			_apply_hold_diffs_to_rect(rect)
+			# A re-stamped site spills past the chunk; the player's edits
+			# must win over the stamp across the whole spill.
+			_apply_hold_diffs_to_rect(rect.grow(14) if stamped_site else rect)
 			_render_world_rect(rect.grow(14 if stamped_site else 1))
 			_respawn_torches_in_rect(rect)
 			if stamped_site or not discovery.is_empty():
