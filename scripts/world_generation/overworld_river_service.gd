@@ -13,6 +13,13 @@ const RIVER_NEIGHBOR_DEFINITIONS := [
 	{"offset": Vector2i(-1, 0), "key": "W", "bit": 8}
 ]
 
+## Flow directions for carving (tile masks stay 4-way; diagonal steps
+## stamp a staircase cell so channels remain edge-connected).
+const RIVER_FLOW_OFFSETS: Array[Vector2i] = [
+	Vector2i(0, -1), Vector2i(1, -1), Vector2i(1, 0), Vector2i(1, 1),
+	Vector2i(0, 1), Vector2i(-1, 1), Vector2i(-1, 0), Vector2i(-1, -1)
+]
+
 const RIVER_MASK_SUFFIX_LOOKUP := {
 	0: "0",
 	1: "N",
@@ -128,44 +135,60 @@ static func build_river_map_buffers(
 	var ocean_distance := build_ocean_distance_map(_biome_buffer_to_dictionary(base_biome_buffer, map_size), map_size)
 	var ocean_influence := lerpf(0.008, 0.02, frequency_normalized)
 	var river_map: Dictionary = {}
+	# Rivers wander like water: eight flow directions, momentum carrying
+	# the current forward, and a slow side-to-side meander per river. The
+	# straight-line channels of the old 4-way steepest-descent are gone.
+	var far_distance := float(map_size.x + map_size.y)
 	for i in range(mini(candidates.size(), max_sources)):
 		var candidate := candidates[i] as Dictionary
 		var idx := int(candidate.get("idx", 0))
 		var coord := _index_to_coord(idx, map_size)
 		var steps := 0
 		var strength := 2 if float(candidate.get("weight", 0.0)) > major_river_threshold else 1
+		var meander_phase := rng.randf() * TAU
+		var meander_amplitude := 0.6 + rng.randf() * 0.8
+		var last_dir := Vector2.ZERO
 		while steps < map_size.x + map_size.y:
 			river_map[coord] = mini(4, int(river_map.get(coord, 0)) + strength)
 			steps += 1
-			var lowest_coord := coord
 			var current_idx := _coord_to_index(coord, map_size)
 			var current_base_value := float(height_buffer[current_idx]) - float(moisture_buffer[current_idx]) * 0.02
-			var lowest_score := current_base_value
-			var lowest_base_value := current_base_value
-			var current_ocean_distance := float(ocean_distance.get(coord, map_size.x + map_size.y))
-			for def_variant: Variant in RIVER_NEIGHBOR_DEFINITIONS:
-				var def := def_variant as Dictionary
-				var neighbor := coord + (def.get("offset", Vector2i.ZERO) as Vector2i)
+			var current_ocean_distance := float(ocean_distance.get(coord, far_distance))
+			var sway := sin(float(steps) * 0.3 + meander_phase) * 0.0045 * meander_amplitude
+			var best_offset := Vector2i.ZERO
+			# A little slack lets the current carry across flats and low bumps.
+			var best_score := current_base_value + 0.0035
+			for offset: Vector2i in RIVER_FLOW_OFFSETS:
+				var neighbor := coord + offset
 				if not _is_valid(neighbor, map_size):
 					continue
 				var neighbor_idx := _coord_to_index(neighbor, map_size)
-				var neighbor_base_value := float(height_buffer[neighbor_idx]) - float(moisture_buffer[neighbor_idx]) * 0.02
-				var score := neighbor_base_value
-				var neighbor_ocean_distance := float(ocean_distance.get(neighbor, map_size.x + map_size.y))
-				var distance_delta := neighbor_ocean_distance - current_ocean_distance
-				score += distance_delta * ocean_influence
-				if score < lowest_score - 0.000001:
-					lowest_score = score
-					lowest_base_value = neighbor_base_value
-					lowest_coord = neighbor
-				elif absf(score - lowest_score) <= 0.000001 and neighbor_base_value < lowest_base_value:
-					lowest_base_value = neighbor_base_value
-					lowest_coord = neighbor
-			if lowest_coord == coord:
+				var direction := Vector2(offset).normalized()
+				var score := float(height_buffer[neighbor_idx]) - float(moisture_buffer[neighbor_idx]) * 0.02
+				score += (float(ocean_distance.get(neighbor, far_distance)) - current_ocean_distance) * ocean_influence * 0.5
+				score -= last_dir.dot(direction) * 0.0035
+				score += last_dir.cross(direction) * sway
+				if score < best_score:
+					best_score = score
+					best_offset = offset
+			if best_offset == Vector2i.ZERO:
 				break
-			if _biome_id_to_string(int(base_biome_buffer[_coord_to_index(lowest_coord, map_size)])) == BIOME_WATER:
+			var next := coord + best_offset
+			var step_dir := Vector2(best_offset).normalized()
+			last_dir = step_dir if last_dir == Vector2.ZERO else last_dir.lerp(step_dir, 0.55).normalized()
+			if best_offset.x != 0 and best_offset.y != 0:
+				# Staircase the diagonal through the lower shoulder so the
+				# channel stays edge-connected for the 4-way tile masks.
+				var horizontal := coord + Vector2i(best_offset.x, 0)
+				var vertical := coord + Vector2i(0, best_offset.y)
+				var shoulder := horizontal
+				if float(height_buffer[_coord_to_index(vertical, map_size)]) < float(height_buffer[_coord_to_index(horizontal, map_size)]):
+					shoulder = vertical
+				if _biome_id_to_string(int(base_biome_buffer[_coord_to_index(shoulder, map_size)])) != BIOME_WATER:
+					river_map[shoulder] = mini(4, int(river_map.get(shoulder, 0)) + strength)
+			if _biome_id_to_string(int(base_biome_buffer[_coord_to_index(next, map_size)])) == BIOME_WATER:
 				break
-			coord = lowest_coord
+			coord = next
 			if int(river_map.get(coord, 0)) > 0 and steps > 3:
 				break
 	return river_map
@@ -180,73 +203,20 @@ static func build_river_map(
 	water_level: float,
 	river_frequency: float
 ) -> Dictionary:
-	var frequency_normalized := clampf(river_frequency, 0.0, 1.0)
-	var frequency_multiplier := lerpf(0.45, 1.75, frequency_normalized)
-	var weight_threshold := 0.12 * lerpf(1.45, 0.45, frequency_normalized)
-	var major_river_threshold := lerpf(0.45, 0.28, frequency_normalized)
-	var candidates: Array[Dictionary] = []
-	for y in range(1, map_size.y - 1):
-		for x in range(1, map_size.x - 1):
-			var coord := Vector2i(x, y)
-			if String(base_biome_map.get(coord, "")) == BIOME_WATER:
-				continue
-			var elev := float(height_map.get(coord, water_level))
-			if elev <= water_level + 0.02:
-				continue
-			var sink := clampf(1.0 - float(moisture_map.get(coord, 0.5)), 0.0, 1.0)
-			var height_factor := maxf(0.0, elev - water_level)
-			var randomness := 0.35 + rng.randf() * 0.65
-			var weight := (height_factor * 0.7 + sink * 0.3) * randomness
-			if weight > weight_threshold:
-				candidates.append({"coord": coord, "weight": weight})
-	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return float(a.get("weight", 0.0)) > float(b.get("weight", 0.0))
-	)
-	var base_sources := maxi(8, int(floor(float(map_size.x * map_size.y) / 3200.0)))
-	var source_density_multiplier := lerpf(1.8, 3.1, frequency_normalized)
-	var max_sources := maxi(4, int(round(float(base_sources) * frequency_multiplier * source_density_multiplier)))
-	var ocean_distance := build_ocean_distance_map(base_biome_map, map_size)
-	var ocean_influence := lerpf(0.008, 0.02, frequency_normalized)
-	var river_map: Dictionary = {}
-	for i in range(mini(candidates.size(), max_sources)):
-		var candidate := candidates[i] as Dictionary
-		var coord := candidate.get("coord", Vector2i.ZERO) as Vector2i
-		var steps := 0
-		var strength := 2 if float(candidate.get("weight", 0.0)) > major_river_threshold else 1
-		while steps < map_size.x + map_size.y:
-			river_map[coord] = mini(4, int(river_map.get(coord, 0)) + strength)
-			steps += 1
-			var lowest_coord := coord
-			var current_base_value := float(height_map.get(coord, water_level)) - float(moisture_map.get(coord, 0.5)) * 0.02
-			var lowest_score := current_base_value
-			var lowest_base_value := current_base_value
-			var current_ocean_distance := float(ocean_distance.get(coord, map_size.x + map_size.y))
-			for def_variant: Variant in RIVER_NEIGHBOR_DEFINITIONS:
-				var def := def_variant as Dictionary
-				var neighbor := coord + (def.get("offset", Vector2i.ZERO) as Vector2i)
-				if not _is_valid(neighbor, map_size):
-					continue
-				var neighbor_base_value := float(height_map.get(neighbor, water_level)) - float(moisture_map.get(neighbor, 0.5)) * 0.02
-				var score := neighbor_base_value
-				var neighbor_ocean_distance := float(ocean_distance.get(neighbor, map_size.x + map_size.y))
-				var distance_delta := neighbor_ocean_distance - current_ocean_distance
-				score += distance_delta * ocean_influence
-				if score < lowest_score - 0.000001:
-					lowest_score = score
-					lowest_base_value = neighbor_base_value
-					lowest_coord = neighbor
-				elif absf(score - lowest_score) <= 0.000001 and neighbor_base_value < lowest_base_value:
-					lowest_base_value = neighbor_base_value
-					lowest_coord = neighbor
-			if lowest_coord == coord:
-				break
-			if String(base_biome_map.get(lowest_coord, "")) == BIOME_WATER:
-				break
-			coord = lowest_coord
-			if int(river_map.get(coord, 0)) > 0 and steps > 3:
-				break
-	return river_map
-
+	# Delegates to the buffer walk so there is exactly one river algorithm.
+	var cell_count := map_size.x * map_size.y
+	var height_buffer := PackedFloat32Array()
+	height_buffer.resize(cell_count)
+	var moisture_buffer := PackedFloat32Array()
+	moisture_buffer.resize(cell_count)
+	var biome_buffer := PackedByteArray()
+	biome_buffer.resize(cell_count)
+	for index in range(cell_count):
+		var coord := _index_to_coord(index, map_size)
+		height_buffer[index] = float(height_map.get(coord, water_level))
+		moisture_buffer[index] = float(moisture_map.get(coord, 0.5))
+		biome_buffer[index] = _ID_TO_BIOME.find(String(base_biome_map.get(coord, TILE_ATLAS_DEFS.BIOME_GRASSLAND)))
+	return build_river_map_buffers(height_buffer, moisture_buffer, biome_buffer, rng, map_size, water_level, river_frequency)
 
 static func build_ocean_distance_map(base_biome_map: Dictionary, map_size: Vector2i) -> Dictionary:
 	return OverworldTerrainService.build_ocean_distance_map(
