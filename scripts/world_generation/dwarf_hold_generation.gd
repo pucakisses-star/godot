@@ -178,6 +178,7 @@ var _player_attack_damage := PlayerStatsService.BASE_ATTACK
 var _player_satiety := PlayerStatsService.SATIETY_MAX
 var _hunger_label: Label
 var _current_stratum: Dictionary = DepthStrataService.SURFACE
+var _furnishing_by_cell: Dictionary = {}
 const PLAYER_ATTACK_COOLDOWN := 0.45
 const CREATURE_CAP := 24
 const CREATURE_DESPAWN_DISTANCE := 90
@@ -1551,6 +1552,8 @@ func _update_depth_controls() -> void:
 	city_layer.modulate = stratum_tint
 	decor_layer.modulate = stratum_tint
 	_populate_stratum_creatures(stratum)
+	if not _hold_state.generated_levels.is_empty():
+		_scatter_stratum_relics(stratum, _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary)
 
 
 func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
@@ -2058,6 +2061,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_refresh_lighting(grid)
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
+	_apply_identity_appearances()
 	_clear_torch_sprites()
 	_clear_creatures()
 	_end_fishing("")
@@ -2292,6 +2296,43 @@ func _is_minable_rubble(cell: Vector2i) -> bool:
 
 ## Click-harvest for wild decor: ore veins yield iron, fungal growth
 ## yields mushrooms.
+## Chests, cabinets and bookcases can be searched once for whatever the
+## owner left inside.
+func _try_search_furnishing(cell: Vector2i) -> bool:
+	if not _is_player_adjacent_to_cell(cell) and cell != _player_cell:
+		return false
+	var piece := String(_furnishing_by_cell.get(cell, ""))
+	if piece.is_empty() or not DfFurnitureDefs.is_searchable(piece):
+		return false
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	var searched := level_data.get("searched_cells", {}) as Dictionary
+	if searched.has(cell):
+		_set_save_status("Already ransacked.", Color(0.75, 0.75, 0.8, 1.0))
+		return true
+	searched[cell] = true
+	level_data["searched_cells"] = searched
+	var roll := _rng.randi_range(1, 100)
+	var found := ""
+	if roll <= 55:
+		var coins := _rng.randi_range(2, 8)
+		_add_to_inventory("Coins", coins)
+		found = "%d coins" % coins
+	elif roll <= 70:
+		_add_to_inventory("Mushrooms", _rng.randi_range(1, 2))
+		found = "dried mushrooms"
+	elif roll <= 82:
+		_add_to_inventory("Old Tome", 1)
+		found = "an old tome"
+	elif roll <= 92:
+		_add_to_inventory("Carved Curio", 1)
+		found = "a carved curio"
+	else:
+		_add_to_inventory("Gem Shard", 1)
+		found = "a gem shard!"
+	_spawn_floating_text("Found %s" % found, _cell_center_position(cell), Color(0.95, 0.9, 0.6, 1.0))
+	_set_save_status("You search the %s: %s." % [DfFurnitureDefs.display_name(piece).to_lower(), found], Color(0.9, 0.85, 0.6, 1.0))
+	return true
+
 func _try_harvest_decor(cell: Vector2i) -> bool:
 	if not _is_player_adjacent_to_cell(cell):
 		return false
@@ -2532,6 +2573,31 @@ func _npc_state_at_cell(cell: Vector2i) -> Dictionary:
 
 ## Every dwarf is somebody: identities are rolled once at spawn from the
 ## hold's seeded rng, so the same seed always houses the same dwarves.
+## Every citizen wears their own face: composed DF layers seeded from
+## their identity. Identical rolls share one texture.
+func _apply_identity_appearances() -> void:
+	var texture_cache: Dictionary = {}
+	for state_variant: Variant in _npc_states:
+		var state := state_variant as Dictionary
+		var identity := state.get("identity", {}) as Dictionary
+		if identity.is_empty():
+			continue
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var layers := NpcIdentityService.appearance_for_identity(identity, "dwarf")
+		var cache_key := str(layers)
+		if not texture_cache.has(cache_key):
+			texture_cache[cache_key] = DwarfSpriteComposer.compose(layers)
+		sprite.texture = texture_cache[cache_key]
+		sprite.region_enabled = false
+		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sprite.scale = Vector2(
+			float(tile_size.x) / 32.0,
+			float(tile_size.y) / 32.0
+		) * 0.9
+		state["composed"] = true
+
 func _assign_npc_identities() -> void:
 	for state: Dictionary in _npc_states:
 		var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Dwarf"))
@@ -2987,6 +3053,35 @@ func _current_level_starmetal_cells() -> Array:
 
 ## Deep levels are populated on arrival from the stratum's roster; the
 ## starmetal veins come guarded by the deep's strongest.
+## Abandoned works of older delvers: minecarts, ladders, crocks and the
+## like, scattered once per level and re-placed identically on revisits.
+func _scatter_stratum_relics(stratum: Dictionary, level_data: Dictionary) -> void:
+	if _hold_state.current_level_index == 0:
+		return
+	var relic_pool := stratum.get("relic_pieces", []) as Array
+	if relic_pool.is_empty():
+		return
+	var placements_variant: Variant = level_data.get("relic_placements")
+	var placements: Array = []
+	if placements_variant is Array:
+		placements = placements_variant as Array
+	else:
+		var hall_cells: Array[Vector2i] = []
+		for cell_variant: Variant in _latest_grid.keys():
+			if int(_latest_grid[cell_variant]) == CELL_HALL and not _latest_floor_decor.has(cell_variant):
+				hall_cells.append(cell_variant as Vector2i)
+		if not hall_cells.is_empty():
+			for _relic in range(_rng.randi_range(6, 12)):
+				placements.append({
+					"piece": String(relic_pool[_rng.randi_range(0, relic_pool.size() - 1)]),
+					"cell": hall_cells[_rng.randi_range(0, hall_cells.size() - 1)]
+				})
+		level_data["relic_placements"] = placements
+	var typed: Array[Dictionary] = []
+	for placement_variant: Variant in placements:
+		typed.append(placement_variant as Dictionary)
+	_apply_furnishing_placements(typed)
+
 func _populate_stratum_creatures(stratum: Dictionary) -> void:
 	if _hold_state.current_level_index == 0:
 		return
@@ -3483,6 +3578,8 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	if not shop_type.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
 		_open_trade_popup(clicked_cell, shop_type)
 		return
+	if _try_search_furnishing(clicked_cell):
+		return
 	if _try_harvest_decor(clicked_cell):
 		return
 	_request_player_move_to_cell(clicked_cell)
@@ -3715,6 +3812,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 		sprite.queue_free()
 	_furnishing_sprites.clear()
 	_furnishing_blocked_cells.clear()
+	_furnishing_by_cell.clear()
 	_actor_passable_cache.clear()
 	if actor_layer == null:
 		return
@@ -3745,7 +3843,9 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 			continue
 		actor_layer.add_child(sprite)
 		_furnishing_sprites.append(sprite)
-		if int((RoomFurnishingService.PIECES.get(piece_name, {}) as Dictionary).get("rows_block", 1)) > 0:
+		for footprint_cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
+			_furnishing_by_cell[footprint_cell] = piece_name
+		if int(RoomFurnishingService.piece_def(piece_name).get("rows_block", 1)) > 0:
 			for cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
 				_furnishing_blocked_cells[cell] = true
 				_actor_passable_cache.erase(cell)
@@ -3854,6 +3954,12 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 		tooltip_lines.append("")
 	tooltip_lines.append("Tile: %s" % tile_name)
 	tooltip_lines.append("Zone: %s" % zone_name)
+	var furnishing_piece := String(_furnishing_by_cell.get(hovered_cell, ""))
+	if not furnishing_piece.is_empty():
+		var piece_line := "Furniture: %s" % DfFurnitureDefs.display_name(furnishing_piece)
+		if DfFurnitureDefs.is_searchable(furnishing_piece):
+			piece_line += " (click to search)"
+		tooltip_lines.append(piece_line)
 	var district_name := String(_latest_district_cell_map.get(hovered_cell, ""))
 	if not district_name.is_empty():
 		tooltip_lines.insert(0, "District: %s" % district_name)

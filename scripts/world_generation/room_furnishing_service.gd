@@ -15,6 +15,8 @@ const TAVERN_BAR_TEXTURE := preload("res://resources/images/webgame_tiles/extra/
 
 ## rect: source pixels (16px art). cells_w: floor cells wide at 2x.
 ## rows_block: floor rows that block movement (0 = walk-through decor).
+const DF_FURNITURE_TEXTURE := preload("res://resources/images/dwarfhold/df_furniture_atlas.png")
+
 const PIECES := {
 	"round_rug": {"sheet": "house", "rect": Rect2(0, 0, 52, 52), "cells_w": 4, "rows_block": 0, "z": 4},
 	"cabinet": {"sheet": "house", "rect": Rect2(48, 8, 48, 48), "cells_w": 3, "rows_block": 1, "z": 8},
@@ -97,7 +99,7 @@ static func _bbox(cells: Array[Vector2i]) -> Rect2i:
 	return Rect2i(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 
 static func footprint_cells(piece_name: String, base_cell: Vector2i) -> Array[Vector2i]:
-	var piece := PIECES.get(piece_name, {}) as Dictionary
+	var piece := piece_def(piece_name)
 	var cells: Array[Vector2i] = []
 	for row in range(maxi(int(piece.get("rows_block", 1)), 1)):
 		for column in range(int(piece.get("cells_w", 1))):
@@ -226,6 +228,13 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 		for cell: Vector2i in interior:
 			if try_place.call("plant_palm", cell):
 				break
+		var small_pool: Array[String] = ["df_box_1_0", "df_box_2_0", "df_tool_20_0", "df_tool_11_0", "df_toy_0_0", "df_chair_0_0", "df_food_0_0"]
+		var small_count := rng.randi_range(1, 2)
+		for _small in range(small_count * 5):
+			if small_count <= 0:
+				break
+			if try_place.call(small_pool[rng.randi_range(0, small_pool.size() - 1)], interior[rng.randi_range(0, interior.size() - 1)]):
+				small_count -= 1
 		return placements
 
 	# The dining set holds the middle of any room wide enough for it,
@@ -267,6 +276,36 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 	for corner: Vector2i in corners:
 		if rng.randf() < 0.5 and try_place.call("plant_palm", corner):
 			break
+
+	# DF clutter: every home owns things - a chest at the foot of the
+	# bed, a cabinet, books, a jug, a child's toy...
+	var clutter_pool: Array[String] = [
+		"df_box_1_0", "df_box_1_1", "df_box_2_0", "df_box_2_1", "df_box_3_0", "df_box_3_1",
+		"df_cabinet_0_0", "df_cabinet_1_0", "df_cabinet_2_0", "df_cabinet_3_0",
+		"df_bookcase_0_0", "df_bookcase_1_0",
+		"df_tool_20_0", "df_tool_20_1", "df_tool_20_2", "df_tool_20_3",
+		"df_tool_11_0", "df_tool_11_1", "df_tool_11_2",
+		"df_tool_12_0", "df_tool_12_1",
+		"df_toy_0_0", "df_toy_0_1", "df_toy_1_0", "df_toy_1_1",
+		"df_chair_0_0", "df_chair_1_0", "df_chair_2_0",
+		"df_food_0_0", "df_food_1_0", "df_food_2_0"
+	]
+	var clutter_count := rng.randi_range(3, mini(7, 3 + interior.size() / 6))
+	var edge_cells: Array[Vector2i] = []
+	for cell: Vector2i in interior:
+		if cell.y == box.position.y or cell.x == box.position.x or cell.x == box.end.x - 1 or cell.y == box.end.y - 1:
+			edge_cells.append(cell)
+	for _clutter in range(clutter_count * 6):
+		if clutter_count <= 0:
+			break
+		var piece: String = clutter_pool[rng.randi_range(0, clutter_pool.size() - 1)]
+		var candidate: Vector2i
+		if not edge_cells.is_empty() and rng.randf() < 0.7:
+			candidate = edge_cells[rng.randi_range(0, edge_cells.size() - 1)]
+		else:
+			candidate = interior[rng.randi_range(0, interior.size() - 1)]
+		if try_place.call(piece, candidate):
+			clutter_count -= 1
 	return placements
 
 ## Dressing for shopfront interiors: stocked shelves along the north
@@ -321,11 +360,61 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 	try_place.call("crate_cluster", Vector2i(box.end.x - 4, box.end.y - 2))
 	if rng.randf() < 0.7:
 		try_place.call("crate_floor", Vector2i(box.position.x, box.end.y - 1))
+
+	# Reference look: continuous stocked shelf runs along the walls.
+	var shelf_run: Array[String] = ["df_tool_23_0", "df_tool_23_1", "df_tool_23_2", "df_tool_23_3", "df_bookcase_2_0", "df_cabinet_1_0"]
+	var run_length := rng.randi_range(2, 4)
+	var run_start := Vector2i(box.position.x + 1, box.position.y)
+	for step in range(run_length):
+		try_place.call(shelf_run[rng.randi_range(0, shelf_run.size() - 1)], run_start + Vector2i(step, 0))
+
+	# The tools of the trade, scattered where they were last used.
+	var trade_pools := {
+		"tavern": ["df_tool_11_0", "df_tool_11_1", "df_tool_11_2", "df_tool_12_0", "df_tool_12_1", "df_tool_0_0", "df_food_0_0", "df_food_1_0", "df_food_2_0", "df_tool_21_0", "df_chair_0_0"],
+		"brewery": ["df_tool_11_0", "df_tool_11_1", "df_tool_12_0", "df_tool_12_1", "df_tool_12_2", "df_tool_27_0", "df_tool_27_1", "df_tool_18_0"],
+		"bakery": ["df_tool_21_0", "df_tool_21_1", "df_tool_14_0", "df_food_0_0", "df_food_1_0", "df_tool_12_0"],
+		"warehouse": ["df_box_0_0", "df_box_0_1", "df_tool_16_0", "df_tool_16_1", "df_tool_17_0", "df_tool_17_1", "df_tool_18_0", "df_tool_18_1", "df_tool_10_0", "df_tool_10_1"],
+		"general_store": ["df_box_1_0", "df_box_2_0", "df_tool_20_0", "df_tool_11_0", "df_toy_0_0", "df_toy_1_0", "df_food_0_0"],
+		"market_stall": ["df_box_0_0", "df_food_0_0", "df_food_1_0", "df_tool_11_1", "df_toy_0_1"]
+	}
+	var trade_pool: Array = trade_pools.get(building_type, ["df_tool_26_0", "df_tool_26_1", "df_tool_26_2", "df_tool_25_0", "df_tool_23_0", "df_tool_23_1", "df_tool_27_0", "df_toy_2_0", "df_toy_2_1"]) as Array
+	var trade_count := rng.randi_range(2, 4)
+	var open_cells: Array[Vector2i] = interior.duplicate()
+	for _piece in range(trade_count * 4):
+		if trade_count <= 0 or open_cells.is_empty():
+			break
+		var piece := String(trade_pool[rng.randi_range(0, trade_pool.size() - 1)])
+		if try_place.call(piece, open_cells[rng.randi_range(0, open_cells.size() - 1)]):
+			trade_count -= 1
 	return placements
 
 ## Builds the sprite for a placement, anchored so its base sits on the
 ## footprint's floor rows and the rest overhangs the wall behind it.
+## DF furniture pieces (df_*) come from the packed atlas: single-cell
+## sprites resolved through DfFurnitureDefs rather than the PIECES map.
+static func piece_def(piece_name: String) -> Dictionary:
+	if piece_name.begins_with("df_"):
+		if not DfFurnitureDefs.FURNITURE_ATLAS.has(piece_name):
+			return {}
+		return {"cells_w": 1, "rows_block": 1, "z": 8}
+	return PIECES.get(piece_name, {}) as Dictionary
+
 static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_size: Vector2i) -> Sprite2D:
+	if piece_name.begins_with("df_"):
+		var coords_variant: Variant = DfFurnitureDefs.FURNITURE_ATLAS.get(piece_name)
+		if coords_variant == null:
+			return null
+		var coords := coords_variant as Vector2i
+		var df_sprite := Sprite2D.new()
+		df_sprite.texture = DF_FURNITURE_TEXTURE
+		df_sprite.region_enabled = true
+		df_sprite.centered = false
+		df_sprite.region_rect = Rect2(coords.x * 32, coords.y * 32, 32, 32)
+		df_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		df_sprite.scale = Vector2(float(tile_size.x) / 32.0, float(tile_size.y) / 32.0)
+		df_sprite.position = Vector2(base_cell * tile_size)
+		df_sprite.z_index = 8
+		return df_sprite
 	var piece := PIECES.get(piece_name, {}) as Dictionary
 	if piece.is_empty():
 		return null
@@ -350,7 +439,7 @@ static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_si
 	return sprite
 
 static func piece_emits_light(piece_name: String) -> bool:
-	return bool((PIECES.get(piece_name, {}) as Dictionary).get("light", false))
+	return bool(piece_def(piece_name).get("light", false))
 
 ## A warm additive light pool for hearths and candle stands.
 static func create_glow_sprite(world_position: Vector2, radius: float, color: Color) -> Sprite2D:

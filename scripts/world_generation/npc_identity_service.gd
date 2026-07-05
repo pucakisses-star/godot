@@ -103,3 +103,33 @@ static func detail_lines(identity: Dictionary) -> Array[String]:
 		"Favors: %s" % String(identity.get("favorite", "quiet evenings")),
 		"Dreams %s" % String(identity.get("dream", "of nothing much"))
 	]
+
+## DF rule: every citizen looks like themselves. Appearance layers are
+## rolled deterministically from the identity, so the same dwarf keeps
+## the same face across sessions. Age greys the hair; dwarves keep
+## their beards, human beards are a coin toss.
+static func appearance_for_identity(identity: Dictionary, species: String = "dwarf") -> Dictionary:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s|%s|%d" % [String(identity.get("name", "")), String(identity.get("clan", "")), int(identity.get("age", 0))])
+	var age := int(identity.get("age", 60))
+	var elder_age := 200 if species == "dwarf" else 58
+	var greying_age := 120 if species == "dwarf" else 45
+	var hair_color: int
+	if age >= elder_age:
+		hair_color = rng.randi_range(0, 1)
+	elif age >= greying_age and rng.randi_range(0, 2) == 0:
+		hair_color = rng.randi_range(0, 1)
+	else:
+		hair_color = rng.randi_range(2, 5)
+	var beard_style := -1
+	if species == "dwarf" or rng.randi_range(0, 1) == 0:
+		beard_style = rng.randi_range(0, 11)
+	return {
+		"species": species,
+		"skin_tone": rng.randi_range(0, 3),
+		"hair_style": rng.randi_range(-1, 7) if species == "human" else rng.randi_range(0, 7),
+		"hair_color": hair_color,
+		"beard_style": beard_style,
+		"beard_color": hair_color,
+		"clothes_color": rng.randi_range(0, 17)
+	}

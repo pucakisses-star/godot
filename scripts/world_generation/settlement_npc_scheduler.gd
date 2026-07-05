@@ -251,7 +251,15 @@ static func update_scheduled_npcs(
 		var frame_key := facing_row * 16 + frame
 		if int(state.get("frame_key", -1)) != frame_key:
 			state["frame_key"] = frame_key
-			DwarfHoldTavernService.update_character_frame(sprite, int(state.get("slot", 0)), frame, facing_row)
+			if bool(state.get("composed", false)):
+				# DF-style composed citizens are single-pose; they face
+				# their walk by mirroring.
+				if facing_row == 1:
+					sprite.flip_h = false
+				elif facing_row == 2:
+					sprite.flip_h = true
+			else:
+				DwarfHoldTavernService.update_character_frame(sprite, int(state.get("slot", 0)), frame, facing_row)
 
 		state["cooldown"] = cooldown
 		state["direction"] = direction
