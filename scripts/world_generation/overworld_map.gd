@@ -595,6 +595,8 @@ var _map_lod_active := false
 )
 var _atlas_source_id := -1
 var _river_atlas_source_id := -1
+var _coast_layer: TileMapLayer
+var _coast_source_id := -1
 var _temperature_noise: FastNoiseLite
 var _rainfall_noise: FastNoiseLite
 var _vegetation_noise: FastNoiseLite
@@ -847,7 +849,7 @@ func _update_map_lod() -> void:
 		return
 	_map_lod_active = far_out
 	_map_snapshot_sprite.visible = far_out and not (_is_globe_view or _is_scene3d_view)
-	for layer: TileMapLayer in [map_layer, tree_layer, river_layer, highland_layer, iceberg_layer]:
+	for layer: TileMapLayer in [map_layer, tree_layer, river_layer, highland_layer, iceberg_layer, _coast_layer]:
 		if layer != null:
 			layer.visible = not far_out
 
@@ -1527,6 +1529,8 @@ func _generate_map() -> void:
 		iceberg_layer.clear()
 	if settlement_layer != null:
 		settlement_layer.clear()
+	if _coast_layer != null:
+		_coast_layer.clear()
 	_tile_data.clear()
 	_tile_region_names.clear()
 	_tile_population_groups.clear()
@@ -1720,6 +1724,7 @@ func _generate_map() -> void:
 	_moisture_map = _float_buffer_to_dictionary(_moisture_buffer)
 	_biome_map = _biome_buffer_to_dictionary(_biome_buffer)
 	_update_height_texture()
+	_apply_coast_overlay()
 	_build_map_snapshot()
 	_mark_all_overlays_dirty()
 	_ensure_overlay_texture("elevation")
@@ -1754,6 +1759,36 @@ func _apply_base_tiles(base_biome_map: Dictionary) -> void:
 			map_layer.set_cell(coord, _atlas_source_id, tile_coords)
 		if y > 0 and y % GENERATION_YIELD_ROW_INTERVAL == 0:
 			await _yield_generation_wave()
+
+## Rounds the coastlines after every base-layer edit has landed: land
+## bulges into neighboring water cells with capped bands, replacing the
+## hard tile-grid shoreline with an organic scallop. Only terrain art
+## feeds the bulges - settlement icons count as land but never as art.
+func _apply_coast_overlay() -> void:
+	if map_layer == null or map_layer.tile_set == null:
+		return
+	if _coast_layer == null:
+		_coast_layer = TileMapLayer.new()
+		_coast_layer.name = "CoastLayer"
+		add_child(_coast_layer)
+		move_child(_coast_layer, map_layer.get_index() + 1)
+		_coast_layer.position = map_layer.position
+		_coast_layer.scale = map_layer.scale
+	_coast_layer.tile_set = map_layer.tile_set
+	var coast_started := Time.get_ticks_msec()
+	var coast_art_tiles: Array[Vector2i] = [
+		SAND_TILE, GRASS_TILE, BADLANDS_TILE, MARSH_TILE, SNOW_TILE, STONE_TILE
+	]
+	_coast_source_id = OverworldCoastService.apply_coast_overlay(
+		_coast_layer,
+		map_layer,
+		WATER_TILE,
+		coast_art_tiles,
+		tile_size,
+		map_size,
+		_coast_source_id
+	)
+	print("[OverworldMap] coast overlay: %d ms" % (Time.get_ticks_msec() - coast_started))
 
 func _apply_overlays_and_metadata(
 	base_biome_map: Dictionary,
