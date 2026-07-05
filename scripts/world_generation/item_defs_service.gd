@@ -25,6 +25,7 @@ const ITEM_DEFS := {
 	"Copper Ore": {"icon": 15, "flavor": "Gleams warm even before the smelter."},
 	"Gold Nugget": {"icon": 12, "flavor": "Enough to turn a merchant's head."},
 	"Gem Shard": {"icon": 88, "flavor": "A splinter of buried starlight."},
+	"Starmetal Ore": {"icon": 88, "flavor": "Sky-iron from the world's roots. It hums against the skin."},
 	"Iron Ingot": {"icon": 30, "flavor": "Smelted and stamped by hold smiths."},
 	"Stone Block": {"icon": 44, "flavor": "Quarried square and true."},
 	"Leather Strap": {"icon": 46, "flavor": "Keeps armor, packs, and promises together."},

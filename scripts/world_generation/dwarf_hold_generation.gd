@@ -177,6 +177,7 @@ var _player_max_hp := PlayerStatsService.BASE_MAX_HP
 var _player_attack_damage := PlayerStatsService.BASE_ATTACK
 var _player_satiety := PlayerStatsService.SATIETY_MAX
 var _hunger_label: Label
+var _current_stratum: Dictionary = DepthStrataService.SURFACE
 const PLAYER_ATTACK_COOLDOWN := 0.45
 const CREATURE_CAP := 24
 const CREATURE_DESPAWN_DISTANCE := 90
@@ -1459,6 +1460,10 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	var civic_buildings_by_id := _compute_civic_buildings_by_id(grid)
 	var civic_building_type_map := _build_civic_building_type_lookup(civic_buildings_by_id)
 	var zone_counts := _count_zone_components(grid)
+	var stratum := DepthStrataService.stratum_for_level(level_index, level_count)
+	var starmetal_cells: Array[Vector2i] = []
+	if is_additional_layer:
+		starmetal_cells = DepthStrataService.stamp_stratum_features(grid, floor_decor, stratum, _rng)
 	var stair_cells := _pick_level_stair_cells(grid, level_index, level_count)
 	return {
 		"grid": grid,
@@ -1471,7 +1476,8 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 		"district_labels": district_labels,
 		"district_cell_map": district_cell_map,
 		"floor_decor": floor_decor,
-		"stair_cells": stair_cells
+		"stair_cells": stair_cells,
+		"starmetal_cells": starmetal_cells
 	}
 
 func _show_level(target_level_index: int) -> void:
@@ -1538,7 +1544,13 @@ func _update_depth_controls() -> void:
 		return
 	depth_down_button.disabled = _hold_state.current_level_index <= 0
 	depth_up_button.disabled = _hold_state.current_level_index >= level_count - 1
-	depth_label.text = "Level %d / %d" % [_hold_state.current_level_index + 1, level_count]
+	var stratum := DepthStrataService.stratum_for_level(_hold_state.current_level_index, level_count)
+	_current_stratum = stratum
+	depth_label.text = "Level %d / %d — %s" % [_hold_state.current_level_index + 1, level_count, String(stratum.get("name", ""))]
+	var stratum_tint := stratum.get("tint", Color.WHITE) as Color
+	city_layer.modulate = stratum_tint
+	decor_layer.modulate = stratum_tint
+	_populate_stratum_creatures(stratum)
 
 
 func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
@@ -2291,7 +2303,12 @@ func _try_harvest_decor(cell: Vector2i) -> bool:
 		_actor_passable_cache.erase(cell)
 		_latest_floor_decor.erase(cell)
 		_record_hold_edit("decor_erased", cell)
-		var vein_drop := _roll_weighted_drop(ORE_VEIN_DROPS)
+		if _current_level_starmetal_cells().has(cell):
+			_add_to_inventory("Starmetal Ore", _rng.randi_range(1, 2))
+			_spawn_floating_text("Starmetal!", _cell_center_position(cell), Color(0.65, 0.85, 1.0, 1.0))
+			_set_save_status("You pry starmetal from the living rock.", Color(0.7, 0.85, 1.0, 1.0))
+			return true
+		var vein_drop := _roll_weighted_drop(_current_stratum.get("ore_drops", ORE_VEIN_DROPS) as Array)
 		_add_to_inventory(
 			String(vein_drop.get("name", "Iron Ore")),
 			_rng.randi_range(int(vein_drop.get("min", 1)), int(vein_drop.get("max", 2)))
@@ -2961,6 +2978,41 @@ func _update_creature_spawning(delta: float) -> void:
 	if not _creature_can_step_to(cell):
 		return
 	_spawn_creature_at(cell, UndergroundCreatureService.pick_definition_index(Vector2(cell).length(), _rng))
+
+func _current_level_starmetal_cells() -> Array:
+	if _hold_state.generated_levels.is_empty():
+		return []
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	return level_data.get("starmetal_cells", []) as Array
+
+## Deep levels are populated on arrival from the stratum's roster; the
+## starmetal veins come guarded by the deep's strongest.
+func _populate_stratum_creatures(stratum: Dictionary) -> void:
+	if _hold_state.current_level_index == 0:
+		return
+	var slots := stratum.get("creature_slots", []) as Array
+	if slots.is_empty():
+		return
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in _latest_grid.keys():
+		if int(_latest_grid[cell_variant]) == CELL_HALL:
+			hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	var spawn_count := clampi(3 + _hold_state.current_level_index, 3, 8)
+	for _spawn in range(spawn_count):
+		if _creature_states.size() >= CREATURE_CAP:
+			break
+		var cell := hall_cells[_rng.randi_range(0, hall_cells.size() - 1)]
+		if Vector2(cell - _player_cell).length() < 12.0:
+			continue
+		_spawn_creature_at(cell, int(slots[_rng.randi_range(0, slots.size() - 1)]))
+	for starmetal_cell_variant: Variant in _current_level_starmetal_cells():
+		if _creature_states.size() >= CREATURE_CAP:
+			break
+		var guard_cell := (starmetal_cell_variant as Vector2i) + Vector2i(_rng.randi_range(-2, 2), _rng.randi_range(-2, 2))
+		if _is_walkable_cell(guard_cell):
+			_spawn_creature_at(guard_cell, int(slots[slots.size() - 1]))
 
 func _update_creatures(delta: float) -> void:
 	if _creature_states.is_empty():

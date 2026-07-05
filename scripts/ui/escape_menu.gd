@@ -80,6 +80,15 @@ func _add_button(layout: VBoxContainer, label_text: String, handler: Callable) -
 	button.pressed.connect(handler)
 	layout.add_child(button)
 
+## The scene's ESC handler is pause-blocked while the menu is open, so
+## the menu (which processes during pause) closes itself.
+func _unhandled_input(event: InputEvent) -> void:
+	if not visible:
+		return
+	if event.is_action_pressed("ui_cancel"):
+		close()
+		get_viewport().set_input_as_handled()
+
 func is_open() -> bool:
 	return visible
 
