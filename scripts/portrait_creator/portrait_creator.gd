@@ -577,6 +577,7 @@ var _randomize_sound_player: AudioStreamPlayer
 ## sync with the painted portrait: the same sliders drive both, and the
 ## composed sprite is the player's in-world body.
 var _dwarf_preview: TextureRect
+var _dwarf_body_preview: TextureRect
 var _stats_label: Label
 var _background_zoom := 1.0
 
@@ -664,8 +665,7 @@ const BODY_PANEL_TEXTURE := preload("res://resources/images/character_creator/ui
 func _build_dwarf_body_panel() -> void:
 	if target_render == null:
 		return
-	# The pixel dwarf lives inside the stone face frame on the left,
-	# the low-res twin of the painted dwarf beside it.
+	# Head bust in the stone face frame, top left.
 	var frame_holder := target_render.get_parent()
 	if frame_holder == null:
 		return
@@ -677,6 +677,23 @@ func _build_dwarf_body_panel() -> void:
 	_dwarf_preview.position = Vector2(72.0, 40.0)
 	_dwarf_preview.size = Vector2(280.0, 280.0)
 	frame_holder.add_child(_dwarf_preview)
+	# The full dwarf takes over the big center panel from the old static
+	# painted body.
+	var static_body := find_child("DwarfBodySprite2", true, false) as TextureRect
+	if static_body != null:
+		static_body.visible = false
+		var panel := static_body.get_parent() as Control
+		_dwarf_body_preview = TextureRect.new()
+		_dwarf_body_preview.name = "DwarfBodyPreview"
+		_dwarf_body_preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		_dwarf_body_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		_dwarf_body_preview.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		_dwarf_body_preview.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_dwarf_body_preview.offset_left = 28.0
+		_dwarf_body_preview.offset_right = -28.0
+		_dwarf_body_preview.offset_top = 30.0
+		_dwarf_body_preview.offset_bottom = -30.0
+		panel.add_child(_dwarf_body_preview)
 
 func _setup_clothing_slider() -> void:
 	if clothing_color == null:
@@ -714,9 +731,11 @@ func _current_dwarf_layers() -> Dictionary:
 	}
 
 func _refresh_dwarf_preview() -> void:
-	if _dwarf_preview == null:
-		return
-	_dwarf_preview.texture = DwarfSpriteComposer.compose(_current_dwarf_layers())
+	var layers := _current_dwarf_layers()
+	if _dwarf_preview != null:
+		_dwarf_preview.texture = DwarfSpriteComposer.compose_head(layers)
+	if _dwarf_body_preview != null:
+		_dwarf_body_preview.texture = DwarfSpriteComposer.compose(layers)
 
 func _update_animated_background(delta: float) -> void:
 	if animated_background == null:

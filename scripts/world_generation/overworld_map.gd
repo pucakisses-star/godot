@@ -776,7 +776,9 @@ func _refresh_scale_bar() -> void:
 		scale_bar_container.visible = false
 		return
 	var safe_zoom := maxf(overworld_camera.zoom.x, 0.001)
-	var pixels_per_km := (float(tile_size) / safe_zoom) / maxf(kilometers_per_tile, 0.001)
+	# Godot 4: screen pixels per world pixel = zoom, so zooming IN means
+	# MORE pixels per km (the bar then steps its labelled distance down).
+	var pixels_per_km := float(tile_size) * safe_zoom / maxf(kilometers_per_tile, 0.001)
 	if scale_bar_visual.has_method("set_scale_display"):
 		scale_bar_visual.call("set_scale_display", pixels_per_km)
 	if scale_bar_visual.has_method("get_distance_label"):
