@@ -62,7 +62,26 @@ func _refresh_load_button() -> void:
 	load_game_button.disabled = not has_save
 
 func _on_start_button_pressed() -> void:
-	get_tree().change_scene_to_file("res://scenes/character_creator.tscn")
+	_change_scene_with_diagnostics("res://scenes/character_creator.tscn")
+
+## A failed scene load used to die silently - the click just did nothing.
+## Load explicitly and surface whatever went wrong on screen.
+func _change_scene_with_diagnostics(scene_path: String) -> void:
+	var packed := load(scene_path) as PackedScene
+	if packed == null:
+		_show_scene_error("Could not load %s - check the editor Output panel for the first red error (usually a missing import; try deleting the .godot folder and reopening the project)." % scene_path)
+		return
+	var error := get_tree().change_scene_to_packed(packed)
+	if error != OK:
+		_show_scene_error("Scene switch failed with error %d for %s" % [error, scene_path])
+
+func _show_scene_error(message: String) -> void:
+	push_error(message)
+	var dialog := AcceptDialog.new()
+	dialog.title = "Scene failed to load"
+	dialog.dialog_text = message
+	add_child(dialog)
+	dialog.popup_centered()
 
 
 func _on_options_button_pressed() -> void:
