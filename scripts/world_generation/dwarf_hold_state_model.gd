@@ -22,7 +22,9 @@ func apply_world_settings(settings: Dictionary, seed_key: String, population_key
 func population_scaled_level_count(max_levels: int) -> int:
 	if target_resident_npcs <= 0:
 		return 0
-	return clampi(int(ceil(float(target_resident_npcs) / 120.0)), 1, maxi(1, max_levels))
+	# Every hold pierces the full strata - soil, stone, the cavern and
+	# the starmetal deep - population digs it deeper still.
+	return clampi(2 + int(ceil(float(target_resident_npcs) / 120.0)), 4, maxi(4, max_levels))
 
 func target_npcs_for_level(level_index: int, level_count: int) -> int:
 	if target_resident_npcs <= 0:
