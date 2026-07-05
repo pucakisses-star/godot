@@ -7,6 +7,7 @@ extends RefCounted
 ## One level is a great natural cavern; the deepest holds the starmetal.
 
 const SOIL := {
+	"relic_pieces": ["df_tool_13_0", "df_tool_13_1", "df_tool_13_2", "df_tool_10_0", "df_tool_10_1", "df_tool_18_0"],
 	"name": "Loamy Soil",
 	"ore_drops": [
 		{"name": "Copper Ore", "weight": 55, "min": 1, "max": 3},
@@ -23,6 +24,7 @@ const SOIL := {
 }
 
 const SEDIMENTARY := {
+	"relic_pieces": ["df_tool_16_0", "df_tool_17_0", "df_tool_18_0", "df_tool_18_1", "df_box_0_0", "df_tool_25_0"],
 	"name": "Sedimentary Stone",
 	"ore_drops": [
 		{"name": "Iron Ore", "weight": 55, "min": 2, "max": 4},
@@ -39,6 +41,7 @@ const SEDIMENTARY := {
 }
 
 const CAVERN := {
+	"relic_pieces": ["df_tool_0_0", "df_tool_12_0", "df_tool_12_1", "df_tool_11_0", "df_box_0_1"],
 	"name": "The Fungal Caverns",
 	"ore_drops": [
 		{"name": "Gem Shard", "weight": 40, "min": 1, "max": 2},
@@ -55,6 +58,7 @@ const CAVERN := {
 }
 
 const IGNEOUS := {
+	"relic_pieces": ["df_tool_16_0", "df_tool_16_1", "df_tool_17_0", "df_tool_17_1", "df_tool_26_0", "df_tool_26_1", "df_box_0_0"],
 	"name": "Igneous Deep",
 	"ore_drops": [
 		{"name": "Gold Nugget", "weight": 35, "min": 1, "max": 2},
@@ -71,6 +75,7 @@ const IGNEOUS := {
 }
 
 const STARMETAL_DEPTH := {
+	"relic_pieces": ["df_tool_16_1", "df_tool_17_1", "df_tool_26_2", "df_tool_26_3", "df_tool_25_0", "df_box_0_1"],
 	"name": "The Starmetal Vein",
 	"ore_drops": [
 		{"name": "Gold Nugget", "weight": 30, "min": 1, "max": 2},
@@ -87,6 +92,7 @@ const STARMETAL_DEPTH := {
 }
 
 const SURFACE := {
+	"relic_pieces": [],
 	"name": "Surface Halls",
 	"ore_drops": [
 		{"name": "Iron Ore", "weight": 55, "min": 2, "max": 4},
