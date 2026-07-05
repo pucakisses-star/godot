@@ -677,6 +677,9 @@ func _build_dwarf_body_panel() -> void:
 	_dwarf_preview.position = Vector2(72.0, 40.0)
 	_dwarf_preview.size = Vector2(280.0, 280.0)
 	frame_holder.add_child(_dwarf_preview)
+	# The old painted-portrait render is superseded by the pixel bust;
+	# left visible it bleeds through as a dark silhouette.
+	target_render.visible = false
 	# The full dwarf takes over the big center panel from the old static
 	# painted body.
 	var static_body := find_child("DwarfBodySprite2", true, false) as TextureRect

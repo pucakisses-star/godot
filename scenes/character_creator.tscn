@@ -368,11 +368,30 @@ theme_override_constants/separation = 8
 visible = false
 layout_mode = 2
 
-[node name="Icon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/BeardlessEntry" unique_id=147900312]
-custom_minimum_size = Vector2(40, 40)
+[node name="FrameforIcon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/BeardlessEntry" unique_id=1517478305]
+custom_minimum_size = Vector2(56, 56)
 layout_mode = 2
+mouse_filter = 2
+texture = ExtResource("17_s8202")
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Icon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/BeardlessEntry/FrameforIcon" unique_id=147900312]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -19.0
+offset_top = -19.0
+offset_right = 19.0
+offset_bottom = 19.0
+grow_horizontal = 2
+grow_vertical = 2
 mouse_filter = 0
 texture = ExtResource("18_u8m4a")
+expand_mode = 1
 stretch_mode = 5
 metadata/attribute_title = "Beardless"
 metadata/attribute_description = "You are the shame of your clan and the disgrace of your holdfast. Without a beard a dwarf is nothing; consider this path to be one that will lead to scorn and ridicule among your peers."
@@ -388,11 +407,30 @@ autowrap_mode = 3
 visible = false
 layout_mode = 2
 
-[node name="Icon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/DarkDwarfEntry" unique_id=147900315]
-custom_minimum_size = Vector2(40, 40)
+[node name="FrameforIcon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/DarkDwarfEntry" unique_id=1517478306]
+custom_minimum_size = Vector2(56, 56)
 layout_mode = 2
+mouse_filter = 2
+texture = ExtResource("17_s8202")
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Icon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/DarkDwarfEntry/FrameforIcon" unique_id=147900315]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -19.0
+offset_top = -19.0
+offset_right = 19.0
+offset_bottom = 19.0
+grow_horizontal = 2
+grow_vertical = 2
 mouse_filter = 0
 texture = ExtResource("19_jk7te")
+expand_mode = 1
 stretch_mode = 5
 metadata/attribute_title = "Dark Dwarf Heritage"
 metadata/attribute_description = "Your soot colored skin indicates you hail from the ash covered lands of Dun Mortis. Your kind are known by your paler skinned cousins as the Dark Dwarves, a race cast away from the light of the All-father into the refuse bin of Stonebeard's furnace. You are hated by your kin as an oathbreaker by virtue of your birthright and if you attempt to enter into their holds will likely be killed on sight."
@@ -408,7 +446,7 @@ autowrap_mode = 3
 layout_mode = 2
 
 [node name="FrameforIcon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/GreyDwarfEntry" unique_id=1517478304]
-custom_minimum_size = Vector2(120, 120)
+custom_minimum_size = Vector2(56, 56)
 layout_mode = 2
 mouse_filter = 2
 texture = ExtResource("17_s8202")
@@ -422,10 +460,10 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -48.5
-offset_top = -47.5
-offset_right = 45.5
-offset_bottom = 36.5
+offset_left = -19.0
+offset_top = -19.0
+offset_right = 19.0
+offset_bottom = 19.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 0
@@ -446,11 +484,30 @@ autowrap_mode = 3
 visible = false
 layout_mode = 2
 
-[node name="Icon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/BankerEntry" unique_id=147900321]
-custom_minimum_size = Vector2(40, 40)
+[node name="FrameforIcon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/BankerEntry" unique_id=1517478307]
+custom_minimum_size = Vector2(56, 56)
 layout_mode = 2
+mouse_filter = 2
+texture = ExtResource("17_s8202")
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Icon" type="TextureRect" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/BankerEntry/FrameforIcon" unique_id=147900322]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -19.0
+offset_top = -19.0
+offset_right = 19.0
+offset_bottom = 19.0
+grow_horizontal = 2
+grow_vertical = 2
 mouse_filter = 0
 texture = ExtResource("21_6p2l2")
+expand_mode = 1
 stretch_mode = 5
 metadata/attribute_title = "Banker"
 metadata/attribute_description = "Among men you would be in a respected profession, among dwarves it is the opposite; expect your increased income to be met with glaring judgments and disdain from your peers who think your livelihood to be undwarflike."
