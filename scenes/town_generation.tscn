@@ -87,6 +87,7 @@ script = ExtResource("3_wd6by")
 [node name="TileHoverTooltip" type="PanelContainer" parent="Margin/Layout/CityPanel" unique_id=206020702]
 unique_name_in_owner = true
 visible = false
+top_level = true
 layout_mode = 2
 mouse_filter = 2
 theme_override_styles/panel = SubResource("StyleBoxFlat_1prb4")
