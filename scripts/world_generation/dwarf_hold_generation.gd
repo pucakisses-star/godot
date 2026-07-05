@@ -101,7 +101,12 @@ var _shop_stocks: Dictionary = {}
 var _active_speech_bubble: PanelContainer
 var _build_selection := -1
 var _escape_menu: EscapeMenu
-var _torch_sprites: Array = []
+var _torch_sprites: Dictionary = {}
+## Streamed wild chunks currently resident, chunk coords -> true. The
+## city core never appears here and is never evicted.
+var _streamed_chunks: Dictionary = {}
+var _discovery_chunks: Dictionary = {}
+var _city_bounds := Rect2i()
 var _player_glow: Sprite2D
 var _glow_texture: Texture2D
 var _torch_texture: Texture2D
@@ -982,7 +987,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		_handle_player_move_input(move_direction)
 
 func _on_back_button_pressed() -> void:
-	get_tree().change_scene_to_file(OVERWORLD_SCENE_PATH)
+	SceneCacheService.request_change(self, OVERWORLD_SCENE_PATH)
 
 func _on_save_game_button_pressed() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -1504,6 +1509,13 @@ func _show_level(target_level_index: int) -> void:
 		_generated_chunks = {}
 		_dug_cells = {}
 	_last_player_chunk = Vector2i(2147483647, 2147483647)
+	_streamed_chunks = {}
+	var stored_bounds: Variant = level_data.get("city_bounds")
+	if stored_bounds is Rect2i:
+		_city_bounds = stored_bounds
+	else:
+		_city_bounds = _find_bounds(grid).grow(2)
+		level_data["city_bounds"] = _city_bounds
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
 	_chest_inventories.clear()
@@ -2126,6 +2138,80 @@ func _stream_world_chunks() -> void:
 		return
 	_last_player_chunk = player_chunk
 	_ensure_chunks_around(player_chunk)
+	_evict_far_chunks(player_chunk)
+
+## Core Keeper rule: the world only exists near the player. Wild chunks
+## more than EVICT_CHUNK_RADIUS out are dropped entirely - tiles, grid
+## entries, decor, creatures - and rebuilt from seed plus the player's
+## recorded diffs when walked back into. The city core is never evicted.
+const EVICT_CHUNK_RADIUS := 4
+
+## Sites and discoveries stamp structures that spill past their chunk;
+## evicting any chunk they touch would tear holes in them.
+func _chunk_neighborhood_has_stamp(chunk: Vector2i) -> bool:
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			var neighbor := chunk + Vector2i(dx, dy)
+			if _discovery_chunks.has(neighbor):
+				return true
+			if not (_sites_by_chunk.get(UndergroundWorldService.chunk_key(neighbor), []) as Array).is_empty():
+				return true
+	return false
+
+func _append_district_label_once(label: Dictionary) -> void:
+	var center: Variant = label.get("center", Vector2i.ZERO)
+	var label_name := String(label.get("name", ""))
+	for existing_variant: Variant in _latest_district_labels:
+		var existing := existing_variant as Dictionary
+		if String(existing.get("name", "")) == label_name and existing.get("center", Vector2i(-1, -1)) == center:
+			return
+	_latest_district_labels.append(label)
+
+func _evict_far_chunks(player_chunk: Vector2i) -> void:
+	var to_evict: Array[Vector2i] = []
+	for chunk_variant: Variant in _streamed_chunks.keys():
+		var chunk := chunk_variant as Vector2i
+		if maxi(absi(chunk.x - player_chunk.x), absi(chunk.y - player_chunk.y)) > EVICT_CHUNK_RADIUS:
+			to_evict.append(chunk)
+	for chunk: Vector2i in to_evict:
+		var rect: Rect2i = UndergroundWorldService.chunk_rect(chunk)
+		if rect.intersects(_city_bounds):
+			continue
+		if _chunk_neighborhood_has_stamp(chunk):
+			continue
+		for y in range(rect.position.y, rect.end.y):
+			for x in range(rect.position.x, rect.end.x):
+				var cell := Vector2i(x, y)
+				city_layer.erase_cell(cell)
+				decor_layer.erase_cell(cell)
+				_latest_grid.erase(cell)
+				_latest_floor_decor.erase(cell)
+				_actor_passable_cache.erase(cell)
+				var torch := _torch_sprites.get(cell) as Sprite2D
+				if torch != null:
+					torch.queue_free()
+					_torch_sprites.erase(cell)
+		for index in range(_creature_states.size() - 1, -1, -1):
+			var state := _creature_states[index] as Dictionary
+			var creature_cell := state.get("cell", Vector2i(2147483647, 0)) as Vector2i
+			if rect.has_point(creature_cell):
+				var sprite := state.get("sprite") as Sprite2D
+				if sprite != null:
+					sprite.queue_free()
+				_creature_states.remove_at(index)
+		_streamed_chunks.erase(chunk)
+		_generated_chunks.erase(UndergroundWorldService.chunk_key(chunk))
+
+## Walked back into an evicted area: the recorded torches get their
+## sprites back.
+func _respawn_torches_in_rect(rect: Rect2i) -> void:
+	if _hold_state.generated_levels.is_empty():
+		return
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	for torch_cell_variant: Variant in (level_data.get("torches", []) as Array):
+		var cell := torch_cell_variant as Vector2i
+		if rect.has_point(cell):
+			_spawn_torch_at(cell)
 
 func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 	for chunk_dy in range(-2, 3):
@@ -2139,15 +2225,20 @@ func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 			for site_variant: Variant in (_sites_by_chunk.get(key, []) as Array):
 				var site := site_variant as Dictionary
 				UndergroundWorldService.stamp_settlement_site(_latest_grid, _latest_floor_decor, site)
-				_latest_district_labels.append({"name": String(site.get("name", "")), "center": site.get("cell", Vector2i.ZERO), "wild": true})
+				_append_district_label_once({"name": String(site.get("name", "")), "center": site.get("cell", Vector2i.ZERO), "wild": true})
 				stamped_site = true
 			var discovery: Dictionary = UndergroundWorldService.stamp_chunk_discovery(_latest_grid, _latest_floor_decor, chunk, _world_seed_hash)
 			if not discovery.is_empty():
 				discovery["wild"] = true
-				_latest_district_labels.append(discovery)
+				_discovery_chunks[chunk] = true
+				_append_district_label_once(discovery)
 			var rect: Rect2i = UndergroundWorldService.generate_chunk(_latest_grid, _latest_floor_decor, chunk, _world_noise)
-			_apply_hold_diffs_to_rect(rect)
+			_streamed_chunks[chunk] = true
+			# A re-stamped site spills past the chunk; the player's edits
+			# must win over the stamp across the whole spill.
+			_apply_hold_diffs_to_rect(rect.grow(14) if stamped_site else rect)
 			_render_world_rect(rect.grow(14 if stamped_site else 1))
+			_respawn_torches_in_rect(rect)
 			if stamped_site or not discovery.is_empty():
 				_rebuild_district_labels()
 			var spawn_rng := RandomNumberGenerator.new()
@@ -2240,6 +2331,8 @@ func _place_torch() -> void:
 	_set_save_status("Torch placed", Color(0.95, 0.85, 0.55, 1.0))
 
 func _spawn_torch_at(cell: Vector2i) -> void:
+	if _torch_sprites.has(cell):
+		return
 	var torch := Sprite2D.new()
 	if _torch_texture == null:
 		_torch_texture = _create_torch_texture()
@@ -2251,14 +2344,14 @@ func _spawn_torch_at(cell: Vector2i) -> void:
 	var glow := _create_glow_sprite(5.0)
 	glow.position = Vector2.ZERO
 	torch.add_child(glow)
-	_torch_sprites.append(torch)
+	_torch_sprites[cell] = torch
 
 func _clear_torch_sprites() -> void:
-	for torch_variant: Variant in _torch_sprites:
+	for torch_variant: Variant in _torch_sprites.values():
 		var torch := torch_variant as Sprite2D
 		if torch != null:
 			torch.queue_free()
-	_torch_sprites = []
+	_torch_sprites = {}
 
 func _create_torch_texture() -> Texture2D:
 	var image := Image.create(8, 16, false, Image.FORMAT_RGBA8)
@@ -3242,6 +3335,15 @@ func _save_persistent_player_state() -> void:
 	settings["player_satiety"] = _player_satiety
 	settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
 	game_session.call("set_world_settings", settings)
+
+## Re-attached from the scene cache: pull the wounds, hunger and clock
+## the rest of the world inflicted while this hold was parked.
+func _on_scene_resumed() -> void:
+	_load_persistent_player_state()
+	_last_clock_stamp = -1
+	_update_clock_label()
+	_update_hp_label()
+	_update_hunger_label()
 
 func _exit_tree() -> void:
 	_save_persistent_player_state()

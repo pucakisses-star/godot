@@ -387,6 +387,7 @@ func _on_embark_pressed() -> void:
 		world_name_input.text = _generate_world_name()
 		_refresh_summary()
 	_store_world_settings()
+	SceneCacheService.request_clear(self)
 	get_tree().change_scene_to_file("res://scenes/overworld.tscn")
 
 func _on_back_pressed() -> void:

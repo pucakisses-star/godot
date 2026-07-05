@@ -75,6 +75,7 @@ func _on_load_game_button_pressed() -> void:
 		return
 	if not bool(game_session.call("load_from_file")):
 		return
+	SceneCacheService.request_clear(self)
 	get_tree().change_scene_to_file("res://scenes/overworld.tscn")
 
 

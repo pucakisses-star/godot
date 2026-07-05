@@ -1396,7 +1396,7 @@ func _spawn_floating_text(text: String, world_position: Vector2, color: Color) -
 
 func _leave_dungeon() -> void:
 	_save_player_inventory()
-	get_tree().change_scene_to_file(OVERWORLD_SCENE_PATH)
+	SceneCacheService.request_change(self, OVERWORLD_SCENE_PATH)
 
 func _seeded_shuffle(values: Array) -> void:
 	for i in range(values.size() - 1, 0, -1):

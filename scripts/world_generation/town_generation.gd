@@ -143,6 +143,8 @@ var _desert_decor_textures: Dictionary = {}
 var _furnishing_sprites: Array[Node2D] = []
 var _furnishing_blocked_cells: Dictionary = {}
 var _glow_sprites: Array[Node2D] = []
+var _pending_glows: Array[Dictionary] = []
+var _light_overlay_sprite: Sprite2D
 var _passable_atlas_set: Dictionary = {}
 var _actor_passable_cache: Dictionary = {}
 var _last_clock_stamp := -1
@@ -566,7 +568,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		_handle_player_move_input(move_direction)
 
 func _on_back_button_pressed() -> void:
-	get_tree().change_scene_to_file(OVERWORLD_SCENE_PATH)
+	SceneCacheService.request_change(self, OVERWORLD_SCENE_PATH)
 
 func _on_save_game_button_pressed() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -598,6 +600,15 @@ func _load_persistent_clock() -> void:
 		_game_hour = clampf(float(clock.get("hour", _game_hour)), 0.0, 23.99)
 		_game_day = maxi(1, int(clock.get("day", _game_day)))
 	_player_satiety = PlayerStatsService.load_satiety(self)
+
+## Re-attached from the scene cache: time and appetite moved on while
+## this town was parked.
+func _on_scene_resumed() -> void:
+	_load_persistent_clock()
+	_last_clock_stamp = -1
+	_applied_day_night_tint = Color(-1.0, -1.0, -1.0, -1.0)
+	_update_day_night_tint()
+	_update_clock_label()
 
 func _exit_tree() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -1095,6 +1106,8 @@ func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
 ## now governs the hearth and candle glow pools instead.
 func _apply_lighting_state() -> void:
 	lighting_layer.visible = true
+	if _light_overlay_sprite != null:
+		_light_overlay_sprite.visible = _lighting_enabled
 	for glow: Node2D in _glow_sprites:
 		if is_instance_valid(glow):
 			glow.visible = _lighting_enabled
@@ -1385,6 +1398,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 	_furnishing_sprites.clear()
 	_furnishing_blocked_cells.clear()
 	_glow_sprites.clear()
+	_pending_glows.clear()
 	_actor_passable_cache.clear()
 	if actor_layer == null:
 		return
@@ -1413,6 +1427,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 		var decor_key := _tile_name_from_atlas(decor_layer.get_cell_atlas_coords(cell))
 		if ["forge", "oven", "brazier"].has(decor_key):
 			_spawn_hearth_glow(cell, 3.4)
+	_rebuild_light_overlay()
 
 func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 	for placement: Dictionary in placements:
@@ -1462,16 +1477,54 @@ func _place_house_hearth(component: Array[Vector2i], is_occupied: Callable) -> v
 		_spawn_hearth_glow(cell, 3.4)
 		return
 
+## Glows are recorded during furnishing and baked into ONE additive
+## overlay texture afterwards - a single canvas item instead of a sprite
+## per hearth and candle (the Core Keeper approach to static light).
+const LIGHT_OVERLAY_PX_PER_TILE := 4
+
 func _spawn_hearth_glow(cell: Vector2i, radius_cells: float) -> void:
-	var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(
-		_cell_center_position(cell),
-		radius_cells * float(tile_size.x),
-		Color(1.0, 0.72, 0.35, 1.0)
-	)
-	glow.visible = _lighting_enabled
-	actor_layer.add_child(glow)
-	_furnishing_sprites.append(glow)
-	_glow_sprites.append(glow)
+	_pending_glows.append({"cell": cell, "radius": radius_cells})
+
+func _rebuild_light_overlay() -> void:
+	if _light_overlay_sprite != null:
+		_light_overlay_sprite.queue_free()
+		_light_overlay_sprite = null
+	if _pending_glows.is_empty() or actor_layer == null:
+		return
+	var bounds := _find_bounds(_latest_grid).grow(6)
+	var image_size := bounds.size * LIGHT_OVERLAY_PX_PER_TILE
+	if image_size.x <= 0 or image_size.y <= 0 or image_size.x > 4096 or image_size.y > 4096:
+		return
+	var image := Image.create(image_size.x, image_size.y, false, Image.FORMAT_RGBA8)
+	var glow_color := Color(1.0, 0.72, 0.35, 1.0)
+	for glow_variant: Variant in _pending_glows:
+		var glow := glow_variant as Dictionary
+		var cell := glow.get("cell", Vector2i.ZERO) as Vector2i
+		var radius_px := float(glow.get("radius", 2.4)) * float(LIGHT_OVERLAY_PX_PER_TILE)
+		var center := (Vector2(cell - bounds.position) + Vector2(0.5, 0.5)) * float(LIGHT_OVERLAY_PX_PER_TILE)
+		var reach := int(ceilf(radius_px))
+		for py in range(maxi(0, int(center.y) - reach), mini(image_size.y, int(center.y) + reach + 1)):
+			for px in range(maxi(0, int(center.x) - reach), mini(image_size.x, int(center.x) + reach + 1)):
+				var falloff := 1.0 - Vector2(px + 0.5, py + 0.5).distance_to(center) / radius_px
+				if falloff <= 0.0:
+					continue
+				falloff *= falloff * 0.55
+				var existing := image.get_pixel(px, py)
+				image.set_pixel(px, py, Color(
+					glow_color.r, glow_color.g, glow_color.b,
+					minf(existing.a + falloff, 0.8)
+				))
+	_light_overlay_sprite = Sprite2D.new()
+	_light_overlay_sprite.texture = ImageTexture.create_from_image(image)
+	_light_overlay_sprite.centered = false
+	_light_overlay_sprite.position = Vector2(bounds.position * tile_size)
+	_light_overlay_sprite.scale = Vector2(tile_size) / float(LIGHT_OVERLAY_PX_PER_TILE)
+	var overlay_material := CanvasItemMaterial.new()
+	overlay_material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	_light_overlay_sprite.material = overlay_material
+	_light_overlay_sprite.z_index = 14
+	_light_overlay_sprite.visible = _lighting_enabled
+	actor_layer.add_child(_light_overlay_sprite)
 
 ## --- Farmsteads: real farm buildings on the town greens -------------------
 ## Each farmstead stakes out a rectangle of open grass and raises a
