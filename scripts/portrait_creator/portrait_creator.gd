@@ -677,6 +677,9 @@ func _build_dwarf_body_panel() -> void:
 	_dwarf_preview.position = Vector2(72.0, 40.0)
 	_dwarf_preview.size = Vector2(280.0, 280.0)
 	frame_holder.add_child(_dwarf_preview)
+	# The old painted-portrait render is superseded by the pixel bust;
+	# left visible it bleeds through as a dark silhouette.
+	target_render.visible = false
 	# The full dwarf takes over the big center panel from the old static
 	# painted body.
 	var static_body := find_child("DwarfBodySprite2", true, false) as TextureRect
@@ -781,7 +784,7 @@ func _on_attribute_icon_hovered(icon: Control) -> void:
 	if attribute_tooltip_panel:
 		attribute_tooltip_panel.visible = true
 	if attribute_tooltip_backdrop:
-		attribute_tooltip_backdrop.visible = true
+		attribute_tooltip_backdrop.visible = false
 	if attribute_reminder_title:
 		attribute_reminder_title.text = title
 	if attribute_reminder_text:
@@ -805,8 +808,12 @@ func _clear_attribute_description() -> void:
 		attribute_reminder_text.text = ""
 		attribute_reminder_text.visible = false
 
+## Floats above the hovered icon like a normal tooltip, clamped to the
+## viewport (falls below the icon when there is no room above).
 func _position_attribute_tooltip() -> void:
 	if attribute_tooltip_panel == null or not attribute_tooltip_panel.visible:
+		return
+	if _hovered_attribute_icon == null or not is_instance_valid(_hovered_attribute_icon):
 		return
 	var viewport := get_viewport()
 	if viewport == null:
@@ -814,9 +821,15 @@ func _position_attribute_tooltip() -> void:
 	var tooltip_size := attribute_tooltip_panel.get_combined_minimum_size()
 	attribute_tooltip_panel.size = tooltip_size
 	var viewport_size := viewport.get_visible_rect().size
-	var target_pos := (viewport_size - tooltip_size) * 0.5
-	target_pos.x = maxf(0.0, target_pos.x)
-	target_pos.y = maxf(0.0, target_pos.y)
+	var icon_rect := _hovered_attribute_icon.get_global_rect()
+	var target_pos := Vector2(
+		icon_rect.get_center().x - tooltip_size.x * 0.5,
+		icon_rect.position.y - tooltip_size.y - 10.0
+	)
+	if target_pos.y < 4.0:
+		target_pos.y = icon_rect.end.y + 10.0
+	target_pos.x = clampf(target_pos.x, 4.0, maxf(4.0, viewport_size.x - tooltip_size.x - 4.0))
+	target_pos.y = clampf(target_pos.y, 4.0, maxf(4.0, viewport_size.y - tooltip_size.y - 4.0))
 	attribute_tooltip_panel.position = target_pos
 
 func _setup_gender_button(button: Button) -> void:
