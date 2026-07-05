@@ -2333,6 +2333,54 @@ func _try_search_furnishing(cell: Vector2i) -> bool:
 	_set_save_status("You search the %s: %s." % [DfFurnitureDefs.display_name(piece).to_lower(), found], Color(0.9, 0.85, 0.6, 1.0))
 	return true
 
+## Working fires smelt starmetal ore into bars; the anvil forges bars
+## into permanent gear: first a blade (+attack), then a plate (+max HP).
+const FORGE_FIRE_PIECES := ["int_hearth_arch", "int_kiln_beehive"]
+
+func _try_work_forge(cell: Vector2i) -> bool:
+	if not _is_player_adjacent_to_cell(cell) and cell != _player_cell:
+		return false
+	var piece := String(_furnishing_by_cell.get(cell, ""))
+	if FORGE_FIRE_PIECES.has(piece):
+		var ore := int(_player_inventory.get("Starmetal Ore", 0))
+		if ore < PlayerStatsService.SMELT_ORE_PER_BAR:
+			_set_save_status("The furnace roars. %d starmetal ore smelts into a bar." % PlayerStatsService.SMELT_ORE_PER_BAR, Color(0.75, 0.8, 0.9, 1.0))
+			return true
+		_add_to_inventory("Starmetal Ore", -PlayerStatsService.SMELT_ORE_PER_BAR)
+		_add_to_inventory("Starmetal Bar", 1)
+		_spawn_floating_text("Starmetal Bar", _cell_center_position(cell), Color(0.7, 0.85, 1.0, 1.0))
+		_set_save_status("The fire flares white: a starmetal bar, still humming.", Color(0.7, 0.85, 1.0, 1.0))
+		return true
+	if piece == "int_anvil":
+		var has_blade := PlayerStatsService.has_gear(self, PlayerStatsService.GEAR_STARMETAL_BLADE)
+		var has_plate := PlayerStatsService.has_gear(self, PlayerStatsService.GEAR_STARMETAL_PLATE)
+		if has_blade and has_plate:
+			_set_save_status("Your starmetal blade and plate are already the anvil's best work.", Color(0.75, 0.8, 0.9, 1.0))
+			return true
+		var bars := int(_player_inventory.get("Starmetal Bar", 0))
+		if bars < PlayerStatsService.FORGE_BARS_PER_PIECE:
+			var next_piece := "blade" if not has_blade else "plate"
+			_set_save_status("The anvil waits: %d starmetal bars forge a %s." % [PlayerStatsService.FORGE_BARS_PER_PIECE, next_piece], Color(0.75, 0.8, 0.9, 1.0))
+			return true
+		_add_to_inventory("Starmetal Bar", -PlayerStatsService.FORGE_BARS_PER_PIECE)
+		if not has_blade:
+			PlayerStatsService.grant_gear(self, PlayerStatsService.GEAR_STARMETAL_BLADE)
+			_spawn_floating_text("Starmetal Blade! +%d ⚔" % PlayerStatsService.STARMETAL_BLADE_ATTACK, _cell_center_position(cell), Color(0.7, 0.85, 1.0, 1.0))
+			_set_save_status("You forge a starmetal blade. It sings when it swings (+%d attack)." % PlayerStatsService.STARMETAL_BLADE_ATTACK, Color(0.7, 0.85, 1.0, 1.0))
+		else:
+			PlayerStatsService.grant_gear(self, PlayerStatsService.GEAR_STARMETAL_PLATE)
+			_spawn_floating_text("Starmetal Plate! +%d ❤" % int(PlayerStatsService.STARMETAL_PLATE_HP), _cell_center_position(cell), Color(0.7, 0.85, 1.0, 1.0))
+			_set_save_status("You forge a starmetal plate. Blows land softer now (+%d max HP)." % int(PlayerStatsService.STARMETAL_PLATE_HP), Color(0.7, 0.85, 1.0, 1.0))
+		_refresh_player_stats_from_session()
+		return true
+	return false
+
+func _refresh_player_stats_from_session() -> void:
+	var stats := PlayerStatsService.for_session(self)
+	_player_max_hp = float(stats.get("max_hp", _player_max_hp))
+	_player_attack_damage = int(stats.get("attack", _player_attack_damage))
+	_update_hp_label()
+
 func _try_harvest_decor(cell: Vector2i) -> bool:
 	if not _is_player_adjacent_to_cell(cell):
 		return false
@@ -3578,6 +3626,8 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	if not shop_type.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
 		_open_trade_popup(clicked_cell, shop_type)
 		return
+	if _try_work_forge(clicked_cell):
+		return
 	if _try_search_furnishing(clicked_cell):
 		return
 	if _try_harvest_decor(clicked_cell):
@@ -3958,6 +4008,10 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 		var piece_line := "Furniture: %s" % DfFurnitureDefs.display_name(furnishing_piece)
 		if DfFurnitureDefs.is_searchable(furnishing_piece):
 			piece_line += " (click to search)"
+		elif FORGE_FIRE_PIECES.has(furnishing_piece):
+			piece_line += " (click to smelt starmetal)"
+		elif furnishing_piece == "int_anvil":
+			piece_line += " (click to forge starmetal gear)"
 		tooltip_lines.append(piece_line)
 	var district_name := String(_latest_district_cell_map.get(hovered_cell, ""))
 	if not district_name.is_empty():
