@@ -124,6 +124,9 @@ var _hover_tooltip_layer: TileMapLayer
 var _last_move_direction := Vector2i.ZERO
 var _move_repeat_timer := 0.0
 var _npc_states: Array[Dictionary] = []
+var _settlement_factions: Array[Dictionary] = []
+var _factions_label: RichTextLabel
+var _faction_event_stamps: Dictionary = {}
 var _town_name := ""
 var _town_details: Dictionary = {}
 var _game_hour := 9.0
@@ -501,6 +504,7 @@ func _advance_game_clock(delta: float) -> void:
 		_game_day += 1
 	# Strolling the market works up an appetite too.
 	_player_satiety = clampf(_player_satiety - delta_hours * PlayerStatsService.SATIETY_DRAIN_PER_GAME_HOUR, 0.0, PlayerStatsService.SATIETY_MAX)
+	_update_faction_events()
 	_update_day_night_tint()
 	_update_clock_label()
 
@@ -1301,6 +1305,7 @@ func _initialize_chest_popup_grids() -> void:
 	_load_player_inventory()
 	_populate_backpack_slots()
 	_setup_coins_label()
+	_setup_factions_panel()
 	_escape_menu = EscapeMenu.new()
 	_escape_menu.show_return_to_map = true
 	add_child(_escape_menu)
@@ -2006,15 +2011,74 @@ func _assign_npc_identities() -> void:
 		state["identity"] = identity
 		state["npc_name"] = String(identity.get("name", "A villager"))
 
+## The town's guilds and societies: rolled per generation from the
+## seeded rng, recruited from the identity roster, and listed in the
+## sidebar. Members answer their faction's meeting bell through the
+## scheduler.
+func _assign_settlement_factions() -> void:
+	_faction_event_stamps.clear()
+	var building_cells_by_type: Dictionary = {}
+	for building_cell_variant: Variant in _latest_civic_building_type_map.keys():
+		var building_type := String(_latest_civic_building_type_map[building_cell_variant])
+		if not building_cells_by_type.has(building_type):
+			building_cells_by_type[building_type] = []
+		(building_cells_by_type[building_type] as Array).append(building_cell_variant)
+	_settlement_factions = SettlementFactionService.generate_factions(
+		"town", _hold_state.selected_hold_population, building_cells_by_type, _rng
+	)
+	SettlementFactionService.assign_members(_settlement_factions, _npc_states, Callable(self, "_is_npc_walkable_cell"), _rng)
+	_update_factions_panel()
+
+func _setup_factions_panel() -> void:
+	var controls := get_node_or_null("Margin/Layout/Controls")
+	if controls == null:
+		return
+	_factions_label = RichTextLabel.new()
+	_factions_label.bbcode_enabled = true
+	_factions_label.fit_content = true
+	_factions_label.scroll_active = false
+	_factions_label.add_theme_font_size_override("normal_font_size", 12)
+	_factions_label.add_theme_font_size_override("bold_font_size", 12)
+	_factions_label.add_theme_font_size_override("italics_font_size", 11)
+	controls.add_child(_factions_label)
+	var legend := controls.get_node_or_null("ZoneLegend")
+	if legend != null:
+		controls.move_child(_factions_label, legend.get_index() + 1)
+
+func _update_factions_panel() -> void:
+	if _factions_label != null:
+		_factions_label.text = SettlementFactionService.sidebar_bbcode(_settlement_factions)
+
+## When a meeting breaks up, word of what the faction did gets out -
+## once per faction per day, and only if the player is around to hear.
+func _update_faction_events() -> void:
+	for faction: Dictionary in _settlement_factions:
+		var since := fposmod(_game_hour - float(faction.get("meeting_hour", 20.0)), 24.0)
+		if since < SettlementFactionService.MEETING_DURATION_HOURS or since > SettlementFactionService.MEETING_DURATION_HOURS + 1.0:
+			continue
+		var stamp := "%s|%d" % [String(faction.get("id", "")), _game_day]
+		if _faction_event_stamps.has(stamp):
+			continue
+		_faction_event_stamps[stamp] = true
+		var line := SettlementFactionService.meeting_event_line(faction, _rng)
+		if not line.is_empty():
+			_set_save_status(line, Color(0.8, 0.75, 0.9, 1.0))
+
 func _show_npc_dialogue(state: Dictionary) -> void:
 	var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
 	if not state.has("identity"):
 		state["identity"] = NpcIdentityService.generate(_rng, role_title, "townsfolk")
 		state["npc_name"] = String((state["identity"] as Dictionary).get("name", "A villager"))
 	var identity := state.get("identity", {}) as Dictionary
-	# Sometimes they talk about themselves instead of the news.
+	# Sworn members talk about their faction, others gossip about the
+	# guilds, and everyone still has personal news and town rumors.
 	var line: String
-	if _rng.randf() < 0.4:
+	var faction_roll := _rng.randf()
+	if state.has("faction_name") and faction_roll < 0.35:
+		line = SettlementEconomyService.dialogue_line(role_title, SettlementFactionService.member_line(state, _rng), _rng)
+	elif faction_roll < 0.5 and not _settlement_factions.is_empty():
+		line = SettlementEconomyService.dialogue_line(role_title, SettlementFactionService.faction_rumor(_settlement_factions, _rng), _rng)
+	elif _rng.randf() < 0.4:
 		line = SettlementEconomyService.dialogue_line(role_title, NpcIdentityService.personal_line(identity, _rng), _rng)
 	else:
 		var rumor: String = SettlementEconomyService.rumor_from_town_details(_town_details, _rng)
@@ -2185,6 +2249,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
+	_assign_settlement_factions()
 	_apply_identity_appearances()
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
@@ -2597,6 +2662,8 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 		tooltip_lines.append(NpcIdentityService.summary_line(identity))
 		for detail: String in NpcIdentityService.detail_lines(identity):
 			tooltip_lines.append(detail)
+		if hovered_npc.has("faction_name") and not bool(hovered_npc.get("faction_secret", false)):
+			tooltip_lines.append("Sworn to the %s" % String(hovered_npc.get("faction_name", "")))
 		tooltip_lines.append("")
 	tooltip_lines.append("Tile: %s" % tile_name)
 	tooltip_lines.append("Zone: %s" % zone_name)
