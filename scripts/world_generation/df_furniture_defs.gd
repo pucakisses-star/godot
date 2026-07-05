@@ -135,9 +135,14 @@ const DISPLAY_NAMES := {
 }
 
 ## Containers the player can search once for loot.
-const SEARCHABLE_PREFIXES := ["df_box_", "df_cabinet_", "df_bookcase_"]
+const SEARCHABLE_PREFIXES := [
+	"df_box_", "df_cabinet_", "df_bookcase_",
+	"int_dresser_", "int_cupboard_", "int_cabinet_", "int_bookshelf_"
+]
 
 static func display_name(key: String) -> String:
+	if key.begins_with("int_"):
+		return key.trim_prefix("int_").capitalize()
 	if not key.begins_with("df_"):
 		return key.capitalize()
 	var parts := key.trim_prefix("df_").split("_")

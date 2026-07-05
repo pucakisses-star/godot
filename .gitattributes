@@ -22,18 +22,7 @@
 *.ogg filter=lfs diff=lfs merge=lfs -text
 *.mp3 filter=lfs diff=lfs merge=lfs -text
 
-# Stored in-repo (fork LFS store is missing objects; keep menu art recoverable)
-resources/images/main_menu/smith.png -filter -diff -merge -text
-resources/images/overworld/atlas/world_map_details.png -filter -diff -merge -text
-resources/images/overworld/atlas/overworld.png -filter -diff -merge -text
-resources/images/town/town_tileset.png -filter -diff -merge -text
-resources/images/npc/townsfolk_characters.png -filter -diff -merge -text
-resources/images/npc/dwarf_characters.png -filter -diff -merge -text
-resources/images/npc/creature_characters.png -filter -diff -merge -text
-resources/images/items/item_icons.png -filter -diff -merge -text
-resources/images/dwarfhold/map.png -filter -diff -merge -text
-resources/images/webgame_tiles/** -filter -diff -merge -text
-resources/images/items/item_icons2.png -filter -diff -merge -text
-resources/images/items/item_icons3.png -filter -diff -merge -text
-resources/images/character_creator/** -filter -diff -merge -text
-resources/images/dwarfhold/df_furniture_atlas.png -filter -diff -merge -text
+# Stored in-repo (fork LFS store is missing objects, so LFS-tracked game
+# assets check out as pointer text on fresh clones; keep everything the
+# game loads as plain blobs)
+resources/** -filter -diff -merge -text

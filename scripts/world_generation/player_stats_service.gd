@@ -57,10 +57,46 @@ static func attack_damage(character: Dictionary) -> int:
 
 static func for_session(context: Node) -> Dictionary:
 	var character: Dictionary = {}
+	var settings: Dictionary = {}
 	var session := context.get_node_or_null("/root/GameSession")
 	if session != null and session.has_method("get_player_character"):
 		character = session.call("get_player_character")
-	return {"max_hp": max_hp(character), "attack": attack_damage(character)}
+	if session != null and session.has_method("get_world_settings"):
+		settings = session.call("get_world_settings")
+	var hp := max_hp(character)
+	var attack := attack_damage(character)
+	if bool(settings.get(GEAR_STARMETAL_PLATE, false)):
+		hp += STARMETAL_PLATE_HP
+	if bool(settings.get(GEAR_STARMETAL_BLADE, false)):
+		attack += STARMETAL_BLADE_ATTACK
+	return {"max_hp": hp, "attack": attack}
+
+## --- Starmetal gear ---------------------------------------------------------
+## Deep-level starmetal smelts into bars at a working furnace and forges
+## into permanent gear at an anvil. Gear is a world-settings flag, so it
+## persists like the rest of the player state.
+
+const GEAR_STARMETAL_BLADE := "starmetal_blade"
+const GEAR_STARMETAL_PLATE := "starmetal_plate"
+const STARMETAL_BLADE_ATTACK := 3
+const STARMETAL_PLATE_HP := 15.0
+const SMELT_ORE_PER_BAR := 2
+const FORGE_BARS_PER_PIECE := 3
+
+static func has_gear(context: Node, gear_key: String) -> bool:
+	var session := context.get_node_or_null("/root/GameSession")
+	if session == null or not session.has_method("get_world_settings"):
+		return false
+	var settings: Dictionary = session.call("get_world_settings")
+	return bool(settings.get(gear_key, false))
+
+static func grant_gear(context: Node, gear_key: String) -> void:
+	var session := context.get_node_or_null("/root/GameSession")
+	if session == null or not session.has_method("get_world_settings") or not session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = session.call("get_world_settings")
+	settings[gear_key] = true
+	session.call("set_world_settings", settings)
 
 static func stat_summary(character: Dictionary) -> String:
 	return "❤ %d   ⚔ %d" % [int(max_hp(character)), attack_damage(character)]

@@ -26,6 +26,7 @@ const ITEM_DEFS := {
 	"Gold Nugget": {"icon": 12, "flavor": "Enough to turn a merchant's head."},
 	"Gem Shard": {"icon": 88, "flavor": "A splinter of buried starlight."},
 	"Starmetal Ore": {"icon": 88, "flavor": "Sky-iron from the world's roots. It hums against the skin."},
+	"Starmetal Bar": {"icon": 30, "flavor": "Smelted sky-iron, faintly aglow. It wants to be a weapon."},
 	"Old Tome": {"icon": 30, "flavor": "Cramped dwarven script. Someone's ledger, or someone's grudge."},
 	"Carved Curio": {"icon": 12, "flavor": "A knick-knack whittled by firelight, worn smooth by pockets."},
 	"Iron Ingot": {"icon": 30, "flavor": "Smelted and stamped by hold smiths."},
