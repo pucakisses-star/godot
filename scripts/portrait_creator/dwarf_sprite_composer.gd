@@ -10,6 +10,10 @@ extends RefCounted
 
 const HEADS_SHEET := preload("res://resources/images/character_creator/portraits/dwarf_body.png")
 const HAIR_SHEET := preload("res://resources/images/character_creator/portraits/dwarf_hair_straight.png")
+## The human layer sheets share the dwarf sheets' geometry exactly, so
+## one composer serves both species (layers.species = "human").
+const HUMAN_HEADS_SHEET := preload("res://resources/images/character_creator/portraits/human_body.png")
+const HUMAN_HAIR_SHEET := preload("res://resources/images/character_creator/portraits/human_hair_straight.png")
 const CLOTHES_SHEET := preload("res://resources/images/character_creator/portraits/dwarf_clothes.png")
 
 const TILE := 32
@@ -64,21 +68,28 @@ static func compose_head(layers: Dictionary) -> ImageTexture:
 		_blit_tile(image, HAIR_SHEET, FIRST_COLOR_COLUMN + beard_color, BEARD_STYLE_ROWS[clampi(beard_style, 0, BEARD_STYLE_ROWS.size() - 1)])
 	return ImageTexture.create_from_image(image)
 
-## The composed 32x32 dwarf. beard_style/hair_style of -1 hide the layer.
+static func _heads_sheet_for(layers: Dictionary) -> Texture2D:
+	return HUMAN_HEADS_SHEET if String(layers.get("species", "dwarf")) == "human" else HEADS_SHEET
+
+static func _hair_sheet_for(layers: Dictionary) -> Texture2D:
+	return HUMAN_HAIR_SHEET if String(layers.get("species", "dwarf")) == "human" else HAIR_SHEET
+
+## The composed 32x32 character. beard_style/hair_style of -1 hide the
+## layer; layers.species picks the dwarf or human sheets.
 static func compose(layers: Dictionary) -> ImageTexture:
 	var image := Image.create(TILE, TILE, false, Image.FORMAT_RGBA8)
 	var skin_tone := clampi(int(layers.get("skin_tone", 0)), 0, SKIN_TONE_ROWS.size() - 1)
 	var clothes_color := clampi(int(layers.get("clothes_color", 7)), 0, CLOTHES_COLOR_COUNT - 1)
 	_blit_tile(image, CLOTHES_SHEET, clothes_color, CLOTHES_ROW)
-	_blit_tile(image, HEADS_SHEET, 0, SKIN_TONE_ROWS[skin_tone])
+	_blit_tile(image, _heads_sheet_for(layers), 0, SKIN_TONE_ROWS[skin_tone])
 	var hair_style := int(layers.get("hair_style", 0))
 	if hair_style >= 0:
 		var hair_color := clampi(int(layers.get("hair_color", 4)), 0, COLOR_COLUMN_COUNT - 1)
-		_blit_tile(image, HAIR_SHEET, FIRST_COLOR_COLUMN + hair_color, HAIR_STYLE_ROWS[clampi(hair_style, 0, HAIR_STYLE_ROWS.size() - 1)])
+		_blit_tile(image, _hair_sheet_for(layers), FIRST_COLOR_COLUMN + hair_color, HAIR_STYLE_ROWS[clampi(hair_style, 0, HAIR_STYLE_ROWS.size() - 1)])
 	var beard_style := int(layers.get("beard_style", 0))
 	if beard_style >= 0:
 		var beard_color := clampi(int(layers.get("beard_color", 4)), 0, COLOR_COLUMN_COUNT - 1)
-		_blit_tile(image, HAIR_SHEET, FIRST_COLOR_COLUMN + beard_color, BEARD_STYLE_ROWS[clampi(beard_style, 0, BEARD_STYLE_ROWS.size() - 1)])
+		_blit_tile(image, _hair_sheet_for(layers), FIRST_COLOR_COLUMN + beard_color, BEARD_STYLE_ROWS[clampi(beard_style, 0, BEARD_STYLE_ROWS.size() - 1)])
 	return ImageTexture.create_from_image(image)
 
 static func _blit_tile(target: Image, sheet: Texture2D, column: int, row: int) -> void:

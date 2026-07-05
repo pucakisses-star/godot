@@ -2058,6 +2058,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_refresh_lighting(grid)
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
+	_apply_identity_appearances()
 	_clear_torch_sprites()
 	_clear_creatures()
 	_end_fishing("")
@@ -2532,6 +2533,31 @@ func _npc_state_at_cell(cell: Vector2i) -> Dictionary:
 
 ## Every dwarf is somebody: identities are rolled once at spawn from the
 ## hold's seeded rng, so the same seed always houses the same dwarves.
+## Every citizen wears their own face: composed DF layers seeded from
+## their identity. Identical rolls share one texture.
+func _apply_identity_appearances() -> void:
+	var texture_cache: Dictionary = {}
+	for state_variant: Variant in _npc_states:
+		var state := state_variant as Dictionary
+		var identity := state.get("identity", {}) as Dictionary
+		if identity.is_empty():
+			continue
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var layers := NpcIdentityService.appearance_for_identity(identity, "dwarf")
+		var cache_key := str(layers)
+		if not texture_cache.has(cache_key):
+			texture_cache[cache_key] = DwarfSpriteComposer.compose(layers)
+		sprite.texture = texture_cache[cache_key]
+		sprite.region_enabled = false
+		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sprite.scale = Vector2(
+			float(tile_size.x) / 32.0,
+			float(tile_size.y) / 32.0
+		) * 0.9
+		state["composed"] = true
+
 func _assign_npc_identities() -> void:
 	for state: Dictionary in _npc_states:
 		var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Dwarf"))
