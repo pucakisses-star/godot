@@ -18,6 +18,7 @@ const MODE_SLEEP := "sleep"
 const MODE_WORK := "work"
 const MODE_LEISURE := "leisure"
 const MODE_PATROL := "patrol"
+const MODE_MEETING := "meeting"
 
 const SLEEP_START_HOUR := 22.0
 const SLEEP_END_HOUR := 6.0
@@ -136,6 +137,11 @@ static func _pick_patrol_points(street_cells: Array[Vector2i], rng: RandomNumber
 
 ## The mode an NPC should be in at the given hour.
 static func mode_for_hour(state: Dictionary, hour: float) -> String:
+	# Sworn faction members answer the meeting bell before anything else -
+	# including sleep, which is how the midnight cults get their crowds.
+	var meeting_hour := float(state.get("faction_meeting_hour", -1.0))
+	if meeting_hour >= 0.0 and fposmod(hour - meeting_hour, 24.0) < SettlementFactionService.MEETING_DURATION_HOURS:
+		return MODE_MEETING
 	var sleeping := hour >= SLEEP_START_HOUR or hour < SLEEP_END_HOUR
 	if bool(state.get("is_guard", false)):
 		if sleeping and not bool(state.get("night_watch", false)):
@@ -153,6 +159,8 @@ static func anchor_for_mode(state: Dictionary, mode: String) -> Vector2i:
 			return state.get("home_anchor", Vector2i.ZERO) as Vector2i
 		MODE_WORK:
 			return state.get("work_anchor", Vector2i.ZERO) as Vector2i
+		MODE_MEETING:
+			return state.get("faction_meeting_anchor", state.get("leisure_anchor", Vector2i.ZERO)) as Vector2i
 		MODE_PATROL:
 			var points_variant: Variant = state.get("patrol_points", [])
 			var points := points_variant as Array
@@ -171,6 +179,8 @@ static func _radius_for_mode(mode: String) -> int:
 			return 2
 		MODE_PATROL:
 			return 0
+		MODE_MEETING:
+			return 2
 		_:
 			return 5
 
@@ -195,6 +205,7 @@ static func update_scheduled_npcs(
 		if String(state.get("mode", "")) != mode:
 			state["mode"] = mode
 			state["cooldown"] = 0.0
+			state.erase("meeting_path")
 
 		var cooldown := float(state.get("cooldown", 0.0)) - delta
 		var direction := state.get("direction", Vector2.ZERO) as Vector2
@@ -213,7 +224,13 @@ static func update_scheduled_npcs(
 
 			var step := Vector2i.ZERO
 			if distance > radius:
-				step = _step_toward(current_cell, anchor, is_npc_walkable, rng)
+				# Meetings are appointments across the whole settlement;
+				# greedy steps lose themselves in winding halls, so sworn
+				# members follow a real path to the door.
+				if mode == MODE_MEETING:
+					step = _meeting_path_step(state, current_cell, anchor, is_npc_walkable)
+				if step == Vector2i.ZERO:
+					step = _step_toward(current_cell, anchor, is_npc_walkable, rng)
 			elif mode == MODE_SLEEP:
 				step = Vector2i.ZERO
 			elif rng.randf() < 0.6:
@@ -289,6 +306,66 @@ static func _step_toward(from_cell: Vector2i, to_cell: Vector2i, is_npc_walkable
 		if bool(is_npc_walkable.call(from_cell + detour)):
 			return detour
 	return Vector2i.ZERO
+
+## Follows (and lazily computes) a BFS path to the meeting anchor. The
+## path is cached on the state and rebuilt when a cell along it closes.
+static func _meeting_path_step(state: Dictionary, from_cell: Vector2i, anchor: Vector2i, is_npc_walkable: Callable) -> Vector2i:
+	var path_variant: Variant = state.get("meeting_path")
+	if path_variant is Array:
+		var path := path_variant as Array
+		if not path.is_empty():
+			var next := path[0] as Vector2i
+			if _chebyshev(from_cell, next) <= 1 and bool(is_npc_walkable.call(next)):
+				path.remove_at(0)
+				return next - from_cell
+	# An unreachable hall shouldn't cost a flood fill on every wake.
+	var backoff := int(state.get("meeting_bfs_backoff", 0))
+	if backoff > 0:
+		state["meeting_bfs_backoff"] = backoff - 1
+		return Vector2i.ZERO
+	var fresh_path := _bfs_path(from_cell, anchor, is_npc_walkable)
+	state["meeting_path"] = fresh_path
+	if fresh_path.is_empty():
+		state["meeting_bfs_backoff"] = 24
+		return Vector2i.ZERO
+	var first := fresh_path[0] as Vector2i
+	fresh_path.remove_at(0)
+	return first - from_cell
+
+const MEETING_PATH_VISIT_CAP := 16384
+
+static func _bfs_path(from_cell: Vector2i, to_cell: Vector2i, is_npc_walkable: Callable) -> Array:
+	if from_cell == to_cell:
+		return []
+	var queue: Array[Vector2i] = [from_cell]
+	var came_from: Dictionary = {from_cell: from_cell}
+	var head := 0
+	var found := false
+	while head < queue.size() and came_from.size() < MEETING_PATH_VISIT_CAP:
+		var current := queue[head]
+		head += 1
+		if current == to_cell:
+			found = true
+			break
+		for direction: Vector2i in CARDINAL_DIRECTIONS:
+			var next := current + direction
+			if came_from.has(next):
+				continue
+			if next != to_cell and not bool(is_npc_walkable.call(next)):
+				continue
+			came_from[next] = current
+			queue.append(next)
+	if not found:
+		return []
+	var reversed: Array[Vector2i] = []
+	var cursor := to_cell
+	while cursor != from_cell:
+		reversed.append(cursor)
+		cursor = came_from[cursor] as Vector2i
+	var path: Array = []
+	for i in range(reversed.size() - 1, -1, -1):
+		path.append(reversed[i])
+	return path
 
 static func _wander_step(from_cell: Vector2i, anchor: Vector2i, radius: int, is_npc_walkable: Callable, rng: RandomNumberGenerator) -> Vector2i:
 	var start := rng.randi_range(0, 3)
