@@ -2040,6 +2040,10 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_cell = result.get("player_cell", _player_cell)
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	_relocate_player_to_city_heart(grid)
+	# Lighting was initialized before the player existed; now that the
+	# dwarf stands somewhere, punch their vision into the fog.
+	_update_shattered_visibility(grid)
+	_refresh_lighting(grid)
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
 	_clear_torch_sprites()
