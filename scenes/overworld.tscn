@@ -301,6 +301,7 @@ theme_override_font_sizes/font_size = 9
 text = "BIOME"
 
 [node name="TooltipBiome" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -312,6 +313,7 @@ theme_override_font_sizes/font_size = 9
 text = "CLIMATE"
 
 [node name="TooltipClimate" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -323,6 +325,7 @@ theme_override_font_sizes/font_size = 9
 text = "RESOURCES"
 
 [node name="TooltipResources" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -334,6 +337,7 @@ theme_override_font_sizes/font_size = 9
 text = "MAJOR GROUPS"
 
 [node name="TooltipMajorPopulationGroups" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -345,6 +349,7 @@ theme_override_font_sizes/font_size = 9
 text = "MINOR GROUPS"
 
 [node name="TooltipMinorPopulationGroups" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -356,6 +361,7 @@ theme_override_font_sizes/font_size = 9
 text = "SETTLEMENT"
 
 [node name="TooltipSettlement" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -367,6 +373,7 @@ theme_override_font_sizes/font_size = 9
 text = "POPULATION"
 
 [node name="TooltipPopulation" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -378,6 +385,7 @@ theme_override_font_sizes/font_size = 9
 text = "RULER"
 
 [node name="TooltipRuler" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -389,6 +397,7 @@ theme_override_font_sizes/font_size = 9
 text = "FOUNDED"
 
 [node name="TooltipFounded" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -400,6 +409,7 @@ theme_override_font_sizes/font_size = 9
 text = "PROMINENT CLAN"
 
 [node name="TooltipProminentClan" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -411,6 +421,7 @@ theme_override_font_sizes/font_size = 9
 text = "MAJOR CLANS"
 
 [node name="TooltipMajorClans" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -422,6 +433,7 @@ theme_override_font_sizes/font_size = 9
 text = "MAJOR GUILDS"
 
 [node name="TooltipMajorGuilds" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -433,6 +445,7 @@ theme_override_font_sizes/font_size = 9
 text = "MAJOR EXPORTS"
 
 [node name="TooltipMajorExports" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
@@ -444,6 +457,7 @@ theme_override_font_sizes/font_size = 9
 text = "HALLMARK"
 
 [node name="TooltipHallmark" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
 theme_override_font_sizes/font_size = 10
 size_flags_horizontal = 3
 autowrap_mode = 3
