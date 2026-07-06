@@ -355,6 +355,7 @@ func _build_ambient_sources(width: int, height: int, tiles: Dictionary, seed_num
 				continue
 			var base := String(tile.get("base_biome", tile.get("base", tile.get("biome_type", ""))))
 			if base == "water":
+				_add_water_ambient_source(seed_number, coord, tiles)
 				continue
 			var biome := String(tile.get("biome_type", base))
 			var structure := String(tile.get("structure", "")).to_lower()
@@ -374,17 +375,33 @@ func _build_ambient_sources(width: int, height: int, tiles: Dictionary, seed_num
 				1.1
 			)
 
+## Sea peoples: sources roll on open water (browser main.js:7722-7753)
+## and their influence lands only on shore tiles that touch the water,
+## since influence is never painted onto the sea itself.
+func _add_water_ambient_source(seed_number: int, coord: Vector2i, tiles: Dictionary) -> void:
+	var coastal_filter := func(candidate_coord: Vector2i, _candidate_tile: Dictionary) -> bool:
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				if dx == 0 and dy == 0:
+					continue
+				var neighbor := tiles.get(candidate_coord + Vector2i(dx, dy), {}) as Dictionary
+				if String(neighbor.get("base_biome", neighbor.get("base", ""))) == "water":
+					return true
+		return false
+	var add_roll := func(salt: int, threshold: float, radius: int, key: String, label: String, falloff: float) -> void:
+		if _hash_roll(seed_number, coord.x, coord.y, salt) < threshold:
+			add_cultural_source(coord.x, coord.y, radius, [{"key": key, "label": label, "color": CULTURE_TYPES.DEFAULT_CULTURE_COLORS.get(key, Color.GRAY), "share": 1.0}], falloff, coastal_filter)
+	add_roll.call(12, 0.07, 8, "karkinos", "Karkinos", 1.32)
+	add_roll.call(14, 0.06, 8, "locathah", "Locathah", 1.3)
+	add_roll.call(16, 0.055, 8, "merfolks", "Merfolks", 1.28)
+	add_roll.call(19, 0.045, 7, "hadozee", "Hadozee", 1.35)
+
 func _add_biome_ambient_source(seed_number: int, coord: Vector2i, biome: String) -> void:
 	var add_roll := func(salt: int, threshold: float, radius: int, key: String, label: String, falloff: float) -> void:
 		if _hash_roll(seed_number, coord.x, coord.y, salt) < threshold:
 			add_cultural_source(coord.x, coord.y, radius, [{"key": key, "label": label, "color": CULTURE_TYPES.DEFAULT_CULTURE_COLORS.get(key, Color.GRAY), "share": 1.0}], falloff)
 
 	match biome:
-		"water":
-			add_roll.call(12, 0.07, 8, "karkinos", "Karkinos", 1.32)
-			add_roll.call(14, 0.06, 8, "locathah", "Locathah", 1.3)
-			add_roll.call(16, 0.055, 8, "merfolks", "Merfolks", 1.28)
-			add_roll.call(19, 0.045, 7, "hadozee", "Hadozee", 1.35)
 		"grassland":
 			add_roll.call(18, 0.08, 6, "humans", "Humans", 1.35)
 			add_roll.call(21, 0.05, 7, "half_orcs", "Half-Orcs", 1.4)
@@ -414,6 +431,11 @@ func _add_biome_ambient_source(seed_number: int, coord: Vector2i, biome: String)
 			add_roll.call(68, 0.042, 8, "hobgoblin", "Hobgoblin", 1.44)
 			add_roll.call(70, 0.038, 8, "gnolls", "Gnolls", 1.46)
 		"mountain", "hills":
+			# Browser main.js:7809-7827: true mountains (not mere hills)
+			# very rarely shelter a dragon, whose territory reaches wider
+			# than any other ambient culture's.
+			if biome == "mountain":
+				add_roll.call(94, 0.013, 10, "dragons", "Dragons", 1.4)
 			add_roll.call(71, 0.055, 8, "dwarves", "Dwarves", 1.38)
 			add_roll.call(72, 0.045, 8, "aarakocra", "Aarakocra", 1.42)
 			add_roll.call(74, 0.04, 8, "giants", "Giants", 1.48)
@@ -847,6 +869,8 @@ func _ambient_option_matches(option: Dictionary, coord: Vector2i, tiles: Diction
 		return false
 	if bool(option.get("requires_cave_neighbor", false)) and not _has_neighbor_structure(coord, tiles, "cave"):
 		return false
+	if bool(option.get("requires_mountain_overlay", false)) and not _has_overlay(coord, tiles, "mountain"):
+		return false
 	var tile := tiles.get(coord, {}) as Dictionary
 	var tile_biome := String(tile.get("biome_type", tile.get("base_biome", tile.get("base", "")))).to_lower()
 	if bool(option.get("requires_plain_grass", false)):
@@ -863,8 +887,10 @@ func _ambient_option_matches(option: Dictionary, coord: Vector2i, tiles: Diction
 
 func _has_overlay(coord: Vector2i, tiles: Dictionary, overlay_key: String) -> bool:
 	var tile := tiles.get(coord, {}) as Dictionary
-	var overlay := String(tile.get("overlay", "")).to_lower()
-	return overlay.find(overlay_key) >= 0
+	# Trees live in "overlay", mountains and hills in "hill_overlay";
+	# gates like requires_mountain_overlay must see both.
+	var overlay := "%s %s" % [String(tile.get("overlay", "")), String(tile.get("hill_overlay", ""))]
+	return overlay.to_lower().find(overlay_key) >= 0
 
 func _has_neighbor_overlay(coord: Vector2i, tiles: Dictionary, overlay_key: String) -> bool:
 	for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN, Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:

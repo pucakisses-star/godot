@@ -2278,6 +2278,14 @@ func _apply_overlays_and_metadata(
 				"base_biome_id": _biome_to_id(base_biome),
 				"overlay_flags": overlay_flags,
 				"hill_biome_id": _biome_to_id(String(highland_map.get(coord, BIOME_GRASSLAND))),
+				# The cultural pipeline (ambient culture rolls, ambient
+				# structure gates, political terrain costs) matches on
+				# label strings, not ids - without these every
+				# biome-keyed culture rule silently never fires.
+				"biome_type": biome,
+				"base_biome": base_biome,
+				"overlay": overlay_label,
+				"hill_overlay": highland_biome,
 				"structure": "",
 				"structure_details": null,
 				"ambient_structure": null,
@@ -9266,6 +9274,9 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 	corners[2] = RegionMapService.danger_for_world_cell(origin + Vector2i(0, span), _region_site_anchors)
 	corners[3] = RegionMapService.danger_for_world_cell(origin + Vector2i(span, span), _region_site_anchors)
 	var has_iceberg := iceberg_layer != null and iceberg_layer.get_cell_source_id(tile) >= 0
+	var iceberg_art := Vector2i(-1, -1)
+	if has_iceberg:
+		iceberg_art = iceberg_layer.get_cell_atlas_coords(tile)
 	var tile_ruggedness := float((_tile_data.get(tile, {}) as Dictionary).get("mountain_ruggedness", 0.45))
 	if tile_ruggedness <= 0.0:
 		tile_ruggedness = 0.45
@@ -9273,8 +9284,28 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 		_region_world_seed_text(), tile,
 		own_biome, _region_river_for_tile(tile),
 		has_iceberg, water, rivers, corners, tile_ruggedness,
-		biomes, roads
+		biomes, roads,
+		_region_tileset_image(), tile_size, iceberg_art
 	)
+
+## The worldmap atlas as a plain RGBA image the render workers can read:
+## the detailed view draws with the SAME tiles as the map, DF-style.
+var _region_tileset_cache: Image = null
+
+func _region_tileset_image() -> Image:
+	if _region_tileset_cache != null:
+		return _region_tileset_cache
+	var atlas_texture := load(TILE_ATLAS_DEFS.ATLAS_TEXTURE) as Texture2D
+	if atlas_texture == null:
+		return null
+	var atlas_image := atlas_texture.get_image()
+	if atlas_image == null:
+		return null
+	if atlas_image.is_compressed():
+		atlas_image.decompress()
+	atlas_image.convert(Image.FORMAT_RGBA8)
+	_region_tileset_cache = atlas_image
+	return _region_tileset_cache
 
 ## Synchronous render for the first screenful on entry.
 func _render_region_tile(tile: Vector2i) -> void:
@@ -9296,7 +9327,7 @@ func _apply_region_job(tile: Vector2i, job: Dictionary) -> void:
 	sprite.texture = ImageTexture.create_from_image(image)
 	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	sprite.position = Vector2(tile * tile_size)
-	sprite.scale = Vector2.ONE * (float(tile_size) / float(RegionMapService.CELLS_PER_TILE))
+	sprite.scale = Vector2.ONE * (float(tile_size) / float(image.get_width()))
 	_region_layer.add_child(sprite)
 	_region_sprites[tile] = sprite
 
