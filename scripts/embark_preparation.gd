@@ -195,19 +195,18 @@ func _ready() -> void:
 	randomize()
 	_populate_options()
 	_apply_cached_world_settings()
-	if seed_input.text.strip_edges().is_empty():
-		seed_input.text = _generate_seed()
-	if world_name_input.text.strip_edges().is_empty():
-		world_name_input.text = _generate_world_name()
 	# Chronology validation (browser rules): years 0-50000, ages 2-20.
 	year_input.min_value = CHRONOLOGY_YEAR_MIN
 	year_input.max_value = CHRONOLOGY_YEAR_MAX
 	age_input.min_value = CHRONOLOGY_AGE_MIN
 	age_input.max_value = CHRONOLOGY_AGE_MAX
-	if year_input.value <= 0:
-		year_input.value = 1485
-	if age_input.value <= 0:
-		age_input.value = 18
+	# Every visit proposes a NEW world: fresh seed, name and chronology
+	# rolls rather than echoes of the last world you forged. The
+	# Randomise buttons reroll, and typing overrides.
+	seed_input.text = _generate_seed()
+	world_name_input.text = _generate_world_name()
+	year_input.value = random_chronology_year()
+	age_input.value = random_chronology_age()
 	_refresh_summary()
 
 	map_size_select.item_selected.connect(func(_index: int) -> void: _refresh_summary())
@@ -432,11 +431,5 @@ func _apply_cached_world_settings() -> void:
 	var layout_index := WORLD_LAYOUTS.find(layout)
 	if layout_index >= 0:
 		world_layout_select.select(layout_index)
-
-	seed_input.text = str(settings.get("world_seed", "")).strip_edges()
-	world_name_input.text = str(settings.get("world_name", "")).strip_edges()
-	var chronology := settings.get("chronology", {}) as Dictionary
-	if chronology.has("year"):
-		year_input.value = int(chronology.get("year", 1485))
-	if chronology.has("age"):
-		age_input.value = max(1, int(chronology.get("age", 18)))
+	# Map size and layout are remembered preferences; seed, name and
+	# chronology are rolled fresh in _ready so each embark is a new world.

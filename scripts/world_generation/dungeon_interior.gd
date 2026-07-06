@@ -159,6 +159,8 @@ var _player_cell := Vector2i.ZERO
 var _player_hp := _player_max_hp
 var _player_move_path: Array[Vector2i] = []
 var _player_is_moving := false
+var _respawn_move_lock := false
+var _exiting_dungeon := false
 var _player_move_target_cell := Vector2i.ZERO
 var _player_move_target_position := Vector2.ZERO
 var _player_inventory: Dictionary = {}
@@ -1027,6 +1029,10 @@ func _is_walkable(cell: Vector2i) -> bool:
 func _try_step(direction: Vector2i) -> void:
 	if _player_is_moving:
 		return
+	# One tile per step, always - a longer vector would glide the sprite
+	# across intermediate cells (and their traps/stairs) unchecked.
+	if direction == Vector2i.ZERO or absi(direction.x) > 1 or absi(direction.y) > 1:
+		return
 	var next_cell := _player_cell + direction
 	# Stepping into a monster swings at it instead.
 	var creature_index := _creature_index_at_cell(next_cell)
@@ -1053,6 +1059,10 @@ func _try_held_step(direction: Vector2i) -> bool:
 		return false
 	if not _is_walkable(next_cell):
 		return false
+	# Corner rule: no diagonal squeeze between two blocked orthogonals.
+	if direction.x != 0 and direction.y != 0:
+		if not _is_walkable(_player_cell + Vector2i(direction.x, 0)) or not _is_walkable(_player_cell + Vector2i(0, direction.y)):
+			return false
 	_player_is_moving = true
 	_player_move_target_cell = next_cell
 	_player_move_target_position = _cell_center(next_cell)
@@ -1060,6 +1070,10 @@ func _try_held_step(direction: Vector2i) -> bool:
 
 func _start_next_dungeon_step() -> void:
 	var held := DwarfHoldUiInputHandler.current_move_input_direction()
+	if _respawn_move_lock:
+		if held != Vector2i.ZERO:
+			return
+		_respawn_move_lock = false
 	if held != Vector2i.ZERO:
 		_player_move_path.clear()
 		if _try_held_step(held):
@@ -1095,8 +1109,9 @@ func _update_player_movement(delta: float) -> void:
 		if not _player_is_moving:
 			return
 	# Spend this frame's travel budget across tile boundaries so held
-	# keys read as one continuous glide instead of tap-per-tile.
-	var budget := PLAYER_MOVE_SPEED * delta
+	# keys read as one continuous glide instead of tap-per-tile. Capped
+	# at one tile so a lag spike can't skip the walker across traps.
+	var budget := minf(PLAYER_MOVE_SPEED * delta, float(TILE_PX))
 	while _player_is_moving and budget > 0.0:
 		var remaining := _player_sprite.position.distance_to(_player_move_target_position)
 		if remaining > budget:
@@ -1109,7 +1124,7 @@ func _update_player_movement(delta: float) -> void:
 		var depth_before := _depth
 		_on_player_entered_cell(_player_cell)
 		# Stairs may have rebuilt the floor (or left the dungeon entirely).
-		if _player_sprite == null or _depth != depth_before:
+		if _player_sprite == null or _depth != depth_before or _exiting_dungeon:
 			return
 		_start_next_dungeon_step()
 
@@ -1143,12 +1158,15 @@ func _on_panel_gui_input(event: InputEvent) -> void:
 			return
 		if wheel.button_index == MOUSE_BUTTON_LEFT:
 			var cell := _cell_at_panel_position(wheel.position)
+			# Mid-glide the walker belongs to the arriving tile, so paths
+			# start there - never from the departed cell.
+			var path_start := _player_move_target_cell if _player_is_moving else _player_cell
 			var creature_index := _creature_index_at_cell(cell)
 			if creature_index >= 0:
 				if _is_adjacent_to_player(cell):
 					_attack_creature(creature_index)
 				else:
-					_player_move_path = _find_path(_player_cell, cell)
+					_player_move_path = _find_path(path_start, cell)
 				return
 			if _pedestals.has(cell) and _is_adjacent_to_player(cell):
 				_loot_pedestal(cell)
@@ -1156,7 +1174,7 @@ func _on_panel_gui_input(event: InputEvent) -> void:
 			if _chests.has(cell) and _is_adjacent_to_player(cell):
 				_loot_chest(cell)
 				return
-			_player_move_path = _find_path(_player_cell, cell)
+			_player_move_path = _find_path(path_start, cell)
 
 func _is_adjacent_to_player(cell: Vector2i) -> bool:
 	var delta := cell - _player_cell
@@ -1354,6 +1372,9 @@ func _handle_player_death(source_name: String) -> void:
 	_player_is_moving = false
 	_player_cell = _spawn_cell
 	_player_sprite.position = _cell_center(_player_cell)
+	# Keys held at the moment of death must not march the fresh corpse
+	# straight onto the entrance stairs; walk again after releasing.
+	_respawn_move_lock = true
 	_set_status("Felled by %s — you crawl back to the entrance" % source_name, Color(0.95, 0.5, 0.5, 1.0))
 
 ## --- Loot --------------------------------------------------------------------
@@ -1447,6 +1468,8 @@ func _spawn_floating_text(text: String, world_position: Vector2, color: Color) -
 	tween.chain().tween_callback(label.queue_free)
 
 func _leave_dungeon() -> void:
+	# The movement loop must not keep stepping a scene that is leaving.
+	_exiting_dungeon = true
 	_save_player_inventory()
 	SceneCacheService.request_change(self, OVERWORLD_SCENE_PATH)
 

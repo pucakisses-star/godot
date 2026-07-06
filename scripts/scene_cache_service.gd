@@ -54,6 +54,13 @@ func change_scene(target_path: String) -> void:
 		incoming.set_meta("scene_cache_key", target_key)
 	tree.root.add_child(incoming)
 	tree.current_scene = incoming
+	# Cached scenes skip _ready, so stamp last_scene here for both fresh
+	# and revived instances - saves must resume into THIS scene.
+	var session := get_node_or_null("/root/GameSession")
+	if session != null and session.has_method("get_world_settings"):
+		var settings: Dictionary = session.call("get_world_settings")
+		settings["last_scene"] = target_path
+		session.call("set_world_settings", settings)
 	if incoming.has_method("_on_scene_resumed"):
 		incoming.call("_on_scene_resumed")
 

@@ -159,6 +159,8 @@ static func _is_home(state: Dictionary) -> bool:
 ## citizen and spread by bite; vampires pick a victim who is alone or
 ## asleep, let the scheduler walk them there, and bite unseen. Returns
 ## event lines (zombies are loud; vampires are not).
+## game_hour is hour-of-day (0-24); total_game_hours is absolute time
+## (day * 24 + hour) so multi-day cooldowns survive midnight.
 static func update_predators(
 	delta: float,
 	npc_states: Array[Dictionary],
@@ -166,9 +168,11 @@ static func update_predators(
 	rng: RandomNumberGenerator,
 	game_hour: float,
 	is_npc_walkable: Callable,
-	cell_center_position: Callable
+	cell_center_position: Callable,
+	total_game_hours: float = -1.0
 ) -> Array[String]:
 	var events: Array[String] = []
+	var absolute_hours := total_game_hours if total_game_hours >= 0.0 else game_hour
 	for state: Dictionary in npc_states:
 		var affliction := state.get("affliction", {}) as Dictionary
 		match String(affliction.get("kind", "")):
@@ -176,7 +180,7 @@ static func update_predators(
 				var zombie_events := _update_zombie(delta, state, npc_states, city_layer, rng, is_npc_walkable, cell_center_position)
 				events.append_array(zombie_events)
 			KIND_VAMPIRE:
-				_update_vampire(state, npc_states, game_hour)
+				_update_vampire(state, npc_states, game_hour, absolute_hours)
 	return events
 
 static func _update_zombie(delta: float, state: Dictionary, npc_states: Array[Dictionary], city_layer: TileMapLayer, rng: RandomNumberGenerator, is_npc_walkable: Callable, cell_center_position: Callable) -> Array[String]:
@@ -224,13 +228,16 @@ static func _update_zombie(delta: float, state: Dictionary, npc_states: Array[Di
 ## The vampire hunts by appointment, not by chase: pick a victim who is
 ## alone or abed, point the night's wanderings at them (the scheduler
 ## does the walking), and bite when nobody else is near.
-static func _update_vampire(state: Dictionary, npc_states: Array[Dictionary], game_hour: float) -> void:
+static func _update_vampire(state: Dictionary, npc_states: Array[Dictionary], game_hour: float, total_game_hours: float) -> void:
 	var night := game_hour >= 21.0 or game_hour < 5.0
 	if not night:
 		state.erase("vampire_target")
 		return
 	var affliction := state.get("affliction", {}) as Dictionary
-	if game_hour - float(affliction.get("last_bite_hour", -1000.0)) < VAMPIRE_BITE_COOLDOWN_HOURS and float(affliction.get("last_bite_hour", -1000.0)) > -999.0:
+	# The cooldown compares ABSOLUTE hours: hour-of-day arithmetic made a
+	# 20-hour cooldown unmeetable for any bite after 4 in the morning.
+	var last_bite := float(affliction.get("last_bite_hour", -1000.0))
+	if last_bite > -999.0 and total_game_hours - last_bite < VAMPIRE_BITE_COOLDOWN_HOURS:
 		return
 	var my_cell := state.get("cell", Vector2i.ZERO) as Vector2i
 	# Keep or pick a victim: healthy, and either asleep at home or alone.
@@ -268,7 +275,7 @@ static func _update_vampire(state: Dictionary, npc_states: Array[Dictionary], ga
 	state["leisure_anchor"] = victim_cell
 	if maxi(absi(victim_cell.x - my_cell.x), absi(victim_cell.y - my_cell.y)) <= 1:
 		victim["affliction"] = {"id": "pale_sickness", "name": "a strange pallor", "kind": KIND_INCUBATING_VAMPIRE, "hours_left": VAMPIRE_INCUBATION_HOURS}
-		affliction["last_bite_hour"] = game_hour
+		affliction["last_bite_hour"] = total_game_hours
 		state.erase("vampire_target")
 
 ## What the hover card admits to. Diseases and shambling are plain to

@@ -91,6 +91,7 @@ var _player_inventory: Dictionary = {}
 var _player_coins := 0
 var _coins_label: Label
 var _trade_shop_cell := Vector2i(2147483647, 2147483647)
+var _crate_armed := ""
 var _trade_shop_type := ""
 var _shop_stocks: Dictionary = {}
 var _active_speech_bubble: PanelContainer
@@ -657,13 +658,17 @@ func _on_back_button_pressed() -> void:
 	SceneCacheService.request_change(self, OVERWORLD_SCENE_PATH)
 
 func _on_save_game_button_pressed() -> void:
+	# Slots, not the orphaned legacy file - the Load screen must see this.
 	var game_session := get_node_or_null("/root/GameSession")
-	if game_session == null or not game_session.has_method("save_to_file"):
+	if game_session == null:
 		_set_save_status("Save unavailable", Color(0.95, 0.45, 0.45, 1.0))
 		return
-	var result: int = int(game_session.call("save_to_file"))
+	var slot_id := String(game_session.call("get_current_slot")) if game_session.has_method("get_current_slot") else ""
+	if slot_id.is_empty() or slot_id == SaveGameService.AUTOSAVE_SLOT:
+		slot_id = SaveGameService.next_free_slot_id()
+	var result: Error = SaveGameService.save_slot(self, slot_id)
 	if result == OK:
-		_set_save_status("Game saved", Color(0.6, 0.9, 0.6, 1.0))
+		_set_save_status("Game saved to %s" % slot_id.replace("_", " "), Color(0.6, 0.9, 0.6, 1.0))
 	else:
 		_set_save_status("Save failed (%d)" % result, Color(0.95, 0.45, 0.45, 1.0))
 
@@ -697,6 +702,11 @@ func _on_scene_resumed() -> void:
 	_update_clock_label()
 
 func _exit_tree() -> void:
+	flush_session_state()
+
+## Pushes the live clock/HP/satiety into the session. Runs on scene exit
+## AND whenever SaveGameService writes a slot, so saves capture now.
+func flush_session_state() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return
@@ -770,6 +780,13 @@ func _handle_player_death(source_name: String) -> void:
 	_update_hp_label()
 	_player_move_path.clear()
 	_player_is_moving = false
+	# You wake ashore and afoot, whatever you were riding when it ended.
+	if _player_boating:
+		_set_boating(false)
+	if _player_mounted:
+		_player_mounted = false
+		if _mount_sprite != null:
+			_mount_sprite.visible = false
 	if _player_sprite != null:
 		_player_cell = _player_home_cell
 		_actor_sprite_to_cell(_player_sprite, _player_home_cell)
@@ -874,8 +891,9 @@ func _update_player_turn_movement(delta: float) -> void:
 
 	# Spend this frame's travel budget, flowing across tile boundaries so
 	# held keys read as one continuous Core Keeper-style glide instead of
-	# a step, a stall, and another step.
-	var budget := PLAYER_MOVE_SPEED * _player_speed_scale() * delta
+	# a step, a stall, and another step. Capped at one tile so a lag spike
+	# can never skip the walker across arrival triggers unchecked.
+	var budget := minf(PLAYER_MOVE_SPEED * _player_speed_scale() * delta, float(tile_size.x))
 	while _player_is_moving and budget > 0.0:
 		var remaining := _player_sprite.position.distance_to(_player_move_target_position)
 		if remaining > budget:
@@ -885,6 +903,7 @@ func _update_player_turn_movement(delta: float) -> void:
 		_player_sprite.position = _player_move_target_position
 		_player_cell = _player_move_target_cell
 		_player_is_moving = false
+		_close_out_of_range_popups()
 		if _try_use_stairs_at_player_cell():
 			_center_view_on_world_position(_player_sprite.position)
 			return
@@ -892,6 +911,18 @@ func _update_player_turn_movement(delta: float) -> void:
 	_center_view_on_world_position(_player_sprite.position)
 	if not _player_is_moving:
 		_finish_idle_interactions()
+
+## Walking away slams the lid: the chest/trade popup only works within
+## reach of its tile, so held keys can't shop from across the map.
+func _close_out_of_range_popups() -> void:
+	if chest_popup == null or not chest_popup.visible:
+		return
+	var anchor := _trade_shop_cell if _is_trade_mode() else _selected_chest_cell
+	if anchor.x == 2147483647:
+		return
+	var span := _player_cell - anchor
+	if maxi(absi(span.x), absi(span.y)) > 6:
+		_clear_chest_selection()
 
 func _is_text_input_focused() -> bool:
 	var focused := get_viewport().gui_get_focus_owner()
@@ -2602,7 +2633,9 @@ func _request_chest_interaction(chest_cell: Vector2i) -> void:
 		_clear_chest_selection()
 		return
 	_request_player_move_to_cell(approach_cell)
-	if not _player_move_path.is_empty():
+	# A one-step path is consumed immediately (leaving the path empty but
+	# the walker moving), so "moving" also counts as path accepted.
+	if not _player_move_path.is_empty() or _player_is_moving:
 		_player_pending_chest_interaction = chest_cell
 
 func _is_player_adjacent_to_cell(cell: Vector2i) -> bool:
@@ -2631,7 +2664,11 @@ func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 	if _latest_grid.is_empty() or not _latest_grid.has(target_cell):
 		return
 
-	var next_path := _build_player_path(_player_cell, target_cell)
+	# Mid-glide the walker belongs to the tile it is arriving at, not the
+	# one it left - pathing from the stale cell made the first step a
+	# multi-tile jump through unchecked ground.
+	var path_start := _player_move_target_cell if _player_is_moving else _player_cell
+	var next_path := _build_player_path(path_start, target_cell)
 	if next_path.is_empty():
 		if not _is_cell_occupied_by_npc(target_cell):
 			_player_move_path.clear()
@@ -2750,11 +2787,22 @@ func _screen_position_from_cell(cell: Vector2i) -> Vector2:
 func _try_move_player(direction: Vector2i) -> bool:
 	if direction == Vector2i.ZERO:
 		return false
+	# One tile per step, always - a longer vector would glide the sprite
+	# across intermediate cells nothing ever walkability-checked.
+	if absi(direction.x) > 1 or absi(direction.y) > 1:
+		return false
 	var target_cell := _player_cell + direction
+	# Corner rule, same as the click pathfinder: no squeezing diagonally
+	# between two blocked orthogonals.
+	if direction.x != 0 and direction.y != 0:
+		if not _player_can_pass_cell(_player_cell + Vector2i(direction.x, 0)) or not _player_can_pass_cell(_player_cell + Vector2i(0, direction.y)):
+			return false
+	if _is_cell_occupied_by_npc(target_cell):
+		return false
 	if _player_boating:
 		# Afloat: water is the road; solid ground means stepping ashore.
 		if not _is_water_cell(target_cell):
-			if _is_walkable_cell(target_cell) and not _is_cell_occupied_by_npc(target_cell):
+			if _is_walkable_cell(target_cell):
 				_set_boating(false)
 			else:
 				return false
@@ -2763,12 +2811,17 @@ func _try_move_player(direction: Vector2i) -> bool:
 			_set_boating(true)
 		else:
 			return false
-	if _is_cell_occupied_by_npc(target_cell):
-		return false
 	_player_move_target_cell = target_cell
 	_player_move_target_position = _cell_center_position(target_cell)
 	_player_is_moving = true
 	return true
+
+## What counts as open ground for the corner rule depends on the medium:
+## a boater's clearance is water, a walker's is floor.
+func _player_can_pass_cell(cell: Vector2i) -> bool:
+	if _is_walkable_cell(cell):
+		return true
+	return _player_boating and _is_water_cell(cell)
 
 func _center_view_on_cell(cell: Vector2i) -> void:
 	_center_view_on_world_position(_cell_center_position(cell))
@@ -2785,7 +2838,8 @@ func _update_npc_movement(delta: float) -> void:
 	var predator_events := SettlementAfflictionService.update_predators(
 		delta, _npc_states, city_layer, _rng, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),
-		Callable(self, "_cell_center_position")
+		Callable(self, "_cell_center_position"),
+		float(_game_day) * 24.0 + _game_hour
 	)
 	for predator_event: String in predator_events:
 		_set_save_status(predator_event, Color(0.95, 0.6, 0.55, 1.0))
@@ -3140,7 +3194,13 @@ func _stamp_dungeon_mouth(anchor: Vector2i) -> void:
 ## Walking onto a gate IS the journey: store the destination context
 ## and hand over to its scene.
 func _check_surface_arrival() -> void:
-	if _surface_arrival_lock or _surface_gates.is_empty() or _player_sprite == null:
+	if _surface_gates.is_empty() or _player_sprite == null:
+		return
+	if _surface_arrival_lock:
+		# Re-arm once the walker steps off the gate they left through,
+		# so gates survive the scene being parked and revived.
+		if not _player_on_any_gate_cell():
+			_surface_arrival_lock = false
 		return
 	for gate: Dictionary in _surface_gates:
 		var trigger_cells := gate.get("trigger_cells", []) as Array
@@ -3168,6 +3228,18 @@ func _check_surface_arrival() -> void:
 		_set_save_status("You arrive at %s." % String(site.get("name", "your destination")), Color(0.85, 0.9, 0.7, 1.0))
 		SceneCacheService.request_change(self, scene_path)
 		return
+
+func _player_on_any_gate_cell() -> bool:
+	for gate: Dictionary in _surface_gates:
+		var trigger_cells := gate.get("trigger_cells", []) as Array
+		if trigger_cells.is_empty():
+			if (gate.get("rect", Rect2i()) as Rect2i).has_point(_player_cell):
+				return true
+			continue
+		for trigger_variant: Variant in trigger_cells:
+			if (trigger_variant as Vector2i) == _player_cell:
+				return true
+	return false
 
 func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 	var to_evict: Array[Vector2i] = []
@@ -3438,6 +3510,13 @@ func _setup_inventory_screen() -> void:
 		Callable(self, "_on_equipment_changed")
 	)
 	chest_popup.get_parent().add_child(_inventory_screen)
+	# UI must outdraw the world: furnishing sprites carry z 8-14 and
+	# speech bubbles z 40 in the same canvas, and z_index beats tree
+	# order - without this, pots and stoves render over open menus.
+	_inventory_screen.z_index = 50
+	chest_popup.z_index = 50
+	if tile_hover_tooltip != null:
+		tile_hover_tooltip.z_index = 50
 
 func _on_equipment_changed() -> void:
 	_refresh_player_stats_town()
@@ -3456,6 +3535,7 @@ func _setup_hotbar() -> void:
 		Callable(self, "_use_hotbar_slot")
 	)
 	chest_popup.get_parent().add_child(_player_hotbar)
+	_player_hotbar.z_index = 50
 	_player_hotbar.refresh()
 	_player_hotbar.reposition.call_deferred()
 
@@ -3492,6 +3572,10 @@ func _use_hotbar_slot(index: int) -> void:
 				_build_selection = entry_index
 				_set_save_status("🔨 Till Soil armed — click grass beside you.", Color(0.85, 0.9, 0.75, 1.0))
 				return
+	if ANIMAL_CRATES.has(item_name):
+		_crate_armed = item_name
+		_set_save_status("🐾 %s armed — click open grass beside you to release the %s." % [item_name, String(ANIMAL_CRATES[item_name])], Color(0.85, 0.9, 0.75, 1.0))
+		return
 	_set_save_status("%s ×%d in the pack." % [item_name, int(_player_inventory.get(item_name, 0))], Color(0.8, 0.8, 0.8, 1.0))
 
 ## Eating above ground: mends and feeds, same math as the hold.
@@ -3650,6 +3734,10 @@ func _try_boat_action(cell: Vector2i) -> bool:
 	if int(_player_inventory.get("Coracle", 0)) < 1:
 		_set_save_status("Open water. A Coracle would carry you across — tinkers on the road sell them.", Color(0.7, 0.82, 0.95, 1.0))
 		return true
+	# Cancel any in-flight step so its arrival can't drag the boater back
+	# onto the departed land cell.
+	_player_is_moving = false
+	_player_move_path.clear()
 	_set_boating(true)
 	_player_cell = cell
 	_actor_sprite_to_cell(_player_sprite, cell)
@@ -3894,17 +3982,19 @@ func _persist_farm() -> void:
 
 ## Live animals released from a drover's crate near the homestead.
 func _try_release_animal(cell: Vector2i) -> bool:
+	# Only an ARMED crate releases (use it from the hotbar first) - a
+	# crate riding in the pack must not fire on ordinary walk clicks.
+	if _crate_armed.is_empty():
+		return false
 	if not _is_player_adjacent_to_cell(cell) or cell == _player_cell:
 		return false
-	var crate_name := ""
-	for candidate: String in ANIMAL_CRATES.keys():
-		if int(_player_inventory.get(candidate, 0)) >= 1:
-			crate_name = candidate
-			break
-	if crate_name.is_empty():
+	var crate_name := _crate_armed
+	if int(_player_inventory.get(crate_name, 0)) < 1:
+		_crate_armed = ""
 		return false
 	if not _is_walkable_cell(cell) or _is_cell_occupied_by_npc(cell):
 		return false
+	_crate_armed = ""
 	var kind := String(ANIMAL_CRATES[crate_name])
 	_add_to_inventory(crate_name, -1)
 	_spawn_owned_animal(kind, cell, float(_game_day) * 24.0 + _game_hour)

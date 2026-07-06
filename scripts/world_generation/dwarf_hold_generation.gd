@@ -1025,13 +1025,17 @@ func _on_back_button_pressed() -> void:
 	SceneCacheService.request_change(self, OVERWORLD_SCENE_PATH)
 
 func _on_save_game_button_pressed() -> void:
+	# Slots, not the orphaned legacy file - the Load screen must see this.
 	var game_session := get_node_or_null("/root/GameSession")
-	if game_session == null or not game_session.has_method("save_to_file"):
+	if game_session == null:
 		_set_save_status("Save unavailable", Color(0.95, 0.45, 0.45, 1.0))
 		return
-	var result: int = int(game_session.call("save_to_file"))
+	var slot_id := String(game_session.call("get_current_slot")) if game_session.has_method("get_current_slot") else ""
+	if slot_id.is_empty() or slot_id == SaveGameService.AUTOSAVE_SLOT:
+		slot_id = SaveGameService.next_free_slot_id()
+	var result: Error = SaveGameService.save_slot(self, slot_id)
 	if result == OK:
-		_set_save_status("Game saved", Color(0.6, 0.9, 0.6, 1.0))
+		_set_save_status("Game saved to %s" % slot_id.replace("_", " "), Color(0.6, 0.9, 0.6, 1.0))
 	else:
 		_set_save_status("Save failed (%d)" % result, Color(0.95, 0.45, 0.45, 1.0))
 
@@ -1117,8 +1121,9 @@ func _update_player_turn_movement(delta: float) -> void:
 
 	# Spend this frame's travel budget, flowing across tile boundaries so
 	# held keys read as one continuous Core Keeper-style glide instead of
-	# a step, a stall, and another step.
-	var budget := PLAYER_MOVE_SPEED * delta
+	# a step, a stall, and another step. Capped at one tile so a lag spike
+	# can never skip the walker across trigger cells unchecked.
+	var budget := minf(PLAYER_MOVE_SPEED * delta, float(tile_size.x))
 	var crossed_tile := false
 	while _player_is_moving and budget > 0.0:
 		var remaining := _player_sprite.position.distance_to(_player_move_target_position)
@@ -1130,6 +1135,7 @@ func _update_player_turn_movement(delta: float) -> void:
 		_player_cell = _player_move_target_cell
 		_player_is_moving = false
 		crossed_tile = true
+		_close_out_of_range_popups()
 		if _try_use_stairs_at_player_cell():
 			_center_view_on_world_position(_player_sprite.position)
 			return
@@ -1144,6 +1150,18 @@ func _update_player_turn_movement(delta: float) -> void:
 func _is_text_input_focused() -> bool:
 	var focused := get_viewport().gui_get_focus_owner()
 	return focused is LineEdit or focused is TextEdit
+
+## Walking away slams the lid: the chest/trade popup only works within
+## reach of its tile, so held keys can't shop from across the hold.
+func _close_out_of_range_popups() -> void:
+	if chest_popup == null or not chest_popup.visible:
+		return
+	var anchor := _trade_shop_cell if _is_trade_mode() else _selected_chest_cell
+	if anchor.x == 2147483647:
+		return
+	var span := _player_cell - anchor
+	if maxi(absi(span.x), absi(span.y)) > 6:
+		_clear_chest_selection()
 
 func _update_zone_legend() -> void:
 	var lines: PackedStringArray = ["[b]Zone Overlay Legend[/b]"]
@@ -1562,9 +1580,17 @@ func _show_level(target_level_index: int) -> void:
 		level_data["city_bounds"] = _city_bounds
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
-	_chest_inventories.clear()
+	# Chests keep their contents per level: sharing the level_data dict
+	# means looting persists and revisits never reroll fresh loot.
+	if not (level_data.get("chest_inventories") is Dictionary):
+		level_data["chest_inventories"] = {}
+	_chest_inventories = level_data.get("chest_inventories") as Dictionary
 	_clear_chest_selection()
 	_apply_hold_diffs_to_level(level_data, grid)
+	# The previous level's furniture must not block this level's spawn
+	# checks; _furnish_interiors rebuilds both maps right after.
+	_furnishing_blocked_cells.clear()
+	_furnishing_by_cell.clear()
 	_render_city(grid, _hold_state.active_level_stairs)
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
@@ -1611,7 +1637,11 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		return
 	city_layer.clear()
 	decor_layer.clear()
+	# Same clamp as the lighting: render the city and its surroundings,
+	# let the chunk streamer redraw far wilds as the walker approaches.
 	var bounds := _find_bounds(grid).grow(1)
+	if _city_bounds.has_area():
+		bounds = bounds.intersection(_city_bounds.grow(96))
 	var house_decor_overrides := _build_house_decor_layouts(grid)
 	for floor_cell_variant: Variant in _latest_floor_decor.keys():
 		if not house_decor_overrides.has(floor_cell_variant):
@@ -1759,7 +1789,14 @@ func _initialize_shattered_lighting(grid: Dictionary) -> void:
 			_lighting_mask_sprite.visible = false
 		return
 
-	_lighting_bounds = _find_bounds(grid).grow(1)
+	# Streamed wilds can stretch the grid arbitrarily far; the fog image
+	# must stay city-sized or one distant discovery balloons it to
+	# gigabytes. Cells beyond the clamp simply go unmasked, exactly like
+	# freshly streamed chunks always have.
+	var lighting_full := _find_bounds(grid).grow(1)
+	if _city_bounds.has_area():
+		lighting_full = lighting_full.intersection(_city_bounds.grow(96))
+	_lighting_bounds = lighting_full
 	var image_size := Vector2i(
 		maxi(_lighting_bounds.size.x * tile_size.x, 1),
 		maxi(_lighting_bounds.size.y * tile_size.y, 1)
@@ -2090,8 +2127,12 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	)
 	_player_sprite = result.get("player_sprite")
 	_player_cell = result.get("player_cell", _player_cell)
+	# A stair arrival chose its own spawn; only fresh entries (no pending
+	# cell) get pulled to the Great Hall.
+	var arrived_via_stairs := _pending_player_spawn_cell.x != 2147483647
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
-	_relocate_player_to_city_heart(grid)
+	if not arrived_via_stairs:
+		_relocate_player_to_city_heart(grid)
 	# Lighting was initialized before the player existed; now that the
 	# dwarf stands somewhere, punch their vision into the fog.
 	_update_shattered_visibility(grid)
@@ -2357,7 +2398,8 @@ func _try_search_furnishing(cell: Vector2i) -> bool:
 	var found := ""
 	if roll <= 55:
 		var coins := _rng.randi_range(2, 8)
-		_add_to_inventory("Coins", coins)
+		# Straight into the purse - a "Coins" pack item can't be spent.
+		_adjust_coins(coins)
 		found = "%d coins" % coins
 	elif roll <= 70:
 		_add_to_inventory("Mushrooms", _rng.randi_range(1, 2))
@@ -2502,6 +2544,13 @@ func _setup_inventory_screen() -> void:
 		Callable(self, "_on_equipment_changed")
 	)
 	chest_popup.get_parent().add_child(_inventory_screen)
+	# UI must outdraw the world: furnishing sprites carry z 8-14 and
+	# speech bubbles z 40 in the same canvas, and z_index beats tree
+	# order - without this, pots and stoves render over open menus.
+	_inventory_screen.z_index = 50
+	chest_popup.z_index = 50
+	if tile_hover_tooltip != null:
+		tile_hover_tooltip.z_index = 50
 
 func _on_equipment_changed() -> void:
 	_refresh_player_stats_from_session()
@@ -2520,6 +2569,7 @@ func _setup_hotbar() -> void:
 		Callable(self, "_use_hotbar_slot")
 	)
 	chest_popup.get_parent().add_child(_player_hotbar)
+	_player_hotbar.z_index = 50
 	_player_hotbar.refresh()
 	_player_hotbar.reposition.call_deferred()
 
@@ -3390,9 +3440,14 @@ func _scatter_stratum_relics(stratum: Dictionary, level_data: Dictionary) -> voi
 	if placements_variant is Array:
 		placements = placements_variant as Array
 	else:
+		# Stairs must stay walkable: a blocking relic on the only up-stair
+		# would seal the level.
+		var stair_cells := {}
+		for stair_variant: Variant in (level_data.get("stair_cells", {}) as Dictionary).values():
+			stair_cells[stair_variant] = true
 		var hall_cells: Array[Vector2i] = []
 		for cell_variant: Variant in _latest_grid.keys():
-			if int(_latest_grid[cell_variant]) == CELL_HALL and not _latest_floor_decor.has(cell_variant):
+			if int(_latest_grid[cell_variant]) == CELL_HALL and not _latest_floor_decor.has(cell_variant) and not stair_cells.has(cell_variant):
 				hall_cells.append(cell_variant as Vector2i)
 		if not hall_cells.is_empty():
 			for _relic in range(_rng.randi_range(6, 12)):
@@ -3650,7 +3705,12 @@ func _handle_player_death(source_name: String) -> void:
 	_update_hp_label()
 	_player_move_path.clear()
 	_player_is_moving = false
-	_relocate_player_to_city_heart(_latest_grid)
+	if _latest_district_labels.is_empty():
+		# Deep levels have no Great Hall to wake in - climb the walker
+		# back to the city level instead of reviving them mid-melee.
+		call_deferred("_show_level", 0)
+	else:
+		_relocate_player_to_city_heart(_latest_grid)
 	_set_save_status("Slain by %s — you wake back in the hold" % source_name, Color(0.95, 0.5, 0.5, 1.0))
 
 ## The hold is home: standing on city ground slowly mends your wounds -
@@ -3911,6 +3971,11 @@ func _on_scene_resumed() -> void:
 func _exit_tree() -> void:
 	_save_persistent_player_state()
 
+## Pushes the live clock/HP/satiety into the session. Runs on scene exit
+## AND whenever SaveGameService writes a slot, so saves capture now.
+func flush_session_state() -> void:
+	_save_persistent_player_state()
+
 func _update_inventory_label() -> void:
 	if _inventory_label == null:
 		return
@@ -4022,7 +4087,9 @@ func _request_chest_interaction(chest_cell: Vector2i) -> void:
 		_clear_chest_selection()
 		return
 	_request_player_move_to_cell(approach_cell)
-	if not _player_move_path.is_empty():
+	# A one-step path is consumed immediately (leaving the path empty but
+	# the walker moving), so "moving" also counts as path accepted.
+	if not _player_move_path.is_empty() or _player_is_moving:
 		_player_pending_chest_interaction = chest_cell
 
 func _is_player_adjacent_to_cell(cell: Vector2i) -> bool:
@@ -4063,7 +4130,11 @@ func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 	if _latest_grid.is_empty() or not _latest_grid.has(target_cell):
 		return
 
-	var next_path := _build_player_path(_player_cell, target_cell)
+	# Mid-glide the walker belongs to the tile it is arriving at, not the
+	# one it left - pathing from the stale cell made the first step a
+	# multi-tile jump through unchecked ground.
+	var path_start := _player_move_target_cell if _player_is_moving else _player_cell
+	var next_path := _build_player_path(path_start, target_cell)
 	if next_path.is_empty():
 		if not _is_cell_occupied_by_npc(target_cell):
 			_player_move_path.clear()
@@ -4183,6 +4254,15 @@ func _screen_position_from_cell(cell: Vector2i) -> Vector2:
 func _try_move_player(direction: Vector2i) -> bool:
 	if direction == Vector2i.ZERO:
 		return false
+	# One tile per step, always - a longer vector would glide the sprite
+	# across intermediate cells nothing ever walkability-checked.
+	if absi(direction.x) > 1 or absi(direction.y) > 1:
+		return false
+	# Corner rule, same as the click pathfinder: no squeezing diagonally
+	# between two blocked orthogonals into sealed rooms.
+	if direction.x != 0 and direction.y != 0:
+		if not _is_walkable_cell(_player_cell + Vector2i(direction.x, 0)) or not _is_walkable_cell(_player_cell + Vector2i(0, direction.y)):
+			return false
 	var target_cell := _player_cell + direction
 	if not _is_walkable_cell(target_cell):
 		return false
@@ -4210,7 +4290,8 @@ func _update_npc_movement(delta: float) -> void:
 	var predator_events := SettlementAfflictionService.update_predators(
 		delta, _npc_states, city_layer, _rng, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),
-		Callable(self, "_cell_center_position")
+		Callable(self, "_cell_center_position"),
+		float(_game_day) * 24.0 + _game_hour
 	)
 	for predator_event: String in predator_events:
 		_set_save_status(predator_event, Color(0.95, 0.6, 0.55, 1.0))
