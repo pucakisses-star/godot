@@ -4,11 +4,13 @@ class_name SettlementNpcScheduler
 ## Daily-life simulation for settlement NPCs (towns and dwarfholds).
 ## Each resident gets a role (matching their spritesheet slot), a home bed
 ## and a workplace; the game clock then drives where they head: work by
-## day, leisure around the plaza in the morning and evening, home to bed
-## at night. Guard-role NPCs patrol waypoints instead of working a
-## building, and half of them keep a night watch. Movement is greedy
-## step-toward-anchor with a random wander inside the anchor radius,
-## reusing the tavern service's facing/frame animation.
+## day, leisure at the tavern and around the plaza in the morning and
+## evening, home to bed at night. Guard-role NPCs patrol waypoints instead
+## of working a building, and half of them keep a night watch. Commutes
+## follow cached BFS paths (buildings have walls and single doors, so
+## greedy steps alone pile residents against the masonry), with a random
+## wander inside the anchor radius on arrival, reusing the tavern
+## service's facing/frame animation.
 ##
 ## Role numbers are spritesheet slots; which slot means what is supplied
 ## by the calling scene through the assignment context ("role_quotas",
@@ -28,6 +30,12 @@ const WORK_END_HOUR := 18.0
 const TRAVEL_COOLDOWN_RANGE := Vector2(0.05, 0.25)
 const WANDER_COOLDOWN_RANGE := Vector2(0.8, 2.4)
 const SLEEP_COOLDOWN_RANGE := Vector2(4.0, 9.0)
+
+## Commute path computations allowed per update call; the rest of the
+## crowd falls back to a greedy step this wake and asks again next time,
+## so a whole town changing shift never floods one frame with flood fills.
+const MAX_PATHS_PER_UPDATE := 3
+static var _path_budget := 0
 
 ## Assigns roles, homes and workplaces to freshly spawned NPC states.
 ## context keys:
@@ -59,6 +67,14 @@ static func assign_daily_lives(npc_states: Array[Dictionary], context: Dictionar
 	var guard_role := int(context.get("guard_role", -1))
 	var green_role := int(context.get("green_role", -1))
 	var role_workplaces := context.get("role_workplaces", {}) as Dictionary
+	# Where the settlement drinks: taverns and inns soak up a share of
+	# everyone's off-hours so common rooms actually fill in the evening.
+	var social_cells: Array[Vector2i] = []
+	for social_type: String in ["tavern", "inn"]:
+		for social_variant: Variant in (buildings.get(social_type, []) as Array):
+			var social_cell := social_variant as Vector2i
+			if bool(is_walkable.call(social_cell)):
+				social_cells.append(social_cell)
 
 	var roles := _build_role_list(npc_states.size(), context.get("role_quotas", []) as Array, context.get("filler_roles", []) as Array, rng)
 	var bed_index := 0
@@ -92,8 +108,16 @@ static func assign_daily_lives(npc_states: Array[Dictionary], context: Dictionar
 		else:
 			state["work_anchor"] = _pick_workplace(role, role_workplaces, buildings, is_walkable, rng, street_cells, home_anchor)
 
-		# Leisure: around the market and streets.
-		state["leisure_anchor"] = _pick_from(street_cells, rng, home_anchor)
+		# Leisure: a stool at the tavern for some, the market streets for
+		# the rest.
+		if not social_cells.is_empty() and rng.randf() < 0.45:
+			state["leisure_anchor"] = _pick_from(social_cells, rng, home_anchor)
+		else:
+			state["leisure_anchor"] = _pick_from(street_cells, rng, home_anchor)
+		# Nobody keeps the bell-tower's exact hours: each resident rises,
+		# clocks in and turns in a little early or late, so shift changes
+		# ripple through the settlement instead of moving it in lock-step.
+		state["schedule_jitter"] = rng.randf_range(-0.7, 0.7)
 		state["mode"] = ""
 
 ## Role composition from caller-supplied quotas, padded with filler roles.
@@ -142,17 +166,20 @@ static func mode_for_hour(state: Dictionary, hour: float) -> String:
 	var meeting_hour := float(state.get("faction_meeting_hour", -1.0))
 	if meeting_hour >= 0.0 and fposmod(hour - meeting_hour, 24.0) < SettlementFactionService.MEETING_DURATION_HOURS:
 		return MODE_MEETING
-	var sleeping := hour >= SLEEP_START_HOUR or hour < SLEEP_END_HOUR
+	# Meetings answer the true bell; everything else runs on the NPC's own
+	# slightly-off personal clock so the town never moves in lock-step.
+	var personal_hour := fposmod(hour + float(state.get("schedule_jitter", 0.0)), 24.0)
+	var sleeping := personal_hour >= SLEEP_START_HOUR or personal_hour < SLEEP_END_HOUR
 	# Nocturnal citizens sleep through the working day and walk the night.
 	if bool(state.get("nocturnal", false)):
-		sleeping = hour >= 8.0 and hour < 18.0
+		sleeping = personal_hour >= 8.0 and personal_hour < 18.0
 	if bool(state.get("is_guard", false)):
 		if sleeping and not bool(state.get("night_watch", false)):
 			return MODE_SLEEP
 		return MODE_PATROL
 	if sleeping:
 		return MODE_SLEEP
-	if hour >= WORK_START_HOUR and hour < WORK_END_HOUR:
+	if personal_hour >= WORK_START_HOUR and personal_hour < WORK_END_HOUR:
 		return MODE_WORK
 	return MODE_LEISURE
 
@@ -199,6 +226,7 @@ static func update_scheduled_npcs(
 	is_npc_walkable: Callable,
 	cell_center_position: Callable
 ) -> void:
+	_path_budget = MAX_PATHS_PER_UPDATE
 	for state: Dictionary in npc_states:
 		var sprite := state.get("sprite") as Sprite2D
 		if sprite == null:
@@ -207,8 +235,11 @@ static func update_scheduled_npcs(
 		var mode := mode_for_hour(state, hour)
 		if String(state.get("mode", "")) != mode:
 			state["mode"] = mode
-			state["cooldown"] = 0.0
-			state.erase("meeting_path")
+			# A short random dawdle before setting out staggers departures
+			# (and spreads the path computations across many frames).
+			state["cooldown"] = rng.randf_range(0.0, 2.0)
+			state.erase("travel_path")
+			_update_sleep_tag(sprite, false)
 
 		var cooldown := float(state.get("cooldown", 0.0)) - delta
 		var direction := state.get("direction", Vector2.ZERO) as Vector2
@@ -227,15 +258,16 @@ static func update_scheduled_npcs(
 
 			var step := Vector2i.ZERO
 			if distance > radius:
-				# Meetings are appointments across the whole settlement;
-				# greedy steps lose themselves in winding halls, so sworn
-				# members follow a real path to the door.
-				if mode == MODE_MEETING:
-					step = _meeting_path_step(state, current_cell, anchor, is_npc_walkable)
+				# Homes and workplaces sit behind walls with a single door;
+				# greedy steps lose themselves against the masonry, so every
+				# commute follows a real path (greedy only as a stopgap when
+				# the path budget or an unreachable goal leaves none).
+				step = _travel_path_step(state, current_cell, anchor, is_npc_walkable)
 				if step == Vector2i.ZERO:
 					step = _step_toward(current_cell, anchor, is_npc_walkable, rng)
 			elif mode == MODE_SLEEP:
 				step = Vector2i.ZERO
+				_update_sleep_tag(sprite, true)
 			elif rng.randf() < 0.6:
 				step = _wander_step(current_cell, anchor, radius, is_npc_walkable, rng)
 
@@ -310,10 +342,15 @@ static func _step_toward(from_cell: Vector2i, to_cell: Vector2i, is_npc_walkable
 			return detour
 	return Vector2i.ZERO
 
-## Follows (and lazily computes) a BFS path to the meeting anchor. The
-## path is cached on the state and rebuilt when a cell along it closes.
-static func _meeting_path_step(state: Dictionary, from_cell: Vector2i, anchor: Vector2i, is_npc_walkable: Callable) -> Vector2i:
-	var path_variant: Variant = state.get("meeting_path")
+## Follows (and lazily computes) a BFS path to the current anchor. The
+## path is cached on the state and rebuilt when the goal moves (a patrol
+## waypoint advances, a mode changes) or a cell along it closes.
+static func _travel_path_step(state: Dictionary, from_cell: Vector2i, anchor: Vector2i, is_npc_walkable: Callable) -> Vector2i:
+	if (state.get("travel_goal", Vector2i(2147483647, 2147483647)) as Vector2i) != anchor:
+		state["travel_goal"] = anchor
+		state.erase("travel_path")
+		state.erase("travel_bfs_backoff")
+	var path_variant: Variant = state.get("travel_path")
 	if path_variant is Array:
 		var path := path_variant as Array
 		if not path.is_empty():
@@ -321,21 +358,26 @@ static func _meeting_path_step(state: Dictionary, from_cell: Vector2i, anchor: V
 			if _chebyshev(from_cell, next) <= 1 and bool(is_npc_walkable.call(next)):
 				path.remove_at(0)
 				return next - from_cell
-	# An unreachable hall shouldn't cost a flood fill on every wake.
-	var backoff := int(state.get("meeting_bfs_backoff", 0))
+		# Stale or blocked: fall through and plot afresh.
+		state.erase("travel_path")
+	# An unreachable goal shouldn't cost a flood fill on every wake.
+	var backoff := int(state.get("travel_bfs_backoff", 0))
 	if backoff > 0:
-		state["meeting_bfs_backoff"] = backoff - 1
+		state["travel_bfs_backoff"] = backoff - 1
 		return Vector2i.ZERO
+	if _path_budget <= 0:
+		return Vector2i.ZERO
+	_path_budget -= 1
 	var fresh_path := _bfs_path(from_cell, anchor, is_npc_walkable)
-	state["meeting_path"] = fresh_path
+	state["travel_path"] = fresh_path
 	if fresh_path.is_empty():
-		state["meeting_bfs_backoff"] = 24
+		state["travel_bfs_backoff"] = 24
 		return Vector2i.ZERO
 	var first := fresh_path[0] as Vector2i
 	fresh_path.remove_at(0)
 	return first - from_cell
 
-const MEETING_PATH_VISIT_CAP := 16384
+const TRAVEL_PATH_VISIT_CAP := 16384
 
 static func _bfs_path(from_cell: Vector2i, to_cell: Vector2i, is_npc_walkable: Callable) -> Array:
 	if from_cell == to_cell:
@@ -344,7 +386,7 @@ static func _bfs_path(from_cell: Vector2i, to_cell: Vector2i, is_npc_walkable: C
 	var came_from: Dictionary = {from_cell: from_cell}
 	var head := 0
 	var found := false
-	while head < queue.size() and came_from.size() < MEETING_PATH_VISIT_CAP:
+	while head < queue.size() and came_from.size() < TRAVEL_PATH_VISIT_CAP:
 		var current := queue[head]
 		head += 1
 		if current == to_cell:
@@ -409,3 +451,26 @@ static func _shuffle_ints(values: Array[int], rng: RandomNumberGenerator) -> voi
 		var swap := values[i]
 		values[i] = values[j]
 		values[j] = swap
+
+const SLEEP_TAG_NAME := "SleepTag"
+
+## A little "z Z" over a resident who has actually reached their bed, so
+## the night shift of the schedule reads at a glance.
+static func _update_sleep_tag(sprite: Sprite2D, asleep: bool) -> void:
+	var tag := sprite.get_node_or_null(SLEEP_TAG_NAME) as Label
+	if not asleep:
+		if tag != null:
+			tag.visible = false
+		return
+	if tag == null:
+		tag = Label.new()
+		tag.name = SLEEP_TAG_NAME
+		tag.text = "z Z"
+		tag.add_theme_font_size_override("font_size", 8)
+		tag.add_theme_color_override("font_color", Color(0.85, 0.9, 1.0, 0.85))
+		tag.add_theme_color_override("font_outline_color", Color(0.1, 0.12, 0.2, 0.8))
+		tag.add_theme_constant_override("outline_size", 2)
+		tag.position = Vector2(4.0, -24.0)
+		tag.z_index = 30
+		sprite.add_child(tag)
+	tag.visible = true
