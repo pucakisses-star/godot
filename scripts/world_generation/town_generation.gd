@@ -911,6 +911,7 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	var grid: Dictionary = {}
 	_latest_civic_buildings_by_id = {}
 	_latest_civic_building_type_map = {}
+	_latest_civic_building_name_map = {}
 	_latest_residence_type_map = {}
 	var plaza_layouts: Array[Dictionary] = []
 	var central_plaza_radius := Vector2i(
@@ -1073,6 +1074,7 @@ func _show_level(target_level_index: int) -> void:
 	_latest_requested_zone_counts = level_data.get("requested_zone_counts", {}) as Dictionary
 	_latest_civic_buildings_by_id = level_data.get("civic_buildings_by_id", {}) as Dictionary
 	_latest_civic_building_type_map = level_data.get("civic_building_type_map", {}) as Dictionary
+	_latest_civic_building_name_map = _build_civic_building_name_lookup(_latest_civic_buildings_by_id, seed_input.text.strip_edges(), "townsfolk")
 	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
@@ -2016,6 +2018,13 @@ func _assign_npc_identities() -> void:
 ## seeded rng, recruited from the identity roster, and listed in the
 ## sidebar. Members answer their faction's meeting bell through the
 ## scheduler.
+## Kinship: couples share a surname, a roof and usually an altar; the
+## young are raised as their children. Runs before faces are composed
+## so adopted surnames reshape the family resemblance too.
+func _assign_npc_families() -> void:
+	var family_stats := SettlementFamilyService.build_families(_npc_states, "townsfolk", _rng)
+	print("[%s] families: %d couples, %d children" % [name, int(family_stats.get("couples", 0)), int(family_stats.get("children_placed", 0))])
+
 func _assign_settlement_factions() -> void:
 	_faction_event_stamps.clear()
 	var building_cells_by_type: Dictionary = {}
@@ -2250,6 +2259,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
+	_assign_npc_families()
 	_assign_settlement_factions()
 	_apply_identity_appearances()
 	if _player_sprite != null:
@@ -2674,7 +2684,11 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	tooltip_lines.append("Zone: %s" % zone_name)
 	var subtype := _building_type_for_cell_or_empty(hovered_cell)
 	if not subtype.is_empty():
-		tooltip_lines.append("Subtype: %s" % _display_name_for_building_type(subtype))
+		var signboard := String(_latest_civic_building_name_map.get(hovered_cell, ""))
+		if signboard.is_empty():
+			tooltip_lines.append("Subtype: %s" % _display_name_for_building_type(subtype))
+		else:
+			tooltip_lines.append("%s — %s" % [signboard, _display_name_for_building_type(subtype)])
 		var flavor := String(BUILDING_SUBTYPE_FLAVOR.get(subtype, ""))
 		if not flavor.is_empty():
 			tooltip_lines.append(flavor)

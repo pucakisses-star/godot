@@ -52,6 +52,17 @@ const FAVORITE_ITEMS: Array[String] = [
 	"Mushroom Skewer", "Copper Ingot", "Moss Agate", "Marbled Steak",
 	"Porcini", "Jerky Strip"
 ]
+## Who a citizen prays to. A slice of every settlement keeps no gods at
+## all, and families tend to share an altar.
+const DWARF_FAITHS: Array[String] = [
+	"the Forge-Father", "the Deep Mother", "the Silent Stone",
+	"the Ember Queen", "the Ancestors"
+]
+const TOWNSFOLK_FAITHS: Array[String] = [
+	"the Harvest Mother", "the Lamplighter", "the River Saint",
+	"the Twin Oaks", "the Pale Moon"
+]
+const FAITHLESS_CHANCE := 0.12
 
 static func generate(rng: RandomNumberGenerator, profession: String, kind: String) -> Dictionary:
 	var first_name: String
@@ -65,6 +76,10 @@ static func generate(rng: RandomNumberGenerator, profession: String, kind: Strin
 		first_name = TOWNSFOLK_FIRST_NAMES[rng.randi_range(0, TOWNSFOLK_FIRST_NAMES.size() - 1)]
 		surname = TOWNSFOLK_SURNAMES[rng.randi_range(0, TOWNSFOLK_SURNAMES.size() - 1)]
 		age = rng.randi_range(16, 78)
+	var faith := ""
+	if rng.randf() >= FAITHLESS_CHANCE:
+		var faiths := DWARF_FAITHS if kind == "dwarf" else TOWNSFOLK_FAITHS
+		faith = faiths[rng.randi_range(0, faiths.size() - 1)]
 	return {
 		"name": "%s %s" % [first_name, surname],
 		"first_name": first_name,
@@ -73,7 +88,8 @@ static func generate(rng: RandomNumberGenerator, profession: String, kind: Strin
 		"age": age,
 		"temperament": TEMPERAMENTS[rng.randi_range(0, TEMPERAMENTS.size() - 1)],
 		"favorite": FAVORITE_ITEMS[rng.randi_range(0, FAVORITE_ITEMS.size() - 1)],
-		"dream": DREAMS[rng.randi_range(0, DREAMS.size() - 1)]
+		"dream": DREAMS[rng.randi_range(0, DREAMS.size() - 1)],
+		"faith": faith
 	}
 
 ## The header line above dialogue and in hover tooltips:
@@ -86,23 +102,58 @@ static func summary_line(identity: Dictionary) -> String:
 	]
 
 ## A personal line for conversation: their dream, their favorite thing,
-## or their temperament, in their own words.
+## their temperament, their family, or their gods, in their own words.
 static func personal_line(identity: Dictionary, rng: RandomNumberGenerator) -> String:
-	match rng.randi_range(0, 2):
+	match rng.randi_range(0, 4):
 		0:
 			return "My dream? %s." % String(identity.get("dream", "to keep on keeping on")).capitalize()
 		1:
 			return "Nothing beats a bit of %s, I say." % String(identity.get("favorite", "quiet"))
+		2:
+			var spouse := String(identity.get("spouse", ""))
+			var children := identity.get("children", []) as Array
+			if not spouse.is_empty() and not children.is_empty():
+				return "%s and the little ones keep me honest." % spouse.get_slice(" ", 0)
+			if not spouse.is_empty():
+				return "Wed to %s, and gladly." % spouse
+			var parents := identity.get("parents", []) as Array
+			if not parents.is_empty():
+				return "My folks? %s's kin, through and through." % String(parents[0]).get_slice(" ", 0)
+			return "Folk around here call me %s." % String(identity.get("temperament", "steady"))
+		3:
+			var faith := String(identity.get("faith", ""))
+			if not faith.is_empty():
+				return "I keep faith with %s. It keeps me back." % faith
+			return "Gods? Never had much use for them."
 		_:
 			return "Folk around here call me %s." % String(identity.get("temperament", "steady"))
 
-## Longer sheet for tooltips: temperament, favorite, and dream stacked.
+## Longer sheet for tooltips: temperament, favorite, dream, kin and gods.
 static func detail_lines(identity: Dictionary) -> Array[String]:
-	return [
+	var lines: Array[String] = [
 		"Temperament: %s" % String(identity.get("temperament", "steady")),
 		"Favors: %s" % String(identity.get("favorite", "quiet evenings")),
 		"Dreams %s" % String(identity.get("dream", "of nothing much"))
 	]
+	var faith := String(identity.get("faith", ""))
+	if not faith.is_empty():
+		lines.append("Keeps faith with %s" % faith)
+	var spouse := String(identity.get("spouse", ""))
+	if not spouse.is_empty():
+		lines.append("Wed to %s" % spouse)
+	var parents := identity.get("parents", []) as Array
+	if not parents.is_empty():
+		var parent_names: Array[String] = []
+		for parent_variant: Variant in parents:
+			parent_names.append(String(parent_variant))
+		lines.append("Child of %s" % " and ".join(parent_names))
+	var children := identity.get("children", []) as Array
+	if not children.is_empty():
+		var child_firsts: Array[String] = []
+		for child_variant: Variant in children:
+			child_firsts.append(String(child_variant).get_slice(" ", 0))
+		lines.append("Parent of %s" % ", ".join(child_firsts))
+	return lines
 
 ## DF rule: every citizen looks like themselves. Appearance layers are
 ## rolled deterministically from the identity, so the same dwarf keeps
