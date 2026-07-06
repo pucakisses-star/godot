@@ -3,15 +3,18 @@ class_name RegionMapService
 
 const TILE_ATLAS_DEFS := preload("res://scripts/world_generation/tile_atlas_defs.gd")
 
-## The Dwarf Fortress zoom: the detailed view re-renders every overworld
-## tile as its 64 walkable surface cells, from the SAME terrain function
-## the town wilds stream from. The overworld biome recolors the palette
-## (mountains crag, tundra whitens, deserts parch, marshes pool), the
-## coastline is a smooth noise-wobbled field rather than a tile boundary,
-## rivers run connected courses tile to tile, icebergs drift where the
-## overworld placed them, and settlement danger shades the deep wilds.
+## The Dwarf Fortress zoom: the detailed view subdivides every overworld
+## tile into SUB_TILES x SUB_TILES cells drawn with the SAME worldmap
+## tileset art (grass, trees, mountains, water), the way DF's region
+## view keeps the world map's glyphs. Terrain decisions come from the
+## same fields as ever: biomes blend across borders, the coastline is a
+## noise-wobbled field, rivers and roads run connected courses tile to
+## tile, icebergs drift where the overworld placed them, and settlement
+## danger shades the deep wilds. Jobs without a tileset image fall back
+## to the old painted per-pixel look.
 
 const CELLS_PER_TILE := 64
+const SUB_TILES := 8
 
 const COLOR_GRASS := Color(0.45, 0.62, 0.28)
 const COLOR_GRASS_DARK := Color(0.34, 0.51, 0.24)
@@ -53,7 +56,10 @@ static func make_render_job(
 	danger_corners: PackedFloat32Array,
 	ruggedness: float = 0.45,
 	biomes3x3: PackedStringArray = PackedStringArray(),
-	road3x3: PackedFloat32Array = PackedFloat32Array()
+	road3x3: PackedFloat32Array = PackedFloat32Array(),
+	tileset: Image = null,
+	atlas_px: int = 32,
+	iceberg_tile: Vector2i = Vector2i(-1, -1)
 ) -> Dictionary:
 	return {
 		"seed": world_seed_text,
@@ -67,11 +73,18 @@ static func make_render_job(
 		"ruggedness": ruggedness,
 		"biomes3x3": biomes3x3,
 		"road3x3": road3x3,
+		"tileset": tileset,
+		"atlas_px": atlas_px,
+		"iceberg_tile": iceberg_tile,
 		"image": null
 	}
 
-## Thread-safe: builds its own noise set and reads only the job pack.
+## Thread-safe: builds its own noise set and reads only the job pack
+## (the tileset image is shared, but strictly read-only).
 static func render_job(job: Dictionary) -> void:
+	if job.get("tileset") is Image:
+		_render_job_as_tiles(job)
+		return
 	var noise_set: Dictionary = SurfaceWorldService.make_noise_set(hash("surface|%s" % String(job.get("seed", ""))))
 	var tile := job.get("tile", Vector2i.ZERO) as Vector2i
 	var biome := String(job.get("biome", ""))
@@ -162,6 +175,173 @@ static func _blended_biome(biome_fields: Array, own_biome: String, world_cell: V
 			best_biome = String(field.get("biome", own_biome))
 	return best_biome
 
+## DF-style detail render: the tile becomes SUB_TILES x SUB_TILES cells
+## of real worldmap art - a ground tile blitted per cell, feature art
+## (trees, mountains, hills, icebergs, roads) alpha-blended on top, and
+## the wilds-danger shade layered over the lot.
+static func _render_job_as_tiles(job: Dictionary) -> void:
+	var noise_set: Dictionary = SurfaceWorldService.make_noise_set(hash("surface|%s" % String(job.get("seed", ""))))
+	var tileset := job.get("tileset") as Image
+	var atlas_px := maxi(1, int(job.get("atlas_px", 32)))
+	var tile := job.get("tile", Vector2i.ZERO) as Vector2i
+	var biome := String(job.get("biome", ""))
+	var has_iceberg := bool(job.get("has_iceberg", false))
+	var iceberg_tile := job.get("iceberg_tile", Vector2i(-1, -1)) as Vector2i
+	var water3x3 := job.get("water3x3") as PackedFloat32Array
+	var danger_corners := job.get("danger_corners") as PackedFloat32Array
+	var ruggedness := clampf(float(job.get("ruggedness", 0.45)), 0.0, 1.0)
+	var river_mask := PackedByteArray()
+	if bool(job.get("has_river", false)):
+		river_mask = _build_river_mask(tile, job.get("river3x3") as PackedFloat32Array, water3x3, noise_set, SUB_TILES)
+	var road3x3 := job.get("road3x3") as PackedFloat32Array
+	var road_mask := PackedByteArray()
+	var has_roads := road3x3 != null and road3x3.size() == 9 and road3x3[4] >= 0.5
+	if has_roads:
+		road_mask = _build_road_mask(tile, road3x3, noise_set, SUB_TILES)
+	var biome_fields := _build_biome_fields(job.get("biomes3x3") as PackedStringArray, biome)
+	var noise := noise_set.get("detail") as FastNoiseLite
+	var cells_per_sub := CELLS_PER_TILE / SUB_TILES
+	var image := Image.create(SUB_TILES * atlas_px, SUB_TILES * atlas_px, false, Image.FORMAT_RGBA8)
+	var art_rect := func(art: Vector2i) -> Rect2i:
+		return Rect2i(art * atlas_px, Vector2i(atlas_px, atlas_px))
+	var shade_cache: Dictionary = {}
+	for sy in SUB_TILES:
+		var fy := (float(sy) + 0.5) / float(SUB_TILES)
+		for sx in SUB_TILES:
+			var fx := (float(sx) + 0.5) / float(SUB_TILES)
+			var world_cell := tile * CELLS_PER_TILE + Vector2i(sx * cells_per_sub + cells_per_sub / 2, sy * cells_per_sub + cells_per_sub / 2)
+			var danger := lerpf(
+				lerpf(danger_corners[0], danger_corners[1], fx),
+				lerpf(danger_corners[2], danger_corners[3], fx),
+				fy
+			)
+			var detail := noise.get_noise_2d(float(world_cell.x), float(world_cell.y))
+			var coast := _field_from_neighbors(water3x3, fx, fy) + detail * 0.16
+			var on_river := not river_mask.is_empty() and river_mask[sy * SUB_TILES + sx] != 0
+			var on_road := not road_mask.is_empty() and road_mask[sy * SUB_TILES + sx] != 0
+			var cell_biome := _blended_biome(biome_fields, biome, world_cell, noise_set, fx, fy)
+			var pick := _pick_cell_art(world_cell, noise_set, cell_biome, coast, detail, on_river, has_iceberg, iceberg_tile, danger, ruggedness)
+			var base_art := pick.get("base", TILE_ATLAS_DEFS.GRASS_TILE) as Vector2i
+			var overlay_art := pick.get("overlay", Vector2i(-1, -1)) as Vector2i
+			if on_road and not bool(pick.get("is_water", false)):
+				overlay_art = _road_art_for_cell(road_mask, road3x3, sx, sy, world_cell)
+			var dest := Vector2i(sx * atlas_px, sy * atlas_px)
+			image.blit_rect(tileset, art_rect.call(base_art) as Rect2i, dest)
+			if overlay_art.x >= 0:
+				image.blend_rect(tileset, art_rect.call(overlay_art) as Rect2i, dest)
+			# Deep wilds read darker, same radial rule the walker feels.
+			var shade_level := int(round(clampf(danger, 0.0, 1.0) * 6.0))
+			if shade_level > 0:
+				if not shade_cache.has(shade_level):
+					var shade := Image.create(atlas_px, atlas_px, false, Image.FORMAT_RGBA8)
+					shade.fill(Color(0.0, 0.0, 0.0, float(shade_level) / 6.0 * 0.28))
+					shade_cache[shade_level] = shade
+				image.blend_rect(shade_cache[shade_level] as Image, Rect2i(0, 0, atlas_px, atlas_px), dest)
+	job["image"] = image
+
+## Ground art plus optional feature art for one detail cell, decided by
+## the same fields the painted renderer used.
+static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_biome: String, coast: float, detail: float, on_river: bool, has_iceberg: bool, iceberg_tile: Vector2i, danger: float, ruggedness: float) -> Dictionary:
+	if coast > 0.5:
+		var result := {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
+		if has_iceberg and iceberg_tile.x >= 0:
+			var berg := (noise_set.get("detail") as FastNoiseLite).get_noise_2d(float(world_cell.x) * 2.6, float(world_cell.y) * 2.6)
+			if berg > 0.4:
+				result["overlay"] = iceberg_tile
+		return result
+	if on_river:
+		return {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
+	var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(world_cell, noise_set, danger)
+	var base_key := String(terrain.get("base", "grass"))
+	var decor_key := String(terrain.get("decor", ""))
+	if base_key.begins_with("water"):
+		# Ponds thin to landmarks at map scale, exactly as before.
+		var pond_keep := (noise_set.get("detail") as FastNoiseLite).get_noise_2d(float(world_cell.x) * 0.13, float(world_cell.y) * 0.13)
+		if pond_keep >= 0.3:
+			return {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
+		decor_key = ""
+	# A sandy shoreline just above the waterline.
+	if coast > 0.4:
+		return {"base": TILE_ATLAS_DEFS.SAND_TILE}
+	var has_tree_decor := decor_key.begins_with("tree")
+	match cell_biome:
+		TILE_ATLAS_DEFS.BIOME_MOUNTAIN:
+			# Rugged ranges render rockier up close: the crag threshold
+			# eases from 0.6 (gentle) down to 0.25 (savage ridge).
+			var crag_threshold := lerpf(0.6, 0.25, ruggedness)
+			if detail > crag_threshold + 0.3:
+				return {"base": TILE_ATLAS_DEFS.STONE_TILE, "overlay": TILE_ATLAS_DEFS.MOUNTAIN_PEAK_TILE}
+			if detail > crag_threshold or not decor_key.is_empty():
+				return {"base": TILE_ATLAS_DEFS.STONE_TILE, "overlay": TILE_ATLAS_DEFS.MOUNTAIN_TILE}
+			return {"base": TILE_ATLAS_DEFS.STONE_TILE}
+		TILE_ATLAS_DEFS.BIOME_HILLS:
+			if detail > 0.2 or has_tree_decor:
+				return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.HILLS_TILE}
+			return {"base": TILE_ATLAS_DEFS.GRASS_TILE}
+		TILE_ATLAS_DEFS.BIOME_TUNDRA:
+			if has_tree_decor:
+				return {"base": TILE_ATLAS_DEFS.SNOW_TILE, "overlay": TILE_ATLAS_DEFS.TREE_SNOW_TILE}
+			return {"base": TILE_ATLAS_DEFS.SNOW_TILE}
+		TILE_ATLAS_DEFS.BIOME_DESERT:
+			if not decor_key.is_empty() and detail > 0.35:
+				return {"base": TILE_ATLAS_DEFS.SAND_TILE, "overlay": TILE_ATLAS_DEFS.DESERT_CACTI_TILE}
+			return {"base": TILE_ATLAS_DEFS.SAND_TILE}
+		TILE_ATLAS_DEFS.BIOME_BADLANDS:
+			return {"base": TILE_ATLAS_DEFS.BADLANDS_TILE}
+		TILE_ATLAS_DEFS.BIOME_MARSH:
+			if detail > 0.5:
+				return {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
+			return {"base": TILE_ATLAS_DEFS.MARSH_TILE}
+		TILE_ATLAS_DEFS.BIOME_FOREST:
+			if has_tree_decor or detail > 0.15:
+				return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.TREE_TILE}
+			return {"base": TILE_ATLAS_DEFS.GRASS_TILE}
+		TILE_ATLAS_DEFS.BIOME_JUNGLE:
+			if has_tree_decor or detail > 0.0:
+				return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.JUNGLE_TREE_TILE}
+			return {"base": TILE_ATLAS_DEFS.GRASS_TILE}
+	if has_tree_decor:
+		return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.TREE_LONE_TILE}
+	return {"base": TILE_ATLAS_DEFS.GRASS_TILE}
+
+## The road art matching this cell's course: N/E/S/W bits from the mask
+## (border cells also look across the tile edge) pick straight, corner,
+## junction or stub art - the same buckets the world map lays.
+static func _road_art_for_cell(road_mask: PackedByteArray, road3x3: PackedFloat32Array, sx: int, sy: int, world_cell: Vector2i) -> Vector2i:
+	var bits := 0
+	if (sy > 0 and road_mask[(sy - 1) * SUB_TILES + sx] != 0) or (sy == 0 and road3x3[1] >= 0.5):
+		bits |= 1
+	if (sx < SUB_TILES - 1 and road_mask[sy * SUB_TILES + sx + 1] != 0) or (sx == SUB_TILES - 1 and road3x3[5] >= 0.5):
+		bits |= 2
+	if (sy < SUB_TILES - 1 and road_mask[(sy + 1) * SUB_TILES + sx] != 0) or (sy == SUB_TILES - 1 and road3x3[7] >= 0.5):
+		bits |= 4
+	if (sx > 0 and road_mask[sy * SUB_TILES + sx - 1] != 0) or (sx == 0 and road3x3[3] >= 0.5):
+		bits |= 8
+	var bucket := "stub"
+	match bits:
+		5:
+			bucket = "ns"
+		10:
+			bucket = "we"
+		6:
+			bucket = "corner_se"
+		12:
+			bucket = "corner_sw"
+		3:
+			bucket = "corner_ne"
+		9:
+			bucket = "corner_nw"
+		1, 4:
+			bucket = "ns"
+		2, 8:
+			bucket = "we"
+		_:
+			if bits != 0:
+				bucket = "junction"
+	var variants := TILE_ATLAS_DEFS.ROAD_TILES.get(bucket, TILE_ATLAS_DEFS.ROAD_TILES["stub"]) as Array
+	var pick := absi(world_cell.x * 73856093 ^ world_cell.y * 19349663) % variants.size()
+	return variants[pick] as Vector2i
+
 ## Bilinear between tile centers so a field crosses tile boundaries
 ## smoothly instead of stair-stepping the tile grid.
 static func _field_from_neighbors(values: PackedFloat32Array, fx: float, fy: float) -> float:
@@ -180,10 +360,11 @@ static func _field_from_neighbors(values: PackedFloat32Array, fx: float, fy: flo
 ## Rivers run tile center to edge midpoints, one meandering segment per
 ## river (or sea) neighbor. Wobble fades to zero at both endpoints so
 ## every tile's course meets its neighbors' exactly at the shared edge.
-static func _build_river_mask(tile: Vector2i, river3x3: PackedFloat32Array, water3x3: PackedFloat32Array, noise_set: Dictionary) -> PackedByteArray:
+## grid picks the mask resolution (64 painted cells or 8 art sub-tiles).
+static func _build_river_mask(tile: Vector2i, river3x3: PackedFloat32Array, water3x3: PackedFloat32Array, noise_set: Dictionary, grid: int = CELLS_PER_TILE) -> PackedByteArray:
 	var mask := PackedByteArray()
-	mask.resize(CELLS_PER_TILE * CELLS_PER_TILE)
-	var center := Vector2(CELLS_PER_TILE * 0.5, CELLS_PER_TILE * 0.5)
+	mask.resize(grid * grid)
+	var center := Vector2(grid * 0.5, grid * 0.5)
 	var noise := noise_set.get("detail") as FastNoiseLite
 	var connections := 0
 	var directions := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
@@ -191,79 +372,88 @@ static func _build_river_mask(tile: Vector2i, river3x3: PackedFloat32Array, wate
 		var index := 4 + direction.x + 3 * direction.y
 		if river3x3[index] < 0.5 and water3x3[index] < 0.5:
 			continue
-		var edge_mid := center + Vector2(direction) * (CELLS_PER_TILE * 0.5)
-		_stamp_river_segment(mask, center, edge_mid, tile, noise)
+		var edge_mid := center + Vector2(direction) * (grid * 0.5)
+		_stamp_river_segment(mask, center, edge_mid, tile, noise, grid)
 		connections += 1
 	if connections == 0:
 		# A lone river tile still shows its stream: north to south.
-		_stamp_river_segment(mask, Vector2(center.x, 0.0), center, tile, noise)
-		_stamp_river_segment(mask, center, Vector2(center.x, float(CELLS_PER_TILE)), tile, noise)
+		_stamp_river_segment(mask, Vector2(center.x, 0.0), center, tile, noise, grid)
+		_stamp_river_segment(mask, center, Vector2(center.x, float(grid)), tile, noise, grid)
 	return mask
 
-static func _stamp_river_segment(mask: PackedByteArray, from_point: Vector2, to_point: Vector2, tile: Vector2i, noise: FastNoiseLite) -> void:
+static func _stamp_river_segment(mask: PackedByteArray, from_point: Vector2, to_point: Vector2, tile: Vector2i, noise: FastNoiseLite, grid: int = CELLS_PER_TILE) -> void:
 	var axis := (to_point - from_point).normalized()
 	var perpendicular := Vector2(-axis.y, axis.x)
-	var steps := 56
+	var grid_scale := float(grid) / float(CELLS_PER_TILE)
+	var brush := 1 if grid >= CELLS_PER_TILE else 0
+	var steps := 56 if grid >= CELLS_PER_TILE else 16
 	for step in steps + 1:
 		var t := float(step) / float(steps)
 		var straight := from_point.lerp(to_point, t)
-		var world := Vector2(tile * CELLS_PER_TILE) + straight
-		var wobble := noise.get_noise_2d(world.x * 0.12, world.y * 0.12) * 11.0 * sin(PI * t)
+		# Wobble is sampled in world-cell units so both resolutions carve
+		# the same course, then scaled into this mask's grid - with a
+		# floor so coarse art grids still meander instead of ruling
+		# straight center-to-edge lines.
+		var world := (Vector2(tile) + straight / float(grid)) * float(CELLS_PER_TILE)
+		var wobble := noise.get_noise_2d(world.x * 0.12, world.y * 0.12) * maxf(11.0 * grid_scale, 2.6) * sin(PI * t)
 		var pos := straight + perpendicular * wobble
 		var px := int(round(pos.x))
 		var py := int(round(pos.y))
-		for oy in range(-1, 2):
-			for ox in range(-1, 2):
+		for oy in range(-brush, brush + 1):
+			for ox in range(-brush, brush + 1):
 				var mx := px + ox
 				var my := py + oy
-				if mx >= 0 and my >= 0 and mx < CELLS_PER_TILE and my < CELLS_PER_TILE:
-					mask[my * CELLS_PER_TILE + mx] = 1
+				if mx >= 0 and my >= 0 and mx < grid and my < grid:
+					mask[my * grid + mx] = 1
 
 ## Roads run tile center to edge midpoints toward road neighbors, a
 ## touch straighter and narrower than rivers. A connectionless road tile
 ## (a settlement approach) shows as a trodden yard at the center.
-static func _build_road_mask(tile: Vector2i, road3x3: PackedFloat32Array, noise_set: Dictionary) -> PackedByteArray:
+static func _build_road_mask(tile: Vector2i, road3x3: PackedFloat32Array, noise_set: Dictionary, grid: int = CELLS_PER_TILE) -> PackedByteArray:
 	var mask := PackedByteArray()
-	mask.resize(CELLS_PER_TILE * CELLS_PER_TILE)
-	var center := Vector2(CELLS_PER_TILE * 0.5, CELLS_PER_TILE * 0.5)
+	mask.resize(grid * grid)
+	var center := Vector2(grid * 0.5, grid * 0.5)
 	var noise := noise_set.get("detail") as FastNoiseLite
 	var connections := 0
 	var directions := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
 	for direction: Vector2i in directions:
 		if road3x3[4 + direction.x + 3 * direction.y] < 0.5:
 			continue
-		var edge_mid := center + Vector2(direction) * (CELLS_PER_TILE * 0.5)
-		_stamp_road_segment(mask, center, edge_mid, tile, noise)
+		var edge_mid := center + Vector2(direction) * (grid * 0.5)
+		_stamp_road_segment(mask, center, edge_mid, tile, noise, grid)
 		connections += 1
 	if connections == 0:
-		for oy in range(-2, 3):
-			for ox in range(-2, 3):
+		var yard := maxi(1, grid / 32)
+		for oy in range(-yard, yard + 1):
+			for ox in range(-yard, yard + 1):
 				var mx := int(center.x) + ox
 				var my := int(center.y) + oy
-				if mx >= 0 and my >= 0 and mx < CELLS_PER_TILE and my < CELLS_PER_TILE:
-					mask[my * CELLS_PER_TILE + mx] = 1
+				if mx >= 0 and my >= 0 and mx < grid and my < grid:
+					mask[my * grid + mx] = 1
 	return mask
 
-static func _stamp_road_segment(mask: PackedByteArray, from_point: Vector2, to_point: Vector2, tile: Vector2i, noise: FastNoiseLite) -> void:
+static func _stamp_road_segment(mask: PackedByteArray, from_point: Vector2, to_point: Vector2, tile: Vector2i, noise: FastNoiseLite, grid: int = CELLS_PER_TILE) -> void:
 	var axis := (to_point - from_point).normalized()
 	var perpendicular := Vector2(-axis.y, axis.x)
-	var steps := 56
+	var grid_scale := float(grid) / float(CELLS_PER_TILE)
+	var reach := 1 if grid >= CELLS_PER_TILE else 0
+	var steps := 56 if grid >= CELLS_PER_TILE else 16
 	for step in steps + 1:
 		var t := float(step) / float(steps)
 		var straight := from_point.lerp(to_point, t)
-		var world := Vector2(tile * CELLS_PER_TILE) + straight
+		var world := (Vector2(tile) + straight / float(grid)) * float(CELLS_PER_TILE)
 		# Carts keep straighter lines than water; the wobble still fades
 		# to zero at the endpoints so tracks meet at shared tile edges.
-		var wobble := noise.get_noise_2d(world.x * 0.1 + 500.0, world.y * 0.1 - 500.0) * 5.0 * sin(PI * t)
+		var wobble := noise.get_noise_2d(world.x * 0.1 + 500.0, world.y * 0.1 - 500.0) * 5.0 * grid_scale * sin(PI * t)
 		var pos := straight + perpendicular * wobble
 		var px := int(round(pos.x))
 		var py := int(round(pos.y))
-		for oy in range(0, 2):
-			for ox in range(0, 2):
+		for oy in range(0, reach + 1):
+			for ox in range(0, reach + 1):
 				var mx := px + ox
 				var my := py + oy
-				if mx >= 0 and my >= 0 and mx < CELLS_PER_TILE and my < CELLS_PER_TILE:
-					mask[my * CELLS_PER_TILE + mx] = 1
+				if mx >= 0 and my >= 0 and mx < grid and my < grid:
+					mask[my * grid + mx] = 1
 
 ## The coastline is a smooth noise-wobbled field, not a tile boundary:
 ## shores meander, beaches hug the waterline, ponds thin out to
