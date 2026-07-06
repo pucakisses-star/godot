@@ -569,6 +569,17 @@ var _map_lod_active := false
 	"MapUi/StructureDetailsDialog/DetailsMargin/DetailsTabs/Economy/EconomyText"
 )
 @onready var tooltip_panel: PanelContainer = get_node_or_null("MapUi/MapTooltip")
+
+## The Dwarf Fortress region zoom: the double-click dive now lands on an
+## embark-style detailed map instead of jumping straight into a scene.
+const REGION_TILES_SPAN := 5
+const REGION_CELL_PX := 2
+var _region_panel: Control
+var _region_map_rect: TextureRect
+var _region_marker_layer: Control
+var _region_title_label: Label
+var _region_info_label: Label
+var _region_tile := Vector2i.ZERO
 @onready var tooltip_title: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipTitle")
 @onready var tooltip_biome: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipBiome")
 @onready var tooltip_climate: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipClimate")
@@ -865,8 +876,19 @@ func _process(delta: float) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel"):
+		if _region_panel != null and _region_panel.visible:
+			_close_region_map()
+			get_viewport().set_input_as_handled()
+			return
 		if _escape_menu != null:
 			_escape_menu.toggle()
+			get_viewport().set_input_as_handled()
+		return
+	# The region view swallows the mouse: right-click zooms back out.
+	if _region_panel != null and _region_panel.visible:
+		var region_mouse := event as InputEventMouseButton
+		if region_mouse != null and region_mouse.pressed and region_mouse.button_index == MOUSE_BUTTON_RIGHT:
+			_close_region_map()
 			get_viewport().set_input_as_handled()
 		return
 	if _is_globe_view and _handle_globe_input(event):
@@ -1105,8 +1127,10 @@ func _dive_into_tile(tile_coord: Vector2i) -> void:
 	var tween: Tween = overworld_camera.dive_to(landing, target_zoom, DIVE_SECONDS)
 	await tween.finished
 	_dive_pending = false
-	if enterable:
-		_begin_journey_from_tile(tile_coord)
+	# Dwarf Fortress style: the dive opens the detailed region map;
+	# traveling happens from its settlement markers (or right-click
+	# Begin Journey as ever). enterable only shapes the zoom feel.
+	_open_region_map(tile_coord)
 
 func _tile_supports_journey(details: Dictionary) -> bool:
 	if details.is_empty():
@@ -5769,3 +5793,176 @@ func _apply_cached_world_settings() -> void:
 			forest_max_coverage = clampf(forest_max_coverage * 1.5, 0.2, 0.95)
 	_configure_globe_viewport()
 	_update_globe_texture()
+
+
+## --- The region map ---------------------------------------------------------
+## Double-clicking the world map zooms into a Dwarf Fortress embark-style
+## region view: the surrounding tiles rendered at full walkable detail
+## (64 cells per tile) from the shared surface terrain, with an info
+## panel for the chosen tile and settlement markers you can travel to.
+
+func _ensure_region_panel() -> void:
+	if _region_panel != null:
+		return
+	var ui_parent := tooltip_panel.get_parent() if tooltip_panel != null else self
+	_region_panel = Control.new()
+	_region_panel.name = "RegionMapPanel"
+	_region_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_region_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_region_panel.visible = false
+	ui_parent.add_child(_region_panel)
+	var dimmer := ColorRect.new()
+	dimmer.color = Color(0.02, 0.02, 0.03, 0.88)
+	dimmer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_region_panel.add_child(dimmer)
+	# The map itself, centered-left like the embark screen.
+	_region_map_rect = TextureRect.new()
+	_region_map_rect.stretch_mode = TextureRect.STRETCH_KEEP
+	_region_map_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_region_panel.add_child(_region_map_rect)
+	_region_marker_layer = Control.new()
+	_region_marker_layer.mouse_filter = Control.MOUSE_FILTER_PASS
+	_region_map_rect.add_child(_region_marker_layer)
+	# DF-style info panel: black field, amber border, top right.
+	var info_panel := PanelContainer.new()
+	var info_style := StyleBoxFlat.new()
+	info_style.bg_color = Color(0.045, 0.045, 0.055, 0.98)
+	info_style.border_color = Color(0.92, 0.62, 0.16, 1.0)
+	info_style.set_border_width_all(3)
+	info_style.set_content_margin_all(12)
+	info_panel.add_theme_stylebox_override("panel", info_style)
+	info_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	info_panel.position = Vector2(-360.0, 16.0)
+	info_panel.custom_minimum_size = Vector2(340.0, 300.0)
+	_region_panel.add_child(info_panel)
+	var info_box := VBoxContainer.new()
+	info_box.add_theme_constant_override("separation", 6)
+	info_panel.add_child(info_box)
+	_region_title_label = Label.new()
+	_region_title_label.add_theme_font_size_override("font_size", 17)
+	_region_title_label.add_theme_color_override("font_color", Color(0.95, 0.9, 0.8, 1.0))
+	_region_title_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_region_title_label.custom_minimum_size = Vector2(310.0, 0.0)
+	info_box.add_child(_region_title_label)
+	_region_info_label = Label.new()
+	_region_info_label.add_theme_font_size_override("font_size", 13)
+	_region_info_label.add_theme_color_override("font_color", Color(0.85, 0.83, 0.76, 1.0))
+	_region_info_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_region_info_label.custom_minimum_size = Vector2(310.0, 0.0)
+	info_box.add_child(_region_info_label)
+	# Bottom hint bar, DF style.
+	var hint_panel := PanelContainer.new()
+	var hint_style := info_style.duplicate() as StyleBoxFlat
+	hint_style.set_content_margin_all(8)
+	hint_panel.add_theme_stylebox_override("panel", hint_style)
+	hint_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	hint_panel.position = Vector2(-320.0, -60.0)
+	hint_panel.custom_minimum_size = Vector2(640.0, 0.0)
+	_region_panel.add_child(hint_panel)
+	var hint_label := Label.new()
+	hint_label.text = "Left-click a settlement to travel there.  Right-click or Esc to zoom back out."
+	hint_label.add_theme_font_size_override("font_size", 13)
+	hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint_panel.add_child(hint_label)
+
+func _region_world_seed_text() -> String:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_world_settings"):
+		var settings: Dictionary = game_session.call("get_world_settings")
+		if settings.has("world_seed"):
+			return str(settings.get("world_seed"))
+	return str(map_seed)
+
+func _region_biome_for_tile(tile: Vector2i) -> String:
+	return String(_biome_map.get(tile, BIOME_GRASSLAND))
+
+func _region_river_for_tile(tile: Vector2i) -> bool:
+	return _tile_has_overlay_flag(_tile_data.get(tile, {}) as Dictionary, TILE_OVERLAY_RIVER)
+
+func _open_region_map(center_tile: Vector2i) -> void:
+	_ensure_region_panel()
+	_region_tile = center_tile
+	var half := REGION_TILES_SPAN / 2
+	var top_left := center_tile - Vector2i(half, half)
+	top_left.x = clampi(top_left.x, 0, maxi(0, map_size.x - REGION_TILES_SPAN))
+	top_left.y = clampi(top_left.y, 0, maxi(0, map_size.y - REGION_TILES_SPAN))
+	# Settlement anchors shade danger; those inside the span get markers.
+	var anchors: Array[Vector2i] = []
+	var span_sites: Array[Dictionary] = []
+	for coord_variant: Variant in _tile_data.keys():
+		var coord := coord_variant as Vector2i
+		var details := _tile_data.get(coord_variant, {}) as Dictionary
+		if String(details.get("settlement_type", "")).strip_edges().is_empty():
+			continue
+		anchors.append(coord * RegionMapService.CELLS_PER_TILE + Vector2i(RegionMapService.CELLS_PER_TILE / 2, RegionMapService.CELLS_PER_TILE / 2))
+		if coord.x >= top_left.x and coord.x < top_left.x + REGION_TILES_SPAN and coord.y >= top_left.y and coord.y < top_left.y + REGION_TILES_SPAN:
+			span_sites.append({"tile": coord, "details": details})
+	_region_map_rect.texture = RegionMapService.render_region(
+		_region_world_seed_text(), top_left, REGION_TILES_SPAN,
+		Callable(self, "_region_biome_for_tile"),
+		Callable(self, "_region_river_for_tile"),
+		anchors, REGION_CELL_PX
+	)
+	var map_pixels := float(REGION_TILES_SPAN * RegionMapService.CELLS_PER_TILE * REGION_CELL_PX)
+	_region_map_rect.position = Vector2(40.0, maxf((_region_panel.size.y - map_pixels) * 0.5, 16.0))
+	# Settlement markers over the map.
+	for stale: Node in _region_marker_layer.get_children():
+		stale.queue_free()
+	for site: Dictionary in span_sites:
+		var site_tile := site.get("tile", Vector2i.ZERO) as Vector2i
+		var site_details := site.get("details", {}) as Dictionary
+		var marker := Button.new()
+		marker.text = "⌂ %s" % _tile_region_name(site_tile, site_details)
+		marker.add_theme_font_size_override("font_size", 12)
+		var marker_style := StyleBoxFlat.new()
+		marker_style.bg_color = Color(0.1, 0.08, 0.05, 0.85)
+		marker_style.border_color = Color(0.92, 0.62, 0.16, 1.0)
+		marker_style.set_border_width_all(1)
+		marker_style.set_content_margin_all(4)
+		marker.add_theme_stylebox_override("normal", marker_style)
+		marker.tooltip_text = "Travel to %s" % _tile_region_name(site_tile, site_details)
+		var local := (site_tile - top_left) * RegionMapService.CELLS_PER_TILE + Vector2i(RegionMapService.CELLS_PER_TILE / 2, RegionMapService.CELLS_PER_TILE / 2)
+		marker.position = Vector2(local * REGION_CELL_PX) - Vector2(30.0, 12.0)
+		marker.pressed.connect(_on_region_site_pressed.bind(site_tile))
+		_region_marker_layer.add_child(marker)
+	# The info panel describes the double-clicked tile, DF-style.
+	var details := _tile_data.get(center_tile, {}) as Dictionary
+	var biome := _tile_biome_from_data(details)
+	var region_name := _tile_region_name(center_tile, details)
+	var biome_label := _humanize_biome(biome)
+	if region_name.is_empty():
+		region_name = "Unnamed %s" % biome_label if not biome_label.is_empty() else "Unnamed Region"
+	_region_title_label.text = region_name
+	var lines: PackedStringArray = []
+	if not biome_label.is_empty():
+		lines.append(biome_label)
+	var climate := _describe_climate(float(details.get("temperature", 0.0)), float(details.get("moisture", 0.0))).strip_edges()
+	if not climate.is_empty():
+		lines.append("Climate: %s" % climate)
+	var center_anchor := center_tile * RegionMapService.CELLS_PER_TILE + Vector2i(RegionMapService.CELLS_PER_TILE / 2, RegionMapService.CELLS_PER_TILE / 2)
+	lines.append("Surroundings: %s" % RegionMapService.surroundings_label(RegionMapService.danger_for_world_cell(center_anchor, anchors)))
+	if _region_river_for_tile(center_tile):
+		lines.append("A river runs through it.")
+	var settlement_type := String(details.get("settlement_type", "")).strip_edges()
+	if not settlement_type.is_empty():
+		lines.append("Settlement: %s (pop. %d)" % [settlement_type.capitalize(), int(details.get("population", 0))])
+	var resource_text := _format_resource_list(_resources_for_tile(center_tile, details))
+	if not resource_text.is_empty():
+		lines.append("")
+		lines.append("Resources: %s" % resource_text)
+	if span_sites.is_empty():
+		lines.append("")
+		lines.append("No settlements in these parts.")
+	_region_info_label.text = "\n".join(lines)
+	_region_panel.visible = true
+	_region_panel.modulate = Color(1.0, 1.0, 1.0, 0.0)
+	var tween := create_tween()
+	tween.tween_property(_region_panel, "modulate:a", 1.0, 0.18)
+
+func _close_region_map() -> void:
+	if _region_panel != null:
+		_region_panel.visible = false
+
+func _on_region_site_pressed(site_tile: Vector2i) -> void:
+	_close_region_map()
+	_begin_journey_from_tile(site_tile)
