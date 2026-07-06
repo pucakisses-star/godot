@@ -56,8 +56,6 @@ extends Node2D
 @export_range(0.5, 6.0, 0.1) var river_overlay_base_width: float = 1.3
 @export_range(5.0, 250.0, 1.0) var river_min_flux_to_draw: float = 44.0
 @export_range(1, 128, 1) var river_max_count: int = 28
-@export_range(0.0, 1.0, 0.01) var iceberg_temperature_threshold: float = 0.32
-@export_range(0.0, 1.0, 0.01) var iceberg_density: float = 0.12
 @export var iceberg_tile_options: Array[Vector2i] = [Vector2i(4, 3), Vector2i(5, 3)]
 
 @export_group("Biomes")
@@ -1798,6 +1796,16 @@ func _generate_map() -> void:
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "tree overlays")
 	highland_map = _build_highland_overlays(base_biome_map, height_map)
 	var river_map := _build_river_map_buffers(height_buffer, moisture_buffer, base_biome_buffer, rng)
+	# Browser ensureRiverConnectionsToWater: landlocked river networks get a
+	# terminal pond so every river visibly reaches water.
+	var river_ponds := OverworldRiverService.ensure_river_connections_to_water(river_map, base_biome_map, height_map, map_size)
+	if not river_ponds.is_empty():
+		for pond_coord: Vector2i in river_ponds:
+			tree_biome_map[pond_coord] = BIOME_WATER
+			tree_map.erase(pond_coord)
+			highland_map.erase(pond_coord)
+		base_biome_buffer = _dictionary_to_biome_buffer(base_biome_map)
+		_landmass_masks = _generate_landmass_masks_from_biome_map(base_biome_map)
 	var edge_connected_water := _compute_edge_connected_water_mask(base_biome_map)
 	var river_tiles := _apply_river_tiles(river_map, base_biome_map, highland_map, tree_map, edge_connected_water)
 	var biome_map: Dictionary = tree_biome_map
@@ -1831,7 +1839,7 @@ func _generate_map() -> void:
 
 	generation_started_ms = Time.get_ticks_msec()
 	_set_loading_progress(62.0, "Calving icebergs...")
-	_place_icebergs(base_biome_map, temperature_map, height_map, rng)
+	_place_icebergs(base_biome_map, biome_map, height_map)
 	_log_generation_stage("icebergs", generation_started_ms)
 	await _yield_generation_wave()
 
@@ -2940,60 +2948,125 @@ func _seed_desert_biomes(
 func _biome_to_tile(biome: String) -> Vector2i:
 	return BIOME_CLASSIFIER.biome_to_tile(biome, _tile_lookup(), _biome_lookup())
 
+## Browser iceberg parity (main.js:24593-24712), three deterministic passes:
+## (a) snow tiles fully surrounded by water calve into water + iceberg;
+## (b) 18% of overlay-free water tiles inside the snow-presence band get a
+##     berg - per-coordinate hash, not RNG order, shoreline placement allowed;
+## (c) 1-in-50 of snow-band water tiles seed lone drift ice.
+## The browser band is north-only (latitude = 1 - y/height, full above 0.86,
+## partial 0.5-0.86); Godot's climate freezes at BOTH map poles, so the same
+## band is measured from whichever pole is nearer.
+const ICEBERG_SNOW_LATITUDE_START := 0.5
+const ICEBERG_SNOW_LATITUDE_FULL := 0.86
+const ICEBERG_SHORELINE_CHANCE := 0.18
+const ICEBERG_OPEN_WATER_CHANCE := 0.02
+const ICEBERG_SHORELINE_SEED_OFFSET := 0x91bd4a2f
+const ICEBERG_PRESENCE_SEED_OFFSET := 0x5ad1f32b
+const ICEBERG_VARIANT_SEED_OFFSET := 0x3d0e12f7
+const ICEBERG_SNOW_NOISE_SEED_OFFSET := 0x27d4eb2d
+
 func _place_icebergs(
+	base_biome_map: Dictionary,
 	biome_map: Dictionary,
-	temperature_map: Dictionary,
-	height_map: Dictionary,
-	rng: RandomNumberGenerator
+	height_map: Dictionary
 ) -> void:
 	if iceberg_layer == null:
 		return
 	if map_layer != null:
 		iceberg_layer.tile_set = map_layer.tile_set
 	iceberg_layer.clear()
-	var candidates: Array[Vector2i] = []
-	var coldest_coord := Vector2i(-1, -1)
-	var coldest_temp := 1.0
-	for coord: Vector2i in biome_map.keys():
-		if biome_map.get(coord, "") != BIOME_WATER:
-			continue
-		var temp := float(temperature_map.get(coord, 1.0))
-		if temp < coldest_temp:
-			coldest_temp = temp
-			coldest_coord = coord
-		if temp <= iceberg_temperature_threshold and _is_iceberg_candidate(coord, height_map):
-			candidates.append(coord)
-	var placed := 0
-	for coord: Vector2i in candidates:
-		if rng.randf() <= iceberg_density:
-			var selected_iceberg_tile := _pick_iceberg_tile(rng)
-			iceberg_layer.set_cell(coord, _atlas_source_id, selected_iceberg_tile)
-			placed += 1
-	if placed == 0 and coldest_coord != Vector2i(-1, -1):
-		var fallback_iceberg_tile := _pick_iceberg_tile(rng)
-		iceberg_layer.set_cell(coldest_coord, _atlas_source_id, fallback_iceberg_tile)
+	var water_biome_id := _biome_to_id(BIOME_WATER)
+	var water_tile := _biome_to_tile(BIOME_WATER)
+	# Pass (a): snow islets fully ringed by water become water + iceberg.
+	for y in range(map_size.y):
+		for x in range(map_size.x):
+			var coord := Vector2i(x, y)
+			if String(base_biome_map.get(coord, "")) != BIOME_TUNDRA:
+				continue
+			var fully_surrounded := true
+			for oy in range(-1, 2):
+				for ox in range(-1, 2):
+					if ox == 0 and oy == 0:
+						continue
+					var neighbor := coord + Vector2i(ox, oy)
+					if neighbor.y < 0:
+						# Browser: past the top edge counts as open polar sea.
+						continue
+					if not _is_valid_map_coord(neighbor) or String(base_biome_map.get(neighbor, "")) != BIOME_WATER:
+						fully_surrounded = false
+						break
+				if not fully_surrounded:
+					break
+			if not fully_surrounded:
+				continue
+			base_biome_map[coord] = BIOME_WATER
+			biome_map[coord] = BIOME_WATER
+			if map_layer != null:
+				map_layer.set_cell(coord, _atlas_source_id, water_tile)
+			if highland_layer != null:
+				highland_layer.erase_cell(coord)
+			if tree_layer != null:
+				tree_layer.erase_cell(coord)
+			if river_layer != null:
+				river_layer.erase_cell(coord)
+			var info := _tile_data.get(coord, {}) as Dictionary
+			if not info.is_empty():
+				info["biome_id"] = water_biome_id
+				info["base_biome_id"] = water_biome_id
+				info["hill_biome_id"] = _biome_to_id(BIOME_GRASSLAND)
+				info["overlay_flags"] = 0
+				info["structure"] = ""
+				info["structure_details"] = null
+				info["ambient_structure"] = null
+				info["water_depth"] = 0.0
+				_tile_data[coord] = info
+			iceberg_layer.set_cell(coord, _atlas_source_id, _iceberg_tile_for_coord(coord))
+	# Passes (b) and (c): hash-seeded drift ice on cold shoreline/open water.
+	for y in range(map_size.y):
+		for x in range(map_size.x):
+			var coord := Vector2i(x, y)
+			if not _is_iceberg_water(coord, base_biome_map, water_biome_id):
+				continue
+			if iceberg_layer.get_cell_source_id(coord) != -1:
+				continue
+			if not _iceberg_snow_presence(coord, float(height_map.get(coord, 0.0))):
+				continue
+			var placed := _hash_coords(x, y, map_seed + ICEBERG_SHORELINE_SEED_OFFSET) < ICEBERG_SHORELINE_CHANCE
+			if not placed and _polar_latitude(y) >= ICEBERG_SNOW_LATITUDE_START:
+				placed = _hash_coords(x, y, map_seed + ICEBERG_PRESENCE_SEED_OFFSET) < ICEBERG_OPEN_WATER_CHANCE
+			if placed:
+				iceberg_layer.set_cell(coord, _atlas_source_id, _iceberg_tile_for_coord(coord))
 
-func _pick_iceberg_tile(rng: RandomNumberGenerator) -> Vector2i:
+func _is_iceberg_water(coord: Vector2i, base_biome_map: Dictionary, water_biome_id: int) -> bool:
+	# Volcano passes rewrite tile_data (lava lakes) without touching the
+	# biome dictionaries, so tile_data is the fresher source when present.
+	var info := _tile_data.get(coord, {}) as Dictionary
+	if not info.is_empty():
+		return int(info.get("base_biome_id", -1)) == water_biome_id
+	return String(base_biome_map.get(coord, "")) == BIOME_WATER
+
+func _polar_latitude(y: int) -> float:
+	var normalized_y := (float(y) + 0.5) / maxf(1.0, float(map_size.y))
+	return absf(normalized_y * 2.0 - 1.0)
+
+func _iceberg_snow_presence(coord: Vector2i, tile_height: float) -> bool:
+	var latitude := _polar_latitude(coord.y)
+	if latitude >= ICEBERG_SNOW_LATITUDE_FULL:
+		return true
+	if latitude <= ICEBERG_SNOW_LATITUDE_START:
+		return false
+	var band_factor := clampf((latitude - ICEBERG_SNOW_LATITUDE_START) / (ICEBERG_SNOW_LATITUDE_FULL - ICEBERG_SNOW_LATITUDE_START), 0.0, 1.0)
+	var elevation_factor := clampf((tile_height - water_level) * 3.8, 0.0, 1.0)
+	var coverage := clampf(band_factor * 0.7 + elevation_factor * 0.3, 0.0, 1.0)
+	var snow_noise := _value_noise(float(coord.x) * 0.13, float(coord.y) * 0.13, map_seed + ICEBERG_SNOW_NOISE_SEED_OFFSET)
+	return snow_noise < coverage
+
+func _iceberg_tile_for_coord(coord: Vector2i) -> Vector2i:
 	if iceberg_tile_options.is_empty():
 		return Vector2i(4, 3)
-	return iceberg_tile_options[rng.randi_range(0, iceberg_tile_options.size() - 1)]
-
-func _is_iceberg_candidate(coord: Vector2i, height_map: Dictionary) -> bool:
-	for offset: Vector2i in [
-		Vector2i.LEFT,
-		Vector2i.RIGHT,
-		Vector2i.UP,
-		Vector2i.DOWN,
-		Vector2i(-1, -1),
-		Vector2i(1, -1),
-		Vector2i(-1, 1),
-		Vector2i(1, 1)
-	]:
-		var neighbor := coord + offset
-		var neighbor_height: float = height_map.get(neighbor, 1.0)
-		if neighbor_height >= water_level:
-			return false
-	return true
+	var variant_noise := _hash_coords(coord.x, coord.y, map_seed + ICEBERG_VARIANT_SEED_OFFSET)
+	var variant_index := clampi(int(floor(variant_noise * float(iceberg_tile_options.size()))), 0, iceberg_tile_options.size() - 1)
+	return iceberg_tile_options[variant_index]
 
 func _place_settlements(biome_map: Dictionary, rng: RandomNumberGenerator) -> void:
 	var settings := _world_settings
@@ -5852,11 +5925,13 @@ func _apply_terrain_ratio_settings(terrain_ratios: Dictionary) -> void:
 
 	var forest_delta := forest_ratio - 0.5
 	var mountain_delta := mountain_ratio - 0.5
-	var river_delta := river_ratio - 0.5
 
-	water_level = clampf(water_level + (river_delta * 0.12) - (mountain_delta * 0.04), 0.2, 0.7)
+	# Browser parity: the river slider only drives buildRiverMap's frequency
+	# knobs (source density and thresholds, main.js:20588-20628). It never
+	# reshapes the sea level or the landmass falloff.
+	river_frequency = river_ratio
+	water_level = clampf(water_level - (mountain_delta * 0.04), 0.2, 0.7)
 	noise_frequency = clampf(noise_frequency + (mountain_delta * 1.2) - (forest_delta * 0.3), 0.6, 4.0)
-	falloff_strength = clampf(falloff_strength + (river_delta * 0.16), -0.45, 0.45)
 	landmass_falloff_scale = clampf(landmass_falloff_scale + (mountain_delta * 0.35), 0.8, 2.2)
 
 func _apply_cached_world_settings() -> void:

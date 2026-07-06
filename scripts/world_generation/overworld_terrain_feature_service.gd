@@ -238,6 +238,16 @@ static func apply_oases_and_lava(
 		var base_biome := _tile_base_biome_from_data(tile_info)
 		var base_tile := map_layer.get_cell_atlas_coords(coord)
 		if base_biome == BIOME_DESERT and base_tile == SAND_TILE:
+			# Browser main.js:22884 skips tiles with any overlay (river,
+			# trees), a hill/highland overlay, or a structure/settlement.
+			if int(tile_info.get("overlay_flags", 0)) != 0:
+				continue
+			if not String(tile_info.get("structure", "")).strip_edges().is_empty():
+				continue
+			if not String(tile_info.get("settlement_type", "")).strip_edges().is_empty():
+				continue
+			if highland_layer != null and highland_layer.get_cell_atlas_coords(coord) != Vector2i(-1, -1):
+				continue
 			var has_adjacent_oasis := false
 			for oy in range(-1, 2):
 				for ox in range(-1, 2):
@@ -252,7 +262,10 @@ static func apply_oases_and_lava(
 				if has_adjacent_oasis:
 					break
 			if not has_adjacent_oasis:
-				var oasis_chance := clampf(0.00025 + float(tile_info.get("moisture", 0.0)) * 0.002, 0.0, 0.08)
+				# Browser main.js:22903-22908: chance scales with desert
+				# suitability (aridity * 0.68 + heat * 0.42), capped at 0.12.
+				var desert_suitability := (1.0 - float(tile_info.get("moisture", 0.0))) * 0.68 + float(tile_info.get("temperature", 0.0)) * 0.42
+				var oasis_chance := clampf(0.00025 + desert_suitability * 0.002, 0.0, 0.12)
 				if rng.randf() < oasis_chance and highland_layer != null and highland_layer.get_cell_atlas_coords(coord) == Vector2i(-1, -1):
 					highland_layer.set_cell(coord, atlas_source_id, OASIS_TILE)
 
