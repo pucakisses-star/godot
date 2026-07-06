@@ -524,6 +524,9 @@ func _ready() -> void:
 	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
 	_load_persistent_clock()
 	_load_player_combat_state()
+	var scene_stamp: Dictionary = _world_settings_snapshot()
+	scene_stamp["last_scene"] = "res://scenes/town_generation.tscn"
+	_store_world_settings(scene_stamp)
 	_setup_hp_label()
 	_setup_inventory_screen()
 	_setup_hotbar()

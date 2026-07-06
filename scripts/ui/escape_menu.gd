@@ -60,6 +60,7 @@ func _ready() -> void:
 
 	_add_button(layout, "Resume", _on_resume_pressed)
 	_add_button(layout, "Save Game", _on_save_pressed)
+	_add_button(layout, "Save to New Slot", _on_save_new_slot_pressed)
 	if show_return_to_map:
 		_add_button(layout, "Return to World Map", _on_return_pressed)
 	_add_button(layout, "Main Menu", _on_main_menu_pressed)
@@ -112,11 +113,20 @@ func _on_resume_pressed() -> void:
 
 func _on_save_pressed() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
-	if game_session == null or not game_session.has_method("save_to_file"):
+	if game_session == null:
 		_status_label.text = "Saving unavailable"
 		return
-	var result: int = int(game_session.call("save_to_file"))
-	_status_label.text = "Game saved" if result == OK else "Save failed (%d)" % result
+	# Save into the session's slot; a fresh game claims the next one.
+	var slot_id := String(game_session.call("get_current_slot")) if game_session.has_method("get_current_slot") else ""
+	if slot_id.is_empty() or slot_id == SaveGameService.AUTOSAVE_SLOT:
+		slot_id = SaveGameService.next_free_slot_id()
+	var result: Error = SaveGameService.save_slot(self, slot_id)
+	_status_label.text = "Saved to %s" % slot_id.replace("_", " ") if result == OK else "Save failed (%d)" % result
+
+func _on_save_new_slot_pressed() -> void:
+	var slot_id := SaveGameService.next_free_slot_id()
+	var result: Error = SaveGameService.save_slot(self, slot_id)
+	_status_label.text = "Saved to %s" % slot_id.replace("_", " ") if result == OK else "Save failed (%d)" % result
 
 func _on_return_pressed() -> void:
 	get_tree().paused = false

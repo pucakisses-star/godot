@@ -216,7 +216,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		_player_move_path.clear()
 		_try_step(move_direction)
 
+func _stamp_last_scene() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings["last_scene"] = "res://scenes/dungeon_interior.tscn"
+	game_session.call("set_world_settings", settings)
+
 func _load_scene_context() -> void:
+	_stamp_last_scene()
 	var game_session := get_node_or_null("/root/GameSession")
 	var seed_text := ""
 	if game_session != null and game_session.has_method("get_world_settings"):
