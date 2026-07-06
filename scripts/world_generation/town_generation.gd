@@ -2004,13 +2004,23 @@ func _apply_identity_appearances() -> void:
 		sprite.scale = Vector2(
 			float(tile_size.x) / 32.0,
 			float(tile_size.y) / 32.0
-		) * 0.9
+		) * 0.9 * float(layers.get("body_scale", 1.0))
 		state["composed"] = true
 
 func _assign_npc_identities() -> void:
+	var used_names: Dictionary = {}
 	for state: Dictionary in _npc_states:
 		var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
 		var identity: Dictionary = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		# Nobody shares a full name: spouse/parent/faction references are
+		# by name, so collisions would tangle the whole census.
+		for _reroll in 8:
+			if not used_names.has(String(identity.get("name", ""))):
+				break
+			identity = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		if used_names.has(String(identity.get("name", ""))):
+			identity["name"] = "%s the Younger" % String(identity.get("name", ""))
+		used_names[String(identity.get("name", ""))] = true
 		state["identity"] = identity
 		state["npc_name"] = String(identity.get("name", "A villager"))
 

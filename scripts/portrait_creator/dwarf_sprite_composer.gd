@@ -75,13 +75,19 @@ static func _hair_sheet_for(layers: Dictionary) -> Texture2D:
 	return HUMAN_HAIR_SHEET if String(layers.get("species", "dwarf")) == "human" else HAIR_SHEET
 
 ## The composed 32x32 character. beard_style/hair_style of -1 hide the
-## layer; layers.species picks the dwarf or human sheets.
+## layer; layers.species picks the dwarf or human sheets. An optional
+## layers.skin_tint (html color string) multiplies the head layer, which
+## is how goblin green and kobold rust come out of the same sheets.
 static func compose(layers: Dictionary) -> ImageTexture:
 	var image := Image.create(TILE, TILE, false, Image.FORMAT_RGBA8)
 	var skin_tone := clampi(int(layers.get("skin_tone", 0)), 0, SKIN_TONE_ROWS.size() - 1)
 	var clothes_color := clampi(int(layers.get("clothes_color", 7)), 0, CLOTHES_COLOR_COUNT - 1)
 	_blit_tile(image, CLOTHES_SHEET, clothes_color, CLOTHES_ROW)
-	_blit_tile(image, _heads_sheet_for(layers), 0, SKIN_TONE_ROWS[skin_tone])
+	var skin_tint_text := String(layers.get("skin_tint", ""))
+	if skin_tint_text.is_empty():
+		_blit_tile(image, _heads_sheet_for(layers), 0, SKIN_TONE_ROWS[skin_tone])
+	else:
+		_blit_tile_tinted(image, _heads_sheet_for(layers), 0, SKIN_TONE_ROWS[skin_tone], Color(skin_tint_text))
 	var hair_style := int(layers.get("hair_style", 0))
 	if hair_style >= 0:
 		var hair_color := clampi(int(layers.get("hair_color", 4)), 0, COLOR_COLUMN_COUNT - 1)
@@ -99,3 +105,19 @@ static func _blit_tile(target: Image, sheet: Texture2D, column: int, row: int) -
 	if source.get_format() != Image.FORMAT_RGBA8:
 		source.convert(Image.FORMAT_RGBA8)
 	target.blend_rect(source, Rect2i(column * TILE, row * TILE, TILE, TILE), Vector2i.ZERO)
+
+static func _blit_tile_tinted(target: Image, sheet: Texture2D, column: int, row: int, tint: Color) -> void:
+	var source := sheet.get_image()
+	if source.is_compressed():
+		source.decompress()
+	if source.get_format() != Image.FORMAT_RGBA8:
+		source.convert(Image.FORMAT_RGBA8)
+	var tile := Image.create(TILE, TILE, false, Image.FORMAT_RGBA8)
+	tile.blit_rect(source, Rect2i(column * TILE, row * TILE, TILE, TILE), Vector2i.ZERO)
+	for y in range(TILE):
+		for x in range(TILE):
+			var pixel := tile.get_pixel(x, y)
+			if pixel.a <= 0.0:
+				continue
+			tile.set_pixel(x, y, Color(pixel.r * tint.r, pixel.g * tint.g, pixel.b * tint.b, pixel.a))
+	target.blend_rect(tile, Rect2i(0, 0, TILE, TILE), Vector2i.ZERO)
