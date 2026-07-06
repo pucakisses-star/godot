@@ -30,32 +30,36 @@ static func make_noise_set(world_seed: int) -> Dictionary:
 	return {"elevation": elevation, "forest": forest, "detail": detail}
 
 ## The ground and its dressing for one cell:
-## {"base": tile key, "decor": tile key or ""}.
-static func terrain_for_cell(cell: Vector2i, noise_set: Dictionary) -> Dictionary:
+## {"base": tile key, "decor": tile key or ""}. danger (0..1) is the
+## radial rule: the further from civilization, the darker the land -
+## meadows give way to deep woods, flowers stop blooming, and thickets
+## close in.
+static func terrain_for_cell(cell: Vector2i, noise_set: Dictionary, danger: float = 0.0) -> Dictionary:
 	var elevation := (noise_set.get("elevation") as FastNoiseLite).get_noise_2d(float(cell.x), float(cell.y))
 	var forest := (noise_set.get("forest") as FastNoiseLite).get_noise_2d(float(cell.x), float(cell.y))
 	var detail := (noise_set.get("detail") as FastNoiseLite).get_noise_2d(float(cell.x), float(cell.y))
-	# Dry barrens fill the lowlands.
+	forest += danger * 0.3
+	# Dry barrens fill the lowlands; deep ones read scorched.
 	if elevation < -0.36:
-		return {"base": "sand_pebbles" if detail > 0.3 else "sand", "decor": ""}
+		return {"base": "sand_pebbles" if detail > 0.3 - danger * 0.5 else "sand", "decor": ""}
 	if elevation < -0.3:
 		return {"base": "sand_alt" if detail > 0.0 else "sand", "decor": ""}
-	# Grassland, shaded darker under heavy canopy.
+	# Grassland, shaded darker under heavy canopy and in the deep wilds.
 	var base := "grass"
-	if forest > 0.2:
+	if forest > 0.2 or danger > 0.62:
 		base = "grass_dark"
 	elif detail > 0.42:
 		base = "grass_tuft"
-	elif detail < -0.52:
+	elif detail < -0.52 and danger < 0.4:
 		base = "flowers_white" if cell.x % 2 == 0 else "flowers_yellow"
 	var decor := ""
 	if forest > 0.16:
 		# Forests thicken toward their heart; the detail noise scatters
 		# the individual trunks so edges stay ragged.
-		var tree_bias := clampf((forest - 0.16) * 2.4, 0.0, 0.82)
+		var tree_bias := clampf((forest - 0.16) * 2.4, 0.0, 0.82 + danger * 0.1)
 		if detail > 0.7 - tree_bias:
-			decor = "tree_dark" if forest > 0.4 else "tree"
-	elif forest < -0.42 and detail > 0.55:
+			decor = "tree_dark" if forest > 0.4 or danger > 0.55 else "tree"
+	elif forest < -0.42 and detail > 0.55 - danger * 0.2:
 		decor = "hedge" if detail < 0.72 else "hedge_alt"
 	return {"base": base, "decor": decor}
 
