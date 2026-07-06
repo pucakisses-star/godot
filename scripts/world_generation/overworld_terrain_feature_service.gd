@@ -14,6 +14,9 @@ const OASIS_TILE := TILE_ATLAS_DEFS.OASIS_TILE
 const SAND_TILE := TILE_ATLAS_DEFS.SAND_TILE
 const WATER_TILE := TILE_ATLAS_DEFS.WATER_TILE
 const LAVA_TILE := TILE_ATLAS_DEFS.LAVA_TILE
+const GRASS_TILE := TILE_ATLAS_DEFS.GRASS_TILE
+const SNOW_TILE := TILE_ATLAS_DEFS.SNOW_TILE
+const BADLANDS_TILE := TILE_ATLAS_DEFS.BADLANDS_TILE
 
 const BIOME_MOUNTAIN := TILE_ATLAS_DEFS.BIOME_MOUNTAIN
 const BIOME_DESERT := TILE_ATLAS_DEFS.BIOME_DESERT
@@ -22,8 +25,14 @@ const BIOME_BADLANDS := TILE_ATLAS_DEFS.BIOME_BADLANDS
 const BIOME_TUNDRA := TILE_ATLAS_DEFS.BIOME_TUNDRA
 const BIOME_GRASSLAND := TILE_ATLAS_DEFS.BIOME_GRASSLAND
 
+const TILE_OVERLAY_RIVER := 1 << 2
 const TILE_OVERLAY_VOLCANO := 1 << 3
 const TILE_OVERLAY_ACTIVE_VOLCANO := 1 << 4
+
+## Browser parity: the volcano's heat aura fades to nothing 6.4 tiles
+## out, and the ash apron converts ground from 0.45 proximity inward.
+const VOLCANO_PROXIMITY_FALLOFF := 6.4
+const VOLCANO_STONE_CONVERSION_THRESHOLD := 0.45
 
 const _BIOME_TO_ID := {
 	TILE_ATLAS_DEFS.BIOME_WATER: 0,
@@ -80,13 +89,20 @@ static func place_volcano_tiles(
 	map_layer: TileMapLayer,
 	atlas_source_id: int,
 	map_size: Vector2i,
-	tile_data: Dictionary
+	tile_data: Dictionary,
+	lake_cells: Dictionary = {}
 ) -> void:
 	apply_mountain_overlay_variants(highland_map, height_map, highland_layer, atlas_source_id, map_size)
 	var candidates: Array[Dictionary] = []
 	for coord_variant: Variant in highland_map.keys():
 		var coord := coord_variant as Vector2i
 		if String(highland_map.get(coord, "")) != BIOME_MOUNTAIN:
+			continue
+		# Browser rule: never on a river or an occupied tile.
+		var info := tile_data.get(coord, {}) as Dictionary
+		if (int(info.get("overlay_flags", 0)) & TILE_OVERLAY_RIVER) != 0:
+			continue
+		if not String(info.get("settlement_type", "")).strip_edges().is_empty() or not String(info.get("structure", "")).strip_edges().is_empty():
 			continue
 		candidates.append({
 			"coord": coord,
@@ -129,6 +145,9 @@ static func place_volcano_tiles(
 			continue
 		if highland_layer != null:
 			highland_layer.set_cell(coord, atlas_source_id, ACTIVE_VOLCANO_TILE if volcanoes.is_empty() else VOLCANO_TILE)
+		# The cone itself stands on bare scorched rock (browser: stone base).
+		if map_layer != null:
+			map_layer.set_cell(coord, atlas_source_id, BADLANDS_TILE)
 		if tile_data.has(coord):
 			var tile_info := tile_data.get(coord, {}) as Dictionary
 			if not tile_info.is_empty():
@@ -136,10 +155,69 @@ static func place_volcano_tiles(
 					tile_info["overlay_flags"] = int(tile_info.get("overlay_flags", 0)) | TILE_OVERLAY_ACTIVE_VOLCANO
 				else:
 					tile_info["overlay_flags"] = int(tile_info.get("overlay_flags", 0)) | TILE_OVERLAY_VOLCANO
+				tile_info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
+				tile_info["volcano_proximity"] = 1.0
 				tile_data[coord] = tile_info
 		volcanoes.append(coord)
 
-	apply_oases_and_lava(volcanoes, rng, highland_layer, map_layer, atlas_source_id, map_size, tile_data)
+	_apply_volcano_proximity(volcanoes, rng, map_layer, atlas_source_id, map_size, tile_data)
+	apply_oases_and_lava(volcanoes, rng, highland_layer, map_layer, atlas_source_id, map_size, tile_data, lake_cells)
+
+## The heat aura, browser-style: proximity = 1 - distance / 6.4 around
+## every volcano, stamped into tile data (resources, climate and shading
+## read it), with an ash apron converting grass and snow to scorched
+## ground - guaranteed at the rim, noise-ragged toward the edge.
+static func _apply_volcano_proximity(
+	volcanoes: Array[Vector2i],
+	rng: RandomNumberGenerator,
+	map_layer: TileMapLayer,
+	atlas_source_id: int,
+	map_size: Vector2i,
+	tile_data: Dictionary
+) -> void:
+	if volcanoes.is_empty():
+		return
+	var apron_noise := FastNoiseLite.new()
+	apron_noise.seed = rng.randi()
+	apron_noise.noise_type = FastNoiseLite.TYPE_VALUE
+	apron_noise.frequency = 0.18 + rng.randf() * 0.06
+	var fine_seed := rng.randi()
+	var reach := int(ceil(VOLCANO_PROXIMITY_FALLOFF))
+	for volcano in volcanoes:
+		for oy in range(-reach, reach + 1):
+			for ox in range(-reach, reach + 1):
+				if ox == 0 and oy == 0:
+					continue
+				var coord := volcano + Vector2i(ox, oy)
+				if coord.x < 0 or coord.y < 0 or coord.x >= map_size.x or coord.y >= map_size.y:
+					continue
+				var proximity := clampf(1.0 - Vector2(ox, oy).length() / VOLCANO_PROXIMITY_FALLOFF, 0.0, 1.0)
+				if proximity <= 0.0:
+					continue
+				var info := tile_data.get(coord, {}) as Dictionary
+				if info.is_empty():
+					continue
+				var base_tile := map_layer.get_cell_atlas_coords(coord) if map_layer != null else Vector2i(-1, -1)
+				# Water keeps no heat memory (lava lakes are handled apart).
+				if base_tile == WATER_TILE:
+					continue
+				info["volcano_proximity"] = maxf(float(info.get("volcano_proximity", 0.0)), proximity)
+				tile_data[coord] = info
+				# Ash apron: only living ground scorches.
+				if proximity < VOLCANO_STONE_CONVERSION_THRESHOLD:
+					continue
+				if base_tile != GRASS_TILE and base_tile != SNOW_TILE:
+					continue
+				var scorch := proximity >= 0.95
+				if not scorch:
+					var coarse := apron_noise.get_noise_2d(float(coord.x), float(coord.y)) * 0.5
+					var fine := float(absi(hash(Vector3i(coord.x, coord.y, fine_seed))) % 1000) / 1000.0 - 0.5
+					var conversion_score := proximity + coarse * 0.55 + fine * 0.25
+					scorch = conversion_score >= 0.58 - proximity * 0.3
+				if scorch and map_layer != null:
+					map_layer.set_cell(coord, atlas_source_id, BADLANDS_TILE)
+					info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
+					tile_data[coord] = info
 
 
 static func apply_oases_and_lava(
@@ -149,7 +227,8 @@ static func apply_oases_and_lava(
 	map_layer: TileMapLayer,
 	atlas_source_id: int,
 	map_size: Vector2i,
-	tile_data: Dictionary
+	tile_data: Dictionary,
+	lake_cells: Dictionary = {}
 ) -> void:
 	for coord_variant: Variant in tile_data.keys():
 		var coord := coord_variant as Vector2i
@@ -177,6 +256,8 @@ static func apply_oases_and_lava(
 				if rng.randf() < oasis_chance and highland_layer != null and highland_layer.get_cell_atlas_coords(coord) == Vector2i(-1, -1):
 					highland_layer.set_cell(coord, atlas_source_id, OASIS_TILE)
 
+	# Browser rule: every LAKE tile touching a volcano boils into lava -
+	# always, and only lakes; the open sea never converts.
 	for volcano_coord in volcanoes:
 		for oy in range(-1, 2):
 			for ox in range(-1, 2):
@@ -187,13 +268,15 @@ static func apply_oases_and_lava(
 					continue
 				if map_layer.get_cell_atlas_coords(neighbor) != WATER_TILE:
 					continue
-				if rng.randf() < 0.35:
-					map_layer.set_cell(neighbor, atlas_source_id, LAVA_TILE)
-					if tile_data.has(neighbor):
-						var info := tile_data.get(neighbor, {}) as Dictionary
-						info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
-						info["biome_id"] = _biome_to_id(BIOME_BADLANDS)
-						tile_data[neighbor] = info
+				if not lake_cells.has(neighbor):
+					continue
+				map_layer.set_cell(neighbor, atlas_source_id, LAVA_TILE)
+				if tile_data.has(neighbor):
+					var info := tile_data.get(neighbor, {}) as Dictionary
+					info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
+					info["biome_id"] = _biome_to_id(BIOME_BADLANDS)
+					info["volcano_proximity"] = 1.0
+					tile_data[neighbor] = info
 
 
 static func build_proximity_map(

@@ -2112,7 +2112,9 @@ func _apply_mountain_overlay_variants(highland_map: Dictionary, height_map: Dict
 
 
 func _place_volcano_tiles(highland_map: Dictionary, height_map: Dictionary, rng: RandomNumberGenerator) -> void:
-	OverworldTerrainFeatureService.place_volcano_tiles(highland_map, height_map, rng, highland_layer, map_layer, _atlas_source_id, map_size, _tile_data)
+	var lake_cells_variant: Variant = _landmass_masks.get("lake_cells", {})
+	var lake_cells := (lake_cells_variant as Dictionary) if lake_cells_variant is Dictionary else {}
+	OverworldTerrainFeatureService.place_volcano_tiles(highland_map, height_map, rng, highland_layer, map_layer, _atlas_source_id, map_size, _tile_data, lake_cells)
 
 
 func _apply_oases_and_lava(volcanoes: Array[Vector2i], rng: RandomNumberGenerator) -> void:
@@ -2143,6 +2145,7 @@ func _update_terrain_shading_overlay(base_biome_map: Dictionary) -> void:
 			var color := Color(0, 0, 0, 0)
 			color = _apply_surface_noise_shading_to_color(color, base_biome, float(tile_meta.get("surface_variation", 0.0)))
 			color = _apply_coastal_shading_to_color(color, base_biome, _tile_biome_from_data(tile_meta), tile_meta)
+			color = _apply_volcano_shading_to_color(color, _tile_biome_from_data(tile_meta), tile_meta)
 			shading_image.set_pixel(x, y, color)
 	var shading_texture := ImageTexture.create_from_image(shading_image)
 	terrain_shading_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
@@ -2151,6 +2154,16 @@ func _update_terrain_shading_overlay(base_biome_map: Dictionary) -> void:
 	terrain_shading_overlay.scale = Vector2(float(tile_size), float(tile_size))
 	terrain_shading_overlay.texture = shading_texture
 
+
+## Browser applyVolcanoShading: land near a volcano darkens by up to
+## 40% alpha with proximity; mountains skip it (their art is already dark).
+func _apply_volcano_shading_to_color(base_color: Color, biome: String, tile_meta: Dictionary) -> Color:
+	if biome == BIOME_MOUNTAIN:
+		return base_color
+	var proximity := clampf(float(tile_meta.get("volcano_proximity", 0.0)), 0.0, 1.0)
+	if proximity <= 0.01:
+		return base_color
+	return base_color.blend(Color(0.0, 0.0, 0.0, proximity * 0.4))
 
 func _apply_surface_noise_shading_to_color(base_color: Color, base_biome: String, variation: float) -> Color:
 	if base_biome != BIOME_TUNDRA and base_biome != BIOME_DESERT and base_biome != BIOME_BADLANDS:
@@ -3908,7 +3921,9 @@ func _select_settlement_tile(
 			var options: Array = SETTLEMENT_TILES.get("town", [TOWN_TILE]) as Array
 			return options[rng.randi_range(0, options.size() - 1)]
 		"dwarfhold":
-			return DARK_DWARFHOLD_TILE if _is_within_tiles_of_volcano(coord, 8) else DWARFHOLD_TILE
+			# Browser rule: dark dwarfholds claim ground within 4 tiles
+			# of a volcano, not 8.
+			return DARK_DWARFHOLD_TILE if _is_within_tiles_of_volcano(coord, 4) else DWARFHOLD_TILE
 		"woodElfGrove":
 			var elf_tiles: Array = SETTLEMENT_TILES.get("woodElfGrove", [WOOD_ELF_GROVES_TILE]) as Array
 			return elf_tiles[rng.randi_range(0, elf_tiles.size() - 1)]
@@ -3957,7 +3972,7 @@ func _resources_for_tile(coord: Vector2i, data: Dictionary) -> Array[String]:
 		resolved.append("dense lumber stands")
 	if float(data.get("temperature", 1.0)) <= 0.25:
 		resolved.append("fur-bearing game")
-	if _is_within_tiles_of_volcano(coord, 3):
+	if float(data.get("volcano_proximity", 0.0)) >= 0.45:
 		resolved.append("volcanic glass and obsidian")
 	if resolved.size() > 5:
 		resolved = resolved.slice(0, 5)
@@ -4643,6 +4658,9 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		not biome_label.is_empty()
 	)
 	var climate_text := _describe_climate(temperature, moisture).strip_edges()
+	# Browser parity: the volcano's heat aura reads in the climate line.
+	if float(data.get("volcano_proximity", 0.0)) >= 0.45 and not climate_text.is_empty():
+		climate_text += " and volcanic warmth"
 	_set_tooltip_label(
 		tooltip_climate,
 		climate_text,
