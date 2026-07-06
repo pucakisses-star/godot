@@ -243,6 +243,11 @@ static func generate_landmass_masks_from_biome_map(biome_map: Dictionary, map_si
 			else:
 				land_mask[coord] = true
 
+	# Browser parity (main.js:28219-28226): a water cluster counts as ocean
+	# when it touches the map edge OR is at least max(80, area / 80) tiles,
+	# so vast inland seas are oceans rather than lakes.
+	var ocean_size_threshold := maxi(80, int(round(float(map_size.x * map_size.y) / 80.0)))
+
 	for coord: Vector2i in water_mask.keys():
 		if visited.has(coord):
 			continue
@@ -265,8 +270,9 @@ static func generate_landmass_masks_from_biome_map(biome_map: Dictionary, map_si
 				if water_mask.has(neighbor) and !visited.has(neighbor):
 					queue.append(neighbor)
 
+		var qualifies_as_ocean := touches_edge or component.size() >= ocean_size_threshold
 		for cell in component:
-			if touches_edge:
+			if qualifies_as_ocean:
 				ocean_cells[cell] = true
 			else:
 				lake_cells[cell] = true

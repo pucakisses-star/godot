@@ -100,10 +100,14 @@ const LAKE_NAME_MOTIFS: Array[String] = [
 	"Echoes", "Willows", "Lanterns", "Dreams", "Reflections", "Whispers", "Herons", "Lilies", "Dawn", "Stars"
 ]
 
+## context_size is the water-body cluster size in tiles for water regions
+## (browser context.size; oceans under 120 tiles downgrade to "Sea").
+## Hills clusters get no region name (browser biomeTypeDefinitions has no
+## hills entry, main.js:2767-2778).
 static func generate_biome_region_name(biome: String, water_body_type: String, rng: RandomNumberGenerator, context_size: int) -> String:
 	match biome:
 		"forest": return _generate_forest_name(rng)
-		"mountain", "hills": return _generate_mountain_name(rng)
+		"mountain": return _generate_mountain_name(rng)
 		"desert": return _generate_desert_name(rng)
 		"tundra": return _generate_tundra_name(rng)
 		"grassland": return _generate_grassland_name(rng)
@@ -117,76 +121,77 @@ static func generate_biome_region_name(biome: String, water_body_type: String, r
 		_:
 			return ""
 
+## Pattern probabilities mirror the browser generators (main.js:2619-2749):
+## motif-form chance first, then (where the browser has one) a separate
+## roll for the "The ..." form.
 static func _generate_forest_name(rng: RandomNumberGenerator) -> String:
 	var prefix := _pick_random_entry(FOREST_NAME_PREFIXES, rng, "Verdant")
 	var suffix := _pick_random_entry(FOREST_NAME_SUFFIXES, rng, "Woods")
 	var motif := _pick_random_entry(FOREST_NAME_MOTIFS, rng)
-	var roll := rng.randf()
-	if roll < 0.34 and not motif.is_empty(): return "%s %s of the %s" % [prefix, suffix, motif]
-	if roll < 0.67: return "The %s %s" % [prefix, suffix]
+	if not motif.is_empty() and rng.randf() < 0.65: return "%s %s of the %s" % [prefix, suffix, motif]
+	if rng.randf() < 0.35: return "The %s %s" % [prefix, suffix]
 	return "%s %s" % [prefix, suffix]
 
 static func _generate_mountain_name(rng: RandomNumberGenerator) -> String:
 	var prefix := _pick_random_entry(MOUNTAIN_NAME_PREFIXES, rng, "Stone")
 	var suffix := _pick_random_entry(MOUNTAIN_NAME_SUFFIXES, rng, "Peaks")
 	var motif := _pick_random_entry(MOUNTAIN_NAME_MOTIFS, rng)
-	if rng.randf() < 0.5 and not motif.is_empty(): return "%s %s of the %s" % [prefix, suffix, motif]
+	if not motif.is_empty() and rng.randf() < 0.6: return "%s %s of the %s" % [prefix, suffix, motif]
 	return "The %s %s" % [prefix, suffix]
 
 static func _generate_desert_name(rng: RandomNumberGenerator) -> String:
 	var descriptor := _pick_random_entry(DESERT_NAME_DESCRIPTORS, rng, "Shifting")
 	var noun := _pick_random_entry(DESERT_NAME_NOUNS, rng, "Dunes")
 	var motif := _pick_random_entry(DESERT_NAME_MOTIFS, rng)
-	if rng.randf() < 0.5 and not motif.is_empty(): return "%s of the %s" % [noun, motif]
+	if not motif.is_empty() and rng.randf() < 0.5: return "%s of the %s" % [noun, motif]
 	return "The %s %s" % [descriptor, noun]
 
 static func _generate_tundra_name(rng: RandomNumberGenerator) -> String:
 	var descriptor := _pick_random_entry(TUNDRA_NAME_DESCRIPTORS, rng, "Frozen")
 	var noun := _pick_random_entry(TUNDRA_NAME_NOUNS, rng, "Tundra")
 	var motif := _pick_random_entry(TUNDRA_NAME_MOTIFS, rng)
-	if rng.randf() < 0.5 and not motif.is_empty(): return "%s of the %s" % [noun, motif]
+	if not motif.is_empty() and rng.randf() < 0.55: return "%s of the %s" % [noun, motif]
 	return "The %s %s" % [descriptor, noun]
 
 static func _generate_grassland_name(rng: RandomNumberGenerator) -> String:
 	var descriptor := _pick_random_entry(GRASSLAND_NAME_DESCRIPTORS, rng, "Windward")
 	var noun := _pick_random_entry(GRASSLAND_NAME_NOUNS, rng, "Plains")
 	var motif := _pick_random_entry(GRASSLAND_NAME_MOTIFS, rng)
-	var roll := rng.randf()
-	if roll < 0.34 and not motif.is_empty(): return "%s of the %s" % [noun, motif]
-	if roll < 0.67: return "The %s %s" % [descriptor, noun]
+	if not motif.is_empty() and rng.randf() < 0.5: return "%s of the %s" % [noun, motif]
+	if rng.randf() < 0.4: return "The %s %s" % [descriptor, noun]
 	return "%s %s" % [descriptor, noun]
 
 static func _generate_jungle_name(rng: RandomNumberGenerator) -> String:
 	var descriptor := _pick_random_entry(JUNGLE_NAME_DESCRIPTORS, rng, "Emerald")
 	var noun := _pick_random_entry(JUNGLE_NAME_NOUNS, rng, "Jungle")
 	var motif := _pick_random_entry(JUNGLE_NAME_MOTIFS, rng)
-	var roll := rng.randf()
-	if roll < 0.34 and not motif.is_empty(): return "%s of the %s" % [noun, motif]
-	if roll < 0.67: return "The %s %s" % [descriptor, noun]
+	if not motif.is_empty() and rng.randf() < 0.65: return "%s of the %s" % [noun, motif]
+	if rng.randf() < 0.45: return "The %s %s" % [descriptor, noun]
 	return "%s %s" % [descriptor, noun]
 
 static func _generate_marsh_name(rng: RandomNumberGenerator) -> String:
 	var descriptor := _pick_random_entry(MARSH_NAME_DESCRIPTORS, rng, "Glimmer")
 	var noun := _pick_random_entry(MARSH_NAME_NOUNS, rng, "Bog")
 	var motif := _pick_random_entry(MARSH_NAME_MOTIFS, rng)
-	if rng.randf() < 0.5 and not motif.is_empty(): return "%s %s of the %s" % [descriptor, noun, motif]
+	if not motif.is_empty() and rng.randf() < 0.6: return "%s %s of the %s" % [descriptor, noun, motif]
 	return "The %s %s" % [descriptor, noun]
 
 static func _generate_badlands_name(rng: RandomNumberGenerator) -> String:
 	var descriptor := _pick_random_entry(BADLANDS_NAME_DESCRIPTORS, rng, "Shattered")
 	var noun := _pick_random_entry(BADLANDS_NAME_NOUNS, rng, "Badlands")
 	var motif := _pick_random_entry(BADLANDS_NAME_MOTIFS, rng)
-	var roll := rng.randf()
-	if roll < 0.34 and not motif.is_empty(): return "%s of the %s" % [noun, motif]
-	if roll < 0.67: return "The %s %s" % [descriptor, noun]
+	if not motif.is_empty() and rng.randf() < 0.55: return "%s of the %s" % [noun, motif]
+	if rng.randf() < 0.35: return "The %s %s" % [descriptor, noun]
 	return "%s %s" % [descriptor, noun]
 
 static func _generate_ocean_name(rng: RandomNumberGenerator, context_size: int) -> String:
 	var descriptor := _pick_random_entry(OCEAN_NAME_DESCRIPTORS, rng, "Sapphire")
 	var noun := _pick_random_entry(OCEAN_NAME_NOUNS, rng, "Sea")
 	var motif := _pick_random_entry(OCEAN_NAME_MOTIFS, rng)
+	# Browser: context.size is the water BODY size in tiles; small bodies
+	# never carry the "Ocean" noun.
 	if context_size < 120 and noun == "Ocean": noun = "Sea"
-	if rng.randf() < 0.5 and not motif.is_empty(): return "%s of the %s" % [noun, motif]
+	if not motif.is_empty() and rng.randf() < 0.65: return "%s of the %s" % [noun, motif]
 	return "The %s %s" % [descriptor, noun]
 
 static func _generate_lake_name(rng: RandomNumberGenerator) -> String:
@@ -194,11 +199,10 @@ static func _generate_lake_name(rng: RandomNumberGenerator) -> String:
 	var noun := _pick_random_entry(LAKE_NAME_NOUNS, rng, "Lake")
 	var motif := _pick_random_entry(LAKE_NAME_MOTIFS, rng)
 	var lower_noun := noun.to_lower()
-	var use_motif := rng.randf() < 0.5
 	if lower_noun == "lake" or lower_noun == "loch":
-		if use_motif and not motif.is_empty(): return "%s %s" % [noun, motif]
+		if not motif.is_empty() and rng.randf() < 0.7: return "%s %s" % [noun, motif]
 		return "%s %s" % [noun, descriptor]
-	if use_motif and not motif.is_empty(): return "The %s %s of the %s" % [descriptor, noun, motif]
+	if not motif.is_empty() and rng.randf() < 0.6: return "The %s %s of the %s" % [descriptor, noun, motif]
 	return "The %s %s" % [descriptor, noun]
 
 static func _pick_random_entry(options: Array[String], rng: RandomNumberGenerator, fallback: String = "") -> String:

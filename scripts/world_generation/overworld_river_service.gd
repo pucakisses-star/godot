@@ -20,6 +20,10 @@ const RIVER_FLOW_OFFSETS: Array[Vector2i] = [
 	Vector2i(0, 1), Vector2i(-1, 1), Vector2i(-1, 0), Vector2i(-1, -1)
 ]
 
+const CARDINAL_FLOW_OFFSETS: Array[Vector2i] = [
+	Vector2i(0, -1), Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0)
+]
+
 const RIVER_MASK_SUFFIX_LOOKUP := {
 	0: "0",
 	1: "N",
@@ -132,7 +136,8 @@ static func build_river_map_buffers(
 	var base_sources := maxi(8, int(floor(float(map_size.x * map_size.y) / 3200.0)))
 	var source_density_multiplier := lerpf(1.8, 3.1, frequency_normalized)
 	var max_sources := maxi(4, int(round(float(base_sources) * frequency_multiplier * source_density_multiplier)))
-	var ocean_distance := build_ocean_distance_map(_biome_buffer_to_dictionary(base_biome_buffer, map_size), map_size)
+	var biome_dictionary := _biome_buffer_to_dictionary(base_biome_buffer, map_size)
+	var ocean_distance := build_ocean_distance_map(biome_dictionary, map_size)
 	var ocean_influence := lerpf(0.008, 0.02, frequency_normalized)
 	var river_map: Dictionary = {}
 	# Rivers wander like water: eight flow directions, momentum carrying
@@ -187,11 +192,208 @@ static func build_river_map_buffers(
 				if _biome_id_to_string(int(base_biome_buffer[_coord_to_index(shoulder, map_size)])) != BIOME_WATER:
 					river_map[shoulder] = mini(4, int(river_map.get(shoulder, 0)) + strength)
 			if _biome_id_to_string(int(base_biome_buffer[_coord_to_index(next, map_size)])) == BIOME_WATER:
+				# Browser main.js:20782-20785 stamps the strength onto the
+				# first water tile reached. The water tile is never rendered
+				# as river, but the 4-bit connection masks read river_map, so
+				# lake and sea inflows visually connect to the water body.
+				river_map[next] = maxi(int(river_map.get(next, 0)), strength)
 				break
 			coord = next
 			if int(river_map.get(coord, 0)) > 0 and steps > 3:
 				break
+	_carve_coastal_rivers(
+		river_map,
+		height_buffer,
+		moisture_buffer,
+		base_biome_buffer,
+		compute_edge_connected_water_mask(biome_dictionary, map_size),
+		ocean_distance,
+		rng,
+		map_size,
+		water_level,
+		frequency_normalized,
+		major_river_threshold,
+		max_sources
+	)
 	return river_map
+
+
+## Browser main.js:20797-20954 second pass: ocean-seeded rivers. Land tiles
+## adjacent to edge-connected water are weighted and the best ones walk
+## INLAND (away from the sea, uphill-ish) so short coastal rivers exist even
+## where no highland source drains to that shore. Godot has no drainage
+## field, so (1 - moisture) stands in as the swampy-sink term - the same
+## proxy the inland source pass already uses.
+static func _carve_coastal_rivers(
+	river_map: Dictionary,
+	height_buffer: PackedFloat32Array,
+	moisture_buffer: PackedFloat32Array,
+	base_biome_buffer: PackedByteArray,
+	ocean_mask: Dictionary,
+	ocean_distance: Dictionary,
+	rng: RandomNumberGenerator,
+	map_size: Vector2i,
+	water_level: float,
+	frequency_normalized: float,
+	major_river_threshold: float,
+	max_sources: int
+) -> void:
+	if ocean_mask.is_empty() or frequency_normalized <= 0.05:
+		return
+	var candidates: Array[Dictionary] = []
+	var taken: Dictionary = {}
+	for y in range(map_size.y):
+		for x in range(map_size.x):
+			var coord := Vector2i(x, y)
+			if not ocean_mask.has(coord):
+				continue
+			for offset: Vector2i in CARDINAL_FLOW_OFFSETS:
+				var neighbor := coord + offset
+				if not _is_valid(neighbor, map_size) or taken.has(neighbor):
+					continue
+				var neighbor_idx := _coord_to_index(neighbor, map_size)
+				if _biome_id_to_string(int(base_biome_buffer[neighbor_idx])) == BIOME_WATER:
+					continue
+				var elev := float(height_buffer[neighbor_idx])
+				if elev <= water_level:
+					continue
+				var sink := clampf(1.0 - float(moisture_buffer[neighbor_idx]), 0.0, 1.0)
+				var lowland_boost := maxf(0.0, water_level + 0.12 - elev)
+				var randomness := 0.4 + rng.randf() * 0.6
+				var base_potential := maxf(0.0, elev - water_level) * 0.5 + sink * 0.5
+				var weight := (base_potential + lowland_boost * 3.2) * randomness
+				taken[neighbor] = true
+				candidates.append({
+					"coord": neighbor,
+					"weight": weight,
+					"strength": 2 if weight > major_river_threshold else 1
+				})
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return float(a.get("weight", 0.0)) > float(b.get("weight", 0.0))
+	)
+	var ocean_source_factor := lerpf(0.18, 0.5, frequency_normalized)
+	var max_ocean_sources := mini(candidates.size(), maxi(0, int(round(float(max_sources) * ocean_source_factor))))
+	if max_ocean_sources <= 0:
+		return
+	var inland_influence := lerpf(0.006, 0.018, frequency_normalized)
+	var max_reverse_length := maxi(6, int(round(sqrt(float(map_size.x * map_size.y)) * lerpf(0.32, 0.58, frequency_normalized))))
+	var detour_probability := lerpf(0.08, 0.22, frequency_normalized)
+	var far_distance := float(map_size.x + map_size.y)
+	for i in range(max_ocean_sources):
+		var start := candidates[i] as Dictionary
+		var start_coord := start.get("coord", Vector2i.ZERO) as Vector2i
+		if int(river_map.get(start_coord, 0)) > 0:
+			continue
+		var path: Array[Vector2i] = []
+		var local_visited: Dictionary = {}
+		var current := start_coord
+		while path.size() < max_reverse_length:
+			if local_visited.has(current):
+				break
+			local_visited[current] = true
+			path.append(current)
+			var current_idx := _coord_to_index(current, map_size)
+			var current_distance := float(ocean_distance.get(current, far_distance))
+			var current_base_value := float(height_buffer[current_idx]) - float(moisture_buffer[current_idx]) * 0.02
+			var best_coord := Vector2i(-1, -1)
+			var best_score := INF
+			for offset: Vector2i in CARDINAL_FLOW_OFFSETS:
+				var neighbor := current + offset
+				if not _is_valid(neighbor, map_size) or local_visited.has(neighbor):
+					continue
+				var neighbor_idx := _coord_to_index(neighbor, map_size)
+				if _biome_id_to_string(int(base_biome_buffer[neighbor_idx])) == BIOME_WATER:
+					continue
+				if int(river_map.get(neighbor, 0)) > 0 and path.size() > 2:
+					continue
+				var distance_delta := float(ocean_distance.get(neighbor, far_distance)) - current_distance
+				if distance_delta < -0.5:
+					continue
+				if absf(distance_delta) <= 0.5 and path.size() > 4:
+					continue
+				var neighbor_base_value := float(height_buffer[neighbor_idx]) - float(moisture_buffer[neighbor_idx]) * 0.02
+				if neighbor_base_value - current_base_value > 0.22 + float(path.size()) * 0.015:
+					continue
+				if path.size() > 4 and rng.randf() < detour_probability:
+					continue
+				var score := neighbor_base_value
+				score -= distance_delta * inland_influence
+				score -= rng.randf() * 0.02
+				if score < best_score:
+					best_score = score
+					best_coord = neighbor
+			if best_coord == Vector2i(-1, -1):
+				break
+			var next_distance := float(ocean_distance.get(best_coord, far_distance))
+			if next_distance <= current_distance and path.size() > 5:
+				break
+			current = best_coord
+		if path.size() < 3:
+			continue
+		var start_strength := int(start.get("strength", 1))
+		for p in range(path.size()):
+			var t := 0.0 if path.size() <= 1 else float(p) / float(path.size() - 1)
+			var strength_at_tile := maxi(1, int(round(lerpf(float(start_strength), 1.0, t))))
+			var cell := path[p]
+			river_map[cell] = maxi(int(river_map.get(cell, 0)), strength_at_tile)
+
+
+## Browser ensureRiverConnectionsToWater (main.js:21156-21257): flood-fill
+## the river cells into 4-way components; any component with no cell next
+## to water gets its lowest endpoint converted into an actual water tile
+## (a pond). Mutates base_biome_map and returns the pond coords so the
+## caller can sync every derived map and buffer.
+static func ensure_river_connections_to_water(
+	river_map: Dictionary,
+	base_biome_map: Dictionary,
+	height_map: Dictionary,
+	map_size: Vector2i
+) -> Array[Vector2i]:
+	var converted: Array[Vector2i] = []
+	var visited: Dictionary = {}
+	for y in range(map_size.y):
+		for x in range(map_size.x):
+			var start := Vector2i(x, y)
+			if visited.has(start) or int(river_map.get(start, 0)) <= 0:
+				continue
+			var stack: Array[Vector2i] = [start]
+			var component: Array[Vector2i] = []
+			var endpoints: Array[Vector2i] = []
+			var touches_water := false
+			while not stack.is_empty():
+				var current: Vector2i = stack.pop_back()
+				if visited.has(current):
+					continue
+				visited[current] = true
+				component.append(current)
+				if String(base_biome_map.get(current, "")) == BIOME_WATER:
+					touches_water = true
+				var neighbor_count := 0
+				for offset: Vector2i in CARDINAL_FLOW_OFFSETS:
+					var neighbor := current + offset
+					if not _is_valid(neighbor, map_size):
+						continue
+					if String(base_biome_map.get(neighbor, "")) == BIOME_WATER:
+						touches_water = true
+					if int(river_map.get(neighbor, 0)) > 0:
+						neighbor_count += 1
+						if not visited.has(neighbor):
+							stack.append(neighbor)
+				if neighbor_count <= 1:
+					endpoints.append(current)
+			if touches_water:
+				continue
+			var candidates := endpoints if not endpoints.is_empty() else component
+			var pond := candidates[0]
+			var pond_height := float(height_map.get(pond, INF))
+			for candidate: Vector2i in candidates:
+				var candidate_height := float(height_map.get(candidate, INF))
+				if candidate_height < pond_height:
+					pond_height = candidate_height
+					pond = candidate
+			base_biome_map[pond] = BIOME_WATER
+			converted.append(pond)
+	return converted
 
 
 static func build_river_map(
