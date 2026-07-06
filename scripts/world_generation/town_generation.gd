@@ -126,6 +126,10 @@ var _last_move_direction := Vector2i.ZERO
 var _move_repeat_timer := 0.0
 var _npc_states: Array[Dictionary] = []
 var _settlement_factions: Array[Dictionary] = []
+var _surface_noise: Dictionary = {}
+var _surface_chunks: Dictionary = {}
+var _surface_last_player_chunk := Vector2i(2147483647, 2147483647)
+var _surface_protect_rect := Rect2i()
 var _factions_label: RichTextLabel
 var _faction_event_stamps: Dictionary = {}
 var _town_name := ""
@@ -489,6 +493,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_advance_game_clock(delta)
+	_stream_surface_chunks()
 	_update_player_turn_movement(delta)
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
@@ -1071,6 +1076,7 @@ func _show_level(target_level_index: int) -> void:
 	var grid := level_data.get("grid", {}) as Dictionary
 	_door_cells = level_data.get("door_cells", {}) as Dictionary
 	_latest_grid = grid
+	_setup_surface_world(grid)
 	_latest_zone_counts = level_data.get("zone_counts", {}) as Dictionary
 	_latest_requested_zone_counts = level_data.get("requested_zone_counts", {}) as Dictionary
 	_latest_civic_buildings_by_id = level_data.get("civic_buildings_by_id", {}) as Dictionary
@@ -1125,6 +1131,8 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		return
 	city_layer.clear()
 	decor_layer.clear()
+	_surface_chunks.clear()
+	_surface_last_player_chunk = Vector2i(2147483647, 2147483647)
 	var bounds := _find_bounds(grid).grow(1)
 	var house_decor_overrides := _build_house_decor_layouts(grid)
 	_latest_bed_count = 0
@@ -2490,7 +2498,8 @@ func _build_player_path(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2
 	var found := false
 
 	var head := 0
-	while head < queue.size():
+	# The wilds stream forever; an unreachable click must not flood them.
+	while head < queue.size() and visited.size() < 8000:
 		var current: Vector2i = queue[head]
 		head += 1
 		if current == to_cell:
@@ -2626,6 +2635,80 @@ func _remove_dead_afflicted() -> void:
 
 func _create_placeholder_tavern_character_texture() -> Texture2D:
 	return DwarfHoldTavernService.create_placeholder_tavern_character_texture()
+
+## --- The open surface world --------------------------------------------
+## Core Keeper above ground: wild chunks generate around the player as
+## they wander past the town edge and evaporate when left behind,
+## rebuilt identically from the seed on return. The town itself is
+## never touched.
+
+const SURFACE_GEN_RADIUS := 2
+const SURFACE_EVICT_RADIUS := 4
+
+func _setup_surface_world(grid: Dictionary) -> void:
+	var seed_text := seed_input.text.strip_edges()
+	_surface_noise = SurfaceWorldService.make_noise_set(hash("surface|%s" % seed_text))
+	var min_cell := Vector2i(2147483647, 2147483647)
+	var max_cell := Vector2i(-2147483648, -2147483648)
+	for cell_variant: Variant in grid.keys():
+		var cell := cell_variant as Vector2i
+		min_cell = Vector2i(mini(min_cell.x, cell.x), mini(min_cell.y, cell.y))
+		max_cell = Vector2i(maxi(max_cell.x, cell.x), maxi(max_cell.y, cell.y))
+	if min_cell.x == 2147483647:
+		_surface_protect_rect = Rect2i()
+		return
+	_surface_protect_rect = Rect2i(min_cell, max_cell - min_cell + Vector2i.ONE).grow(8)
+
+func _stream_surface_chunks() -> void:
+	if _surface_noise.is_empty() or _player_sprite == null:
+		return
+	var player_chunk: Vector2i = SurfaceWorldService.chunk_for_cell(_player_cell)
+	if player_chunk == _surface_last_player_chunk:
+		return
+	_surface_last_player_chunk = player_chunk
+	for chunk_dy in range(-SURFACE_GEN_RADIUS, SURFACE_GEN_RADIUS + 1):
+		for chunk_dx in range(-SURFACE_GEN_RADIUS, SURFACE_GEN_RADIUS + 1):
+			_ensure_surface_chunk(player_chunk + Vector2i(chunk_dx, chunk_dy))
+	_evict_far_surface_chunks(player_chunk)
+
+func _ensure_surface_chunk(chunk: Vector2i) -> void:
+	if _surface_chunks.has(chunk):
+		return
+	var painted: Array[Vector2i] = []
+	var rect: Rect2i = SurfaceWorldService.chunk_rect(chunk)
+	for y in range(rect.position.y, rect.end.y):
+		for x in range(rect.position.x, rect.end.x):
+			var cell := Vector2i(x, y)
+			# Anything the town rendered stays exactly as built; the wilds
+			# fill every void right up to its walls.
+			if _latest_grid.has(cell) or city_layer.get_cell_source_id(cell) >= 0:
+				continue
+			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell, _surface_noise)
+			var base_key := String(terrain.get("base", "grass"))
+			var decor_key := String(terrain.get("decor", ""))
+			# Flowers are transparent overlays: grass beneath, bloom above.
+			if base_key.begins_with("flowers_"):
+				decor_key = base_key
+				base_key = "grass"
+			_place_tile(city_layer, cell, base_key)
+			if not decor_key.is_empty():
+				_place_tile(decor_layer, cell, decor_key)
+			painted.append(cell)
+	_surface_chunks[chunk] = painted
+
+func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
+	var to_evict: Array[Vector2i] = []
+	for chunk_variant: Variant in _surface_chunks.keys():
+		var chunk := chunk_variant as Vector2i
+		if maxi(absi(chunk.x - player_chunk.x), absi(chunk.y - player_chunk.y)) <= SURFACE_EVICT_RADIUS:
+			continue
+		to_evict.append(chunk)
+	for chunk: Vector2i in to_evict:
+		for cell: Vector2i in (_surface_chunks[chunk] as Array[Vector2i]):
+			city_layer.erase_cell(cell)
+			decor_layer.erase_cell(cell)
+			_actor_passable_cache.erase(cell)
+		_surface_chunks.erase(chunk)
 
 func _is_walkable_cell(cell: Vector2i) -> bool:
 	# Above ground the green is open terrain: any rendered passable tile is

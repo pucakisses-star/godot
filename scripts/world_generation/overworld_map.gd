@@ -872,6 +872,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if _is_scene3d_view and _handle_scene3d_input(event):
 		return
+	if _handle_double_click_dive(event):
+		get_viewport().set_input_as_handled()
+		return
 	if _handle_structure_context_menu_input(event):
 		get_viewport().set_input_as_handled()
 		return
@@ -1068,6 +1071,46 @@ func _on_structure_context_menu_id_pressed(action_id: int) -> void:
 			_begin_journey_from_tile(clicked_tile)
 		CONTEXT_MENU_MORE_INFORMATION_ID:
 			_open_structure_details_from_context_menu(clicked_tile)
+
+## Dwarf Fortress-style dive: a double-click glides the camera down
+## onto the tile; if a site sits there, the journey begins on landing.
+## Wild tiles just get the zoom - the closer look is its own reward.
+const DIVE_ZOOM := 3.2
+const DIVE_SECONDS := 0.85
+var _dive_pending := false
+
+func _handle_double_click_dive(event: InputEvent) -> bool:
+	var mouse_button_event := event as InputEventMouseButton
+	if mouse_button_event == null or not mouse_button_event.pressed or not mouse_button_event.double_click:
+		return false
+	if mouse_button_event.button_index != MOUSE_BUTTON_LEFT:
+		return false
+	if _is_globe_view or _is_scene3d_view or _dive_pending:
+		return false
+	if overworld_camera == null or map_layer == null:
+		return false
+	var tile_coord := _get_tile_coord_from_global_position(get_global_mouse_position())
+	if not _is_valid_map_coord(tile_coord):
+		return false
+	_dive_into_tile(tile_coord)
+	return true
+
+func _dive_into_tile(tile_coord: Vector2i) -> void:
+	var details := _tile_data.get(tile_coord, {}) as Dictionary
+	var enterable := _tile_supports_journey(details)
+	var landing := map_layer.to_global(map_layer.map_to_local(tile_coord))
+	var target_zoom := maxf(overworld_camera.zoom.x * 2.4, DIVE_ZOOM) if enterable else clampf(overworld_camera.zoom.x * 2.0, 0.2, DIVE_ZOOM)
+	_dive_pending = true
+	var tween: Tween = overworld_camera.dive_to(landing, target_zoom, DIVE_SECONDS)
+	await tween.finished
+	_dive_pending = false
+	if enterable:
+		_begin_journey_from_tile(tile_coord)
+
+func _tile_supports_journey(details: Dictionary) -> bool:
+	if details.is_empty():
+		return false
+	return _is_dwarfhold_structure(details) or _is_town_settlement(details) or _is_dungeon_structure(details)
 
 func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 	var details := _tile_data.get(tile_coord, {}) as Dictionary

@@ -19,6 +19,7 @@ var _pan_start_position := Vector2.ZERO
 var _pan_exceeded_threshold := false
 var _world_bounds := Rect2()
 var _has_world_bounds := false
+var _dive_tween: Tween
 
 func _unhandled_input(event: InputEvent) -> void:
 	var mouse_event := event as InputEventMouseButton
@@ -53,7 +54,29 @@ func _unhandled_input(event: InputEvent) -> void:
 	if motion_event != null:
 		_update_pan(motion_event.position, -1)
 
+## A Dwarf Fortress-style dive: glide onto a spot while zooming in.
+## Returns the tween so callers can await the landing.
+func dive_to(world_position: Vector2, target_zoom: float, duration: float = 0.85) -> Tween:
+	if _dive_tween != null and _dive_tween.is_valid():
+		_dive_tween.kill()
+	_end_pan()
+	var clamped_zoom := clampf(target_zoom, min_zoom, max_zoom)
+	_dive_tween = create_tween().set_parallel(true)
+	_dive_tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN_OUT)
+	_dive_tween.tween_property(self, "global_position", world_position, duration)
+	_dive_tween.tween_method(_apply_dive_zoom, zoom.x, clamped_zoom, duration)
+	return _dive_tween
+
+func is_diving() -> bool:
+	return _dive_tween != null and _dive_tween.is_valid() and _dive_tween.is_running()
+
+func _apply_dive_zoom(zoom_level: float) -> void:
+	zoom = Vector2(zoom_level, zoom_level)
+	zoom_changed.emit(zoom_level)
+
 func _physics_process(delta: float) -> void:
+	if is_diving():
+		return
 	var direction := Vector2.ZERO
 	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
 		direction.y -= 1.0
@@ -133,6 +156,8 @@ func _clamp_to_world_bounds() -> void:
 	global_position = clamped
 
 func _start_pan(screen_position: Vector2, pointer_index: int) -> void:
+	if is_diving():
+		return
 	_is_panning = true
 	_pan_pointer_index = pointer_index
 	_pan_start_screen = screen_position
