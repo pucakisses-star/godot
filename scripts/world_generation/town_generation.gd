@@ -144,7 +144,25 @@ var _player_hp := PlayerStatsService.BASE_MAX_HP
 var _player_max_hp := PlayerStatsService.BASE_MAX_HP
 var _player_home_cell := Vector2i.ZERO
 var _hp_label: Label
+var _gear_label: Label
 const SURFACE_CREATURE_TEXTURE := preload("res://resources/images/npc/creature_characters.png")
+const BOAT_SPRITE_TEXTURE := preload("res://resources/images/npc/boat_sprite.png")
+var _player_attack_timer := 0.0
+var _staff_cooldown := 0.0
+var _companion: Dictionary = {}
+var _player_boating := false
+var _boat_sprite: Sprite2D
+var _player_mounted := false
+var _mount_sprite: Sprite2D
+var _build_selection := -1
+var _player_built_cells: Dictionary = {}
+var _farm_plots: Dictionary = {}
+var _raid_active := false
+var _raid_end_stamp := 0.0
+var _next_raid_day := 0
+var _music_timer := 0.0
+var _wall_damage: Dictionary = {}
+var _speed_scale_cache := 1.0
 var _factions_label: RichTextLabel
 var _faction_event_stamps: Dictionary = {}
 var _town_name := ""
@@ -505,15 +523,21 @@ func _ready() -> void:
 	_load_persistent_clock()
 	_load_player_combat_state()
 	_setup_hp_label()
+	GameAudioService.play_music(self, "town")
 	_update_day_night_tint()
 	_update_clock_label()
 	_generate_city()
 
 func _process(delta: float) -> void:
 	_advance_game_clock(delta)
+	_player_attack_timer = maxf(_player_attack_timer - delta, 0.0)
+	_staff_cooldown = maxf(_staff_cooldown - delta, 0.0)
 	_stream_surface_chunks()
 	_check_surface_arrival()
 	_update_surface_life(delta)
+	_update_companion(delta)
+	_update_raid(delta)
+	_update_music(delta)
 	_update_player_turn_movement(delta)
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
@@ -524,10 +548,18 @@ func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
 		return
 	var delta_hours := delta * 24.0 / (minutes_per_game_day * 60.0)
+	var hour_before := int(_game_hour)
 	_game_hour += delta_hours
 	while _game_hour >= 24.0:
 		_game_hour -= 24.0
 		_game_day += 1
+	if int(_game_hour) != hour_before:
+		var clock_settings: Dictionary = _world_settings_snapshot()
+		clock_settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
+		_store_world_settings(clock_settings)
+		_refresh_player_stats_town()
+		_advance_farm_growth()
+		_maybe_start_raid()
 	# Strolling the market works up an appetite too.
 	_player_satiety = clampf(_player_satiety - delta_hours * PlayerStatsService.SATIETY_DRAIN_PER_GAME_HOUR, 0.0, PlayerStatsService.SATIETY_MAX)
 	_advance_afflictions(delta_hours)
@@ -590,6 +622,21 @@ func _unhandled_input(event: InputEvent) -> void:
 			_escape_menu.toggle()
 		get_viewport().set_input_as_handled()
 		return
+	var key_event := event as InputEventKey
+	if key_event != null and key_event.pressed and not key_event.echo and not _is_text_input_focused():
+		match key_event.keycode:
+			KEY_B:
+				_cycle_town_build_selection()
+				get_viewport().set_input_as_handled()
+				return
+			KEY_Q:
+				_handle_quick_drink_action()
+				get_viewport().set_input_as_handled()
+				return
+			KEY_M:
+				_toggle_mount()
+				get_viewport().set_input_as_handled()
+				return
 	if _player_sprite == null or not _player_control_enabled:
 		return
 	if _is_text_input_focused():
@@ -678,10 +725,16 @@ func _setup_hp_label() -> void:
 	_hp_label = Label.new()
 	_hp_label.add_theme_font_size_override("font_size", 13)
 	controls.add_child(_hp_label)
+	_gear_label = Label.new()
+	_gear_label.add_theme_font_size_override("font_size", 12)
+	_gear_label.modulate = Color(0.85, 0.88, 0.95, 1.0)
+	controls.add_child(_gear_label)
 	var clock := controls.get_node_or_null("ClockLabel")
 	if clock != null:
 		controls.move_child(_hp_label, clock.get_index() + 1)
+		controls.move_child(_gear_label, clock.get_index() + 2)
 	_update_hp_label()
+	_update_gear_label()
 
 func _update_hp_label() -> void:
 	if _hp_label == null:
@@ -786,7 +839,7 @@ func _update_player_hold_movement(delta: float) -> void:
 	_move_repeat_timer -= delta
 	while _move_repeat_timer <= 0.0:
 		_request_player_move_to_cell(_player_cell + move_direction)
-		_move_repeat_timer += PLAYER_MOVE_REPEAT_INTERVAL
+		_move_repeat_timer += PLAYER_MOVE_REPEAT_INTERVAL / _player_speed_scale()
 
 func _current_move_input_direction() -> Vector2i:
 	return DwarfHoldUiInputHandler.current_move_input_direction()
@@ -803,7 +856,7 @@ func _update_player_turn_movement(delta: float) -> void:
 		return
 
 	if _player_is_moving:
-		var next_position := _player_sprite.position.move_toward(_player_move_target_position, PLAYER_MOVE_SPEED * delta)
+		var next_position := _player_sprite.position.move_toward(_player_move_target_position, PLAYER_MOVE_SPEED * _player_speed_scale() * delta)
 		_player_sprite.position = next_position
 		_center_view_on_world_position(next_position)
 		if next_position.distance_to(_player_move_target_position) > 0.5:
@@ -1853,12 +1906,12 @@ func _spawn_farm_animals() -> void:
 		for _herd_index in range(herd_size):
 			var pen_cell := pen_cells[_rng.randi_range(0, pen_cells.size() - 1)] as Vector2i
 			_spawn_farm_animal_at(pen_cell, pen_index)
-	if _green_cells.is_empty():
-		return
-	var animal_count := clampi(_green_cells.size() / 14, 4, 10)
-	for _animal_index in range(animal_count):
-		var cell := _green_cells[_rng.randi_range(0, _green_cells.size() - 1)]
-		_spawn_farm_animal_at(cell, -1)
+	if not _green_cells.is_empty():
+		var animal_count := clampi(_green_cells.size() / 14, 4, 10)
+		for _animal_index in range(animal_count):
+			var cell := _green_cells[_rng.randi_range(0, _green_cells.size() - 1)]
+			_spawn_farm_animal_at(cell, -1)
+	_restore_owned_animals()
 
 func _spawn_farm_animal_at(cell: Vector2i, pen_index: int) -> void:
 	var def := FARM_ANIMAL_DEFS[_rng.randi_range(0, FARM_ANIMAL_DEFS.size() - 1)] as Dictionary
@@ -1913,7 +1966,10 @@ func _update_farm_animals(delta: float) -> void:
 				# Animals keep to the greens; penned animals keep to their pen.
 				var pen_index := int(state.get("pen_index", -1))
 				var allowed: bool
-				if pen_index >= 0 and pen_index < _farm_pens.size():
+				if pen_index == -2:
+					var home := state.get("home", state.get("cell", Vector2i.ZERO)) as Vector2i
+					allowed = maxi(absi(next_cell.x - home.x), absi(next_cell.y - home.y)) <= 3 and _is_passable_cell_for_actor(next_cell)
+				elif pen_index >= 0 and pen_index < _farm_pens.size():
 					allowed = (_farm_pens[pen_index] as Array).has(next_cell)
 				else:
 					allowed = _green_cells.has(next_cell)
@@ -1950,6 +2006,7 @@ func _animate_farm_animal(state: Dictionary, sprite: Sprite2D, def: Dictionary) 
 func _adjust_coins(amount: int) -> void:
 	_player_coins = maxi(_player_coins + amount, 0)
 	_update_coins_label()
+	_update_gear_label()
 	_save_player_inventory()
 
 func _setup_coins_label() -> void:
@@ -2383,6 +2440,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_sprite = result.get("player_sprite")
 	_player_cell = result.get("player_cell", _player_cell)
 	_player_home_cell = _player_cell
+	_ensure_companion()
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
@@ -2481,13 +2539,18 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	if _player_sprite == null or not _player_control_enabled:
 		return
 	var clicked_cell := _cell_from_mouse_position(mouse_position)
+	if _build_selection >= 0 and _try_place_town_build(clicked_cell):
+		return
 	if _is_chest_cell(clicked_cell):
 		_request_chest_interaction(clicked_cell)
 		return
 	var creature_index := _surface_creature_index_at_cell(clicked_cell)
-	if creature_index >= 0 and _is_player_adjacent_to_cell(clicked_cell):
-		_attack_surface_creature(creature_index)
-		return
+	if creature_index >= 0:
+		if _is_player_adjacent_to_cell(clicked_cell):
+			_attack_surface_creature(creature_index)
+			return
+		if _try_ranged_attack_town(creature_index, clicked_cell):
+			return
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
 		# You don't chat with the risen dead - you put them down.
@@ -2502,11 +2565,23 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 				_remove_dead_afflicted()
 				_set_save_status("The corpse falls still at last.", Color(0.8, 0.85, 0.7, 1.0))
 			return
+		if bool(npc_state.get("traveler", false)) and _try_open_traveler_trade(npc_state):
+			return
 		_show_npc_dialogue(npc_state)
 		return
 	var shop_type := _shop_type_at_cell(clicked_cell)
 	if not shop_type.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
 		_open_trade_popup(clicked_cell, shop_type)
+		return
+	if _try_boat_action(clicked_cell):
+		return
+	if _try_farm_action(clicked_cell):
+		return
+	if _try_collect_produce(clicked_cell):
+		return
+	if _try_release_animal(clicked_cell):
+		return
+	if _try_chop_tree(clicked_cell):
 		return
 	_request_player_move_to_cell(clicked_cell)
 
@@ -2668,8 +2743,18 @@ func _try_move_player(direction: Vector2i) -> bool:
 	if direction == Vector2i.ZERO:
 		return false
 	var target_cell := _player_cell + direction
-	if not _is_walkable_cell(target_cell):
-		return false
+	if _player_boating:
+		# Afloat: water is the road; solid ground means stepping ashore.
+		if not _is_water_cell(target_cell):
+			if _is_walkable_cell(target_cell) and not _is_cell_occupied_by_npc(target_cell):
+				_set_boating(false)
+			else:
+				return false
+	elif not _is_walkable_cell(target_cell):
+		if _is_water_cell(target_cell) and int(_player_inventory.get("Coracle", 0)) > 0:
+			_set_boating(true)
+		else:
+			return false
 	if _is_cell_occupied_by_npc(target_cell):
 		return false
 	_player_move_target_cell = target_cell
@@ -2707,7 +2792,7 @@ func _update_npc_movement(delta: float) -> void:
 func _scheduled_states() -> Array[Dictionary]:
 	var living: Array[Dictionary] = []
 	for state: Dictionary in _npc_states:
-		if SettlementAfflictionService.is_active_zombie(state) or bool(state.get("traveler", false)):
+		if SettlementAfflictionService.is_active_zombie(state) or bool(state.get("traveler", false)) or bool(state.get("raid_duty", false)):
 			continue
 		living.append(state)
 	return living
@@ -2783,6 +2868,10 @@ func _setup_surface_world(grid: Dictionary) -> void:
 		if creature_sprite != null:
 			creature_sprite.queue_free()
 	_surface_creatures.clear()
+	_raid_active = false
+	_wall_damage.clear()
+	CompanionService.despawn(_companion)
+	_companion = {}
 	for state_index in range(_npc_states.size() - 1, -1, -1):
 		if bool(_npc_states[state_index].get("traveler", false)):
 			var traveler_sprite := _npc_states[state_index].get("sprite") as Sprite2D
@@ -2815,6 +2904,7 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	var bbox_center := min_cell + (max_cell - min_cell) / 2
 	_surface_world_origin = own_tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2) - bbox_center
 	_plan_surface_sites(own_tile, bbox_center, settings)
+	_restore_homestead(settings)
 
 ## Neighboring gazetteer sites become gates in the wilds, the nearest
 ## few joined to town by a dirt road.
@@ -2950,6 +3040,10 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			_place_surface_tile(city_layer, cell, base_key, danger)
 			if not decor_key.is_empty():
 				_place_surface_tile(decor_layer, cell, decor_key, danger)
+			if _player_built_cells.has(cell):
+				_stamp_player_build(cell, String(_player_built_cells[cell]))
+			elif _farm_plots.has(cell):
+				_stamp_farm_plot(cell)
 			painted.append(cell)
 	_surface_chunks[chunk] = painted
 	_stamp_gates_in_rect(rect)
@@ -3211,6 +3305,7 @@ func _maintain_travelers() -> void:
 	var spawn_index := clampi(best_road_index + _rng.randi_range(-30, 30), 2, road_path.size() - 3)
 	traveler["road_index"] = spawn_index
 	traveler["cell"] = road_path[spawn_index] as Vector2i
+	traveler["shop_anchor"] = Vector2i(2000000 + _npc_states.size(), spawn_index)
 	(traveler.get("sprite") as Sprite2D).position = _cell_center_position(road_path[spawn_index] as Vector2i)
 	_npc_states.append(traveler)
 
@@ -3221,24 +3316,832 @@ func _surface_creature_index_at_cell(cell: Vector2i) -> int:
 	return -1
 
 func _attack_surface_creature(creature_index: int) -> void:
+	if _player_attack_timer > 0.0:
+		return
+	_player_attack_timer = 0.45
+	GameAudioService.play_sfx(self, "swing")
+	_strike_surface_creature(creature_index, int(PlayerStatsService.for_session(self).get("attack", 2)))
+
+## Shared edge for melee, bow, staff, guards and the loyal sporeling.
+func _strike_surface_creature(creature_index: int, damage: int) -> void:
+	if creature_index < 0 or creature_index >= _surface_creatures.size():
+		return
 	var state := _surface_creatures[creature_index]
 	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
-	var swing := int(PlayerStatsService.for_session(self).get("attack", 2))
-	state["hp"] = int(state.get("hp", 1)) - swing
+	state["hp"] = int(state.get("hp", 1)) - damage
+	GameAudioService.play_sfx(self, "hit")
 	var sprite := state.get("sprite") as Sprite2D
 	if sprite != null:
 		_flash_sprite(sprite, Color(1.0, 0.4, 0.35, 1.0))
-		_spawn_floating_text("-%d" % swing, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
+		_spawn_floating_text("-%d" % damage, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
 	if int(state.get("hp", 0)) > 0:
 		return
 	var creature_name := String(def.get("name", "creature"))
 	var coins := _rng.randi_range(2, 6) + int(def.get("damage", 1)) * 2
 	_adjust_coins(coins)
+	GameAudioService.play_sfx(self, "coin")
 	if sprite != null:
 		_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
 		sprite.queue_free()
 	_surface_creatures.remove_at(creature_index)
 	_set_save_status("The %s falls — %d coins scavenged." % [creature_name, coins], Color(0.85, 0.95, 0.7, 1.0))
+
+## --- The homestead layer ---------------------------------------------------
+## Everything the player owns above ground: built walls and floors, tilled
+## fields, penned animals - persisted per town seed and re-stamped as the
+## streaming wilds rebuild. Raids march on it; fences and walls matter
+## because raiders and animals path around them like everyone else.
+
+const TOWN_BUILD_CATALOG := [
+	{"name": "Timber Wall", "tile": "plank_wall", "kind": "decor", "costs": {"Timber": 3}},
+	{"name": "Stone Wall", "tile": "wall", "kind": "decor", "costs": {"Stone": 2}},
+	{"name": "Fence", "tile": "fence", "kind": "decor", "costs": {"Timber": 1}},
+	{"name": "Door", "tile": "door", "kind": "base", "costs": {"Timber": 2}},
+	{"name": "Plank Floor", "tile": "floor", "kind": "base", "costs": {"Timber": 1}},
+	{"name": "Storage Chest", "tile": "chest", "kind": "decor", "costs": {"Timber": 4}},
+	{"name": "Bed", "tile": "bed", "kind": "decor", "costs": {"Timber": 3, "Skein of Wool": 1}},
+	{"name": "Till Soil", "tile": "", "kind": "till", "costs": {}}
+]
+
+const CROP_DEFS := {
+	"carrot": {"seed": "Carrot Seeds", "yield": "Carrot", "tiles": ["crop_carrot_0", "crop_carrot_1", "crop_carrot_2"]},
+	"beetroot": {"seed": "Beetroot Seeds", "yield": "Beetroot", "tiles": ["crop_beetroot_0", "crop_beetroot_1", "crop_beetroot_2"]},
+	"tomato": {"seed": "Tomato Seeds", "yield": "Tomato", "tiles": ["crop_tomato_0", "crop_tomato_1", "crop_tomato_2"]}
+}
+const FARM_STAGE_HOURS := 8.0
+const ANIMAL_CRATES := {"Chicken Crate": "chicken", "Piglet Crate": "pig", "Calf Crate": "cow"}
+const ANIMAL_PRODUCE := {"chicken": "Egg", "pig": "Truffle", "cow": "Milk Pail"}
+
+const RAID_MIN_HOMESTEAD := 8
+const RAID_GRACE_DAYS := 2
+
+func _world_settings_snapshot() -> Dictionary:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings"):
+		return {}
+	return game_session.call("get_world_settings")
+
+func _store_world_settings(settings: Dictionary) -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("set_world_settings"):
+		game_session.call("set_world_settings", settings)
+
+func _scene_store_key(prefix: String) -> String:
+	return "%s|%s" % [prefix, seed_input.text.strip_edges()]
+
+func _add_to_inventory(item_name: String, amount: int) -> void:
+	if item_name == "Copper Coins":
+		_adjust_coins(amount)
+		return
+	_player_inventory[item_name] = int(_player_inventory.get(item_name, 0)) + amount
+	if int(_player_inventory.get(item_name, 0)) <= 0:
+		_player_inventory.erase(item_name)
+	_populate_backpack_slots()
+	_update_gear_label()
+	if GearService.TRINKET_DEFS.has(item_name):
+		_refresh_player_stats_town()
+	_save_player_inventory()
+
+func _refresh_player_stats_town() -> void:
+	var stats: Dictionary = PlayerStatsService.for_session(self)
+	_player_max_hp = float(stats.get("max_hp", _player_max_hp))
+	_player_hp = minf(_player_hp, _player_max_hp)
+	_speed_scale_cache = float(stats.get("speed_mult", 1.0))
+	_update_hp_label()
+	_update_gear_label()
+
+func _update_gear_label() -> void:
+	if _gear_label == null:
+		return
+	var loadout := PlayerStatsService.for_session(self).get("loadout", {}) as Dictionary
+	_gear_label.text = GearService.loadout_line(loadout, int(_player_inventory.get("Arrows", 0)))
+
+func _player_speed_scale() -> float:
+	return maxf(_speed_scale_cache * (1.65 if _player_mounted else 1.0), 0.25)
+
+## Q: knock back a potion. Heals wait for wounds; buffs go down whenever.
+func _handle_quick_drink_action() -> void:
+	for potion_name: String in GearService.POTION_DEFS.keys():
+		if int(_player_inventory.get(potion_name, 0)) < 1:
+			continue
+		var def := GearService.POTION_DEFS[potion_name] as Dictionary
+		if def.has("heal") and _player_hp >= _player_max_hp:
+			continue
+		var settings: Dictionary = _world_settings_snapshot()
+		settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
+		var result: Dictionary = GearService.drink(settings, potion_name, float(_game_day) * 24.0 + _game_hour)
+		_store_world_settings(settings)
+		_add_to_inventory(potion_name, -1)
+		GameAudioService.play_sfx(self, "drink")
+		if result.has("heal"):
+			_player_hp = minf(_player_hp + float(int(result.get("heal", 0))), _player_max_hp)
+			_update_hp_label()
+			_set_save_status("You drink the %s (+%d HP)." % [potion_name, int(result.get("heal", 0))], Color(0.9, 0.6, 0.6, 1.0))
+		else:
+			_refresh_player_stats_town()
+			_set_save_status("You drink the %s — %s hums in your blood." % [potion_name, String(result.get("buff", ""))], Color(0.8, 0.75, 0.95, 1.0))
+		return
+	_set_save_status("No potions in the pack — apothecaries and road peddlers sell them.", Color(0.8, 0.8, 0.8, 1.0))
+
+## --- weapon classes at range -------------------------------------------------
+
+func _try_ranged_attack_town(creature_index: int, cell: Vector2i) -> bool:
+	var distance := maxi(absi(cell.x - _player_cell.x), absi(cell.y - _player_cell.y))
+	var stats: Dictionary = PlayerStatsService.for_session(self)
+	var loadout := stats.get("loadout", {}) as Dictionary
+	var staff := loadout.get("staff", {}) as Dictionary
+	if not staff.is_empty() and distance <= 3 and _staff_cooldown <= 0.0:
+		_staff_cooldown = float(staff.get("cooldown", 9.0))
+		var radius := int(staff.get("radius", 1))
+		var burst := int(stats.get("attack", 2)) + int(staff.get("attack", 1))
+		GameAudioService.play_sfx(self, "magic")
+		_spawn_floating_text("✦", _cell_center_position(cell), Color(0.8, 0.6, 1.0, 1.0))
+		for index in range(_surface_creatures.size() - 1, -1, -1):
+			var creature_cell := _surface_creatures[index].get("cell", Vector2i(9999, 9999)) as Vector2i
+			if maxi(absi(creature_cell.x - cell.x), absi(creature_cell.y - cell.y)) <= radius:
+				_strike_surface_creature(index, burst)
+		return true
+	var bow := loadout.get("bow", {}) as Dictionary
+	if not bow.is_empty() and distance <= int(bow.get("range", 4)):
+		if int(_player_inventory.get("Arrows", 0)) < 1:
+			_set_save_status("Your quiver is empty — tinkers and peddlers sell Arrows.", Color(0.95, 0.75, 0.45, 1.0))
+			return true
+		if _player_attack_timer > 0.0:
+			return true
+		_player_attack_timer = 0.45
+		_add_to_inventory("Arrows", -1)
+		GameAudioService.play_sfx(self, "bow")
+		_spawn_arrow_flight(_player_cell, cell)
+		_strike_surface_creature(creature_index, int(stats.get("attack", 2)) + int(bow.get("attack", 0)))
+		return true
+	return false
+
+func _spawn_arrow_flight(from_cell: Vector2i, to_cell: Vector2i) -> void:
+	var arrow_image := Image.create(8, 2, false, Image.FORMAT_RGBA8)
+	arrow_image.fill(Color(0.85, 0.78, 0.6, 1.0))
+	var arrow := Sprite2D.new()
+	arrow.texture = ImageTexture.create_from_image(arrow_image)
+	arrow.position = _cell_center_position(from_cell)
+	var target: Vector2 = _cell_center_position(to_cell)
+	arrow.rotation = (target - arrow.position).angle()
+	arrow.z_index = 20
+	actor_layer.add_child(arrow)
+	var tween := create_tween()
+	tween.tween_property(arrow, "position", target, 0.14)
+	tween.tween_callback(arrow.queue_free)
+
+## --- the loyal sporeling -----------------------------------------------------
+
+func _ensure_companion() -> void:
+	if not _companion.is_empty() or _player_sprite == null:
+		return
+	var loadout := PlayerStatsService.for_session(self).get("loadout", {}) as Dictionary
+	var charm := loadout.get("charm", {}) as Dictionary
+	if charm.is_empty():
+		return
+	_companion = CompanionService.spawn(charm, SURFACE_CREATURE_TEXTURE, _player_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size)
+	if not _companion.is_empty():
+		_set_save_status("Something small and loyal pads out of the hedgerows to walk with you.", Color(0.75, 0.92, 0.75, 1.0))
+
+func _update_companion(delta: float) -> void:
+	if _companion.is_empty() or _player_sprite == null:
+		return
+	CompanionService.update(
+		delta, _companion, _player_cell, _surface_creatures,
+		Callable(self, "_is_walkable_cell"),
+		Callable(self, "_cell_center_position"),
+		Callable(self, "_strike_surface_creature")
+	)
+
+## --- water and the coracle ---------------------------------------------------
+
+func _is_water_cell(cell: Vector2i) -> bool:
+	if city_layer.get_cell_source_id(cell) < 0:
+		return false
+	var atlas_coords := city_layer.get_cell_atlas_coords(cell)
+	return atlas_coords == (TILE_ATLAS.get("water") as Vector2i) or atlas_coords == (TILE_ATLAS.get("water_calm") as Vector2i)
+
+func _set_boating(boating: bool) -> void:
+	if _player_boating == boating:
+		return
+	_player_boating = boating
+	GameAudioService.play_sfx(self, "splash")
+	if boating and _player_mounted:
+		_toggle_mount()
+	if _boat_sprite == null and _player_sprite != null:
+		_boat_sprite = Sprite2D.new()
+		_boat_sprite.texture = BOAT_SPRITE_TEXTURE
+		_boat_sprite.position = Vector2(0.0, 4.0)
+		# Behind the rider but above the water tiles.
+		_boat_sprite.show_behind_parent = true
+		_boat_sprite.scale = Vector2(0.9, 0.75)
+		_player_sprite.add_child(_boat_sprite)
+	if _boat_sprite != null:
+		_boat_sprite.visible = boating
+	if boating:
+		_set_save_status("You push the coracle out onto the water.", Color(0.7, 0.82, 0.95, 1.0))
+	else:
+		_set_save_status("You drag the coracle ashore and step out.", Color(0.7, 0.82, 0.95, 1.0))
+
+func _try_boat_action(cell: Vector2i) -> bool:
+	if _player_boating or not _is_water_cell(cell) or not _is_player_adjacent_to_cell(cell):
+		return false
+	if int(_player_inventory.get("Coracle", 0)) < 1:
+		_set_save_status("Open water. A Coracle would carry you across — tinkers on the road sell them.", Color(0.7, 0.82, 0.95, 1.0))
+		return true
+	_set_boating(true)
+	_player_cell = cell
+	_actor_sprite_to_cell(_player_sprite, cell)
+	return true
+
+## --- the riding sow ----------------------------------------------------------
+
+func _toggle_mount() -> void:
+	if not _player_mounted and int(_player_inventory.get("Sow Saddle", 0)) < 1:
+		_set_save_status("You need a Sow Saddle to ride — drovers on the road sell them (M to mount).", Color(0.8, 0.8, 0.8, 1.0))
+		return
+	if _player_boating:
+		_set_save_status("Not in the boat.", Color(0.8, 0.8, 0.8, 1.0))
+		return
+	_player_mounted = not _player_mounted
+	GameAudioService.play_sfx(self, "mount")
+	if _mount_sprite == null and _player_sprite != null:
+		var pig_texture := load("res://resources/images/webgame_tiles/Farm/Tiled_files/Pig_animation.png") as Texture2D
+		if pig_texture != null:
+			_mount_sprite = Sprite2D.new()
+			_mount_sprite.texture = pig_texture
+			_mount_sprite.region_enabled = true
+			_mount_sprite.region_rect = Rect2(0, 0, 32, 32)
+			_mount_sprite.position = Vector2(0.0, 4.0)
+			_mount_sprite.show_behind_parent = true
+			_mount_sprite.scale = Vector2(0.85, 0.7)
+			_player_sprite.add_child(_mount_sprite)
+	if _mount_sprite != null:
+		_mount_sprite.visible = _player_mounted
+	if _player_mounted:
+		_set_save_status("You swing into the saddle — the sow trots off eagerly.", Color(0.85, 0.8, 0.7, 1.0))
+	else:
+		_set_save_status("You dismount. The sow looks relieved.", Color(0.85, 0.8, 0.7, 1.0))
+
+## --- building the homestead --------------------------------------------------
+
+func _cycle_town_build_selection() -> void:
+	_build_selection += 1
+	if _build_selection >= TOWN_BUILD_CATALOG.size():
+		_build_selection = -1
+		_set_save_status("Build mode off", Color(0.8, 0.8, 0.8, 1.0))
+		return
+	var entry := TOWN_BUILD_CATALOG[_build_selection] as Dictionary
+	var costs_text := _town_build_costs_text(entry)
+	if String(entry.get("kind", "")) == "till":
+		costs_text = "needs an Iron Hoe"
+	_set_save_status("🔨 Build: %s (%s) — click a tile beside you · B for next" % [String(entry.get("name", "")), costs_text], Color(0.85, 0.9, 0.75, 1.0))
+
+func _town_build_costs_text(entry: Dictionary) -> String:
+	var parts := PackedStringArray()
+	var costs := entry.get("costs", {}) as Dictionary
+	for item_variant: Variant in costs.keys():
+		parts.append("%d %s" % [int(costs[item_variant]), String(item_variant)])
+	return ", ".join(parts) if not parts.is_empty() else "free"
+
+func _build_kind_for_tile(tile_key: String) -> String:
+	for entry_variant: Variant in TOWN_BUILD_CATALOG:
+		if String((entry_variant as Dictionary).get("tile", "")) == tile_key:
+			return String((entry_variant as Dictionary).get("kind", "decor"))
+	return "decor"
+
+## Buildable ground: streamed wilds grass or sand, never the town's own
+## cells, roads, water, or someone's standing spot.
+func _can_build_on_cell(cell: Vector2i) -> bool:
+	if _latest_grid.has(cell) or _surface_road_cells.has(cell) or _player_built_cells.has(cell) or _farm_plots.has(cell):
+		return false
+	if city_layer.get_cell_source_id(cell) < 0 or _is_water_cell(cell):
+		return false
+	if decor_layer.get_cell_source_id(cell) >= 0:
+		return false
+	if _is_cell_occupied_by_npc(cell) or _surface_creature_index_at_cell(cell) >= 0 or cell == _player_cell:
+		return false
+	return true
+
+func _try_place_town_build(cell: Vector2i) -> bool:
+	if _build_selection < 0 or _build_selection >= TOWN_BUILD_CATALOG.size():
+		return false
+	if not _is_player_adjacent_to_cell(cell) or cell == _player_cell:
+		return false
+	var entry := TOWN_BUILD_CATALOG[_build_selection] as Dictionary
+	if String(entry.get("kind", "")) == "till":
+		return _try_till_cell(cell)
+	var build_name := String(entry.get("name", ""))
+	var costs := entry.get("costs", {}) as Dictionary
+	for item_variant: Variant in costs.keys():
+		if int(_player_inventory.get(String(item_variant), 0)) < int(costs[item_variant]):
+			_set_save_status("Need %s for %s" % [_town_build_costs_text(entry), build_name], Color(0.95, 0.75, 0.45, 1.0))
+			return true
+	if not _can_build_on_cell(cell):
+		_set_save_status("Can't raise %s there — clear wild ground only." % build_name, Color(0.95, 0.75, 0.45, 1.0))
+		return true
+	for item_variant: Variant in costs.keys():
+		_add_to_inventory(String(item_variant), -int(costs[item_variant]))
+	var tile_key := String(entry.get("tile", "wall"))
+	_player_built_cells[cell] = tile_key
+	_stamp_player_build(cell, tile_key)
+	if tile_key == "chest" and not _chest_inventories.has(cell):
+		_chest_inventories[cell] = []
+	_persist_player_builds()
+	GameAudioService.play_sfx(self, "till")
+	_spawn_floating_text("+%s" % build_name, _cell_center_position(cell), Color(0.8, 0.95, 0.7, 1.0))
+	_set_save_status("Built %s (homestead: %d pieces)" % [build_name, _player_built_cells.size()], Color(0.75, 0.92, 0.7, 1.0))
+	return true
+
+func _stamp_player_build(cell: Vector2i, tile_key: String) -> void:
+	if city_layer.get_cell_source_id(cell) < 0:
+		_place_tile(city_layer, cell, "grass")
+	if _build_kind_for_tile(tile_key) == "base":
+		_place_tile(city_layer, cell, tile_key)
+		decor_layer.erase_cell(cell)
+	else:
+		_place_tile(decor_layer, cell, tile_key)
+	_actor_passable_cache.erase(cell)
+
+func _remove_player_build(cell: Vector2i) -> void:
+	var tile_key := String(_player_built_cells.get(cell, ""))
+	_player_built_cells.erase(cell)
+	_wall_damage.erase(cell)
+	if _build_kind_for_tile(tile_key) == "base":
+		_place_tile(city_layer, cell, "grass")
+	else:
+		decor_layer.erase_cell(cell)
+	_actor_passable_cache.erase(cell)
+	_persist_player_builds()
+
+func _persist_player_builds() -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var stored: Dictionary = {}
+	for cell_variant: Variant in _player_built_cells.keys():
+		var cell := cell_variant as Vector2i
+		stored["%d,%d" % [cell.x, cell.y]] = String(_player_built_cells[cell_variant])
+	settings[_scene_store_key("town_builds")] = stored
+	_store_world_settings(settings)
+
+func _homestead_center() -> Vector2i:
+	if _player_built_cells.is_empty():
+		return _player_home_cell
+	var total := Vector2.ZERO
+	for cell_variant: Variant in _player_built_cells.keys():
+		total += Vector2(cell_variant as Vector2i)
+	return Vector2i((total / float(_player_built_cells.size())).round())
+
+## --- fields and pens ---------------------------------------------------------
+
+func _can_till_cell(cell: Vector2i) -> bool:
+	if not _can_build_on_cell(cell):
+		return false
+	var atlas_coords := city_layer.get_cell_atlas_coords(cell)
+	for grass_key: String in ["grass", "grass_dark", "grass_tuft"]:
+		if atlas_coords == (TILE_ATLAS.get(grass_key) as Vector2i):
+			return true
+	return false
+
+func _try_till_cell(cell: Vector2i) -> bool:
+	if int(_player_inventory.get("Iron Hoe", 0)) < 1:
+		_set_save_status("Tilling wants an Iron Hoe — tinkers on the road sell them.", Color(0.95, 0.75, 0.45, 1.0))
+		return true
+	if not _can_till_cell(cell):
+		_set_save_status("Only open grass takes the hoe.", Color(0.95, 0.75, 0.45, 1.0))
+		return true
+	_farm_plots[cell] = {"crop": "", "stage": 0, "planted_h": 0.0}
+	_stamp_farm_plot(cell)
+	_persist_farm()
+	GameAudioService.play_sfx(self, "till")
+	_set_save_status("You turn the earth. Click the plot with seeds in your pack to plant.", Color(0.75, 0.92, 0.7, 1.0))
+	return true
+
+func _stamp_farm_plot(cell: Vector2i) -> void:
+	var plot := _farm_plots.get(cell, {}) as Dictionary
+	if plot.is_empty():
+		return
+	_place_tile(city_layer, cell, "tilled_soil")
+	var crop := String(plot.get("crop", ""))
+	if crop.is_empty() or not CROP_DEFS.has(crop):
+		decor_layer.erase_cell(cell)
+	else:
+		var stage_tiles := (CROP_DEFS[crop] as Dictionary).get("tiles", []) as Array
+		var stage := clampi(int(plot.get("stage", 0)), 0, stage_tiles.size() - 1)
+		_place_tile(decor_layer, cell, String(stage_tiles[stage]))
+	_actor_passable_cache.erase(cell)
+
+func _try_farm_action(cell: Vector2i) -> bool:
+	if not _farm_plots.has(cell) or not _is_player_adjacent_to_cell(cell):
+		return false
+	var plot := _farm_plots[cell] as Dictionary
+	var crop := String(plot.get("crop", ""))
+	if crop.is_empty():
+		for crop_id: String in CROP_DEFS.keys():
+			var seed_item := String((CROP_DEFS[crop_id] as Dictionary).get("seed", ""))
+			if int(_player_inventory.get(seed_item, 0)) >= 1:
+				_add_to_inventory(seed_item, -1)
+				plot["crop"] = crop_id
+				plot["stage"] = 0
+				plot["planted_h"] = float(_game_day) * 24.0 + _game_hour
+				_stamp_farm_plot(cell)
+				_persist_farm()
+				GameAudioService.play_sfx(self, "till")
+				_set_save_status("You plant %s." % seed_item, Color(0.75, 0.92, 0.7, 1.0))
+				return true
+		_set_save_status("Tilled and waiting — peddlers and the general store sell seeds.", Color(0.8, 0.8, 0.8, 1.0))
+		return true
+	if int(plot.get("stage", 0)) >= 2:
+		var yield_item := String((CROP_DEFS[crop] as Dictionary).get("yield", "crop"))
+		var amount := 2 + (1 if _rng.randf() < 0.5 else 0)
+		_add_to_inventory(yield_item, amount)
+		if _rng.randf() < 0.35:
+			_add_to_inventory(String((CROP_DEFS[crop] as Dictionary).get("seed", "")), 1)
+		GameAudioService.play_sfx(self, "harvest")
+		_spawn_floating_text("+%d %s" % [amount, yield_item], _cell_center_position(cell), Color(0.8, 0.95, 0.7, 1.0))
+		plot["crop"] = ""
+		plot["stage"] = 0
+		_stamp_farm_plot(cell)
+		_persist_farm()
+		return true
+	_set_save_status("The %s still grows — a stage every %d hours." % [crop, int(FARM_STAGE_HOURS)], Color(0.8, 0.8, 0.8, 1.0))
+	return true
+
+func _advance_farm_growth() -> void:
+	var now_hours := float(_game_day) * 24.0 + _game_hour
+	var changed := false
+	for cell_variant: Variant in _farm_plots.keys():
+		var plot := _farm_plots[cell_variant] as Dictionary
+		if String(plot.get("crop", "")).is_empty():
+			continue
+		var stage := clampi(int((now_hours - float(plot.get("planted_h", now_hours))) / FARM_STAGE_HOURS), 0, 2)
+		if stage != int(plot.get("stage", 0)):
+			plot["stage"] = stage
+			_stamp_farm_plot(cell_variant as Vector2i)
+			changed = true
+	if changed:
+		_persist_farm()
+
+func _persist_farm() -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var stored: Dictionary = {}
+	for cell_variant: Variant in _farm_plots.keys():
+		var cell := cell_variant as Vector2i
+		var plot := _farm_plots[cell_variant] as Dictionary
+		stored["%d,%d" % [cell.x, cell.y]] = {"crop": String(plot.get("crop", "")), "stage": int(plot.get("stage", 0)), "planted_h": float(plot.get("planted_h", 0.0))}
+	settings[_scene_store_key("town_farm")] = stored
+	_store_world_settings(settings)
+
+## Live animals released from a drover's crate near the homestead.
+func _try_release_animal(cell: Vector2i) -> bool:
+	if not _is_player_adjacent_to_cell(cell) or cell == _player_cell:
+		return false
+	var crate_name := ""
+	for candidate: String in ANIMAL_CRATES.keys():
+		if int(_player_inventory.get(candidate, 0)) >= 1:
+			crate_name = candidate
+			break
+	if crate_name.is_empty():
+		return false
+	if not _is_walkable_cell(cell) or _is_cell_occupied_by_npc(cell):
+		return false
+	var kind := String(ANIMAL_CRATES[crate_name])
+	_add_to_inventory(crate_name, -1)
+	_spawn_owned_animal(kind, cell, float(_game_day) * 24.0 + _game_hour)
+	_persist_animals()
+	GameAudioService.play_sfx(self, "mount")
+	_set_save_status("You open the crate — the %s trots out. Fence it in and collect its yield daily." % kind, Color(0.75, 0.92, 0.7, 1.0))
+	return true
+
+func _spawn_owned_animal(kind: String, cell: Vector2i, last_produce_h: float) -> void:
+	var def: Dictionary = {}
+	for def_variant: Variant in FARM_ANIMAL_DEFS:
+		if String((def_variant as Dictionary).get("id", "")) == kind:
+			def = def_variant as Dictionary
+			break
+	if def.is_empty():
+		return
+	var animal_id := String(def.get("id", "chicken"))
+	if not _farm_animal_textures.has(animal_id):
+		_farm_animal_textures[animal_id] = load(String(def.get("path", ""))) as Texture2D
+	var texture := _farm_animal_textures.get(animal_id) as Texture2D
+	if texture == null:
+		return
+	var frame_px := int(def.get("frame", 32))
+	var sprite := Sprite2D.new()
+	sprite.texture = texture
+	sprite.region_enabled = true
+	sprite.centered = true
+	sprite.region_rect = Rect2(0, 0, frame_px, frame_px)
+	sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px)) * 0.9
+	sprite.position = _cell_center_position(cell)
+	sprite.z_index = 11
+	actor_layer.add_child(sprite)
+	_farm_animals.append({
+		"def": def,
+		"sprite": sprite,
+		"cell": cell,
+		"pen_index": -2,
+		"home": cell,
+		"owned": true,
+		"last_produce_h": last_produce_h,
+		"moving": false,
+		"facing": Vector2i(0, 1),
+		"wander_timer": _rng.randf_range(0.5, 4.0),
+		"anim_time": _rng.randf_range(0.0, 2.0)
+	})
+
+func _try_collect_produce(cell: Vector2i) -> bool:
+	if not _is_player_adjacent_to_cell(cell):
+		return false
+	for state: Dictionary in _farm_animals:
+		if not bool(state.get("owned", false)):
+			continue
+		if (state.get("cell", Vector2i(9999, 9999)) as Vector2i) != cell:
+			continue
+		var kind := String((state.get("def", {}) as Dictionary).get("id", "chicken"))
+		var produce := String(ANIMAL_PRODUCE.get(kind, "Egg"))
+		var now_hours := float(_game_day) * 24.0 + _game_hour
+		if now_hours - float(state.get("last_produce_h", 0.0)) < 24.0:
+			_set_save_status("The %s has nothing for you yet — come back tomorrow." % kind, Color(0.8, 0.8, 0.8, 1.0))
+			return true
+		state["last_produce_h"] = now_hours
+		_add_to_inventory(produce, 1)
+		_persist_animals()
+		GameAudioService.play_sfx(self, "harvest")
+		_spawn_floating_text("+1 %s" % produce, _cell_center_position(cell), Color(0.8, 0.95, 0.7, 1.0))
+		_set_save_status("You collect the %s's %s." % [kind, produce], Color(0.75, 0.92, 0.7, 1.0))
+		return true
+	return false
+
+func _persist_animals() -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var stored: Array = []
+	for state: Dictionary in _farm_animals:
+		if not bool(state.get("owned", false)):
+			continue
+		var home := state.get("home", Vector2i.ZERO) as Vector2i
+		stored.append({"kind": String((state.get("def", {}) as Dictionary).get("id", "chicken")), "x": home.x, "y": home.y, "last_produce_h": float(state.get("last_produce_h", 0.0))})
+	settings[_scene_store_key("town_animals")] = stored
+	_store_world_settings(settings)
+
+func _restore_owned_animals() -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var stored: Variant = settings.get(_scene_store_key("town_animals"))
+	if not (stored is Array):
+		return
+	for entry_variant: Variant in (stored as Array):
+		if not (entry_variant is Dictionary):
+			continue
+		var entry := entry_variant as Dictionary
+		_spawn_owned_animal(String(entry.get("kind", "chicken")), Vector2i(int(entry.get("x", 0)), int(entry.get("y", 0))), float(entry.get("last_produce_h", 0.0)))
+
+## Restores the whole owned layer from the save: builds, fields, the
+## raid calendar. Animals rebuild after the town dressing pass.
+func _restore_homestead(settings: Dictionary) -> void:
+	_player_built_cells.clear()
+	_farm_plots.clear()
+	_wall_damage.clear()
+	var builds: Variant = settings.get(_scene_store_key("town_builds"))
+	if builds is Dictionary:
+		for key_variant: Variant in (builds as Dictionary).keys():
+			var parts := String(key_variant).split(",")
+			if parts.size() != 2:
+				continue
+			var cell := Vector2i(int(parts[0]), int(parts[1]))
+			_player_built_cells[cell] = String((builds as Dictionary)[key_variant])
+			_stamp_player_build(cell, String((builds as Dictionary)[key_variant]))
+			if String((builds as Dictionary)[key_variant]) == "chest" and not _chest_inventories.has(cell):
+				_chest_inventories[cell] = []
+	var farm: Variant = settings.get(_scene_store_key("town_farm"))
+	if farm is Dictionary:
+		for key_variant: Variant in (farm as Dictionary).keys():
+			var parts := String(key_variant).split(",")
+			if parts.size() != 2:
+				continue
+			var cell := Vector2i(int(parts[0]), int(parts[1]))
+			var plot_variant: Variant = (farm as Dictionary)[key_variant]
+			if plot_variant is Dictionary:
+				_farm_plots[cell] = (plot_variant as Dictionary).duplicate()
+				_stamp_farm_plot(cell)
+	_next_raid_day = int(settings.get("town_next_raid_day", 0))
+
+## --- tree felling ------------------------------------------------------------
+
+func _try_chop_tree(cell: Vector2i) -> bool:
+	if not _is_player_adjacent_to_cell(cell):
+		return false
+	if decor_layer.get_cell_source_id(cell) < 0:
+		return false
+	var atlas_coords := decor_layer.get_cell_atlas_coords(cell)
+	if atlas_coords != (TILE_ATLAS.get("tree") as Vector2i) and atlas_coords != (TILE_ATLAS.get("tree_dark") as Vector2i):
+		return false
+	decor_layer.erase_cell(cell)
+	_actor_passable_cache.erase(cell)
+	_add_to_inventory("Timber", 2)
+	GameAudioService.play_sfx(self, "harvest")
+	_spawn_floating_text("+2 Timber", _cell_center_position(cell), Color(0.8, 0.95, 0.7, 1.0))
+	_set_save_status("You fell the tree — the wilds grow them back in time.", Color(0.75, 0.92, 0.7, 1.0))
+	return true
+
+## --- trading on the road -----------------------------------------------------
+
+func _try_open_traveler_trade(state: Dictionary) -> bool:
+	var role := String((state.get("identity", {}) as Dictionary).get("profession", ""))
+	if not SettlementEconomyService.TRAVELER_STOCK_TYPES.has(role):
+		return false
+	var stock_type := String(SettlementEconomyService.TRAVELER_STOCK_TYPES[role])
+	var anchor := state.get("shop_anchor", Vector2i(2000001, 0)) as Vector2i
+	if not _shop_stocks.has(anchor):
+		var stock_rng := RandomNumberGenerator.new()
+		stock_rng.seed = hash(String((state.get("identity", {}) as Dictionary).get("name", "wanderer")))
+		_shop_stocks[anchor] = SettlementEconomyService.generate_shop_stock(stock_type, stock_rng)
+	_selected_chest_cell = Vector2i(2147483647, 2147483647)
+	_trade_shop_cell = anchor
+	_trade_shop_type = stock_type
+	chest_popup.visible = true
+	chest_popup_title.text = "Trade — %s" % String(state.get("npc_name", "A traveler"))
+	chest_popup_take_all_button.disabled = true
+	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
+	if section_label != null:
+		section_label.text = "Wares from the pack"
+	_refresh_trade_panel()
+	return true
+
+## --- raids on the homestead --------------------------------------------------
+
+## Once the homestead is worth robbing, evening raids come for it. The
+## horn sounds, a band spawns in the dark ring and marches; your walls
+## slow them, your guards and sporeling meet them, and whatever reaches
+## the heart of your ground robs you before melting away.
+func _maybe_start_raid() -> void:
+	if _raid_active or _player_built_cells.size() < RAID_MIN_HOMESTEAD:
+		return
+	if _next_raid_day <= 0:
+		_next_raid_day = _game_day + RAID_GRACE_DAYS
+		_persist_next_raid_day()
+		return
+	if _game_day < _next_raid_day or int(_game_hour) < 19 or int(_game_hour) >= 23:
+		return
+	var center := _homestead_center()
+	var raider_count := 4 + mini(3, _game_day / 4)
+	var spawned := 0
+	for attempt in raider_count * 6:
+		if spawned >= raider_count:
+			break
+		var angle := _rng.randf_range(0.0, TAU)
+		var ring := _rng.randf_range(24.0, 32.0)
+		var cell := center + Vector2i(roundi(cos(angle) * ring), roundi(sin(angle) * ring))
+		if not _is_walkable_cell(cell):
+			continue
+		var size_before := _surface_creatures.size()
+		var raider_defs := [3, 4, 5, 6, 6, 7]
+		SurfaceLifeService.spawn_creature(_surface_creatures, SURFACE_CREATURE_TEXTURE, int(raider_defs[_rng.randi_range(0, raider_defs.size() - 1)]), cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true)
+		if _surface_creatures.size() > size_before:
+			var raider := _surface_creatures[_surface_creatures.size() - 1]
+			raider["raider"] = true
+			raider["march_target"] = center
+			raider["hp"] = int(raider.get("hp", 8)) + 4
+			spawned += 1
+	if spawned == 0:
+		return
+	_raid_active = true
+	_raid_end_stamp = float(_game_day) * 24.0 + _game_hour + 2.0
+	_next_raid_day = _game_day + 3 + _rng.randi_range(0, 2)
+	_persist_next_raid_day()
+	GameAudioService.play_sfx(self, "raid_horn")
+	_set_save_status("A war horn sounds — %d raiders march on your homestead!" % spawned, Color(0.95, 0.4, 0.35, 1.0))
+
+func _persist_next_raid_day() -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	settings["town_next_raid_day"] = _next_raid_day
+	_store_world_settings(settings)
+
+func _update_raid(delta: float) -> void:
+	if not _raid_active:
+		return
+	var raiders: Array[Dictionary] = []
+	for state: Dictionary in _surface_creatures:
+		if bool(state.get("raider", false)) and not bool(state.get("dying", false)):
+			raiders.append(state)
+	if raiders.is_empty():
+		_end_raid(true)
+		return
+	if float(_game_day) * 24.0 + _game_hour >= _raid_end_stamp:
+		_end_raid(false)
+		return
+	for raider: Dictionary in raiders:
+		_update_raider_bashing(raider, delta)
+	_update_guard_response(delta, raiders)
+
+## A raider stuck against your walls starts breaking them: three blows
+## fell one piece. Solid rings buy time; gaps invite the knife.
+func _update_raider_bashing(raider: Dictionary, delta: float) -> void:
+	var cell := raider.get("cell", Vector2i.ZERO) as Vector2i
+	if cell != (raider.get("bash_last_cell", Vector2i(9999, 9999)) as Vector2i):
+		raider["bash_last_cell"] = cell
+		raider["bash_stuck_time"] = 0.0
+		return
+	raider["bash_stuck_time"] = float(raider.get("bash_stuck_time", 0.0)) + delta
+	if float(raider.get("bash_stuck_time", 0.0)) < 2.0:
+		return
+	raider["bash_stuck_time"] = 0.0
+	for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var wall_cell := cell + offset
+		if not _player_built_cells.has(wall_cell):
+			continue
+		var hits := int(_wall_damage.get(wall_cell, 0)) + 1
+		if hits >= 3:
+			var broken := String(_player_built_cells.get(wall_cell, "wall"))
+			_remove_player_build(wall_cell)
+			GameAudioService.play_sfx(self, "hit")
+			_set_save_status("A raider smashes through your %s!" % broken, Color(0.95, 0.5, 0.4, 1.0))
+		else:
+			_wall_damage[wall_cell] = hits
+			_spawn_floating_text("crack!", _cell_center_position(wall_cell), Color(0.85, 0.8, 0.7, 1.0))
+		return
+
+## Town guards drop their rounds and close on raiders within their ward.
+func _update_guard_response(delta: float, raiders: Array[Dictionary]) -> void:
+	for state: Dictionary in _npc_states:
+		if int(state.get("role", -1)) != ROLE_GUARD:
+			continue
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var guard_cell := state.get("cell", Vector2i.ZERO) as Vector2i
+		var best := -1
+		var best_distance := 26
+		for index in raiders.size():
+			var raider_cell := raiders[index].get("cell", Vector2i(9999, 9999)) as Vector2i
+			var distance := maxi(absi(raider_cell.x - guard_cell.x), absi(raider_cell.y - guard_cell.y))
+			if distance < best_distance:
+				best_distance = distance
+				best = index
+		if best < 0:
+			state.erase("raid_duty")
+			continue
+		state["raid_duty"] = true
+		state["guard_step_timer"] = float(state.get("guard_step_timer", 0.0)) - delta
+		state["guard_attack_timer"] = maxf(float(state.get("guard_attack_timer", 0.0)) - delta, 0.0)
+		if best_distance <= 1:
+			if float(state.get("guard_attack_timer", 0.0)) <= 0.0:
+				state["guard_attack_timer"] = 1.2
+				var raider_index := _surface_creatures.find(raiders[best])
+				if raider_index >= 0:
+					_strike_surface_creature(raider_index, 2)
+		elif float(state.get("guard_step_timer", 0.0)) <= 0.0:
+			state["guard_step_timer"] = 0.4
+			var step: Vector2i = CreatureCombatService.step_toward(guard_cell, raiders[best].get("cell", guard_cell) as Vector2i, Callable(self, "_is_npc_walkable_cell"))
+			if step != Vector2i.ZERO:
+				state["cell"] = guard_cell + step
+				sprite.position = _cell_center_position(guard_cell + step)
+
+func _end_raid(victorious: bool) -> void:
+	_raid_active = false
+	_wall_damage.clear()
+	var center := _homestead_center()
+	var stolen := 0
+	for index in range(_surface_creatures.size() - 1, -1, -1):
+		var state := _surface_creatures[index]
+		if not bool(state.get("raider", false)):
+			continue
+		var raider_cell := state.get("cell", Vector2i(9999, 9999)) as Vector2i
+		if not victorious and maxi(absi(raider_cell.x - center.x), absi(raider_cell.y - center.y)) <= 8:
+			stolen += 15
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite != null:
+			sprite.queue_free()
+		_surface_creatures.remove_at(index)
+	for state: Dictionary in _npc_states:
+		state.erase("raid_duty")
+	if victorious:
+		var bounty := 25 + _rng.randi_range(0, 20)
+		_adjust_coins(bounty)
+		GameAudioService.play_sfx(self, "coin")
+		if _rng.randf() < 0.5:
+			_add_to_inventory("Runestone", 1)
+			_set_save_status("Raid repelled! +%d coins — and a Runestone off their chief." % bounty, Color(0.7, 0.95, 0.7, 1.0))
+		else:
+			_set_save_status("Raid repelled! +%d coins scavenged off the fallen." % bounty, Color(0.7, 0.95, 0.7, 1.0))
+	else:
+		stolen = mini(stolen, _player_coins)
+		if stolen > 0:
+			_adjust_coins(-stolen)
+			_set_save_status("The raiders withdraw with %d of your coins." % stolen, Color(0.95, 0.5, 0.4, 1.0))
+		else:
+			_set_save_status("The raiders lose heart and melt back into the wilds.", Color(0.8, 0.85, 0.7, 1.0))
+
+## --- the land's two voices ---------------------------------------------------
+
+func _update_music(delta: float) -> void:
+	_music_timer -= delta
+	if _music_timer > 0.0:
+		return
+	_music_timer = 4.0
+	if _surface_anchor_cells.is_empty() or _player_sprite == null:
+		return
+	var danger: float = SurfaceLifeService.danger_for_cell(_player_cell, _surface_anchor_cells)
+	GameAudioService.play_music(self, "wilds" if danger > 0.4 else "town")
 
 func _is_walkable_cell(cell: Vector2i) -> bool:
 	# Above ground the green is open terrain: any rendered passable tile is

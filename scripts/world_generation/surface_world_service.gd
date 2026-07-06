@@ -39,6 +39,10 @@ static func terrain_for_cell(cell: Vector2i, noise_set: Dictionary, danger: floa
 	var forest := (noise_set.get("forest") as FastNoiseLite).get_noise_2d(float(cell.x), float(cell.y))
 	var detail := (noise_set.get("detail") as FastNoiseLite).get_noise_2d(float(cell.x), float(cell.y))
 	forest += danger * 0.3
+	# The lowest basins hold open water: lakes and ponds a walker needs
+	# a boat to cross. Sand shores ring them via the band below.
+	if elevation < -0.5:
+		return {"base": "water" if detail > -0.2 else "water_calm", "decor": ""}
 	# Dry barrens fill the lowlands; deep ones read scorched.
 	if elevation < -0.36:
 		return {"base": "sand_pebbles" if detail > 0.3 - danger * 0.5 else "sand", "decor": ""}

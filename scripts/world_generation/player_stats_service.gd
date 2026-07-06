@@ -55,6 +55,8 @@ static func max_hp(character: Dictionary) -> float:
 static func attack_damage(character: Dictionary) -> int:
 	return maxi(1, BASE_ATTACK + int(_modifiers(character).get("attack", 0)))
 
+## The character sheet plus the whole armory: gear ladder, set bonus,
+## carried trinkets, enchants and live potion buffs all fold in here.
 static func for_session(context: Node) -> Dictionary:
 	var character: Dictionary = {}
 	var settings: Dictionary = {}
@@ -63,13 +65,14 @@ static func for_session(context: Node) -> Dictionary:
 		character = session.call("get_player_character")
 	if session != null and session.has_method("get_world_settings"):
 		settings = session.call("get_world_settings")
-	var hp := max_hp(character)
-	var attack := attack_damage(character)
-	if bool(settings.get(GEAR_STARMETAL_PLATE, false)):
-		hp += STARMETAL_PLATE_HP
-	if bool(settings.get(GEAR_STARMETAL_BLADE, false)):
-		attack += STARMETAL_BLADE_ATTACK
-	return {"max_hp": hp, "attack": attack}
+	var inventory := settings.get("player_inventory", {}) as Dictionary if settings.get("player_inventory") is Dictionary else {}
+	var loadout: Dictionary = GearService.resolve_loadout(settings, inventory)
+	return {
+		"max_hp": max_hp(character) + float(loadout.get("hp_bonus", 0.0)),
+		"attack": attack_damage(character) + int(loadout.get("attack_bonus", 0)),
+		"speed_mult": float(loadout.get("speed_mult", 1.0)),
+		"loadout": loadout
+	}
 
 ## --- Starmetal gear ---------------------------------------------------------
 ## Deep-level starmetal smelts into bars at a working furnace and forges

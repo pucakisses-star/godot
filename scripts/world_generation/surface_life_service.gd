@@ -44,8 +44,9 @@ static func tier_def_index(danger: float, rng: RandomNumberGenerator) -> int:
 		return rng.randi_range(3, 5)
 	return rng.randi_range(6, 7)
 
-static func spawn_creature(states: Array[Dictionary], creature_texture: Texture2D, def_index: int, cell: Vector2i, actor_layer: Node2D, cell_center_position: Callable, tile_size: Vector2i, rng: RandomNumberGenerator) -> void:
-	if states.size() >= SURFACE_CREATURE_CAP:
+static func spawn_creature(states: Array[Dictionary], creature_texture: Texture2D, def_index: int, cell: Vector2i, actor_layer: Node2D, cell_center_position: Callable, tile_size: Vector2i, rng: RandomNumberGenerator, force: bool = false) -> void:
+	# Raid bands muster past the ambient cap; only wild spawns respect it.
+	if not force and states.size() >= SURFACE_CREATURE_CAP:
 		return
 	if def_index < 0 or def_index >= UndergroundCreatureService.CREATURE_DEFS.size():
 		return
@@ -106,6 +107,16 @@ static func update_creatures(
 					state["cell"] = cell + step
 					state["facing_dir"] = step
 					CreatureCombatService.set_creature_anim(state, "walk")
+		elif state.has("march_target"):
+			# Raiders keep marching on their prize when the player is
+			# out of reach.
+			if float(state.get("wander_timer", 0.0)) <= 0.0:
+				state["wander_timer"] = 0.34
+				var march_step: Vector2i = CreatureCombatService.step_toward(cell, state.get("march_target", cell) as Vector2i, is_walkable)
+				if march_step != Vector2i.ZERO:
+					state["cell"] = cell + march_step
+					state["facing_dir"] = march_step
+					CreatureCombatService.set_creature_anim(state, "walk")
 		elif float(state.get("wander_timer", 0.0)) <= 0.0:
 			state["wander_timer"] = rng.randf_range(1.2, 3.0)
 			var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
@@ -123,6 +134,8 @@ static func update_creatures(
 
 static func despawn_far_creatures(states: Array[Dictionary], player_cell: Vector2i) -> void:
 	for index in range(states.size() - 1, -1, -1):
+		if bool(states[index].get("raider", false)):
+			continue
 		var cell := states[index].get("cell", Vector2i.ZERO) as Vector2i
 		if maxi(absi(cell.x - player_cell.x), absi(cell.y - player_cell.y)) <= CREATURE_DESPAWN_DISTANCE:
 			continue
