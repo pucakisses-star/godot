@@ -2278,6 +2278,14 @@ func _apply_overlays_and_metadata(
 				"base_biome_id": _biome_to_id(base_biome),
 				"overlay_flags": overlay_flags,
 				"hill_biome_id": _biome_to_id(String(highland_map.get(coord, BIOME_GRASSLAND))),
+				# The cultural pipeline (ambient culture rolls, ambient
+				# structure gates, political terrain costs) matches on
+				# label strings, not ids - without these every
+				# biome-keyed culture rule silently never fires.
+				"biome_type": biome,
+				"base_biome": base_biome,
+				"overlay": overlay_label,
+				"hill_overlay": highland_biome,
 				"structure": "",
 				"structure_details": null,
 				"ambient_structure": null,

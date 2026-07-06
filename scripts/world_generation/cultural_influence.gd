@@ -414,6 +414,11 @@ func _add_biome_ambient_source(seed_number: int, coord: Vector2i, biome: String)
 			add_roll.call(68, 0.042, 8, "hobgoblin", "Hobgoblin", 1.44)
 			add_roll.call(70, 0.038, 8, "gnolls", "Gnolls", 1.46)
 		"mountain", "hills":
+			# Browser main.js:7809-7827: true mountains (not mere hills)
+			# very rarely shelter a dragon, whose territory reaches wider
+			# than any other ambient culture's.
+			if biome == "mountain":
+				add_roll.call(94, 0.013, 10, "dragons", "Dragons", 1.4)
 			add_roll.call(71, 0.055, 8, "dwarves", "Dwarves", 1.38)
 			add_roll.call(72, 0.045, 8, "aarakocra", "Aarakocra", 1.42)
 			add_roll.call(74, 0.04, 8, "giants", "Giants", 1.48)
@@ -847,6 +852,8 @@ func _ambient_option_matches(option: Dictionary, coord: Vector2i, tiles: Diction
 		return false
 	if bool(option.get("requires_cave_neighbor", false)) and not _has_neighbor_structure(coord, tiles, "cave"):
 		return false
+	if bool(option.get("requires_mountain_overlay", false)) and not _has_overlay(coord, tiles, "mountain"):
+		return false
 	var tile := tiles.get(coord, {}) as Dictionary
 	var tile_biome := String(tile.get("biome_type", tile.get("base_biome", tile.get("base", "")))).to_lower()
 	if bool(option.get("requires_plain_grass", false)):
@@ -863,8 +870,10 @@ func _ambient_option_matches(option: Dictionary, coord: Vector2i, tiles: Diction
 
 func _has_overlay(coord: Vector2i, tiles: Dictionary, overlay_key: String) -> bool:
 	var tile := tiles.get(coord, {}) as Dictionary
-	var overlay := String(tile.get("overlay", "")).to_lower()
-	return overlay.find(overlay_key) >= 0
+	# Trees live in "overlay", mountains and hills in "hill_overlay";
+	# gates like requires_mountain_overlay must see both.
+	var overlay := "%s %s" % [String(tile.get("overlay", "")), String(tile.get("hill_overlay", ""))]
+	return overlay.to_lower().find(overlay_key) >= 0
 
 func _has_neighbor_overlay(coord: Vector2i, tiles: Dictionary, overlay_key: String) -> bool:
 	for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN, Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:

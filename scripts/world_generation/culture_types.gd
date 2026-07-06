@@ -185,8 +185,16 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "old_growth", "label": "Old Growth", "tile": Vector2i(0, 2), "requires_tree_overlay": true, "replace_tree_overlay": true}
 	],
 	"dragons": [
-		{"id": "sleeping_dragon", "label": "Sleeping Dragon", "tile": Vector2i(14, 0), "requires_cave_neighbor": true},
-		{"id": "green_dragon", "label": "Green Dragon", "tile": Vector2i(18, 0), "requires_cave_neighbor": true}
+		# Browser: the Sleeping Dragon coils on a mountain peak
+		# (requiresMountainOverlay); the green dragon haunts cave mouths;
+		# the rest are tile-less tooltip landmarks, and diluting the pick
+		# pool keeps actual dragons a rare sight.
+		{"id": "sleeping_dragon", "label": "Sleeping Dragon", "tile": Vector2i(14, 0), "requires_mountain_overlay": true},
+		{"id": "green_dragon", "label": "Green Dragon", "tile": Vector2i(18, 0), "requires_cave_neighbor": true},
+		{"id": "molten_perch", "label": "Molten Perch"},
+		{"id": "treasure_scatter", "label": "Treasure Scatter"},
+		{"id": "windworn_ledge", "label": "Windworn Ledge"},
+		{"id": "skycoil_outlook", "label": "Skycoil Outlook"}
 	],
 	# The wider folk of the world (browser AMBIENT_STRUCTURE_OPTIONS):
 	# every land culture leaves its mark on its own territory.
