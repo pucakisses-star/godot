@@ -135,18 +135,40 @@ func resolve_culture_color(color: Variant, key: String) -> Color:
 		return Color(String(color))
 	return CULTURE_TYPES.DEFAULT_CULTURE_COLORS.get(key, Color.GRAY)
 
+## Browser derivePopulationGroupsFromCulture (main.js:14276-14324): sort
+## shares descending, the top entry is always a major, majors accept
+## >= 0.22 (or >= 0.16 while fewer than two), minors accept >= 0.08 or
+## while fewer than two, labels carry a "(NN%)" suffix from 5% up, and the
+## first minor is promoted when no major survived.
 func derive_population_groups(breakdown: Array[Dictionary]) -> Dictionary:
-	var major: Array[String] = []
-	var minor: Array[String] = []
+	var entries: Array[Dictionary] = []
 	for entry: Dictionary in breakdown:
-		var share := float(entry.get("share", 0.0))
+		var share := clampf(float(entry.get("share", 0.0)), 0.0, 1.0)
+		if share <= 0.0:
+			continue
 		var label := String(entry.get("label", "")).strip_edges()
 		if label.is_empty():
+			label = format_culture_label(String(entry.get("key", "")))
+		if label.is_empty():
 			continue
-		if share >= 0.22:
-			major.append(label)
-		elif share >= 0.08:
-			minor.append(label)
+		entries.append({"label": label, "share": share})
+	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return float(a.get("share", 0.0)) > float(b.get("share", 0.0))
+	)
+	var major: Array[String] = []
+	var minor: Array[String] = []
+	for index in range(entries.size()):
+		var entry := entries[index]
+		var share := float(entry.get("share", 0.0))
+		var label := String(entry.get("label", ""))
+		var percentage := int(round(share * 100.0))
+		var display := "%s (%d%%)" % [label, percentage] if percentage >= 5 else label
+		if index == 0 or share >= 0.22 or (major.size() < 2 and share >= 0.16):
+			major.append(display)
+		elif share >= 0.08 or minor.size() < 2:
+			minor.append(display)
+	if major.is_empty() and not minor.is_empty():
+		major.append(minor.pop_front() as String)
 	return {"major": major, "minor": minor}
 
 func build_tooltip_data(tile_data: Dictionary) -> Dictionary:

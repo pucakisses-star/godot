@@ -47,7 +47,8 @@ static func make_render_job(
 	has_iceberg: bool,
 	water3x3: PackedFloat32Array,
 	river3x3: PackedFloat32Array,
-	danger_corners: PackedFloat32Array
+	danger_corners: PackedFloat32Array,
+	ruggedness: float = 0.45
 ) -> Dictionary:
 	return {
 		"seed": world_seed_text,
@@ -58,6 +59,7 @@ static func make_render_job(
 		"water3x3": water3x3,
 		"river3x3": river3x3,
 		"danger_corners": danger_corners,
+		"ruggedness": ruggedness,
 		"image": null
 	}
 
@@ -69,6 +71,7 @@ static func render_job(job: Dictionary) -> void:
 	var has_iceberg := bool(job.get("has_iceberg", false))
 	var water3x3 := job.get("water3x3") as PackedFloat32Array
 	var danger_corners := job.get("danger_corners") as PackedFloat32Array
+	var ruggedness := clampf(float(job.get("ruggedness", 0.45)), 0.0, 1.0)
 	var river_mask := PackedByteArray()
 	if bool(job.get("has_river", false)):
 		river_mask = _build_river_mask(tile, job.get("river3x3") as PackedFloat32Array, water3x3, noise_set)
@@ -86,7 +89,7 @@ static func render_job(job: Dictionary) -> void:
 			)
 			var water_amount := _field_from_neighbors(water3x3, fx, fy)
 			var on_river := not river_mask.is_empty() and river_mask[cy * CELLS_PER_TILE + cx] != 0
-			image.set_pixel(cx, cy, _field_cell_color(world_cell, noise_set, biome, on_river, has_iceberg, danger, water_amount))
+			image.set_pixel(cx, cy, _field_cell_color(world_cell, noise_set, biome, on_river, has_iceberg, danger, water_amount, ruggedness))
 	job["image"] = image
 
 ## Bilinear between tile centers so a field crosses tile boundaries
@@ -149,7 +152,7 @@ static func _stamp_river_segment(mask: PackedByteArray, from_point: Vector2, to_
 ## The coastline is a smooth noise-wobbled field, not a tile boundary:
 ## shores meander, beaches hug the waterline, ponds thin out to
 ## landmarks instead of wallpaper, and icebergs dot the marked seas.
-static func _field_cell_color(world_cell: Vector2i, noise_set: Dictionary, biome: String, on_river: bool, has_iceberg: bool, danger: float, water_amount: float) -> Color:
+static func _field_cell_color(world_cell: Vector2i, noise_set: Dictionary, biome: String, on_river: bool, has_iceberg: bool, danger: float, water_amount: float, ruggedness: float = 0.45) -> Color:
 	var detail := (noise_set.get("detail") as FastNoiseLite).get_noise_2d(float(world_cell.x), float(world_cell.y))
 	var coast := water_amount + detail * 0.16
 	if coast > 0.5:
@@ -205,7 +208,10 @@ static func _field_cell_color(world_cell: Vector2i, noise_set: Dictionary, biome
 	if not is_water_ground:
 		match biome:
 			TILE_ATLAS_DEFS.BIOME_MOUNTAIN:
-				color = COLOR_STONE_DARK if not decor_key.is_empty() or detail > 0.45 else COLOR_STONE
+				# Rugged ranges render rockier up close: the crag threshold
+				# eases from 0.6 (gentle) down to 0.25 (savage ridge).
+				var crag_threshold := lerpf(0.6, 0.25, ruggedness)
+				color = COLOR_STONE_DARK if not decor_key.is_empty() or detail > crag_threshold else COLOR_STONE
 			TILE_ATLAS_DEFS.BIOME_HILLS:
 				color = color.lerp(COLOR_STONE, 0.35)
 			TILE_ATLAS_DEFS.BIOME_TUNDRA:

@@ -1,15 +1,117 @@
 extends RefCounted
 class_name OverworldLabelsService
 
-## Builds and rescales the settlement name labels shown on the overworld
+## Builds and rescales the location name labels shown on the overworld
 ## map. Extracted from overworld_map.gd. The map script gathers the
-## settlement entries (it owns the tile data); this service handles label
-## layout, creation, and zoom behaviour.
+## settlement and structure entries (it owns the tile data); this service
+## handles category/importance resolution, label layout, creation, and
+## zoom behaviour.
+##
+## Browser parity (main.js:29377-29392, 29488-29680): every location of
+## importance >= 2 gets a label; placement tries nine candidate offsets
+## around the anchor and always falls back to a clamped position instead
+## of dropping the label on overlap.
 
-## entries: [{"center": Vector2, "name": String, "font_size": int,
-##            "priority": int, "population": int}], pre-sorted or not.
-## config: {"tile_size": int, "primary_color": Color, "secondary_color":
-##          Color, "outline_color": Color, "outline_size": float}
+## Browser locationLabelImportanceByCategory (main.js:29377-29392).
+const IMPORTANCE_BY_CATEGORY := {
+	"capital": 6,
+	"city": 5,
+	"dwarfhold": 5,
+	"hillhold": 4,
+	"castle": 4,
+	"temple": 3,
+	"monastery": 3,
+	"town": 3,
+	"grove": 2,
+	"village": 2,
+	"tower": 2,
+	"shrine": 2,
+	"mine": 2,
+	"dungeon": 2
+}
+
+## Browser resolveLocationLabelCategory (main.js:29394-29456): normalize
+## every descriptor (snake/kebab/camelCase to spaced lowercase), join, and
+## match category keywords in priority order.
+static func resolve_label_category(descriptors: Array[String]) -> String:
+	var parts: Array[String] = []
+	for value: String in descriptors:
+		if value.strip_edges().is_empty():
+			continue
+		parts.append(_normalize_descriptor(value))
+	if parts.is_empty():
+		return "location"
+	var combined := " ".join(parts)
+	if combined.contains("capital"):
+		return "capital"
+	if combined.contains("dwarfhold"):
+		return "dwarfhold"
+	if combined.contains("hillhold"):
+		return "hillhold"
+	if combined.contains("metropolis") or combined.contains("city"):
+		return "city"
+	if combined.contains("town"):
+		return "town"
+	if combined.contains("village") or combined.contains("hamlet"):
+		return "village"
+	if combined.contains("castle") or combined.contains("citadel") or combined.contains("keep"):
+		return "castle"
+	if combined.contains("temple"):
+		return "temple"
+	if combined.contains("monastery") or combined.contains("abbey"):
+		return "monastery"
+	if combined.contains("grove"):
+		return "grove"
+	if combined.contains("tower"):
+		return "tower"
+	if combined.contains("shrine"):
+		return "shrine"
+	if combined.contains("mine"):
+		return "mine"
+	if combined.contains("dungeon"):
+		return "dungeon"
+	if combined.contains("camp"):
+		return "camp"
+	return parts[0]
+
+static func _normalize_descriptor(value: String) -> String:
+	var spaced := ""
+	for index in range(value.length()):
+		var character := value[index]
+		if character == "_" or character == "-":
+			if not spaced.ends_with(" "):
+				spaced += " "
+			continue
+		if index > 0 and character >= "A" and character <= "Z":
+			var previous := value[index - 1]
+			if previous >= "a" and previous <= "z":
+				spaced += " "
+		spaced += character
+	return spaced.strip_edges().to_lower()
+
+static func importance_for_category(category: String) -> int:
+	return int(IMPORTANCE_BY_CATEGORY.get(category, 1))
+
+## Browser fonts run 14-22px on canvas; the Godot map labels keep their
+## established smaller range, scaled 11-16 by importance tier.
+static func font_size_for_importance(importance: int) -> int:
+	match importance:
+		6:
+			return 16
+		5:
+			return 15
+		4:
+			return 14
+		3:
+			return 12
+		_:
+			return 11
+
+## entries: [{"center": Vector2, "name": String, "category": String,
+##            "importance": int, "population": int}]
+## config: {"tile_size": int, "map_pixel_size": Vector2, "primary_color":
+##          Color, "secondary_color": Color, "outline_color": Color,
+##          "outline_size": float}
 static func rebuild(labels_overlay: Node2D, entries: Array[Dictionary], config: Dictionary) -> void:
 	if labels_overlay == null:
 		return
@@ -28,14 +130,15 @@ static func rebuild(labels_overlay: Node2D, entries: Array[Dictionary], config: 
 
 	var sorted_entries := entries.duplicate()
 	sorted_entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		var a_priority := int(a.get("priority", 0))
-		var b_priority := int(b.get("priority", 0))
-		if a_priority == b_priority:
+		var a_importance := int(a.get("importance", 0))
+		var b_importance := int(b.get("importance", 0))
+		if a_importance == b_importance:
 			return int(a.get("population", 0)) > int(b.get("population", 0))
-		return a_priority > b_priority
+		return a_importance > b_importance
 	)
 
 	var tile_size := int(config.get("tile_size", 32))
+	var map_pixel_size: Vector2 = config.get("map_pixel_size", Vector2.ZERO)
 	var primary_color: Color = config.get("primary_color", Color.WHITE)
 	var secondary_color: Color = config.get("secondary_color", Color.WHITE)
 	var outline_color: Color = config.get("outline_color", Color.BLACK)
@@ -43,35 +146,73 @@ static func rebuild(labels_overlay: Node2D, entries: Array[Dictionary], config: 
 
 	var occupied_rects: Array[Rect2] = []
 	for entry: Dictionary in sorted_entries:
-		var font_size := int(entry.get("font_size", 12))
+		var importance := int(entry.get("importance", 1))
+		if importance < 2:
+			continue
+		var font_size := font_size_for_importance(importance)
 		var text := String(entry.get("name", ""))
 		var center: Vector2 = entry.get("center", Vector2.ZERO)
 		var estimated_width := maxf(22.0, text.length() * float(font_size) * 0.52)
 		var estimated_height := float(font_size) * 1.2
-		var candidate_rect := Rect2(
-			center + Vector2(-estimated_width * 0.5, -float(tile_size) * 0.72 - estimated_height),
-			Vector2(estimated_width, estimated_height)
-		)
-		if _rect_overlaps_any(candidate_rect, occupied_rects):
-			continue
-		occupied_rects.append(candidate_rect)
+		var half_size := Vector2(estimated_width * 0.5, estimated_height * 0.5)
+		var offset_distance := maxf(float(tile_size) * 0.9, float(font_size) * 2.2)
+		# Browser candidateOffsets (main.js:29628-29638): above, below,
+		# right, left, four diagonals, far above.
+		var candidate_offsets: Array[Vector2] = [
+			Vector2(0.0, -offset_distance * 0.75),
+			Vector2(0.0, offset_distance * 0.75),
+			Vector2(offset_distance, 0.0),
+			Vector2(-offset_distance, 0.0),
+			Vector2(offset_distance * 0.85, -offset_distance * 0.45),
+			Vector2(-offset_distance * 0.85, -offset_distance * 0.45),
+			Vector2(offset_distance * 0.85, offset_distance * 0.45),
+			Vector2(-offset_distance * 0.85, offset_distance * 0.45),
+			Vector2(0.0, -offset_distance * 1.35)
+		]
+		var placed_center := Vector2.ZERO
+		var used_fallback := true
+		for offset: Vector2 in candidate_offsets:
+			var candidate_center := center + offset
+			var candidate_rect := Rect2(candidate_center - half_size, half_size * 2.0)
+			if map_pixel_size.x > 0.0 and map_pixel_size.y > 0.0:
+				if candidate_rect.position.x < 0.0 or candidate_rect.position.y < 0.0:
+					continue
+				if candidate_rect.end.x > map_pixel_size.x or candidate_rect.end.y > map_pixel_size.y:
+					continue
+			if _rect_overlaps_any(candidate_rect, occupied_rects):
+				continue
+			placed_center = candidate_center
+			used_fallback = false
+			break
+		if used_fallback:
+			# Browser fallback (main.js:29667-29680): clamp the anchor into
+			# the map bounds and place regardless of overlap.
+			placed_center = center
+			if map_pixel_size.x > 0.0 and map_pixel_size.y > 0.0:
+				placed_center.x = clampf(placed_center.x, half_size.x, map_pixel_size.x - half_size.x)
+				placed_center.y = clampf(placed_center.y, half_size.y, map_pixel_size.y - half_size.y)
+		var placed_rect := Rect2(placed_center - half_size, half_size * 2.0)
+		occupied_rects.append(placed_rect)
 
 		var label := Label.new()
 		label.text = text
-		label.position = candidate_rect.position
-		label.size = candidate_rect.size
+		label.position = placed_rect.position
+		label.size = placed_rect.size
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		label.clip_text = true
 		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		label.add_theme_font_size_override("font_size", font_size)
-		label.add_theme_color_override("font_color", primary_color if int(entry.get("priority", 0)) >= 2 else secondary_color)
+		label.add_theme_color_override("font_color", primary_color if importance >= 3 else secondary_color)
 		label.add_theme_color_override("font_outline_color", outline_color)
 		label.add_theme_constant_override("outline_size", int(round(outline_size)))
 		label.set_meta("base_font_size", font_size)
-		label.set_meta("anchor_center", center)
+		label.set_meta("anchor_center", placed_center)
+		label.set_meta("category", String(entry.get("category", "location")))
+		label.set_meta("importance", importance)
+		label.set_meta("used_fallback", used_fallback)
 
-		var group_key := "major" if int(entry.get("priority", 0)) >= 2 else "minor"
+		var group_key := "major" if importance >= 3 else "minor"
 		var target_group := grouped_settlements[group_key] as Node2D
 		target_group.add_child(label)
 
@@ -81,7 +222,6 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 	if labels_overlay == null:
 		return
 	var safe_zoom := maxf(zoom_factor, 0.001)
-	var tile_size := int(config.get("tile_size", 32))
 	var rescale_on_zoom := bool(config.get("rescale_on_zoom", true))
 	var auto_visibility := bool(config.get("auto_visibility", true))
 	var min_screen_size := float(config.get("min_screen_size", 7.0))
@@ -97,12 +237,13 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 				scaled_font_size = maxf(8.0, (base_font_size + (base_font_size * safe_zoom)) * 0.5)
 			label.add_theme_font_size_override("font_size", int(round(scaled_font_size)))
 
-			# Re-derive the label rect from the scaled font so the text is
-			# never clipped by a stale, smaller rect after zooming in.
+			# Re-derive the label rect from the scaled font, centered on the
+			# collision-resolved placement, so the text is never clipped by
+			# a stale, smaller rect after zooming in.
 			var anchor := label.get_meta("anchor_center", Vector2.ZERO) as Vector2
 			var scaled_width := maxf(22.0, label.text.length() * scaled_font_size * 0.52)
 			var scaled_height := scaled_font_size * 1.2
-			label.position = anchor + Vector2(-scaled_width * 0.5, -float(tile_size) * 0.72 - scaled_height)
+			label.position = anchor - Vector2(scaled_width * 0.5, scaled_height * 0.5)
 			label.size = Vector2(scaled_width, scaled_height)
 
 			if auto_visibility:
@@ -110,28 +251,6 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 				label.visible = screen_size >= min_screen_size and screen_size <= max_screen_size
 			else:
 				label.visible = true
-
-static func font_size_for_settlement(settlement_type: String) -> int:
-	match settlement_type:
-		"great_dwarfhold", "dark_dwarfhold", "abandoned_dwarfhold", "dwarfhold":
-			return 15
-		"city", "wood_elf_grove", "lizardmen_city":
-			return 13
-		"town", "wizard_tower":
-			return 12
-		_:
-			return 11
-
-static func priority_for_settlement(settlement_type: String) -> int:
-	match settlement_type:
-		"great_dwarfhold", "dark_dwarfhold", "abandoned_dwarfhold", "dwarfhold":
-			return 3
-		"city", "wood_elf_grove", "lizardmen_city":
-			return 2
-		"town", "wizard_tower":
-			return 2
-		_:
-			return 1
 
 static func _rect_overlaps_any(candidate: Rect2, rects: Array[Rect2]) -> bool:
 	for rect in rects:

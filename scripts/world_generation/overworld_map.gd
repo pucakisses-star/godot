@@ -213,17 +213,20 @@ const TILE_OVERLAY_RIVER := 1 << 2
 
 ## Structures that join the road network alongside true settlements.
 const ROUTE_ELIGIBLE_STRUCTURE_IDS := ["roadsideTavern", "travelerCamp", "orcCamp", "tower", "evilWizardTower"]
+## Browser summarizeTileResources catalog (main.js:14147-14158), lowercase
+## to match the Godot tooltip styling. Water id 0 carries the ocean triad;
+## lakes swap to the freshwater triad in _resources_for_tile. Hills (id 2)
+## have no browser entry - hill tiles yield their base biome's triad.
 const _BIOME_RESOURCES_BY_ID := {
-	0: ["fish", "salt"],
-	1: ["stone", "iron", "gems"],
-	2: ["stone", "game", "herbs"],
-	3: ["reeds", "peat", "herbs"],
-	4: ["fur", "ice", "hardwood"],
-	5: ["spice", "glass", "salt"],
-	6: ["clay", "copper", "scrub"],
-	7: ["timber", "game", "berries"],
-	8: ["exotic wood", "fruit", "spices"],
-	9: ["grain", "livestock", "herbs"]
+	0: ["rich fisheries", "pearl beds", "kelp forests"],
+	1: ["metallic ores", "quarried stone", "crystal seams"],
+	3: ["peat bogs", "reed thickets", "bog iron deposits"],
+	4: ["fur-bearing fauna", "permafrost relics", "glacial ice"],
+	5: ["trade spices", "glass sands", "hidden oasis wells"],
+	6: ["scrap metals", "hardy grazing", "quartz outcrops"],
+	7: ["hardwood timber", "game animals", "medicinal herbs"],
+	8: ["rare hardwoods", "exotic fruits", "alchemical resins"],
+	9: ["grain harvests", "pasture livestock", "wildflower dyes"]
 }
 const DWARFHOLD_POPULATION_RACE_OPTIONS := [
 	{"key": "dwarves", "label": "Dwarves", "color": Color("#f4c069")},
@@ -2146,28 +2149,85 @@ func _apply_overlays_and_metadata(
 	name_rng: RandomNumberGenerator
 ) -> void:
 	var overlays_started := Time.get_ticks_msec()
-	var coast_proximity_map := _build_proximity_map(base_biome_map, [BIOME_WATER], 8)
-	var marsh_proximity_map := _build_proximity_map(base_biome_map, [BIOME_MARSH], 7)
-	var desert_proximity_map := _build_proximity_map(base_biome_map, [BIOME_DESERT, BIOME_BADLANDS], 8)
-	var tree_coverage_map := _build_tree_coverage_biome_map(base_biome_map, tree_map)
-	var forest_proximity_map := _build_proximity_map(tree_coverage_map, [BIOME_FOREST, BIOME_JUNGLE], 6)
+	var w := map_size.x
+	var rows := map_size.y
+	# Browser proximity fields are near-euclidean distance transforms
+	# (computeEuclideanDistanceField): coast from OCEAN tiles only
+	# (falloff 4.2, main.js:28270-28311), marsh from marsh tiles (3.5,
+	# main.js:23089-23112), desert from sand+badlands (4.5,
+	# main.js:22846-22868), water depth from land (normalized by the map's
+	# deepest water, main.js:24761-24784), and forest canopy as distance
+	# to the forest EDGE inside forests (falloff 4.2, main.js:28313-28357).
+	var ocean_cells := _landmass_masks.get("ocean_cells", {}) as Dictionary
+	var ocean_sources: Array[Vector2i] = []
+	for cell_variant: Variant in ocean_cells.keys():
+		ocean_sources.append(cell_variant as Vector2i)
+	var marsh_sources: Array[Vector2i] = []
+	var desert_sources: Array[Vector2i] = []
+	var land_sources: Array[Vector2i] = []
+	var non_forest_sources: Array[Vector2i] = []
+	var forest_mask := PackedByteArray()
+	forest_mask.resize(w * rows)
+	for y in range(rows):
+		for x in range(w):
+			var coord := Vector2i(x, y)
+			var cell_biome := base_biome_map.get(coord, BIOME_GRASSLAND) as String
+			if cell_biome == BIOME_MARSH:
+				marsh_sources.append(coord)
+			elif cell_biome == BIOME_DESERT or cell_biome == BIOME_BADLANDS:
+				desert_sources.append(coord)
+			if cell_biome != BIOME_WATER:
+				land_sources.append(coord)
+			# Browser forest mask: grass-base forest tiles only (jungle and
+			# snow woods excluded, main.js:28322).
+			var is_forest_cell := cell_biome == BIOME_GRASSLAND and tree_map.has(coord) and String(tree_map.get(coord, BIOME_FOREST)) != BIOME_JUNGLE
+			if is_forest_cell:
+				forest_mask[y * w + x] = 1
+			else:
+				non_forest_sources.append(coord)
+	var coast_field := _chamfer_distance_field(ocean_sources)
+	var marsh_field := _chamfer_distance_field(marsh_sources)
+	var desert_field := _chamfer_distance_field(desert_sources)
+	var land_field := _chamfer_distance_field(land_sources)
+	var canopy_field := _chamfer_distance_field(non_forest_sources)
+	var has_ocean := not ocean_sources.is_empty()
+	var has_marsh := not marsh_sources.is_empty()
+	var has_desert := not desert_sources.is_empty()
+	var max_water_depth := 0.0
+	for y in range(rows):
+		for x in range(w):
+			if String(base_biome_map.get(Vector2i(x, y), BIOME_GRASSLAND)) != BIOME_WATER:
+				continue
+			var depth := float(land_field[y * w + x])
+			if depth > max_water_depth:
+				max_water_depth = depth
+	var depth_normalization := (1.0 / max_water_depth) if max_water_depth > 0.0 else 1.0
 	var proximity_ms := Time.get_ticks_msec() - overlays_started
 	overlays_started = Time.get_ticks_msec()
-	var context_size := maxi(map_size.x, map_size.y)
-	var region_names := _build_region_name_map(biome_map, name_rng, context_size)
+	var region_naming := _build_region_name_map(biome_map, name_rng)
+	var region_names := region_naming.get("names", {}) as Dictionary
+	var region_clusters := region_naming.get("clusters", {}) as Dictionary
 	print("[OverworldMap] overlays: proximity %d ms | region names %d ms" % [proximity_ms, Time.get_ticks_msec() - overlays_started])
 	overlays_started = Time.get_ticks_msec()
+	var have_mountain_scores := _mountain_score_buffer.size() == w * rows
+	var ruggedness_seed := map_seed + 0x51a7bead
 	for y in range(map_size.y):
 		for x in range(map_size.x):
 			var coord := Vector2i(x, y)
+			var idx := y * w + x
 			var base_biome := base_biome_map.get(coord, BIOME_GRASSLAND) as String
+			var highland_biome := String(highland_map.get(coord, ""))
 			if highland_layer != null:
 				if highland_map.has(coord):
-					var highland_biome := highland_map[coord] as String
 					var highland_tile := _highland_tile_for_biome(highland_biome, base_biome, coord)
 					highland_layer.set_cell(coord, _atlas_source_id, highland_tile)
 				else:
 					highland_layer.erase_cell(coord)
+			# Browser main.js:23684-23687: sand/badlands bases under mountain
+			# overlays convert to bare stone. No stone biome id exists, so
+			# only the art changes; the classification keeps the base biome.
+			if highland_biome == BIOME_MOUNTAIN and (base_biome == BIOME_DESERT or base_biome == BIOME_BADLANDS) and map_layer != null:
+				map_layer.set_cell(coord, _atlas_source_id, STONE_TILE)
 			var biome := biome_map.get(coord, base_biome) as String
 			var region_name := String(region_names.get(coord, ""))
 			var has_river := river_tiles.has(coord)
@@ -2185,6 +2245,34 @@ func _apply_overlays_and_metadata(
 				overlay_flags |= TILE_OVERLAY_FOREST
 			if has_river:
 				overlay_flags |= TILE_OVERLAY_RIVER
+			var is_water := base_biome == BIOME_WATER
+			var coast_proximity := 0.0
+			var marsh_proximity := 0.0
+			var desert_proximity := 0.0
+			var canopy_density := 0.0
+			var water_depth := 0.0
+			if is_water:
+				water_depth = clampf(float(land_field[idx]) * depth_normalization, 0.0, 1.0)
+			else:
+				if has_ocean:
+					coast_proximity = clampf(1.0 - float(coast_field[idx]) / 4.2, 0.0, 1.0)
+				if base_biome == BIOME_GRASSLAND:
+					if has_marsh:
+						marsh_proximity = clampf(1.0 - float(marsh_field[idx]) / 3.5, 0.0, 1.0)
+					if has_desert:
+						desert_proximity = clampf(1.0 - float(desert_field[idx]) / 4.5, 0.0, 1.0)
+				if forest_mask[idx] == 1:
+					canopy_density = clampf(float(canopy_field[idx]) / 4.2, 0.0, 1.0)
+			# Browser mountainRuggedness (main.js:23673-23683, 24845-24857):
+			# 0.35 + h*0.45 on mountains, 0.55 + h*0.35 on peaks, +/- 0.15
+			# seeded noise; zero everywhere without a mountain overlay.
+			var mountain_ruggedness := 0.0
+			if highland_biome == BIOME_MOUNTAIN:
+				var normalized_height := clampf(float(_mountain_score_buffer[idx]), 0.0, 1.0) if have_mountain_scores else clampf((float(height_map.get(coord, 0.0)) - water_level) / maxf(0.0001, 1.0 - water_level), 0.0, 1.0)
+				var is_peak := float(height_map.get(coord, 0.0)) >= 0.97
+				var base_ruggedness := (0.55 + normalized_height * 0.35) if is_peak else (0.35 + normalized_height * 0.45)
+				var ruggedness_noise := _hash_coords(x, y, ruggedness_seed)
+				mountain_ruggedness = clampf(base_ruggedness + (ruggedness_noise - 0.5) * 0.3, 0.0, 1.0)
 			_tile_data[coord] = {
 				"biome_id": _biome_to_id(biome),
 				"base_biome_id": _biome_to_id(base_biome),
@@ -2194,11 +2282,13 @@ func _apply_overlays_and_metadata(
 				"structure_details": null,
 				"ambient_structure": null,
 				"surface_variation": _surface_variation_for_coord(coord, base_biome),
-				"water_depth": _water_depth_for_coord(coord, base_biome, height_map),
-				"coast_proximity": float(coast_proximity_map.get(coord, 0.0)),
-				"marsh_proximity": float(marsh_proximity_map.get(coord, 0.0)),
-				"desert_proximity": float(desert_proximity_map.get(coord, 0.0)),
-				"forest_canopy_density": float(forest_proximity_map.get(coord, 0.0)),
+				"water_depth": water_depth,
+				"coast_proximity": coast_proximity,
+				"marsh_proximity": marsh_proximity,
+				"desert_proximity": desert_proximity,
+				"forest_canopy_density": canopy_density,
+				"mountain_ruggedness": mountain_ruggedness,
+				"biome_cluster_id": int(region_clusters.get(coord, -1)),
 				"temperature": temperature_map.get(coord, 0.0),
 				"moisture": moisture_map.get(coord, 0.0)
 			}
@@ -2274,16 +2364,8 @@ func _apply_oases_and_lava(volcanoes: Array[Vector2i], rng: RandomNumberGenerato
 	OverworldTerrainFeatureService.apply_oases_and_lava(volcanoes, rng, highland_layer, map_layer, _atlas_source_id, map_size, _tile_data)
 
 
-func _build_proximity_map(biome_map: Dictionary, target_biomes: Array[String], max_distance: int) -> Dictionary:
-	return OverworldTerrainFeatureService.build_proximity_map(biome_map, target_biomes, max_distance, map_size)
-
-
 func _surface_variation_for_coord(coord: Vector2i, base_biome: String) -> float:
 	return OverworldTerrainFeatureService.surface_variation_for_coord(coord, base_biome, _rainfall_noise, _temperature_noise)
-
-
-func _water_depth_for_coord(coord: Vector2i, base_biome: String, height_map: Dictionary) -> float:
-	return OverworldTerrainFeatureService.water_depth_for_coord(coord, base_biome, height_map, water_level)
 
 
 func _update_terrain_shading_overlay(base_biome_map: Dictionary) -> void:
@@ -2375,39 +2457,48 @@ func _blend_overlay_color(base_color: Color, tint_color: Color, alpha: float) ->
 	var out_b := (tint_color.b * overlay_alpha + base_color.b * base_color.a * (1.0 - overlay_alpha)) / out_alpha
 	return Color(out_r, out_g, out_b, out_alpha)
 
+## Browser-parity region clusters: 8-connected same-biome flood fill,
+## a stable cluster id per region, and the region name generated with the
+## CLUSTER size as context (oceans under 120 tiles downgrade to "Sea").
+## Returns {"names": {coord: String}, "clusters": {coord: int}}.
 func _build_region_name_map(
 	biome_map: Dictionary,
-	rng: RandomNumberGenerator,
-	context_size: int
+	rng: RandomNumberGenerator
 ) -> Dictionary:
 	var region_names := {}
+	var cluster_ids := {}
+	var next_cluster_id := 0
 	for y in range(map_size.y):
 		for x in range(map_size.x):
 			var start := Vector2i(x, y)
-			if region_names.has(start):
+			if cluster_ids.has(start):
 				continue
 			var biome := String(biome_map.get(start, BIOME_GRASSLAND))
-			var water_body_type := ""
-			if biome == BIOME_WATER:
-				water_body_type = _water_region_type(start, biome_map)
-			var region_name := _generate_biome_region_name(biome, water_body_type, rng, context_size)
+			var cluster_id := next_cluster_id
+			next_cluster_id += 1
+			var cluster_cells: Array[Vector2i] = []
 			var frontier: Array[Vector2i] = [start]
+			cluster_ids[start] = cluster_id
 			while not frontier.is_empty():
 				var coord: Vector2i = frontier.pop_back()
-				if region_names.has(coord):
-					continue
-				if String(biome_map.get(coord, BIOME_GRASSLAND)) != biome:
-					continue
-				region_names[coord] = region_name
-				for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+				cluster_cells.append(coord)
+				for offset: Vector2i in NEIGHBOR_OFFSETS_8:
 					var neighbor: Vector2i = coord + offset
 					if neighbor.x < 0 or neighbor.y < 0 or neighbor.x >= map_size.x or neighbor.y >= map_size.y:
 						continue
-					if region_names.has(neighbor):
+					if cluster_ids.has(neighbor):
 						continue
 					if String(biome_map.get(neighbor, BIOME_GRASSLAND)) == biome:
+						cluster_ids[neighbor] = cluster_id
 						frontier.append(neighbor)
-	return region_names
+			var water_body_type := ""
+			if biome == BIOME_WATER:
+				water_body_type = _water_region_type(start, biome_map)
+			var region_name := _generate_biome_region_name(biome, water_body_type, rng, cluster_cells.size())
+			if not region_name.is_empty():
+				for coord: Vector2i in cluster_cells:
+					region_names[coord] = region_name
+	return {"names": region_names, "clusters": cluster_ids}
 
 func _water_region_type(start_coord: Vector2i, biome_map: Dictionary) -> String:
 	var lake_cells_variant: Variant = _landmass_masks.get("lake_cells", {})
@@ -6696,10 +6787,16 @@ func _assign_cultural_groups(
 				if entry_variant is Dictionary:
 					breakdown.append(entry_variant as Dictionary)
 			var population_groups := pipeline.derive_population_groups(breakdown)
-			_tile_population_groups[coord] = {
-				"major_population_groups": population_groups.get("major", []),
-				"minor_population_groups": population_groups.get("minor", [])
-			}
+			var major_groups := population_groups.get("major", []) as Array
+			var minor_groups := population_groups.get("minor", []) as Array
+			# Browser derivePopulationGroupsFromCulture returns null groups
+			# for empty breakdowns - store nothing so structure-stamped
+			# groups survive and the tooltip section simply hides.
+			if not major_groups.is_empty() or not minor_groups.is_empty():
+				_tile_population_groups[coord] = {
+					"major_population_groups": major_groups,
+					"minor_population_groups": minor_groups
+				}
 		var ambient_structure: Variant = tile_info.get("ambient_structure", null)
 		if ambient_structure is Dictionary:
 			# Roads were laid before culture ran; keep them clear of clutter.
@@ -6982,19 +7079,26 @@ func _resources_for_tile(coord: Vector2i, data: Dictionary) -> Array[String]:
 	if biome_id == _biome_to_id(BIOME_WATER) and _is_lake_coord(coord):
 		resolved = ["freshwater catches", "boat timber", "shoreline clay"]
 	else:
-		resolved = _resources_for_biome_id(biome_id)
+		var catalog_id := biome_id
+		if biome_id == _biome_to_id(BIOME_HILLS):
+			# Browser hill overlays keep the underlying biome's yields
+			# (no hills entry in the main.js:14147-14158 catalog).
+			catalog_id = int(data.get("base_biome_id", _biome_to_id(BIOME_GRASSLAND)))
+		resolved = _resources_for_biome_id(catalog_id)
+	# Bonus order matches the browser (main.js:14177-14194): coast, marsh,
+	# desert, volcano, canopy, cold - so the 5-entry cap bites identically.
 	if float(data.get("coast_proximity", 0.0)) >= 0.65 and biome_id != _biome_to_id(BIOME_WATER):
 		resolved.append("coastal fisheries")
 	if float(data.get("marsh_proximity", 0.0)) >= 0.55 and biome_id != _biome_to_id(BIOME_MARSH):
 		resolved.append("peat and bog iron")
 	if float(data.get("desert_proximity", 0.0)) >= 0.55 and biome_id != _biome_to_id(BIOME_DESERT):
 		resolved.append("trade caravans")
-	if float(data.get("forest_canopy_density", 0.0)) >= 0.65:
-		resolved.append("dense lumber stands")
-	if float(data.get("temperature", 1.0)) <= 0.25:
-		resolved.append("fur-bearing game")
 	if float(data.get("volcano_proximity", 0.0)) >= 0.45:
 		resolved.append("volcanic glass and obsidian")
+	if float(data.get("forest_canopy_density", 0.0)) >= 0.65:
+		resolved.append("dense lumber stands")
+	if float(data.get("temperature", 1.0)) <= 0.25 and biome_id != _biome_to_id(BIOME_TUNDRA):
+		resolved.append("fur-bearing game")
 	if resolved.size() > 5:
 		resolved = resolved.slice(0, 5)
 	return resolved
@@ -7005,8 +7109,8 @@ func _is_lake_coord(coord: Vector2i) -> bool:
 		return (lake_cells_variant as Dictionary).has(coord)
 	return false
 
-func _describe_climate(temperature: float, moisture: float) -> String:
-	return OverworldPopulationService.describe_climate(temperature, moisture)
+func _describe_climate(data: Dictionary) -> String:
+	return OverworldPopulationService.describe_climate(data)
 
 func _format_resource_list(resources: Array[String]) -> String:
 	return OverworldPopulationService.format_resource_list(resources)
@@ -7446,6 +7550,16 @@ func _humanize_biome(biome: String) -> String:
 		words[index] = String(words[index]).capitalize()
 	return " ".join(words)
 
+## Browser biomeTypeDefinitions labels (main.js:2767-2778): water resolves
+## to "Ocean"/"Lake" per the landmass masks and mountains read as
+## "Mountain Range" instead of the raw biome word.
+func _resolved_biome_label(coord: Vector2i, biome: String) -> String:
+	if biome == BIOME_WATER:
+		return "Lake" if _is_lake_coord(coord) else "Ocean"
+	if biome == BIOME_MOUNTAIN:
+		return "Mountain Range"
+	return _humanize_biome(biome)
+
 func _cache_map_layer_parent() -> void:
 	if map_layer == null:
 		return
@@ -7661,11 +7775,9 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		tooltip_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var data: Dictionary = _tile_data.get(coord, {})
 	var biome := _tile_biome_from_data(data)
-	var temperature := float(data.get("temperature", 0.0))
-	var moisture := float(data.get("moisture", 0.0))
 	var resources := _resources_for_tile(coord, data)
 	var region_name := _tile_region_name(coord, data)
-	var biome_label := _humanize_biome(biome)
+	var biome_label := _resolved_biome_label(coord, biome)
 	if region_name.is_empty():
 		if biome_label.is_empty():
 			region_name = "Unnamed Region"
@@ -7678,10 +7790,9 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		biome_label,
 		not biome_label.is_empty()
 	)
-	var climate_text := _describe_climate(temperature, moisture).strip_edges()
-	# Browser parity: the volcano's heat aura reads in the climate line.
-	if float(data.get("volcano_proximity", 0.0)) >= 0.45 and not climate_text.is_empty():
-		climate_text += " and volcanic warmth"
+	# The volcanic-warmth qualifier now travels inside describe_climate's
+	# unified qualifier list (browser main.js:14241-14271).
+	var climate_text := _describe_climate(data).strip_edges()
 	_set_tooltip_label(
 		tooltip_climate,
 		climate_text,
@@ -7715,10 +7826,6 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 			continue
 		filtered_minor_population_groups.append(group)
 	minor_population_groups = filtered_minor_population_groups
-	if not culture_tooltip.is_empty():
-		var influence_label := String(culture_tooltip.get("label", "Unknown"))
-		if not influence_label.is_empty() and not major_population_groups.has(influence_label) and not minor_population_groups.has(influence_label):
-			minor_population_groups.append(influence_label)
 	_set_tooltip_label(
 		tooltip_minor_population_groups,
 		_format_resource_list(minor_population_groups),
@@ -8687,6 +8794,10 @@ func _update_labels_overlay_visibility() -> void:
 	if labels_overlay.visible:
 		_update_labels_overlay_zoom_behavior()
 
+## Browser drawLocationLabels (main.js:29488-29680): settlements AND named
+## structures (castles, monasteries, hillholds, mines, dungeons, shrines,
+## towers...) label by importance tier; anything below importance 2 stays
+## unlabeled, exactly the browser cutoff.
 func _rebuild_labels_overlay() -> void:
 	if labels_overlay == null:
 		return
@@ -8694,21 +8805,38 @@ func _rebuild_labels_overlay() -> void:
 	for coord_variant: Variant in _tile_data.keys():
 		var coord := coord_variant as Vector2i
 		var tile_info := _tile_data.get(coord, {}) as Dictionary
-		var settlement_type := String(tile_info.get("settlement_type", "")).strip_edges().to_lower()
-		if settlement_type.is_empty():
+		var settlement_type := String(tile_info.get("settlement_type", "")).strip_edges()
+		var structure_id := String(tile_info.get("structure", "")).strip_edges()
+		if settlement_type.is_empty() and structure_id.is_empty():
 			continue
 		var region_name := _tile_region_name(coord, tile_info)
 		if region_name.is_empty():
 			continue
+		var classification := String(tile_info.get("settlement_classification", "")).strip_edges()
+		var descriptors: Array[String] = []
+		# Browser hamlets/villages carry type 'village' (main.js:3913);
+		# Godot marks them with is_hamlet / a "Village" classification on
+		# the shared "town" settlement type.
+		if bool(tile_info.get("is_hamlet", false)) or classification == "Village":
+			descriptors.append("village")
+		else:
+			descriptors.append(settlement_type)
+		descriptors.append(classification)
+		descriptors.append(structure_id)
+		var category := OverworldLabelsService.resolve_label_category(descriptors)
+		var importance := OverworldLabelsService.importance_for_category(category)
+		if importance < 2:
+			continue
 		entries.append({
 			"center": _map_cell_center(coord),
 			"name": region_name,
-			"font_size": OverworldLabelsService.font_size_for_settlement(settlement_type),
-			"priority": OverworldLabelsService.priority_for_settlement(settlement_type),
+			"category": category,
+			"importance": importance,
 			"population": int(tile_info.get("population", 0))
 		})
 	OverworldLabelsService.rebuild(labels_overlay, entries, {
 		"tile_size": tile_size,
+		"map_pixel_size": Vector2(float(map_size.x * tile_size), float(map_size.y * tile_size)),
 		"primary_color": labels_overlay_primary_color,
 		"secondary_color": labels_overlay_secondary_color,
 		"outline_color": labels_overlay_outline_color,
@@ -9122,10 +9250,13 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 	corners[2] = RegionMapService.danger_for_world_cell(origin + Vector2i(0, span), _region_site_anchors)
 	corners[3] = RegionMapService.danger_for_world_cell(origin + Vector2i(span, span), _region_site_anchors)
 	var has_iceberg := iceberg_layer != null and iceberg_layer.get_cell_source_id(tile) >= 0
+	var tile_ruggedness := float((_tile_data.get(tile, {}) as Dictionary).get("mountain_ruggedness", 0.45))
+	if tile_ruggedness <= 0.0:
+		tile_ruggedness = 0.45
 	return RegionMapService.make_render_job(
 		_region_world_seed_text(), tile,
 		_region_biome_for_tile(tile), _region_river_for_tile(tile),
-		has_iceberg, water, rivers, corners
+		has_iceberg, water, rivers, corners, tile_ruggedness
 	)
 
 ## Synchronous render for the first screenful on entry.

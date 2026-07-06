@@ -16,7 +16,7 @@ const WATER_TILE := TILE_ATLAS_DEFS.WATER_TILE
 const LAVA_TILE := TILE_ATLAS_DEFS.LAVA_TILE
 const GRASS_TILE := TILE_ATLAS_DEFS.GRASS_TILE
 const SNOW_TILE := TILE_ATLAS_DEFS.SNOW_TILE
-const BADLANDS_TILE := TILE_ATLAS_DEFS.BADLANDS_TILE
+const STONE_TILE := TILE_ATLAS_DEFS.STONE_TILE
 
 const BIOME_MOUNTAIN := TILE_ATLAS_DEFS.BIOME_MOUNTAIN
 const BIOME_DESERT := TILE_ATLAS_DEFS.BIOME_DESERT
@@ -145,9 +145,11 @@ static func place_volcano_tiles(
 			continue
 		if highland_layer != null:
 			highland_layer.set_cell(coord, atlas_source_id, ACTIVE_VOLCANO_TILE if volcanoes.is_empty() else VOLCANO_TILE)
-		# The cone itself stands on bare scorched rock (browser: stone base).
+		# The cone itself stands on bare stone (browser main.js:23794-23796:
+		# tile.base = stoneTileKey). No dedicated stone biome id exists, so
+		# the classification stays BIOME_BADLANDS; only the art is stone.
 		if map_layer != null:
-			map_layer.set_cell(coord, atlas_source_id, BADLANDS_TILE)
+			map_layer.set_cell(coord, atlas_source_id, STONE_TILE)
 		if tile_data.has(coord):
 			var tile_info := tile_data.get(coord, {}) as Dictionary
 			if not tile_info.is_empty():
@@ -157,6 +159,8 @@ static func place_volcano_tiles(
 					tile_info["overlay_flags"] = int(tile_info.get("overlay_flags", 0)) | TILE_OVERLAY_VOLCANO
 				tile_info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
 				tile_info["volcano_proximity"] = 1.0
+				# Browser main.js:23790-23793: volcano ruggedness 0.65 +/- 0.175.
+				tile_info["mountain_ruggedness"] = clampf(0.65 + (rng.randf() - 0.5) * 0.35, 0.0, 1.0)
 				tile_data[coord] = tile_info
 		volcanoes.append(coord)
 
@@ -215,7 +219,9 @@ static func _apply_volcano_proximity(
 					var conversion_score := proximity + coarse * 0.55 + fine * 0.25
 					scorch = conversion_score >= 0.58 - proximity * 0.3
 				if scorch and map_layer != null:
-					map_layer.set_cell(coord, atlas_source_id, BADLANDS_TILE)
+					# Ash apron converts to stone art (browser stoneTileKey);
+					# classification stays badlands (no stone biome id).
+					map_layer.set_cell(coord, atlas_source_id, STONE_TILE)
 					info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
 					tile_data[coord] = info
 
@@ -292,64 +298,6 @@ static func apply_oases_and_lava(
 					tile_data[neighbor] = info
 
 
-static func build_proximity_map(
-	biome_map: Dictionary,
-	target_biomes: Array[String],
-	max_distance: int,
-	map_size: Vector2i
-) -> Dictionary:
-	# Multi-source ring BFS: seed every target cell at distance 0, then grow
-	# outward one Chebyshev ring at a time. Equivalent to scanning a
-	# (2r+1)^2 window per cell, but visits each cell once.
-	var proximity_map: Dictionary = {}
-	if max_distance <= 0 or target_biomes.is_empty():
-		return proximity_map
-	var target_set: Dictionary = {}
-	for biome: String in target_biomes:
-		target_set[biome] = true
-	var width := map_size.x
-	var height := map_size.y
-	var distances := PackedInt32Array()
-	distances.resize(width * height)
-	distances.fill(max_distance + 1)
-	var frontier := PackedInt32Array()
-	for y in range(height):
-		var row := y * width
-		for x in range(width):
-			if target_set.has(String(biome_map.get(Vector2i(x, y), BIOME_GRASSLAND))):
-				distances[row + x] = 0
-				frontier.append(row + x)
-	var ring := 0
-	while ring < max_distance and not frontier.is_empty():
-		ring += 1
-		var next_frontier := PackedInt32Array()
-		for index in frontier:
-			var cx := index % width
-			var cy := index / width
-			for oy in range(-1, 2):
-				var ny := cy + oy
-				if ny < 0 or ny >= height:
-					continue
-				for ox in range(-1, 2):
-					var nx := cx + ox
-					if nx < 0 or nx >= width:
-						continue
-					var neighbor_index := ny * width + nx
-					if distances[neighbor_index] > ring:
-						distances[neighbor_index] = ring
-						next_frontier.append(neighbor_index)
-		frontier = next_frontier
-	for y in range(height):
-		var row := y * width
-		for x in range(width):
-			var nearest := distances[row + x]
-			if nearest > max_distance:
-				proximity_map[Vector2i(x, y)] = 0.0
-			else:
-				proximity_map[Vector2i(x, y)] = clampf(1.0 - float(nearest) / float(max_distance), 0.0, 1.0)
-	return proximity_map
-
-
 static func surface_variation_for_coord(
 	coord: Vector2i,
 	base_biome: String,
@@ -361,20 +309,6 @@ static func surface_variation_for_coord(
 	var coarse := _to_normalized(rainfall_noise.get_noise_2d(float(coord.x) * 0.8, float(coord.y) * 0.8))
 	var detail := _to_normalized(temperature_noise.get_noise_2d(float(coord.x) * 2.3, float(coord.y) * 2.3))
 	return clampf((coarse * 0.65 + detail * 0.35 - 0.5) * 1.6, -1.0, 1.0)
-
-
-static func water_depth_for_coord(
-	coord: Vector2i,
-	base_biome: String,
-	height_map: Dictionary,
-	water_level: float
-) -> float:
-	if base_biome != BIOME_WATER:
-		return 0.0
-	var height := float(height_map.get(coord, water_level))
-	if water_level <= 0.001:
-		return 0.0
-	return clampf((water_level - height) / water_level, 0.0, 1.0)
 
 
 static func _tile_base_biome_from_data(p_tile_data: Dictionary) -> String:
