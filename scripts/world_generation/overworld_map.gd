@@ -598,6 +598,7 @@ var _river_atlas_source_id := -1
 var _coast_layer: TileMapLayer
 var _coast_source_id := -1
 var _temperature_noise: FastNoiseLite
+var _snow_edge_noise: FastNoiseLite
 var _rainfall_noise: FastNoiseLite
 var _vegetation_noise: FastNoiseLite
 var _tile_data: Dictionary = {}
@@ -1597,6 +1598,18 @@ func _generate_map() -> void:
 	_temperature_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	_temperature_noise.fractal_octaves = 3
 
+	# The snow line gets its own CELL-SCALE noise. Every other field is
+	# scaled by 1/map width, which on big maps flattens to a constant
+	# across the whole map - that constant is what drew the ruler-straight
+	# treeline. This one keeps an absolute frequency so the boundary
+	# wanders at 10-50 cell wavelengths no matter the map size.
+	_snow_edge_noise = FastNoiseLite.new()
+	_snow_edge_noise.seed = map_seed + 313
+	_snow_edge_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_snow_edge_noise.frequency = 0.055
+	_snow_edge_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_snow_edge_noise.fractal_octaves = 4
+
 	_rainfall_noise = FastNoiseLite.new()
 	_rainfall_noise.seed = map_seed + 211
 	_rainfall_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
@@ -2341,13 +2354,15 @@ func _sample_snow_latitude_strength(coord: Vector2i) -> float:
 	var y_ratio := float(coord.y) / maxf(1.0, float(map_size.y - 1))
 	var latitude := absf(y_ratio * 2.0 - 1.0)
 	var latitude_strength := pow(latitude, 1.35)
+	if _snow_edge_noise == null:
+		return clampf(latitude_strength, 0.0, 1.0)
 	var x := float(coord.x)
 	var y := float(coord.y)
-	var octave_1 := _to_normalized(_temperature_noise.get_noise_2d(x * 0.45, y * 0.45))
-	var octave_2 := _to_normalized(_temperature_noise.get_noise_2d(x * 0.9 + 71.0, y * 0.9 - 37.0))
-	var octave_3 := _to_normalized(_temperature_noise.get_noise_2d(x * 1.8 - 113.0, y * 1.8 + 53.0))
-	var octave_noise := octave_1 * 0.55 + octave_2 * 0.3 + octave_3 * 0.15
-	var band_breakup := (octave_noise - 0.5) * 0.26
+	# Broad lobes sweep the snow line in whole-peninsula pushes; the
+	# ragged octave chews the edge at a few-cell scale.
+	var lobes := _to_normalized(_snow_edge_noise.get_noise_2d(x * 0.35, y * 0.35))
+	var ragged := _to_normalized(_snow_edge_noise.get_noise_2d(x * 1.6 + 71.0, y * 1.6 - 37.0))
+	var band_breakup := (lobes - 0.5) * 0.34 + (ragged - 0.5) * 0.14
 	return clampf(latitude_strength + band_breakup, 0.0, 1.0)
 
 
@@ -2382,9 +2397,16 @@ func _assign_base_biome(
 ) -> String:
 	var biomes := _biome_lookup()
 	var base_biome := BIOME_CLASSIFIER.assign_base_biome(coord, height, temperature, moisture, height_map, _biome_thresholds(), biomes)
+	# The snow strength contour owns the treeline in both directions:
+	# warm valleys bite north into the tundra, snowy fingers reach south
+	# into the grass. Temperature still fences how far a finger may go.
+	var snow_strength := _sample_snow_latitude_strength(coord)
 	if base_biome == String(biomes.get("tundra", BIOME_TUNDRA)):
-		if _sample_snow_latitude_strength(coord) < snow_latitude_threshold:
+		if snow_strength < snow_latitude_threshold:
 			return String(biomes.get("grassland", BIOME_GRASSLAND))
+	elif base_biome == String(biomes.get("grassland", BIOME_GRASSLAND)):
+		if snow_strength >= snow_latitude_threshold + 0.05 and temperature < tundra_threshold + 0.12:
+			return String(biomes.get("tundra", BIOME_TUNDRA))
 	return base_biome
 
 

@@ -52,68 +52,205 @@ const FAVORITE_ITEMS: Array[String] = [
 	"Mushroom Skewer", "Copper Ingot", "Moss Agate", "Marbled Steak",
 	"Porcini", "Jerky Strip"
 ]
+## Who a citizen prays to. A slice of every settlement keeps no gods at
+## all, and families tend to share an altar.
+const DWARF_FAITHS: Array[String] = [
+	"the Forge-Father", "the Deep Mother", "the Silent Stone",
+	"the Ember Queen", "the Ancestors"
+]
+const TOWNSFOLK_FAITHS: Array[String] = [
+	"the Harvest Mother", "the Lamplighter", "the River Saint",
+	"the Twin Oaks", "the Pale Moon"
+]
+const FAITHLESS_CHANCE := 0.12
+
+## Explicit race, weighted per settlement kind: holds are dwarven with
+## goblin, gnome, kobold and human minorities; towns the reverse. Races
+## bring their own names, lifespans, and looks.
+const RACES_BY_KIND := {
+	"dwarf": [["Dwarf", 86], ["Goblin", 5], ["Gnome", 4], ["Kobold", 3], ["Human", 2]],
+	"townsfolk": [["Human", 83], ["Gnome", 6], ["Dwarf", 5], ["Goblin", 3], ["Kobold", 3]]
+}
+const RACE_AGE_RANGES := {
+	"Dwarf": [22, 320], "Human": [16, 78], "Gnome": [30, 260],
+	"Goblin": [12, 60], "Kobold": [10, 50]
+}
+const GOBLIN_FIRST_NAMES: Array[String] = [
+	"Snik", "Grubbash", "Mizzle", "Rakka", "Fettle", "Yagra", "Skiv",
+	"Nubbin", "Grix", "Tarnak", "Wexla", "Bogrin"
+]
+const GOBLIN_SURNAMES: Array[String] = [
+	"Mudgrin", "Rustbite", "Sniplash", "Damptoe", "Cinderlick", "Gutterwise",
+	"Shankfoot", "Molepaw"
+]
+const GNOME_FIRST_NAMES: Array[String] = [
+	"Fizwick", "Nimble", "Tock", "Perriwig", "Glimmer", "Boddynock",
+	"Ellywick", "Sprocket", "Quilla", "Wrenna", "Fenwick", "Dabbledob"
+]
+const GNOME_SURNAMES: Array[String] = [
+	"Cogspinner", "Murmurwell", "Thistletorque", "Copperwhistle", "Fiddlefen",
+	"Glowpocket", "Nackleknob", "Silverspring"
+]
+const KOBOLD_FIRST_NAMES: Array[String] = [
+	"Yip", "Skarn", "Meepo", "Tikka", "Vex", "Drazzik", "Snarl", "Kekkit",
+	"Izzik", "Pox", "Rikrik", "Zsofka"
+]
+const KOBOLD_SURNAMES: Array[String] = [
+	"Emberclaw", "Tunnelborn", "Scaleflint", "Deepsnout", "Wyrmkin",
+	"Ashscale", "Cavewhisper", "Gravelhiss"
+]
+
+static func roll_race(rng: RandomNumberGenerator, kind: String) -> String:
+	var pool := RACES_BY_KIND.get(kind, RACES_BY_KIND["townsfolk"]) as Array
+	var total := 0
+	for entry_variant: Variant in pool:
+		total += int((entry_variant as Array)[1])
+	var roll := rng.randi_range(1, total)
+	for entry_variant: Variant in pool:
+		var entry := entry_variant as Array
+		roll -= int(entry[1])
+		if roll <= 0:
+			return String(entry[0])
+	return String((pool[0] as Array)[0])
 
 static func generate(rng: RandomNumberGenerator, profession: String, kind: String) -> Dictionary:
+	var race := roll_race(rng, kind)
 	var first_name: String
 	var surname: String
-	var age: int
-	if kind == "dwarf":
-		first_name = DWARF_FIRST_NAMES[rng.randi_range(0, DWARF_FIRST_NAMES.size() - 1)]
-		surname = DWARF_CLAN_NAMES[rng.randi_range(0, DWARF_CLAN_NAMES.size() - 1)]
-		age = rng.randi_range(22, 320)
-	else:
-		first_name = TOWNSFOLK_FIRST_NAMES[rng.randi_range(0, TOWNSFOLK_FIRST_NAMES.size() - 1)]
-		surname = TOWNSFOLK_SURNAMES[rng.randi_range(0, TOWNSFOLK_SURNAMES.size() - 1)]
-		age = rng.randi_range(16, 78)
+	match race:
+		"Dwarf":
+			first_name = DWARF_FIRST_NAMES[rng.randi_range(0, DWARF_FIRST_NAMES.size() - 1)]
+			surname = DWARF_CLAN_NAMES[rng.randi_range(0, DWARF_CLAN_NAMES.size() - 1)]
+		"Goblin":
+			first_name = GOBLIN_FIRST_NAMES[rng.randi_range(0, GOBLIN_FIRST_NAMES.size() - 1)]
+			surname = GOBLIN_SURNAMES[rng.randi_range(0, GOBLIN_SURNAMES.size() - 1)]
+		"Gnome":
+			first_name = GNOME_FIRST_NAMES[rng.randi_range(0, GNOME_FIRST_NAMES.size() - 1)]
+			surname = GNOME_SURNAMES[rng.randi_range(0, GNOME_SURNAMES.size() - 1)]
+		"Kobold":
+			first_name = KOBOLD_FIRST_NAMES[rng.randi_range(0, KOBOLD_FIRST_NAMES.size() - 1)]
+			surname = KOBOLD_SURNAMES[rng.randi_range(0, KOBOLD_SURNAMES.size() - 1)]
+		_:
+			first_name = TOWNSFOLK_FIRST_NAMES[rng.randi_range(0, TOWNSFOLK_FIRST_NAMES.size() - 1)]
+			surname = TOWNSFOLK_SURNAMES[rng.randi_range(0, TOWNSFOLK_SURNAMES.size() - 1)]
+	var age_range := RACE_AGE_RANGES.get(race, [16, 78]) as Array
+	var age := rng.randi_range(int(age_range[0]), int(age_range[1]))
+	var faith := ""
+	if rng.randf() >= FAITHLESS_CHANCE:
+		var faiths := DWARF_FAITHS if kind == "dwarf" else TOWNSFOLK_FAITHS
+		faith = faiths[rng.randi_range(0, faiths.size() - 1)]
 	return {
 		"name": "%s %s" % [first_name, surname],
 		"first_name": first_name,
 		"clan": surname,
+		"race": race,
 		"profession": profession,
 		"age": age,
 		"temperament": TEMPERAMENTS[rng.randi_range(0, TEMPERAMENTS.size() - 1)],
 		"favorite": FAVORITE_ITEMS[rng.randi_range(0, FAVORITE_ITEMS.size() - 1)],
-		"dream": DREAMS[rng.randi_range(0, DREAMS.size() - 1)]
+		"dream": DREAMS[rng.randi_range(0, DREAMS.size() - 1)],
+		"faith": faith
 	}
 
 ## The header line above dialogue and in hover tooltips:
-## "Urist Copperbeard, Miner (112)".
+## "Urist Copperbeard, Dwarf Miner (112)".
 static func summary_line(identity: Dictionary) -> String:
+	var race := String(identity.get("race", ""))
+	var calling := String(identity.get("profession", "Wanderer"))
+	if not race.is_empty():
+		calling = "%s %s" % [race, calling]
 	return "%s, %s (%d)" % [
 		String(identity.get("name", "A stranger")),
-		String(identity.get("profession", "Wanderer")),
+		calling,
 		int(identity.get("age", 0))
 	]
 
 ## A personal line for conversation: their dream, their favorite thing,
-## or their temperament, in their own words.
+## their temperament, their family, or their gods, in their own words.
 static func personal_line(identity: Dictionary, rng: RandomNumberGenerator) -> String:
-	match rng.randi_range(0, 2):
+	match rng.randi_range(0, 4):
 		0:
 			return "My dream? %s." % String(identity.get("dream", "to keep on keeping on")).capitalize()
 		1:
 			return "Nothing beats a bit of %s, I say." % String(identity.get("favorite", "quiet"))
+		2:
+			var spouse := String(identity.get("spouse", ""))
+			var children := identity.get("children", []) as Array
+			if not spouse.is_empty() and not children.is_empty():
+				return "%s and the little ones keep me honest." % spouse.get_slice(" ", 0)
+			if not spouse.is_empty():
+				return "Wed to %s, and gladly." % spouse
+			var parents := identity.get("parents", []) as Array
+			if not parents.is_empty():
+				return "My folks? %s's kin, through and through." % String(parents[0]).get_slice(" ", 0)
+			return "Folk around here call me %s." % String(identity.get("temperament", "steady"))
+		3:
+			var faith := String(identity.get("faith", ""))
+			if not faith.is_empty():
+				return "I keep faith with %s. It keeps me back." % faith
+			return "Gods? Never had much use for them."
 		_:
 			return "Folk around here call me %s." % String(identity.get("temperament", "steady"))
 
-## Longer sheet for tooltips: temperament, favorite, and dream stacked.
+## Longer sheet for tooltips: temperament, favorite, dream, kin and gods.
 static func detail_lines(identity: Dictionary) -> Array[String]:
-	return [
+	var lines: Array[String] = [
 		"Temperament: %s" % String(identity.get("temperament", "steady")),
 		"Favors: %s" % String(identity.get("favorite", "quiet evenings")),
 		"Dreams %s" % String(identity.get("dream", "of nothing much"))
 	]
+	var faith := String(identity.get("faith", ""))
+	if not faith.is_empty():
+		lines.append("Keeps faith with %s" % faith)
+	var spouse := String(identity.get("spouse", ""))
+	if not spouse.is_empty():
+		lines.append("Wed to %s" % spouse)
+	var parents := identity.get("parents", []) as Array
+	if not parents.is_empty():
+		var parent_names: Array[String] = []
+		for parent_variant: Variant in parents:
+			parent_names.append(String(parent_variant))
+		lines.append("Child of %s" % " and ".join(parent_names))
+	var children := identity.get("children", []) as Array
+	if not children.is_empty():
+		var child_firsts: Array[String] = []
+		for child_variant: Variant in children:
+			child_firsts.append(String(child_variant).get_slice(" ", 0))
+		lines.append("Parent of %s" % ", ".join(child_firsts))
+	return lines
 
 ## DF rule: every citizen looks like themselves. Appearance layers are
 ## rolled deterministically from the identity, so the same dwarf keeps
 ## the same face across sessions. Age greys the hair; dwarves keep
 ## their beards, human beards are a coin toss.
-static func appearance_for_identity(identity: Dictionary, species: String = "dwarf") -> Dictionary:
+static func appearance_for_identity(identity: Dictionary, default_species: String = "dwarf") -> Dictionary:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash("%s|%s|%d" % [String(identity.get("name", "")), String(identity.get("clan", "")), int(identity.get("age", 0))])
+	var race := String(identity.get("race", ""))
+	if race.is_empty():
+		race = "Dwarf" if default_species == "dwarf" else "Human"
+	# Each race maps onto the layer sheets its own way: sheet choice,
+	# skin tint (goblin green, kobold rust), beards, and body scale.
+	var species := "human" if race == "Human" or race == "Gnome" else "dwarf"
+	var skin_tint := ""
+	var body_scale := 1.0
+	var beardless := false
+	match race:
+		"Goblin":
+			skin_tint = "#7fbf6a"
+			body_scale = 0.8
+			beardless = true
+		"Kobold":
+			skin_tint = "#c98a5e"
+			body_scale = 0.72
+			beardless = true
+		"Gnome":
+			body_scale = 0.72
 	var age := int(identity.get("age", 60))
-	var elder_age := 200 if species == "dwarf" else 58
-	var greying_age := 120 if species == "dwarf" else 45
+	var age_range := RACE_AGE_RANGES.get(race, [16, 78]) as Array
+	var lifespan := float(int(age_range[1]))
+	var elder_age := int(lifespan * 0.68)
+	var greying_age := int(lifespan * 0.45)
 	var hair_color: int
 	if age >= elder_age:
 		hair_color = rng.randi_range(0, 1)
@@ -122,14 +259,18 @@ static func appearance_for_identity(identity: Dictionary, species: String = "dwa
 	else:
 		hair_color = rng.randi_range(2, 5)
 	var beard_style := -1
-	if species == "dwarf" or rng.randi_range(0, 1) == 0:
+	if not beardless and (race == "Dwarf" or race == "Gnome" or rng.randi_range(0, 1) == 0):
 		beard_style = rng.randi_range(0, 11)
-	return {
+	var layers := {
 		"species": species,
 		"skin_tone": rng.randi_range(0, 3),
 		"hair_style": rng.randi_range(-1, 7) if species == "human" else rng.randi_range(0, 7),
 		"hair_color": hair_color,
 		"beard_style": beard_style,
 		"beard_color": hair_color,
-		"clothes_color": rng.randi_range(0, 17)
+		"clothes_color": rng.randi_range(0, 17),
+		"body_scale": body_scale
 	}
+	if not skin_tint.is_empty():
+		layers["skin_tint"] = skin_tint
+	return layers

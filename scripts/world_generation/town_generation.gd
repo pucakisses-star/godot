@@ -505,6 +505,7 @@ func _advance_game_clock(delta: float) -> void:
 		_game_day += 1
 	# Strolling the market works up an appetite too.
 	_player_satiety = clampf(_player_satiety - delta_hours * PlayerStatsService.SATIETY_DRAIN_PER_GAME_HOUR, 0.0, PlayerStatsService.SATIETY_MAX)
+	_advance_afflictions(delta_hours)
 	_update_faction_events()
 	_update_day_night_tint()
 	_update_clock_label()
@@ -911,6 +912,7 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	var grid: Dictionary = {}
 	_latest_civic_buildings_by_id = {}
 	_latest_civic_building_type_map = {}
+	_latest_civic_building_name_map = {}
 	_latest_residence_type_map = {}
 	var plaza_layouts: Array[Dictionary] = []
 	var central_plaza_radius := Vector2i(
@@ -1073,6 +1075,7 @@ func _show_level(target_level_index: int) -> void:
 	_latest_requested_zone_counts = level_data.get("requested_zone_counts", {}) as Dictionary
 	_latest_civic_buildings_by_id = level_data.get("civic_buildings_by_id", {}) as Dictionary
 	_latest_civic_building_type_map = level_data.get("civic_building_type_map", {}) as Dictionary
+	_latest_civic_building_name_map = _build_civic_building_name_lookup(_latest_civic_buildings_by_id, seed_input.text.strip_edges(), "townsfolk")
 	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
@@ -2002,13 +2005,23 @@ func _apply_identity_appearances() -> void:
 		sprite.scale = Vector2(
 			float(tile_size.x) / 32.0,
 			float(tile_size.y) / 32.0
-		) * 0.9
+		) * 0.9 * float(layers.get("body_scale", 1.0))
 		state["composed"] = true
 
 func _assign_npc_identities() -> void:
+	var used_names: Dictionary = {}
 	for state: Dictionary in _npc_states:
 		var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
 		var identity: Dictionary = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		# Nobody shares a full name: spouse/parent/faction references are
+		# by name, so collisions would tangle the whole census.
+		for _reroll in 8:
+			if not used_names.has(String(identity.get("name", ""))):
+				break
+			identity = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		if used_names.has(String(identity.get("name", ""))):
+			identity["name"] = "%s the Younger" % String(identity.get("name", ""))
+		used_names[String(identity.get("name", ""))] = true
 		state["identity"] = identity
 		state["npc_name"] = String(identity.get("name", "A villager"))
 
@@ -2016,6 +2029,13 @@ func _assign_npc_identities() -> void:
 ## seeded rng, recruited from the identity roster, and listed in the
 ## sidebar. Members answer their faction's meeting bell through the
 ## scheduler.
+## Kinship: couples share a surname, a roof and usually an altar; the
+## young are raised as their children. Runs before faces are composed
+## so adopted surnames reshape the family resemblance too.
+func _assign_npc_families() -> void:
+	var family_stats := SettlementFamilyService.build_families(_npc_states, "townsfolk", _rng)
+	print("[%s] families: %d couples, %d children" % [name, int(family_stats.get("couples", 0)), int(family_stats.get("children_placed", 0))])
+
 func _assign_settlement_factions() -> void:
 	_faction_event_stamps.clear()
 	var building_cells_by_type: Dictionary = {}
@@ -2250,7 +2270,10 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
+	_assign_npc_families()
 	_assign_settlement_factions()
+	SettlementAfflictionService.seed_afflictions(_npc_states, _rng)
+	_apply_affliction_visuals()
 	_apply_identity_appearances()
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
@@ -2347,6 +2370,18 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 		return
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
+		# You don't chat with the risen dead - you put them down.
+		if SettlementAfflictionService.is_active_zombie(npc_state):
+			var swing := int(PlayerStatsService.for_session(self).get("attack", 2))
+			npc_state["zombie_hp"] = int(npc_state.get("zombie_hp", 6)) - swing
+			var zombie_sprite := npc_state.get("sprite") as Sprite2D
+			if zombie_sprite != null and has_method("_spawn_floating_text"):
+				call("_spawn_floating_text", "-%d" % swing, zombie_sprite.position, Color(1.0, 0.85, 0.5, 1.0))
+			if int(npc_state.get("zombie_hp", 0)) <= 0:
+				npc_state["affliction_dead"] = true
+				_remove_dead_afflicted()
+				_set_save_status("The corpse falls still at last.", Color(0.8, 0.85, 0.7, 1.0))
+			return
 		_show_npc_dialogue(npc_state)
 		return
 	var shop_type := _shop_type_at_cell(clicked_cell)
@@ -2533,12 +2568,61 @@ func _center_view_on_world_position(local_position: Vector2) -> void:
 	_update_city_layer_transform()
 
 func _update_npc_movement(delta: float) -> void:
+	var predator_events := SettlementAfflictionService.update_predators(
+		delta, _npc_states, city_layer, _rng, _game_hour,
+		Callable(self, "_is_npc_walkable_cell"),
+		Callable(self, "_cell_center_position")
+	)
+	for predator_event: String in predator_events:
+		_set_save_status(predator_event, Color(0.95, 0.6, 0.55, 1.0))
 	SettlementNpcScheduler.update_scheduled_npcs(
-		delta, _npc_states, city_layer, _rng,
+		delta, _scheduled_states(), city_layer, _rng,
 		tile_size, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),
 		Callable(self, "_cell_center_position")
 	)
+
+## The dead answer to their hunger, not the clock.
+func _scheduled_states() -> Array[Dictionary]:
+	var living: Array[Dictionary] = []
+	for state: Dictionary in _npc_states:
+		if not SettlementAfflictionService.is_active_zombie(state):
+			living.append(state)
+	return living
+
+## Clock-scale affliction bookkeeping: recovery, deaths, incubations,
+## contagion, and vampires caught out in the sun.
+func _advance_afflictions(delta_hours: float) -> void:
+	if _npc_states.is_empty() or delta_hours <= 0.0:
+		return
+	var day_hour := _game_hour >= 6.0 and _game_hour < 20.0
+	var affliction_events := SettlementAfflictionService.advance(_npc_states, delta_hours, _rng, true, day_hour)
+	for affliction_event: String in affliction_events:
+		_set_save_status(affliction_event, Color(0.95, 0.6, 0.55, 1.0))
+	_apply_affliction_visuals()
+	_remove_dead_afflicted()
+
+func _apply_affliction_visuals() -> void:
+	for state: Dictionary in _npc_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var tint: Color = SettlementAfflictionService.tint_for(state)
+		var tint_key := str(tint)
+		if String(state.get("affliction_tint_applied", "")) == tint_key:
+			continue
+		state["affliction_tint_applied"] = tint_key
+		sprite.modulate = tint
+
+func _remove_dead_afflicted() -> void:
+	for index in range(_npc_states.size() - 1, -1, -1):
+		var state := _npc_states[index]
+		if not bool(state.get("affliction_dead", false)):
+			continue
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite != null:
+			sprite.queue_free()
+		_npc_states.remove_at(index)
 
 func _create_placeholder_tavern_character_texture() -> Texture2D:
 	return DwarfHoldTavernService.create_placeholder_tavern_character_texture()
@@ -2669,12 +2753,19 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 			tooltip_lines.append(detail)
 		if hovered_npc.has("faction_name") and not bool(hovered_npc.get("faction_secret", false)):
 			tooltip_lines.append("Sworn to the %s" % String(hovered_npc.get("faction_name", "")))
+		var affliction_line: String = SettlementAfflictionService.tooltip_line(hovered_npc)
+		if not affliction_line.is_empty():
+			tooltip_lines.append(affliction_line)
 		tooltip_lines.append("")
 	tooltip_lines.append("Tile: %s" % tile_name)
 	tooltip_lines.append("Zone: %s" % zone_name)
 	var subtype := _building_type_for_cell_or_empty(hovered_cell)
 	if not subtype.is_empty():
-		tooltip_lines.append("Subtype: %s" % _display_name_for_building_type(subtype))
+		var signboard := String(_latest_civic_building_name_map.get(hovered_cell, ""))
+		if signboard.is_empty():
+			tooltip_lines.append("Subtype: %s" % _display_name_for_building_type(subtype))
+		else:
+			tooltip_lines.append("%s — %s" % [signboard, _display_name_for_building_type(subtype)])
 		var flavor := String(BUILDING_SUBTYPE_FLAVOR.get(subtype, ""))
 		if not flavor.is_empty():
 			tooltip_lines.append(flavor)

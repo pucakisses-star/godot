@@ -41,6 +41,7 @@ var _hold_state := DwarfHoldStateModel.new()
 var _latest_grid: Dictionary = {}
 
 var _latest_civic_building_type_map: Dictionary = {}
+var _latest_civic_building_name_map: Dictionary = {}
 
 var _latest_residence_type_map: Dictionary = {}
 
@@ -295,6 +296,18 @@ func _stable_component_anchor(component: Array[Vector2i]) -> Vector2i:
 		if cell.x < anchor.x or (cell.x == anchor.x and cell.y < anchor.y):
 			anchor = cell
 	return anchor
+
+## Signboards: every civic building gets a deterministic name over its
+## door, rolled from the settlement seed and the building's stable id.
+func _build_civic_building_name_lookup(buildings_by_id: Dictionary, seed_text: String, kind: String) -> Dictionary:
+	var lookup: Dictionary = {}
+	for building_id: String in buildings_by_id.keys():
+		var payload := buildings_by_id[building_id] as Dictionary
+		var display_name := BuildingNameService.name_for(String(payload.get("type", "workshop")), seed_text, building_id, kind)
+		payload["display_name"] = display_name
+		for cell_variant: Variant in (payload.get("cells", []) as Array):
+			lookup[cell_variant as Vector2i] = display_name
+	return lookup
 
 func _build_civic_building_type_lookup(buildings_by_id: Dictionary) -> Dictionary:
 	var lookup: Dictionary = {}
