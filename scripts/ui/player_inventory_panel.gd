@@ -128,7 +128,7 @@ func _build_ui() -> void:
 	_hint_label = Label.new()
 	_hint_label.add_theme_font_size_override("font_size", 11)
 	_hint_label.modulate = Color(0.75, 0.72, 0.65, 1.0)
-	_hint_label.text = "Click packed gear to wear it · click a worn piece to take it off · I closes"
+	_hint_label.text = "Click gear to wear it · click other items to bind them to the hotbar · I closes"
 	layout.add_child(_hint_label)
 
 func _make_slot_button() -> Button:
@@ -166,7 +166,22 @@ func _on_backpack_slot_pressed(index: int) -> void:
 		return
 	var item_name := _backpack_items[index]
 	if GearService.equip_slot_for(item_name).is_empty():
-		_hint_label.text = "%s isn't something you can wear." % item_name
+		# Not wearable: clicking binds it to (or frees it from) the hotbar.
+		var bind_settings: Dictionary = _get_settings.call()
+		var bound := GearService.hotbar_index_of(bind_settings, item_name)
+		if bound >= 0:
+			GearService.set_hotbar_binding(bind_settings, bound, "")
+			_hint_label.text = "%s unbound from key %d." % [item_name, (bound + 1) % 10]
+		else:
+			bound = GearService.bind_hotbar_first_free(bind_settings, item_name)
+			if bound < 0:
+				_hint_label.text = "The hotbar is full — unbind something first."
+				return
+			_hint_label.text = "%s bound to key %d." % [item_name, (bound + 1) % 10]
+		_store_settings.call(bind_settings)
+		refresh()
+		if _on_changed.is_valid():
+			_on_changed.call()
 		return
 	var settings: Dictionary = _get_settings.call()
 	var inventory: Dictionary = _get_inventory.call()
@@ -222,9 +237,12 @@ func refresh() -> void:
 			var flavor := ItemDefsService.flavor_text(item_name)
 			if not flavor.is_empty() and not tooltip.contains(flavor):
 				tooltip += "\n" + flavor
+			var bound_key := GearService.hotbar_index_of(settings, item_name)
+			if bound_key >= 0:
+				tooltip += "\nHotbar key %d" % [(bound_key + 1) % 10]
 			pack_button.tooltip_text = tooltip
 		else:
-			_hint_label.text = "Click packed gear to wear it · click a worn piece to take it off · I closes"
+			_hint_label.text = "Click gear to wear it · click other items to bind them to the hotbar · I closes"
 			pack_button.icon = null
 			pack_button.text = ""
 			pack_button.tooltip_text = ""

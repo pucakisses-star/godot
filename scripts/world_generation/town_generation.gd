@@ -164,6 +164,7 @@ var _music_timer := 0.0
 var _wall_damage: Dictionary = {}
 var _speed_scale_cache := 1.0
 var _inventory_screen: PlayerInventoryPanel
+var _player_hotbar: PlayerHotbar
 var _factions_label: RichTextLabel
 var _faction_event_stamps: Dictionary = {}
 var _town_name := ""
@@ -525,6 +526,7 @@ func _ready() -> void:
 	_load_player_combat_state()
 	_setup_hp_label()
 	_setup_inventory_screen()
+	_setup_hotbar()
 	GameAudioService.play_music(self, "town")
 	_update_day_night_tint()
 	_update_clock_label()
@@ -644,6 +646,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					_inventory_screen.toggle()
 				get_viewport().set_input_as_handled()
 				return
+			_:
+				var hotbar_index := _hotbar_index_for_keycode(key_event.keycode)
+				if hotbar_index >= 0:
+					_use_hotbar_slot(hotbar_index)
+					get_viewport().set_input_as_handled()
+					return
 	if _player_sprite == null or not _player_control_enabled:
 		return
 	if _is_text_input_focused():
@@ -2332,7 +2340,10 @@ func _load_player_inventory() -> void:
 	_player_inventory = (inventory_variant as Dictionary).duplicate() if inventory_variant is Dictionary else {}
 	_player_coins = int(settings.get("player_coins", 0))
 	# Old saves wore gear as flags; hang it on the paper doll once.
-	if GearService.ensure_equipment_migrated(settings, _player_inventory):
+	var save_changed := GearService.ensure_equipment_migrated(settings, _player_inventory)
+	if GearService.seed_default_hotbar(settings, _player_inventory):
+		save_changed = true
+	if save_changed:
 		game_session.call("set_world_settings", settings)
 		_save_player_inventory()
 
@@ -3409,6 +3420,8 @@ func _add_to_inventory(item_name: String, amount: int) -> void:
 		_player_inventory.erase(item_name)
 	_populate_backpack_slots()
 	_update_gear_label()
+	if _player_hotbar != null:
+		_player_hotbar.refresh()
 	if GearService.TRINKET_DEFS.has(item_name):
 		_refresh_player_stats_town()
 	_save_player_inventory()
@@ -3444,6 +3457,74 @@ func _on_equipment_changed() -> void:
 	_refresh_player_stats_town()
 	_populate_backpack_slots()
 	_save_player_inventory()
+	if _player_hotbar != null:
+		_player_hotbar.refresh()
+
+func _setup_hotbar() -> void:
+	if chest_popup == null:
+		return
+	_player_hotbar = PlayerHotbar.new()
+	_player_hotbar.setup(
+		Callable(self, "_world_settings_snapshot"),
+		func() -> Dictionary: return _player_inventory,
+		Callable(self, "_use_hotbar_slot")
+	)
+	chest_popup.get_parent().add_child(_player_hotbar)
+	_player_hotbar.refresh()
+	_player_hotbar.reposition.call_deferred()
+
+func _hotbar_index_for_keycode(keycode: int) -> int:
+	if keycode >= KEY_1 and keycode <= KEY_9:
+		return keycode - KEY_1
+	if keycode == KEY_0:
+		return 9
+	return -1
+
+## The quick keys: potions drink, food eats, the hoe arms till mode,
+## anything else just reports itself.
+func _use_hotbar_slot(index: int) -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var bindings: Array = GearService.hotbar_bindings(settings)
+	var item_name := String(bindings[index]) if index < bindings.size() else ""
+	if item_name.is_empty():
+		_set_save_status("Hotbar %d is empty — bind items from the pack (I)." % [(index + 1) % 10], Color(0.8, 0.8, 0.8, 1.0))
+		return
+	if _player_hotbar != null:
+		_player_hotbar.flash(index)
+	if int(_player_inventory.get(item_name, 0)) < 1:
+		_set_save_status("Out of %s." % item_name, Color(0.95, 0.75, 0.45, 1.0))
+		return
+	if GearService.POTION_DEFS.has(item_name):
+		_drink_potion(item_name)
+		return
+	if ItemDefsService.is_edible(item_name):
+		_eat_item(item_name)
+		return
+	if item_name == "Iron Hoe":
+		for entry_index in TOWN_BUILD_CATALOG.size():
+			if String((TOWN_BUILD_CATALOG[entry_index] as Dictionary).get("kind", "")) == "till":
+				_build_selection = entry_index
+				_set_save_status("🔨 Till Soil armed — click grass beside you.", Color(0.85, 0.9, 0.75, 1.0))
+				return
+	_set_save_status("%s ×%d in the pack." % [item_name, int(_player_inventory.get(item_name, 0))], Color(0.8, 0.8, 0.8, 1.0))
+
+## Eating above ground: mends and feeds, same math as the hold.
+func _eat_item(item_name: String) -> void:
+	if not ItemDefsService.is_edible(item_name) or int(_player_inventory.get(item_name, 0)) < 1:
+		return
+	if _player_hp >= _player_max_hp and _player_satiety > PlayerStatsService.SATIETY_MAX * 0.9:
+		_set_save_status("You're at full health and well fed", Color(0.7, 0.9, 0.7, 1.0))
+		return
+	var heal := ItemDefsService.heal_amount(item_name)
+	_add_to_inventory(item_name, -1)
+	_player_hp = minf(_player_hp + float(heal), _player_max_hp)
+	_player_satiety = clampf(_player_satiety + float(heal) * PlayerStatsService.SATIETY_PER_HEAL_POINT, 0.0, PlayerStatsService.SATIETY_MAX)
+	PlayerStatsService.save_satiety(self, _player_satiety)
+	_update_hp_label()
+	GameAudioService.play_sfx(self, "eat")
+	if _player_sprite != null:
+		_spawn_floating_text("+%d" % heal, _player_sprite.position, Color(0.5, 0.95, 0.5, 1.0))
+	_set_save_status("Ate %s (+%d)" % [item_name, heal], Color(0.7, 0.95, 0.6, 1.0))
 
 func _player_speed_scale() -> float:
 	return maxf(_speed_scale_cache * (1.65 if _player_mounted else 1.0), 0.25)
@@ -3456,21 +3537,26 @@ func _handle_quick_drink_action() -> void:
 		var def := GearService.POTION_DEFS[potion_name] as Dictionary
 		if def.has("heal") and _player_hp >= _player_max_hp:
 			continue
-		var settings: Dictionary = _world_settings_snapshot()
-		settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
-		var result: Dictionary = GearService.drink(settings, potion_name, float(_game_day) * 24.0 + _game_hour)
-		_store_world_settings(settings)
-		_add_to_inventory(potion_name, -1)
-		GameAudioService.play_sfx(self, "drink")
-		if result.has("heal"):
-			_player_hp = minf(_player_hp + float(int(result.get("heal", 0))), _player_max_hp)
-			_update_hp_label()
-			_set_save_status("You drink the %s (+%d HP)." % [potion_name, int(result.get("heal", 0))], Color(0.9, 0.6, 0.6, 1.0))
-		else:
-			_refresh_player_stats_town()
-			_set_save_status("You drink the %s — %s hums in your blood." % [potion_name, String(result.get("buff", ""))], Color(0.8, 0.75, 0.95, 1.0))
+		_drink_potion(potion_name)
 		return
 	_set_save_status("No potions in the pack — apothecaries and road peddlers sell them.", Color(0.8, 0.8, 0.8, 1.0))
+
+func _drink_potion(potion_name: String) -> void:
+	if int(_player_inventory.get(potion_name, 0)) < 1:
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
+	var result: Dictionary = GearService.drink(settings, potion_name, float(_game_day) * 24.0 + _game_hour)
+	_store_world_settings(settings)
+	_add_to_inventory(potion_name, -1)
+	GameAudioService.play_sfx(self, "drink")
+	if result.has("heal"):
+		_player_hp = minf(_player_hp + float(int(result.get("heal", 0))), _player_max_hp)
+		_update_hp_label()
+		_set_save_status("You drink the %s (+%d HP)." % [potion_name, int(result.get("heal", 0))], Color(0.9, 0.6, 0.6, 1.0))
+	else:
+		_refresh_player_stats_town()
+		_set_save_status("You drink the %s — %s hums in your blood." % [potion_name, String(result.get("buff", ""))], Color(0.8, 0.75, 0.95, 1.0))
 
 ## --- weapon classes at range -------------------------------------------------
 

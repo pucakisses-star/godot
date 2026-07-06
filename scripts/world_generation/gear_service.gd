@@ -236,6 +236,67 @@ static func auto_equip_best(settings: Dictionary, inventory: Dictionary) -> void
 			if not best_name.is_empty():
 				equip(settings, inventory, best_name)
 
+## --- the hotbar ---------------------------------------------------------------
+## Ten quick-use keys (1-9, 0). Slots BIND item names; counts and
+## consumption stay in the ordinary backpack, so a binding survives
+## running dry and lights back up on resupply.
+
+const HOTBAR_KEY := "player_hotbar"
+const HOTBAR_SLOTS := 10
+
+static func hotbar_bindings(settings: Dictionary) -> Array:
+	var stored: Variant = settings.get(HOTBAR_KEY)
+	var bindings: Array = (stored as Array).duplicate() if stored is Array else []
+	while bindings.size() < HOTBAR_SLOTS:
+		bindings.append("")
+	bindings.resize(HOTBAR_SLOTS)
+	return bindings
+
+static func set_hotbar_binding(settings: Dictionary, index: int, item_name: String) -> void:
+	if index < 0 or index >= HOTBAR_SLOTS:
+		return
+	var bindings := hotbar_bindings(settings)
+	bindings[index] = item_name
+	settings[HOTBAR_KEY] = bindings
+
+static func hotbar_index_of(settings: Dictionary, item_name: String) -> int:
+	return hotbar_bindings(settings).find(item_name)
+
+## Binds into the first free slot; -1 when full or already bound.
+static func bind_hotbar_first_free(settings: Dictionary, item_name: String) -> int:
+	var bindings := hotbar_bindings(settings)
+	if bindings.has(item_name):
+		return -1
+	var free := bindings.find("")
+	if free < 0:
+		return -1
+	bindings[free] = item_name
+	settings[HOTBAR_KEY] = bindings
+	return free
+
+## First-run seeding: potions, the most filling food, and the field
+## tools already in the pack take the front keys.
+static func seed_default_hotbar(settings: Dictionary, inventory: Dictionary) -> bool:
+	if settings.get(HOTBAR_KEY) is Array:
+		return false
+	settings[HOTBAR_KEY] = []
+	for potion_name: String in POTION_DEFS.keys():
+		if int(inventory.get(potion_name, 0)) > 0:
+			bind_hotbar_first_free(settings, potion_name)
+	var best_food := ""
+	var best_heal := -1
+	for item_variant: Variant in inventory.keys():
+		var item_name := String(item_variant)
+		if ItemDefsService.is_edible(item_name) and ItemDefsService.heal_amount(item_name) > best_heal:
+			best_heal = ItemDefsService.heal_amount(item_name)
+			best_food = item_name
+	if not best_food.is_empty():
+		bind_hotbar_first_free(settings, best_food)
+	for tool_name: String in ["Iron Hoe", "Arrows", "Carrot Seeds", "Beetroot Seeds", "Tomato Seeds"]:
+		if int(inventory.get(tool_name, 0)) > 0:
+			bind_hotbar_first_free(settings, tool_name)
+	return true
+
 ## --- the forge --------------------------------------------------------------
 
 static func smelt_option(inventory: Dictionary) -> Dictionary:
