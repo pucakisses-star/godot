@@ -1966,7 +1966,7 @@ func _spawn_farm_animal_at(cell: Vector2i, pen_index: int) -> void:
 	sprite.region_enabled = true
 	sprite.centered = true
 	sprite.region_rect = Rect2(0, 0, frame_px, frame_px)
-	sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px)) * 0.9
+	sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px))
 	sprite.position = _cell_center_position(cell)
 	sprite.z_index = 11
 	actor_layer.add_child(sprite)
@@ -2216,7 +2216,7 @@ func _apply_identity_appearances() -> void:
 		sprite.scale = Vector2(
 			float(tile_size.x) / 32.0,
 			float(tile_size.y) / 32.0
-		) * 0.9 * float(layers.get("body_scale", 1.0))
+		) * float(layers.get("body_scale", 1.0))
 		state["composed"] = true
 
 func _assign_npc_identities() -> void:
@@ -3726,7 +3726,7 @@ func _set_boating(boating: bool) -> void:
 		_boat_sprite.position = Vector2(0.0, 4.0)
 		# Behind the rider but above the water tiles.
 		_boat_sprite.show_behind_parent = true
-		_boat_sprite.scale = Vector2(0.9, 0.75)
+		_boat_sprite.scale = Vector2.ONE
 		_player_sprite.add_child(_boat_sprite)
 	if _boat_sprite != null:
 		_boat_sprite.visible = boating
@@ -3770,7 +3770,7 @@ func _toggle_mount() -> void:
 			_mount_sprite.region_rect = Rect2(0, 0, 32, 32)
 			_mount_sprite.position = Vector2(0.0, 4.0)
 			_mount_sprite.show_behind_parent = true
-			_mount_sprite.scale = Vector2(0.85, 0.7)
+			_mount_sprite.scale = Vector2.ONE
 			_player_sprite.add_child(_mount_sprite)
 	if _mount_sprite != null:
 		_mount_sprite.visible = _player_mounted
@@ -4030,7 +4030,7 @@ func _spawn_owned_animal(kind: String, cell: Vector2i, last_produce_h: float) ->
 	sprite.region_enabled = true
 	sprite.centered = true
 	sprite.region_rect = Rect2(0, 0, frame_px, frame_px)
-	sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px)) * 0.9
+	sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px))
 	sprite.position = _cell_center_position(cell)
 	sprite.z_index = 11
 	actor_layer.add_child(sprite)
