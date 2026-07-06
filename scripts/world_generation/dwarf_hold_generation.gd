@@ -938,6 +938,7 @@ func _advance_game_clock(delta: float) -> void:
 		_game_hour -= 24.0
 		_game_day += 1
 	_advance_hunger(delta_hours)
+	_advance_afflictions(delta_hours)
 	_update_faction_events()
 	_update_clock_label()
 
@@ -2071,6 +2072,8 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_assign_npc_identities()
 	_assign_npc_families()
 	_assign_settlement_factions()
+	SettlementAfflictionService.seed_afflictions(_npc_states, _rng)
+	_apply_affliction_visuals()
 	_apply_identity_appearances()
 	_clear_torch_sprites()
 	_clear_creatures()
@@ -3705,6 +3708,18 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 		return
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
+		# You don't chat with the risen dead - you put them down.
+		if SettlementAfflictionService.is_active_zombie(npc_state):
+			var swing := int(PlayerStatsService.for_session(self).get("attack", 2))
+			npc_state["zombie_hp"] = int(npc_state.get("zombie_hp", 6)) - swing
+			var zombie_sprite := npc_state.get("sprite") as Sprite2D
+			if zombie_sprite != null:
+				_spawn_floating_text("-%d" % swing, zombie_sprite.position, Color(1.0, 0.85, 0.5, 1.0))
+			if int(npc_state.get("zombie_hp", 0)) <= 0:
+				npc_state["affliction_dead"] = true
+				_remove_dead_afflicted()
+				_set_save_status("The corpse falls still at last.", Color(0.8, 0.85, 0.7, 1.0))
+			return
 		_show_npc_dialogue(npc_state)
 		return
 	var shop_type := _shop_type_at_cell(clicked_cell)
@@ -3913,12 +3928,61 @@ func _center_view_on_world_position(local_position: Vector2) -> void:
 	_update_city_layer_transform()
 
 func _update_npc_movement(delta: float) -> void:
+	var predator_events := SettlementAfflictionService.update_predators(
+		delta, _npc_states, city_layer, _rng, _game_hour,
+		Callable(self, "_is_npc_walkable_cell"),
+		Callable(self, "_cell_center_position")
+	)
+	for predator_event: String in predator_events:
+		_set_save_status(predator_event, Color(0.95, 0.6, 0.55, 1.0))
 	SettlementNpcScheduler.update_scheduled_npcs(
-		delta, _npc_states, city_layer, _rng,
+		delta, _scheduled_states(), city_layer, _rng,
 		tile_size, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),
 		Callable(self, "_cell_center_position")
 	)
+
+## The dead answer to their hunger, not the clock.
+func _scheduled_states() -> Array[Dictionary]:
+	var living: Array[Dictionary] = []
+	for state: Dictionary in _npc_states:
+		if not SettlementAfflictionService.is_active_zombie(state):
+			living.append(state)
+	return living
+
+## Clock-scale affliction bookkeeping: recovery, deaths, incubations,
+## contagion, and vampires caught out in the sun.
+func _advance_afflictions(delta_hours: float) -> void:
+	if _npc_states.is_empty() or delta_hours <= 0.0:
+		return
+	var day_hour := _game_hour >= 6.0 and _game_hour < 20.0
+	var affliction_events := SettlementAfflictionService.advance(_npc_states, delta_hours, _rng, false, day_hour)
+	for affliction_event: String in affliction_events:
+		_set_save_status(affliction_event, Color(0.95, 0.6, 0.55, 1.0))
+	_apply_affliction_visuals()
+	_remove_dead_afflicted()
+
+func _apply_affliction_visuals() -> void:
+	for state: Dictionary in _npc_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var tint: Color = SettlementAfflictionService.tint_for(state)
+		var tint_key := str(tint)
+		if String(state.get("affliction_tint_applied", "")) == tint_key:
+			continue
+		state["affliction_tint_applied"] = tint_key
+		sprite.modulate = tint
+
+func _remove_dead_afflicted() -> void:
+	for index in range(_npc_states.size() - 1, -1, -1):
+		var state := _npc_states[index]
+		if not bool(state.get("affliction_dead", false)):
+			continue
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite != null:
+			sprite.queue_free()
+		_npc_states.remove_at(index)
 
 func _create_placeholder_tavern_character_texture() -> Texture2D:
 	return DwarfHoldTavernService.create_placeholder_tavern_character_texture()
@@ -4091,6 +4155,9 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 			tooltip_lines.append(detail)
 		if hovered_npc.has("faction_name") and not bool(hovered_npc.get("faction_secret", false)):
 			tooltip_lines.append("Sworn to the %s" % String(hovered_npc.get("faction_name", "")))
+		var affliction_line: String = SettlementAfflictionService.tooltip_line(hovered_npc)
+		if not affliction_line.is_empty():
+			tooltip_lines.append(affliction_line)
 		tooltip_lines.append("")
 	tooltip_lines.append("Tile: %s" % tile_name)
 	tooltip_lines.append("Zone: %s" % zone_name)

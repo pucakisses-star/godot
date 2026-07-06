@@ -143,6 +143,9 @@ static func mode_for_hour(state: Dictionary, hour: float) -> String:
 	if meeting_hour >= 0.0 and fposmod(hour - meeting_hour, 24.0) < SettlementFactionService.MEETING_DURATION_HOURS:
 		return MODE_MEETING
 	var sleeping := hour >= SLEEP_START_HOUR or hour < SLEEP_END_HOUR
+	# Nocturnal citizens sleep through the working day and walk the night.
+	if bool(state.get("nocturnal", false)):
+		sleeping = hour >= 8.0 and hour < 18.0
 	if bool(state.get("is_guard", false)):
 		if sleeping and not bool(state.get("night_watch", false)):
 			return MODE_SLEEP
