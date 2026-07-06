@@ -355,6 +355,7 @@ func _build_ambient_sources(width: int, height: int, tiles: Dictionary, seed_num
 				continue
 			var base := String(tile.get("base_biome", tile.get("base", tile.get("biome_type", ""))))
 			if base == "water":
+				_add_water_ambient_source(seed_number, coord, tiles)
 				continue
 			var biome := String(tile.get("biome_type", base))
 			var structure := String(tile.get("structure", "")).to_lower()
@@ -374,17 +375,33 @@ func _build_ambient_sources(width: int, height: int, tiles: Dictionary, seed_num
 				1.1
 			)
 
+## Sea peoples: sources roll on open water (browser main.js:7722-7753)
+## and their influence lands only on shore tiles that touch the water,
+## since influence is never painted onto the sea itself.
+func _add_water_ambient_source(seed_number: int, coord: Vector2i, tiles: Dictionary) -> void:
+	var coastal_filter := func(candidate_coord: Vector2i, _candidate_tile: Dictionary) -> bool:
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				if dx == 0 and dy == 0:
+					continue
+				var neighbor := tiles.get(candidate_coord + Vector2i(dx, dy), {}) as Dictionary
+				if String(neighbor.get("base_biome", neighbor.get("base", ""))) == "water":
+					return true
+		return false
+	var add_roll := func(salt: int, threshold: float, radius: int, key: String, label: String, falloff: float) -> void:
+		if _hash_roll(seed_number, coord.x, coord.y, salt) < threshold:
+			add_cultural_source(coord.x, coord.y, radius, [{"key": key, "label": label, "color": CULTURE_TYPES.DEFAULT_CULTURE_COLORS.get(key, Color.GRAY), "share": 1.0}], falloff, coastal_filter)
+	add_roll.call(12, 0.07, 8, "karkinos", "Karkinos", 1.32)
+	add_roll.call(14, 0.06, 8, "locathah", "Locathah", 1.3)
+	add_roll.call(16, 0.055, 8, "merfolks", "Merfolks", 1.28)
+	add_roll.call(19, 0.045, 7, "hadozee", "Hadozee", 1.35)
+
 func _add_biome_ambient_source(seed_number: int, coord: Vector2i, biome: String) -> void:
 	var add_roll := func(salt: int, threshold: float, radius: int, key: String, label: String, falloff: float) -> void:
 		if _hash_roll(seed_number, coord.x, coord.y, salt) < threshold:
 			add_cultural_source(coord.x, coord.y, radius, [{"key": key, "label": label, "color": CULTURE_TYPES.DEFAULT_CULTURE_COLORS.get(key, Color.GRAY), "share": 1.0}], falloff)
 
 	match biome:
-		"water":
-			add_roll.call(12, 0.07, 8, "karkinos", "Karkinos", 1.32)
-			add_roll.call(14, 0.06, 8, "locathah", "Locathah", 1.3)
-			add_roll.call(16, 0.055, 8, "merfolks", "Merfolks", 1.28)
-			add_roll.call(19, 0.045, 7, "hadozee", "Hadozee", 1.35)
 		"grassland":
 			add_roll.call(18, 0.08, 6, "humans", "Humans", 1.35)
 			add_roll.call(21, 0.05, 7, "half_orcs", "Half-Orcs", 1.4)
