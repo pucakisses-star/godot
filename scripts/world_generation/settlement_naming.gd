@@ -215,6 +215,20 @@ const CASTLE_HOUSE_NAMES: Array[String] = [
 	"House Frostmere", "House Dawnspear", "House Emberhall"
 ]
 
+## Snow village pools (browser snowVillageName*, main.js:1176-1204).
+const SNOW_VILLAGE_PREFIXES: Array[String] = [
+	"Aput", "Nanu", "Siku", "Qimmi", "Tuktu", "Aklaq", "Sila", "Ukpik",
+	"Imaq", "Nuna", "Kangi", "Talir"
+]
+
+const SNOW_VILLAGE_SUFFIXES: Array[String] = [
+	"vik", "ruq", "naq", "lik", "juq", "toq", "riaq", "suk", "aluk", "miut"
+]
+
+const SNOW_VILLAGE_DESCRIPTORS: Array[String] = [
+	"Camp", "Harbor", "Haven", "Settlement", "Encampment"
+]
+
 static func town_name(rng: RandomNumberGenerator) -> String:
 	var prefix := _pick(TOWN_PREFIXES, rng, "Oak")
 	var suffix := _pick(TOWN_SUFFIXES, rng, "ford")
@@ -226,6 +240,19 @@ static func town_name(rng: RandomNumberGenerator) -> String:
 	if style_roll < 0.65:
 		return base_name
 	return "Town of %s" % base_name
+
+## Browser generateSnowVillageName (main.js:3756-3770).
+static func snow_village_name(rng: RandomNumberGenerator) -> String:
+	var prefix := _pick(SNOW_VILLAGE_PREFIXES, rng, "Siku")
+	var suffix := _pick(SNOW_VILLAGE_SUFFIXES, rng, "vik")
+	var base_name := "%s%s" % [prefix, suffix]
+	var descriptor := _pick(SNOW_VILLAGE_DESCRIPTORS, rng, "")
+	var style_roll := rng.randf()
+	if not descriptor.is_empty() and style_roll < 0.35:
+		return "%s %s" % [base_name, descriptor]
+	if not descriptor.is_empty() and style_roll > 0.85:
+		return "%s of %s" % [descriptor, base_name]
+	return base_name
 
 static func grove_name(rng: RandomNumberGenerator) -> String:
 	var prefix := _pick(GROVE_PREFIXES, rng, "Sylvan")

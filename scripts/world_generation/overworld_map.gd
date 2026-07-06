@@ -162,9 +162,14 @@ const BIOME_BADLANDS := TILE_ATLAS_DEFS.BIOME_BADLANDS
 const BIOME_FOREST := TILE_ATLAS_DEFS.BIOME_FOREST
 const BIOME_JUNGLE := TILE_ATLAS_DEFS.BIOME_JUNGLE
 const BIOME_GRASSLAND := TILE_ATLAS_DEFS.BIOME_GRASSLAND
+## Tile skins per settlement type. Every variant is EARNED, never random:
+## PORT needs a water 8-neighbor, HAMLET needs a small population, grove
+## upgrades need a high population ratio, GREAT/ABANDONED holds come from
+## score/abandonment rolls. Castles are a separate scored structure pass
+## (browser main.js:27407-27520), not a town skin.
 const SETTLEMENT_TILES := {
 	"dwarfhold": [DWARFHOLD_TILE, ABANDONED_DWARFHOLD_TILE, GREAT_DWARFHOLD_TILE, DARK_DWARFHOLD_TILE],
-	"town": [TOWN_TILE, PORT_TOWN_TILE, CASTLE_TILE, HAMLET_TILE],
+	"town": [TOWN_TILE, PORT_TOWN_TILE, HAMLET_TILE, HAMLET_SNOW_TILE],
 	"woodElfGrove": [WOOD_ELF_GROVES_TILE, WOOD_ELF_GROVES_LARGE_TILE, WOOD_ELF_GROVES_GRAND_TILE],
 	"lizardmenCity": [LIZARDMEN_CITY_TILE]
 }
@@ -626,6 +631,22 @@ var _vegetation_noise: FastNoiseLite
 var _rainfall_buffer: PackedFloat32Array = PackedFloat32Array()
 var _desert_suitability_buffer: PackedFloat32Array = PackedFloat32Array()
 var _desert_heat_buffer: PackedFloat32Array = PackedFloat32Array()
+## Combined mountain scores from _build_highland_overlays (browser
+## mountainScores); dwarfhold/mine placement reuses them.
+var _mountain_score_buffer: PackedFloat32Array = PackedFloat32Array()
+var _mountain_candidate_threshold := 0.45
+## Flat per-cell terrain buffers shared by the settlement/structure
+## placement passes (built once in _place_settlements).
+var _placement_fields: Dictionary = {}
+## Settlement point sets recorded during placement (browser towns[],
+## dwarfholds[], ... arrays) so later passes can enforce distances.
+var _town_points: Array[Vector2i] = []
+var _hamlet_points: Array[Vector2i] = []
+var _dwarfhold_points: Array[Vector2i] = []
+var _grove_points: Array[Vector2i] = []
+var _lizardmen_city_points: Array[Vector2i] = []
+var _desert_city_points: Array[Vector2i] = []
+var _hillhold_points: Array[Vector2i] = []
 ## Per-layout knobs (browser worldGenerationProfiles, main.js:20044-20108).
 var _sea_level_shift := 0.02
 var _rainfall_bias := 0.0
@@ -712,6 +733,7 @@ const TOWN_SCENE_TILE_KEY := "town_scene_tile"
 const TOWN_SCENE_NAME_KEY := "town_scene_name"
 const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
 const TOWN_SCENE_THEME_KEY := "town_scene_theme"
+const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
 const DUNGEON_INTERIOR_SCENE_PATH := "res://scenes/dungeon_interior.tscn"
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
@@ -1305,6 +1327,7 @@ func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i,
 	settings[TOWN_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
 	settings[TOWN_SCENE_POPULATION_KEY] = maxi(0, int(details.get("population", 0)))
 	settings[TOWN_SCENE_THEME_KEY] = theme
+	settings[TOWN_SCENE_VILLAGE_KEY] = bool(details.get("is_hamlet", false)) or bool(details.get("is_snow_village", false))
 	game_session.call("set_world_settings", settings)
 
 func _town_scene_seed_for_tile(tile_coord: Vector2i, details: Dictionary) -> String:
@@ -1968,7 +1991,7 @@ func _generate_map() -> void:
 	generation_started_ms = Time.get_ticks_msec()
 	_set_loading_progress(70.0, "Founding settlements and cultures...")
 	await _yield_generation_wave()
-	_place_settlements(biome_map, rng)
+	_place_settlements(height_map, rng)
 	_log_generation_stage("settlements", generation_started_ms)
 	generation_started_ms = Time.get_ticks_msec()
 	_set_loading_progress(74.0, "Raising watchtowers, camps and shrines...")
@@ -3503,6 +3526,11 @@ func _build_highland_overlays(
 		var nudged := maxf(float(height_buffer[idx]), mountain_level + 0.01 + float(scores[idx]) * 0.15)
 		height_buffer[idx] = nudged
 		height_map[coord] = nudged
+	# Dwarfhold and mine placement (browser mountainScores /
+	# mountainCandidateThreshold, main.js:23871-24260) reuses the combined
+	# mountain score field computed above.
+	_mountain_score_buffer = scores
+	_mountain_candidate_threshold = candidate_threshold
 	return overlay_map
 
 
@@ -4408,93 +4436,933 @@ func _iceberg_tile_for_coord(coord: Vector2i) -> Vector2i:
 	var variant_index := clampi(int(floor(variant_noise * float(iceberg_tile_options.size()))), 0, iceberg_tile_options.size() - 1)
 	return iceberg_tile_options[variant_index]
 
-func _place_settlements(biome_map: Dictionary, rng: RandomNumberGenerator) -> void:
-	var settings := _world_settings
-	var ratios: Dictionary = settings.get("settlement_ratios", {}) as Dictionary
-	var settlements: Dictionary = settings.get("settlements", {}) as Dictionary
-	var base_count: int = maxi(1, int(round(float(map_size.x * map_size.y) / 4096.0)))
+## Browser-parity settlement placement (main.js:23871-26240): scored town
+## candidates with spacing, a hamlet back-fill pass, ridge-scored dwarfhold
+## distribution with range coverage, and scored grove/lizardmen passes.
+func _place_settlements(height_map: Dictionary, rng: RandomNumberGenerator) -> void:
+	_town_points.clear()
+	_hamlet_points.clear()
+	_dwarfhold_points.clear()
+	_grove_points.clear()
+	_lizardmen_city_points.clear()
+	_desert_city_points.clear()
+	_hillhold_points.clear()
+	_placement_fields = _build_placement_fields(height_map)
+	var stage_log := PackedStringArray()
+	var stage_ms := Time.get_ticks_msec()
+	if _settlement_frequency_normalized("humans") > 0.0:
+		var seeded_grass_hamlets := _place_towns_browser_style(rng)
+		_place_hamlet_expansion(seeded_grass_hamlets, rng)
+	stage_log.append("towns %d" % (Time.get_ticks_msec() - stage_ms))
+	stage_ms = Time.get_ticks_msec()
+	if _settlement_frequency_normalized("dwarves") > 0.0:
+		_place_dwarfholds_browser_style(rng)
+	stage_log.append("dwarfholds %d" % (Time.get_ticks_msec() - stage_ms))
+	stage_ms = Time.get_ticks_msec()
+	if _settlement_frequency_normalized("wood_elves") > 0.0:
+		_place_wood_elf_groves(rng)
+	if _settlement_frequency_normalized("lizardmen") > 0.0:
+		_place_lizardmen_cities(rng)
+	stage_log.append("groves+lizardmen %d" % (Time.get_ticks_msec() - stage_ms))
+	print("[OverworldMap] settlement passes ms: %s" % " | ".join(stage_log))
 
-	var min_distance := 8.0
-	# Suitability pools are scored once per faction type; placements then
-	# draw weighted samples against an O(1) blocked-area set instead of
-	# re-filtering and re-scoring every map cell per settlement.
-	var blocked_area: Dictionary = {}
-	var capital_pools: Dictionary = {}
-	var class_buckets := OverworldSettlementService.build_settlement_class_buckets(
-		biome_map, tree_layer, TREE_TILE, JUNGLE_TREE_TILE, Callable(self, "_settlement_biome_label"))
 
-	for civilization: String in DwarfholdLogic.SETTLEMENT_TYPES.keys():
-		var settlement_type := String(DwarfholdLogic.SETTLEMENT_TYPES[civilization])
-		var ratio := -1.0
-		if ratios.has(civilization):
-			ratio = float(ratios.get(civilization, 0.0))
-		elif settlements.has(civilization):
-			var raw_value := float(settlements.get(civilization, 0.0))
-			ratio = clampf(raw_value / 100.0, 0.0, 1.0)
-		else:
-			ratio = 0.5
-		if ratio <= 0.0:
+## Normalized settlement frequency for a civilization key (browser
+## *SettlementFrequencyNormalized, main.js:21309-21316). Default 0.5.
+func _settlement_frequency_normalized(civilization: String) -> float:
+	var ratios: Dictionary = _world_settings.get("settlement_ratios", {}) as Dictionary
+	var settlements: Dictionary = _world_settings.get("settlements", {}) as Dictionary
+	if ratios.has(civilization):
+		return clampf(float(ratios.get(civilization, 0.5)), 0.0, 1.0)
+	if settlements.has(civilization):
+		return clampf(float(settlements.get(civilization, 50.0)) / 100.0, 0.0, 1.0)
+	return 0.5
+
+
+## Browser computeFrequencyMultiplier (main.js:8683-8688): 0 -> 0.5, 1 -> 2.0.
+func _frequency_multiplier(frequency_normalized: float) -> float:
+	return 0.5 + clampf(frequency_normalized, 0.0, 1.0) * 1.5
+
+
+## Browser adjustMinDistance (main.js:8781-8806): x1.2 at freq 0, x0.7 at 1.
+func _adjusted_min_distance(base_distance: float, frequency_normalized: float) -> int:
+	if base_distance <= 0.0:
+		return 6
+	var multiplier := 1.2 - clampf(frequency_normalized, 0.0, 1.0) * 0.5
+	return maxi(1, int(round(base_distance * multiplier)))
+
+
+## Browser computeStructurePlacementLimit (main.js:8742-8760).
+func _structure_placement_limit(base_target: int, max_limit: int, multiplier: float) -> int:
+	var safe_target := maxi(1, base_target)
+	var safe_multiplier := multiplier if multiplier > 0.0 else 1.0
+	return maxi(1, mini(int(round(float(safe_target) * safe_multiplier)), maxi(1, max_limit)))
+
+
+## Browser computeDwarfholdDistributionAdjustment (main.js:8716-8740).
+func _dwarfhold_distribution_adjustment(x: int, y: int, rows: int, seed_value: int) -> float:
+	var hashed: int = ((x * 73856093) ^ (y * 19349663) ^ (seed_value * 83492791)) & 0xFFFFFFFF
+	var normalized := float(hashed % 1000000) / 1000000.0
+	var vertical_bias := (float(y) / maxf(1.0, float(rows))) * 2.0 - 1.0
+	return (normalized - 0.5) * 0.15 + vertical_bias * 0.05
+
+
+func _nearest_distance_sq_points(coord: Vector2i, points: Array[Vector2i]) -> float:
+	var best := INF
+	for point: Vector2i in points:
+		var dist_sq := float((coord - point).length_squared())
+		if dist_sq < best:
+			best = dist_sq
+	return best
+
+
+## Two-pass chamfer distance transform (near-euclidean, weights 1/1.414)
+## from a set of source cells - the browser's computeNearestDistanceSq /
+## computeEuclideanDistanceField calls collapse into O(cells) lookups.
+func _chamfer_distance_field(sources: Array[Vector2i]) -> PackedFloat32Array:
+	var w := map_size.x
+	var rows := map_size.y
+	var field := PackedFloat32Array()
+	field.resize(w * rows)
+	field.fill(1.0e9)
+	if sources.is_empty():
+		return field
+	for source: Vector2i in sources:
+		if source.x >= 0 and source.y >= 0 and source.x < w and source.y < rows:
+			field[source.y * w + source.x] = 0.0
+	var diagonal := 1.41421356
+	for y in range(rows):
+		var row := y * w
+		for x in range(w):
+			var idx := row + x
+			var best := float(field[idx])
+			if x > 0 and float(field[idx - 1]) + 1.0 < best:
+				best = float(field[idx - 1]) + 1.0
+			if y > 0:
+				if float(field[idx - w]) + 1.0 < best:
+					best = float(field[idx - w]) + 1.0
+				if x > 0 and float(field[idx - w - 1]) + diagonal < best:
+					best = float(field[idx - w - 1]) + diagonal
+				if x < w - 1 and float(field[idx - w + 1]) + diagonal < best:
+					best = float(field[idx - w + 1]) + diagonal
+			field[idx] = best
+	for y in range(rows - 1, -1, -1):
+		var row := y * w
+		for x in range(w - 1, -1, -1):
+			var idx := row + x
+			var best := float(field[idx])
+			if x < w - 1 and float(field[idx + 1]) + 1.0 < best:
+				best = float(field[idx + 1]) + 1.0
+			if y < rows - 1:
+				if float(field[idx + w]) + 1.0 < best:
+					best = float(field[idx + w]) + 1.0
+				if x < w - 1 and float(field[idx + w + 1]) + diagonal < best:
+					best = float(field[idx + w + 1]) + diagonal
+				if x > 0 and float(field[idx + w - 1]) + diagonal < best:
+					best = float(field[idx + w - 1]) + diagonal
+			field[idx] = best
+	return field
+
+
+## Flat per-cell buffers + per-biome index lists so the placement passes
+## avoid re-walking _tile_data dictionaries (65k Vector2i lookups apiece).
+func _build_placement_fields(height_map: Dictionary) -> Dictionary:
+	var w := map_size.x
+	var rows := map_size.y
+	var cell_count := w * rows
+	var height_field := PackedFloat32Array()
+	height_field.resize(cell_count)
+	var base_id := PackedByteArray()
+	base_id.resize(cell_count)
+	var hill_id := PackedByteArray()
+	hill_id.resize(cell_count)
+	var flags := PackedByteArray()
+	flags.resize(cell_count)
+	var blocked := PackedByteArray()
+	blocked.resize(cell_count)
+	var moisture_field := PackedFloat32Array()
+	moisture_field.resize(cell_count)
+	var moisture_local := PackedFloat32Array()
+	moisture_local.resize(cell_count)
+	var canopy := PackedFloat32Array()
+	canopy.resize(cell_count)
+	var grass_cells := PackedInt32Array()
+	var snow_cells := PackedInt32Array()
+	var sand_cells := PackedInt32Array()
+	var marsh_cells := PackedInt32Array()
+	var badlands_cells := PackedInt32Array()
+	var forest_cells := PackedInt32Array()
+	var jungle_cells := PackedInt32Array()
+	var grass_id := _biome_to_id(BIOME_GRASSLAND)
+	var snow_id := _biome_to_id(BIOME_TUNDRA)
+	var sand_id := _biome_to_id(BIOME_DESERT)
+	var marsh_id := _biome_to_id(BIOME_MARSH)
+	var badlands_id := _biome_to_id(BIOME_BADLANDS)
+	for y in range(rows):
+		var row := y * w
+		for x in range(w):
+			var idx := row + x
+			var coord := Vector2i(x, y)
+			var tile_info := _tile_data.get(coord, {}) as Dictionary
+			var cell_base := int(tile_info.get("base_biome_id", grass_id))
+			base_id[idx] = cell_base
+			hill_id[idx] = int(tile_info.get("hill_biome_id", grass_id))
+			var cell_flags := int(tile_info.get("overlay_flags", 0))
+			flags[idx] = cell_flags
+			height_field[idx] = float(height_map.get(coord, 0.0))
+			var wetness := clampf(float(tile_info.get("moisture", 0.5)), 0.0, 1.0)
+			moisture_field[idx] = wetness
+			var rainfall := float(_rainfall_buffer[idx]) if idx < _rainfall_buffer.size() else 0.5
+			# Browser localMoisture = rainfall*0.7 + (1-drainage)*0.3; the
+			# wetness map stands in for poor drainage.
+			moisture_local[idx] = clampf(rainfall * 0.7 + wetness * 0.3, 0.0, 1.0)
+			canopy[idx] = clampf(float(tile_info.get("forest_canopy_density", 0.0)), 0.0, 1.0)
+			if tile_info.has("settlement_type") or not String(tile_info.get("structure", "")).is_empty():
+				blocked[idx] = 1
+			if cell_flags & TILE_OVERLAY_FOREST:
+				forest_cells.append(idx)
+			elif cell_flags & TILE_OVERLAY_TREE:
+				jungle_cells.append(idx)
+			if cell_base == grass_id:
+				grass_cells.append(idx)
+			elif cell_base == snow_id:
+				snow_cells.append(idx)
+			elif cell_base == sand_id:
+				sand_cells.append(idx)
+			elif cell_base == marsh_id:
+				marsh_cells.append(idx)
+			elif cell_base == badlands_id:
+				badlands_cells.append(idx)
+	return {
+		"height": height_field,
+		"base_id": base_id,
+		"hill_id": hill_id,
+		"flags": flags,
+		"blocked": blocked,
+		"moisture": moisture_field,
+		"moisture_local": moisture_local,
+		"canopy": canopy,
+		"grass_cells": grass_cells,
+		"snow_cells": snow_cells,
+		"sand_cells": sand_cells,
+		"marsh_cells": marsh_cells,
+		"badlands_cells": badlands_cells,
+		"forest_cells": forest_cells,
+		"jungle_cells": jungle_cells
+	}
+
+
+## Town candidate scoring + spacing (browser main.js:24864-25095): grass and
+## snow cells scored on elevation near sea+0.18, flatness, edge distance,
+## river adjacency, moisture-derived grass preference and biome penalties.
+## Towns never land on river tiles.
+func _place_towns_browser_style(rng: RandomNumberGenerator) -> int:
+	var w := map_size.x
+	var rows := map_size.y
+	var height_field := _placement_fields["height"] as PackedFloat32Array
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var moisture_field := _placement_fields["moisture"] as PackedFloat32Array
+	var moisture_local := _placement_fields["moisture_local"] as PackedFloat32Array
+	var water_id := _biome_to_id(BIOME_WATER)
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var snow_id := _biome_to_id(BIOME_TUNDRA)
+	var preferred_elevation := water_level + 0.18
+	var max_edge_distance := maxf(1.0, float(mini(w, rows)) / 2.0)
+	var overlay_block := TILE_OVERLAY_TREE | TILE_OVERLAY_FOREST | TILE_OVERLAY_RIVER
+	var candidates: Array[Dictionary] = []
+	for cell_list_variant: Variant in [_placement_fields["grass_cells"], _placement_fields["snow_cells"]]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & overlay_block) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var x := idx % w
+			@warning_ignore("integer_division")
+			var y := idx / w
+			var is_snow := int(base_id[idx]) == snow_id
+			var elevation_value := float(height_field[idx])
+			var elevation_score := clampf(1.0 - absf(elevation_value - preferred_elevation) * 2.1, 0.0, 1.0)
+			var local_moisture := float(moisture_local[idx])
+			var roughness := 0.0
+			var neighbor_count := 0
+			var neighborhood_moisture_sum := 0.0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+					continue
+				var n_idx := ny * w + nx
+				if int(base_id[n_idx]) == water_id:
+					continue
+				roughness += absf(elevation_value - float(height_field[n_idx]))
+				neighbor_count += 1
+				neighborhood_moisture_sum += float(moisture_local[n_idx])
+			var average_roughness := (roughness / float(neighbor_count)) if neighbor_count > 0 else 0.0
+			var slope_score := clampf(1.0 - average_roughness * 12.0, 0.0, 1.0)
+			var edge_distance := mini(mini(x, w - 1 - x), mini(y, rows - 1 - y))
+			var edge_score := clampf(float(edge_distance) / max_edge_distance, 0.0, 1.0)
+			var neighborhood_moisture := (neighborhood_moisture_sum / float(neighbor_count)) if neighbor_count > 0 else local_moisture
+			var blended_moisture := local_moisture * 0.65 + neighborhood_moisture * 0.35
+			var dryness := 1.0 - blended_moisture
+			var humidity_excess := maxf(0.0, blended_moisture - 0.52)
+			var swamp_pressure := maxf(0.0, blended_moisture - 0.68)
+			var arid_pressure := maxf(0.0, dryness - 0.55)
+			var drainage_value := 1.0 - float(moisture_field[idx])
+			var poor_drainage := maxf(0.0, 0.48 - drainage_value)
+			var normalized_y := (float(y) + 0.5) / float(rows)
+			var latitude_factor := 1.0 - absf(normalized_y - 0.5) * 2.0
+			var elevation_above_sea := maxf(elevation_value - water_level, 0.0)
+			var elevation_cooling := clampf(1.0 - elevation_above_sea * 3.5, 0.0, 1.0)
+			var approximate_temperature := clampf(latitude_factor * 0.75 + elevation_cooling * 0.25, 0.0, 1.0)
+			var relative_elevation := elevation_value - water_level
+			var biome_tendency := "grassland"
+			if relative_elevation < 0.05:
+				if blended_moisture > 0.7:
+					biome_tendency = "marsh"
+				elif blended_moisture > 0.54 and approximate_temperature > 0.52:
+					biome_tendency = "forest"
+			elif blended_moisture < 0.3:
+				biome_tendency = "badlands"
+			elif approximate_temperature < 0.3:
+				biome_tendency = "tundra"
+			elif blended_moisture > 0.72:
+				biome_tendency = "marsh"
+			elif blended_moisture > 0.52 and approximate_temperature > 0.55:
+				biome_tendency = "forest"
+			var grass_preference := clampf(
+				1.0 - humidity_excess * 1.4 - swamp_pressure * 1.25 - arid_pressure * 1.05 - poor_drainage * 0.55,
+				0.0,
+				1.0
+			)
+			if biome_tendency == "forest":
+				grass_preference *= 0.12
+			elif biome_tendency == "marsh":
+				grass_preference *= 0.08
+			elif biome_tendency == "tundra" or biome_tendency == "badlands":
+				grass_preference *= 0.35
+			if not is_snow and grass_preference < 0.22:
+				continue
+			var river_adjacency := 0
+			for definition: Dictionary in RIVER_NEIGHBOR_DEFINITIONS:
+				var card_offset := definition.get("offset", Vector2i.ZERO) as Vector2i
+				var nx := x + card_offset.x
+				var ny := y + card_offset.y
+				if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+					continue
+				if int(flags[ny * w + nx]) & TILE_OVERLAY_RIVER:
+					river_adjacency += 1
+			var river_score := clampf(0.18 + float(river_adjacency) * 0.06, 0.0, 0.32) if river_adjacency > 0 else 0.0
+			var biome_penalty := 0.0
+			if biome_tendency == "forest":
+				biome_penalty = 0.24
+			elif biome_tendency == "marsh":
+				biome_penalty = 0.18
+			elif biome_tendency == "tundra" or biome_tendency == "badlands":
+				biome_penalty = 0.08
+			var score := (
+				elevation_score * 0.35
+				+ slope_score * 0.2
+				+ edge_score * 0.12
+				+ river_score
+				+ grass_preference * 0.32
+				- biome_penalty
+				+ rng.randf() * 0.12
+			)
+			candidates.append({
+				"coord": Vector2i(x, y),
+				"score": score,
+				"grass_preference": grass_preference,
+				"snow": is_snow
+			})
+	if candidates.is_empty():
+		return 0
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var human_frequency := _settlement_frequency_normalized("humans")
+	var area := w * rows
+	var base_target := maxi(2, int(round(float(area) / 4800.0)))
+	var max_towns := _structure_placement_limit(base_target, 36, _frequency_multiplier(human_frequency))
+	var min_distance := _adjusted_min_distance(maxf(6.0, round(float(mini(w, rows)) / 12.0)), human_frequency)
+	var min_distance_sq := float(min_distance * min_distance)
+	var placed: Array[Vector2i] = []
+	var seeded_grass_hamlets := 0
+	for candidate: Dictionary in candidates:
+		if placed.size() >= max_towns:
+			break
+		var is_snow := bool(candidate.get("snow", false))
+		if not is_snow and float(candidate.get("grass_preference", 0.0)) < 0.25:
 			continue
-		if not capital_pools.has(settlement_type):
-			capital_pools[settlement_type] = OverworldSettlementService.build_weighted_capital_pool(settlement_type, class_buckets)
-		var pool := capital_pools[settlement_type] as Dictionary
-		var count: int = maxi(1, int(round(base_count * ratio)))
-		for _i in range(count):
-			var chosen: Vector2i = OverworldSettlementService.sample_capital_from_pool(pool, blocked_area, rng)
-			if chosen == Vector2i(-1, -1):
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, placed) < min_distance_sq:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+			continue
+		var settlement_name: String
+		var population := 0
+		var is_small_village := false
+		if is_snow:
+			# Browser snow villages (main.js:25040-25046): population 30-100,
+			# always classified Village; larger rolls skip the site.
+			settlement_name = SETTLEMENT_NAMING.snow_village_name(rng)
+			population = maxi(20, int(30.0 + rng.randf() * 70.0))
+			if population >= 100:
+				continue
+			is_small_village = true
+		else:
+			settlement_name = SETTLEMENT_NAMING.town_name(rng)
+			var raw_population := maxi(20, int(20.0 + rng.randf() * 6000.0))
+			is_small_village = raw_population < 100
+			population = clampi(raw_population, 450, 6200)
+		var tile := TOWN_TILE
+		# Earned port skin (main.js:25047-25064): an 8-neighbor must be water.
+		for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+			var nx := coord.x + offset.x
+			var ny := coord.y + offset.y
+			if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+				continue
+			if int(base_id[ny * w + nx]) == water_id:
+				tile = PORT_TOWN_TILE
 				break
-			OverworldSettlementService.mark_occupied_area(blocked_area, chosen, min_distance)
-			var biome_label := _settlement_biome_label(biome_map.get(chosen, BIOME_GRASSLAND))
-			var tile := _select_settlement_tile(settlement_type, biome_label, rng, chosen)
-			if settlement_layer != null:
-				settlement_layer.set_cell(chosen, _atlas_source_id, tile)
+		var is_hamlet := false
+		if is_small_village:
+			if is_snow:
+				if rng.randf() < 0.5:
+					tile = HAMLET_SNOW_TILE
+					is_hamlet = true
 			else:
-				map_layer.set_cell(chosen, _atlas_source_id, tile)
-			var tile_info: Dictionary = {}
-			if _tile_data.has(chosen):
-				tile_info = _tile_data[chosen] as Dictionary
-			var settlement_name: String = String(OVERWORLD_CONTENT.SETTLEMENT_NAMES.get(civilization, "Settlement"))
-			if civilization == "dwarves" and not DWARFHOLD_NAMES.is_empty():
-				settlement_name = DWARFHOLD_NAMES[rng.randi_range(0, DWARFHOLD_NAMES.size() - 1)]
-			elif civilization == "lizardmen":
-				settlement_name = OVERWORLD_CONTENT.generate_lizardmen_city_name(rng)
-			elif civilization == "humans":
-				settlement_name = SETTLEMENT_NAMING.town_name(rng)
-			elif civilization == "wood_elves":
-				settlement_name = SETTLEMENT_NAMING.grove_name(rng)
-			_tile_region_names[chosen] = settlement_name
-			var civilization_label := String(CIVILIZATION_LABELS.get(civilization, civilization.capitalize()))
-			_tile_population_groups[chosen] = {"major_population_groups": [civilization_label], "minor_population_groups": []}
-			tile_info["settlement_type"] = settlement_type
-			if settlement_type == "dwarfhold":
-				tile_info.merge(_generate_dwarfhold_details(settlement_name, chosen, tile, rng), true)
-				tile_info[DWARFHOLD_SCENE_SEED_KEY] = _dwarfhold_scene_seed_for_tile(chosen, tile_info)
-			else:
-				var founded_years_ago := _founded_years_ago_for_settlement_type(settlement_type, rng)
-				tile_info["founded_years_ago"] = founded_years_ago
-				var population_options := _population_options_for_settlement_type(settlement_type)
-				if not population_options.is_empty():
-					var population := _roll_population_for_settlement_type(settlement_type, rng)
-					var primary_population_option: Dictionary = population_options[0]
-					var majority_key := String(primary_population_option.get("key", ""))
-					var population_breakdown := _generate_population_breakdown_from_options(
-						population_options,
-						population,
-						rng,
-						majority_key
-					)
-					var population_timeline := _generate_population_timeline(population, rng, founded_years_ago)
-					tile_info["population"] = population
-					tile_info["population_label"] = "Population"
-					tile_info["population_descriptor"] = "residents"
-					tile_info["population_breakdown"] = population_breakdown
-					tile_info["population_timeline"] = population_timeline
-					var labels := _labels_from_population_breakdown(population_breakdown)
-					_tile_population_groups[chosen] = {
-						"major_population_groups": labels.get("major", [civilization_label]),
-						"minor_population_groups": labels.get("minor", [])
-					}
-			_tile_data[chosen] = tile_info
+				tile = HAMLET_TILE
+				is_hamlet = true
+		if is_hamlet:
+			population = maxi(18, int(24.0 + rng.randf() * 60.0)) if is_snow else maxi(22, int(28.0 + rng.randf() * 140.0))
+		var classification := "Village" if (is_snow or is_hamlet) else TownDetailsGenerator.classification_for_population(population)
+		_register_town_settlement(coord, tile, settlement_name, classification, population, is_hamlet, is_snow, rng)
+		blocked[idx] = 1
+		placed.append(coord)
+		_town_points.append(coord)
+		if is_hamlet:
+			_hamlet_points.append(coord)
+			if not is_snow:
+				seeded_grass_hamlets += 1
+	return seeded_grass_hamlets
+
+
+func _register_town_settlement(
+	coord: Vector2i,
+	tile: Vector2i,
+	settlement_name: String,
+	classification: String,
+	population: int,
+	is_hamlet: bool,
+	is_snow: bool,
+	rng: RandomNumberGenerator
+) -> void:
+	if settlement_layer != null:
+		settlement_layer.set_cell(coord, _atlas_source_id, tile)
+	else:
+		map_layer.set_cell(coord, _atlas_source_id, tile)
+	var tile_info := _tile_data.get(coord, {}) as Dictionary
+	_tile_region_names[coord] = settlement_name
+	tile_info["settlement_type"] = "town"
+	tile_info["settlement_classification"] = classification
+	tile_info["is_hamlet"] = is_hamlet
+	tile_info["is_snow_village"] = is_snow
+	var founded_years_ago := _founded_years_ago_for_settlement_type("town", rng)
+	tile_info["founded_years_ago"] = founded_years_ago
+	# Hamlets and snow villages are all-human (browser generateHamletDetails
+	# populationBreakdown, main.js:3894-3910).
+	var population_options: Array = TOWN_POPULATION_RACE_OPTIONS
+	if is_snow or is_hamlet:
+		population_options = [TOWN_POPULATION_RACE_OPTIONS[0]]
+	var majority_key := String((population_options[0] as Dictionary).get("key", ""))
+	var population_breakdown := _generate_population_breakdown_from_options(population_options, population, rng, majority_key)
+	var population_timeline := _generate_population_timeline(population, rng, founded_years_ago)
+	tile_info["population"] = population
+	tile_info["population_label"] = "Population"
+	tile_info["population_descriptor"] = "residents"
+	tile_info["population_breakdown"] = population_breakdown
+	tile_info["population_timeline"] = population_timeline
+	var labels := _labels_from_population_breakdown(population_breakdown)
+	_tile_population_groups[coord] = {
+		"major_population_groups": labels.get("major", ["Humans"]),
+		"minor_population_groups": labels.get("minor", [])
+	}
+	_tile_data[coord] = tile_info
+
+
+## Hamlet expansion (browser main.js:25096-25235): back-fill grass hamlets
+## up to max(6x seeded, area/12000) scored on a moisture sweet spot, grass
+## neighbors, water adjacency and distance-from-town sweet spot.
+func _place_hamlet_expansion(seeded_grass_hamlets: int, rng: RandomNumberGenerator) -> void:
+	var w := map_size.x
+	var rows := map_size.y
+	var area := w * rows
+	var human_frequency := _settlement_frequency_normalized("humans")
+	var desired := maxi(seeded_grass_hamlets * 6, int(round(float(area) / 12000.0 * _frequency_multiplier(human_frequency))))
+	var additional_needed := maxi(0, desired - seeded_grass_hamlets)
+	if additional_needed <= 0:
+		return
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var moisture_local := _placement_fields["moisture_local"] as PackedFloat32Array
+	var grass_cells := _placement_fields["grass_cells"] as PackedInt32Array
+	var water_id := _biome_to_id(BIOME_WATER)
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var grass_id := _biome_to_id(BIOME_GRASSLAND)
+	var settlement_field := _chamfer_distance_field(_town_points)
+	var hamlet_field := _chamfer_distance_field(_hamlet_points)
+	var noise_seed := map_seed + 0x62bd3e45
+	var overlay_block := TILE_OVERLAY_TREE | TILE_OVERLAY_FOREST | TILE_OVERLAY_RIVER
+	var candidates: Array[Dictionary] = []
+	for list_index in grass_cells.size():
+		var idx := grass_cells[list_index]
+		if blocked[idx] == 1 or (int(flags[idx]) & overlay_block) != 0:
+			continue
+		if int(hill_id[idx]) == mountain_id:
+			continue
+		var settlement_distance := float(settlement_field[idx])
+		if settlement_distance < 5.0:
+			continue
+		if float(hamlet_field[idx]) < 5.0:
+			continue
+		var x := idx % w
+		@warning_ignore("integer_division")
+		var y := idx / w
+		var moisture := float(moisture_local[idx])
+		var moisture_score := clampf(1.0 - absf(moisture - 0.55) * 2.2, 0.0, 1.0) * 0.24
+		var grass_neighbors := 0
+		var neighbor_samples := 0
+		var water_adjacency := 0
+		for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+			var nx := x + offset.x
+			var ny := y + offset.y
+			if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+				continue
+			var n_idx := ny * w + nx
+			if int(base_id[n_idx]) == water_id:
+				water_adjacency += 1
+				continue
+			if int(flags[n_idx]) & TILE_OVERLAY_RIVER:
+				water_adjacency += 1
+			if int(base_id[n_idx]) == grass_id:
+				grass_neighbors += 1
+			neighbor_samples += 1
+		var adjacency_score := (float(grass_neighbors) / float(neighbor_samples)) * 0.18 if neighbor_samples > 0 else 0.0
+		var water_score := clampf(float(water_adjacency) * 0.04, 0.0, 0.18)
+		var proximity_score := clampf((settlement_distance - 6.0) / 14.0, 0.0, 1.0) * 0.2
+		var latitude := (float(y) + 0.5) / float(rows)
+		var latitude_score := absf(sin((latitude + 0.15) * PI * 2.0)) * 0.08
+		var noise := _hash_coords(x, y, noise_seed) - 0.5
+		var score := 0.28 + moisture_score + adjacency_score + water_score + proximity_score + latitude_score + noise * 0.18 + rng.randf() * 0.08
+		candidates.append({"coord": Vector2i(x, y), "score": score})
+	if candidates.is_empty():
+		return
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var placed := 0
+	for candidate: Dictionary in candidates:
+		if placed >= additional_needed:
+			break
+		if float(candidate.get("score", 0.0)) < 0.24:
+			continue
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, _hamlet_points) < 25.0:
+			continue
+		if _nearest_distance_sq_points(coord, _town_points) < 20.0:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+			continue
+		var settlement_name := SETTLEMENT_NAMING.town_name(rng)
+		var population := maxi(22, int(28.0 + rng.randf() * 140.0))
+		_register_town_settlement(coord, HAMLET_TILE, settlement_name, "Village", population, true, false, rng)
+		blocked[idx] = 1
+		_town_points.append(coord)
+		_hamlet_points.append(coord)
+		placed += 1
+
+
+## Dwarfhold distribution (browser main.js:23871-24175): ridge-scored
+## mountain candidates plus high-score near-mountain fallbacks, >=12 tiles
+## from towns, spacing 6, per-range coverage and a southern-half top-up.
+func _place_dwarfholds_browser_style(rng: RandomNumberGenerator) -> void:
+	var w := map_size.x
+	var rows := map_size.y
+	var cell_count := w * rows
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var height_field := _placement_fields["height"] as PackedFloat32Array
+	var water_id := _biome_to_id(BIOME_WATER)
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var have_scores := _mountain_score_buffer.size() == cell_count
+	var fallback_threshold := clampf(_mountain_candidate_threshold * 0.85, 0.28, 0.62)
+	var distribution_seed := map_seed + 0x3bd39e8f
+	var overlay_block := TILE_OVERLAY_TREE | TILE_OVERLAY_FOREST
+	var candidates: Array[Dictionary] = []
+	var mountain_candidate_set: Dictionary = {}
+	for idx in range(cell_count):
+		if int(base_id[idx]) == water_id:
+			continue
+		if int(flags[idx]) & TILE_OVERLAY_RIVER:
+			continue
+		var is_mountain := int(hill_id[idx]) == mountain_id or int(base_id[idx]) == mountain_id
+		var score := float(_mountain_score_buffer[idx]) if have_scores else clampf((float(height_field[idx]) - water_level) / maxf(0.0001, 1.0 - water_level), 0.0, 1.0)
+		if not is_mountain:
+			var fallback_eligible: bool = (int(flags[idx]) & overlay_block) == 0 and score >= fallback_threshold
+			if not fallback_eligible:
+				continue
+		var x := idx % w
+		@warning_ignore("integer_division")
+		var y := idx / w
+		var coord := Vector2i(x, y)
+		candidates.append({
+			"coord": coord,
+			"score": score + _dwarfhold_distribution_adjustment(x, y, rows, distribution_seed),
+			"raw_score": score,
+			"mountain": is_mountain
+		})
+		if is_mountain:
+			mountain_candidate_set[coord] = true
+	if candidates.is_empty():
+		return
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var dwarf_frequency := _settlement_frequency_normalized("dwarves")
+	var multiplier := _frequency_multiplier(dwarf_frequency)
+	var base_target := maxi(1, int(round(float(candidates.size()) / 500.0)))
+	var max_dwarfholds := _structure_placement_limit(base_target, 24, multiplier)
+	# Abandoned chance lerp(0.35, 0.05, frequency) (main.js:8761-8780).
+	var abandoned_chance := clampf(0.35 - dwarf_frequency * 0.30, 0.05, 0.35)
+	var min_distance_base := 6.0
+	var min_distance := _adjusted_min_distance(min_distance_base, dwarf_frequency)
+	var south_min_distance := _adjusted_min_distance(float(maxi(3, int(round(min_distance_base * 0.85)))), dwarf_frequency)
+	# O(1) guards: cells within spacing of a placed hold / within 12 tiles
+	# of a town are pre-marked instead of point-looped per candidate.
+	var town_blocked: Dictionary = {}
+	for town: Vector2i in _town_points:
+		OverworldSettlementService.mark_occupied_area(town_blocked, town, DWARFHOLD_NEARBY_TOWN_RADIUS)
+	var spacing_blocked: Dictionary = {}
+	var south_spacing_blocked: Dictionary = {}
+	var placed: Array[Vector2i] = []
+	for candidate: Dictionary in candidates:
+		if placed.size() >= max_dwarfholds:
+			break
+		var main_coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if spacing_blocked.has(main_coord) or town_blocked.has(main_coord):
+			continue
+		if _try_place_dwarfhold(candidate, placed, abandoned_chance, blocked, flags, rng):
+			OverworldSettlementService.mark_occupied_area(spacing_blocked, main_coord, float(min_distance))
+			OverworldSettlementService.mark_occupied_area(south_spacing_blocked, main_coord, float(south_min_distance))
+	if placed.is_empty():
+		for candidate: Dictionary in candidates:
+			var fallback_coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+			if town_blocked.has(fallback_coord):
+				continue
+			if _try_place_dwarfhold(candidate, placed, abandoned_chance, blocked, flags, rng):
+				OverworldSettlementService.mark_occupied_area(spacing_blocked, fallback_coord, float(min_distance))
+				OverworldSettlementService.mark_occupied_area(south_spacing_blocked, fallback_coord, float(south_min_distance))
+				break
+	# Coverage pass: every connected mountain range with candidates gets at
+	# least one hold (browser mountainAreasWithHolds, main.js:24013-24118).
+	# Deviation: the browser keys ranges off large named biome clusters;
+	# Godot's ridge chains split into many small components, so only ranges
+	# of a meaningful size demand coverage and the hold spacing stays
+	# enforced (a tiny splinter range next to a held range counts as
+	# covered by it).
+	var component_of: Dictionary = {}
+	var component_sizes: Array[int] = []
+	for candidate: Dictionary in candidates:
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if not bool(candidate.get("mountain", false)) or component_of.has(coord):
+			continue
+		var component_id := component_sizes.size()
+		var component_size := 0
+		var stack: Array[Vector2i] = [coord]
+		while not stack.is_empty():
+			var current: Vector2i = stack.pop_back()
+			if component_of.has(current):
+				continue
+			component_of[current] = component_id
+			component_size += 1
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var neighbor := current + offset
+				if mountain_candidate_set.has(neighbor) and not component_of.has(neighbor):
+					stack.append(neighbor)
+		component_sizes.append(component_size)
+	var missing_components: Dictionary = {}
+	for coord_variant: Variant in component_of.keys():
+		var range_id := int(component_of[coord_variant])
+		if component_sizes[range_id] >= 12:
+			missing_components[range_id] = true
+	for hold: Vector2i in placed:
+		if component_of.has(hold):
+			missing_components.erase(int(component_of[hold]))
+	if not missing_components.is_empty():
+		for candidate: Dictionary in candidates:
+			if missing_components.is_empty():
+				break
+			if not bool(candidate.get("mountain", false)):
+				continue
+			var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+			var component_id := int(component_of.get(coord, -1))
+			if component_id < 0 or not missing_components.has(component_id):
+				continue
+			if spacing_blocked.has(coord) or town_blocked.has(coord):
+				continue
+			if _try_place_dwarfhold(candidate, placed, abandoned_chance, blocked, flags, rng):
+				OverworldSettlementService.mark_occupied_area(spacing_blocked, coord, float(min_distance))
+				OverworldSettlementService.mark_occupied_area(south_spacing_blocked, coord, float(south_min_distance))
+				missing_components.erase(component_id)
+	# Southern-half top-up with tighter spacing (main.js:24120-24175).
+	var south_boundary := int(floor(float(rows) * 0.45))
+	var southern_candidate_count := 0
+	for candidate: Dictionary in candidates:
+		if (candidate.get("coord", Vector2i(-1, -1)) as Vector2i).y >= south_boundary:
+			southern_candidate_count += 1
+	if southern_candidate_count > 0:
+		var placed_south := 0
+		for hold: Vector2i in placed:
+			if hold.y >= south_boundary:
+				placed_south += 1
+		var south_base_target := maxi(1, int(round(float(southern_candidate_count) / 650.0)))
+		var south_max := _structure_placement_limit(south_base_target, 16, multiplier)
+		var south_limit_from_total := maxi(1, int(ceil(float(max_dwarfholds) * 0.5)))
+		var south_extra := maxi(0, mini(mini(south_max - placed_south, south_limit_from_total), southern_candidate_count - placed_south))
+		if south_extra > 0:
+			var south_placed := 0
+			for candidate: Dictionary in candidates:
+				if south_placed >= south_extra:
+					break
+				var south_coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+				if south_coord.y < south_boundary:
+					continue
+				if south_spacing_blocked.has(south_coord) or town_blocked.has(south_coord):
+					continue
+				if _try_place_dwarfhold(candidate, placed, abandoned_chance, blocked, flags, rng):
+					OverworldSettlementService.mark_occupied_area(spacing_blocked, south_coord, float(min_distance))
+					OverworldSettlementService.mark_occupied_area(south_spacing_blocked, south_coord, float(south_min_distance))
+					south_placed += 1
+
+
+## Browser tryPlaceDwarfhold (main.js:9097-9260): dark holds within 4 tiles
+## of a volcano, GREAT on score>0.75 with a 15% roll, otherwise an abandoned
+## roll. Spacing and the 12-tile town guard are enforced by the callers'
+## marked-area dictionaries.
+func _try_place_dwarfhold(
+	candidate: Dictionary,
+	placed: Array[Vector2i],
+	abandoned_chance: float,
+	blocked: PackedByteArray,
+	flags: PackedByteArray,
+	rng: RandomNumberGenerator
+) -> bool:
+	var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+	if coord.x < 0 or coord.y < 0 or coord.x >= map_size.x or coord.y >= map_size.y:
+		return false
+	var idx := coord.y * map_size.x + coord.x
+	if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+		return false
+	# Never on a volcano tile itself (browser isVolcanoOverlayKey guard).
+	if _is_within_tiles_of_volcano(coord, 0):
+		return false
+	var tile := DWARFHOLD_TILE
+	if _is_within_tiles_of_volcano(coord, 4):
+		tile = DARK_DWARFHOLD_TILE
+	elif float(candidate.get("raw_score", 0.0)) > 0.75 and rng.randf() < 0.15:
+		tile = GREAT_DWARFHOLD_TILE
+	elif rng.randf() < abandoned_chance:
+		tile = ABANDONED_DWARFHOLD_TILE
+	if settlement_layer != null:
+		settlement_layer.set_cell(coord, _atlas_source_id, tile)
+	else:
+		map_layer.set_cell(coord, _atlas_source_id, tile)
+	var settlement_name := "Dwarfhold"
+	if not DWARFHOLD_NAMES.is_empty():
+		settlement_name = DWARFHOLD_NAMES[rng.randi_range(0, DWARFHOLD_NAMES.size() - 1)]
+	var tile_info := _tile_data.get(coord, {}) as Dictionary
+	_tile_region_names[coord] = settlement_name
+	_tile_population_groups[coord] = {"major_population_groups": ["Dwarves"], "minor_population_groups": []}
+	tile_info["settlement_type"] = "dwarfhold"
+	tile_info.merge(_generate_dwarfhold_details(settlement_name, coord, tile, rng), true)
+	tile_info[DWARFHOLD_SCENE_SEED_KEY] = _dwarfhold_scene_seed_for_tile(coord, tile_info)
+	_tile_data[coord] = tile_info
+	blocked[idx] = 1
+	placed.append(coord)
+	_dwarfhold_points.append(coord)
+	return true
+
+
+## Registers a grove/lizardmen settlement with the standard detail block
+## (founded years, population breakdown and timeline).
+func _register_scored_settlement(
+	coord: Vector2i,
+	tile: Vector2i,
+	settlement_type: String,
+	settlement_name: String,
+	civilization_label: String,
+	population: int,
+	rng: RandomNumberGenerator
+) -> void:
+	if settlement_layer != null:
+		settlement_layer.set_cell(coord, _atlas_source_id, tile)
+	else:
+		map_layer.set_cell(coord, _atlas_source_id, tile)
+	var tile_info := _tile_data.get(coord, {}) as Dictionary
+	_tile_region_names[coord] = settlement_name
+	_tile_population_groups[coord] = {"major_population_groups": [civilization_label], "minor_population_groups": []}
+	tile_info["settlement_type"] = settlement_type
+	var founded_years_ago := _founded_years_ago_for_settlement_type(settlement_type, rng)
+	tile_info["founded_years_ago"] = founded_years_ago
+	var population_options := _population_options_for_settlement_type(settlement_type)
+	if not population_options.is_empty():
+		var majority_key := String((population_options[0] as Dictionary).get("key", ""))
+		var population_breakdown := _generate_population_breakdown_from_options(population_options, population, rng, majority_key)
+		var population_timeline := _generate_population_timeline(population, rng, founded_years_ago)
+		tile_info["population"] = population
+		tile_info["population_label"] = "Population"
+		tile_info["population_descriptor"] = "residents"
+		tile_info["population_breakdown"] = population_breakdown
+		tile_info["population_timeline"] = population_timeline
+		var labels := _labels_from_population_breakdown(population_breakdown)
+		_tile_population_groups[coord] = {
+			"major_population_groups": labels.get("major", [civilization_label]),
+			"minor_population_groups": labels.get("minor", [])
+		}
+	_tile_data[coord] = tile_info
+
+
+## Wood elf groves (browser main.js:25972-26155): forest-canopy scored,
+## never on or adjacent to ocean, min spacing 14, and the grove tile is
+## upgraded to LARGE/GRAND by population ratio >=0.8/>=0.9.
+func _place_wood_elf_groves(rng: RandomNumberGenerator) -> void:
+	var w := map_size.x
+	var rows := map_size.y
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var forest_cells := _placement_fields["forest_cells"] as PackedInt32Array
+	var snow_id := _biome_to_id(BIOME_TUNDRA)
+	var ocean_cells := _landmass_masks.get("ocean_cells", {}) as Dictionary
+	var candidates: Array[Dictionary] = []
+	for list_index in forest_cells.size():
+		var idx := forest_cells[list_index]
+		if blocked[idx] == 1 or int(base_id[idx]) == snow_id:
+			continue
+		var x := idx % w
+		@warning_ignore("integer_division")
+		var y := idx / w
+		var coord := Vector2i(x, y)
+		var near_ocean := ocean_cells.has(coord)
+		var tree_neighbors := 0
+		for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+			var nx := x + offset.x
+			var ny := y + offset.y
+			if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+				near_ocean = true
+				continue
+			if not near_ocean and ocean_cells.has(Vector2i(nx, ny)):
+				near_ocean = true
+			if int(flags[ny * w + nx]) & TILE_OVERLAY_FOREST:
+				tree_neighbors += 1
+		if near_ocean:
+			continue
+		# Tree-density stand-in for the browser treeDensityField.
+		var score := float(tree_neighbors + 1) / 9.0
+		candidates.append({"coord": coord, "score": score})
+	if candidates.is_empty():
+		return
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var elf_frequency := _settlement_frequency_normalized("wood_elves")
+	var base_target := maxi(1, int(round(float(candidates.size()) / 1350.0)))
+	var max_groves := _structure_placement_limit(base_target, 28, _frequency_multiplier(elf_frequency))
+	var min_distance := _adjusted_min_distance(14.0, elf_frequency)
+	var min_distance_sq := float(min_distance * min_distance)
+	for candidate: Dictionary in candidates:
+		if _grove_points.size() >= max_groves:
+			break
+		if float(candidate.get("score", 0.0)) < 0.32:
+			continue
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, _grove_points) < min_distance_sq:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		var population := _roll_population_for_settlement_type("woodElfGrove", rng)
+		var population_ratio := float(population) / 2800.0
+		var tile := WOOD_ELF_GROVES_TILE
+		if population_ratio >= 0.9:
+			tile = WOOD_ELF_GROVES_GRAND_TILE
+		elif population_ratio >= 0.8:
+			tile = WOOD_ELF_GROVES_LARGE_TILE
+		_register_scored_settlement(coord, tile, "woodElfGrove", SETTLEMENT_NAMING.grove_name(rng), "Wood Elves", population, rng)
+		blocked[idx] = 1
+		_grove_points.append(coord)
+
+
+## Lizardmen cities (browser main.js:26157-26234): deep-jungle scoring
+## (density + humidity + equatorial band + low elevation), min spacing 18.
+func _place_lizardmen_cities(rng: RandomNumberGenerator) -> void:
+	var w := map_size.x
+	var rows := map_size.y
+	var height_field := _placement_fields["height"] as PackedFloat32Array
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var moisture_local := _placement_fields["moisture_local"] as PackedFloat32Array
+	var jungle_cells := _placement_fields["jungle_cells"] as PackedInt32Array
+	var preferred_elevation := water_level + 0.08
+	var candidates: Array[Dictionary] = []
+	for list_index in jungle_cells.size():
+		var idx := jungle_cells[list_index]
+		if blocked[idx] == 1:
+			continue
+		var x := idx % w
+		@warning_ignore("integer_division")
+		var y := idx / w
+		var jungle_neighbors := 0
+		for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+			var nx := x + offset.x
+			var ny := y + offset.y
+			if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+				continue
+			if int(flags[ny * w + nx]) & TILE_OVERLAY_TREE:
+				jungle_neighbors += 1
+		var density := float(jungle_neighbors + 1) / 9.0
+		var humidity := float(moisture_local[idx])
+		var normalized_y := (float(y) + 0.5) / float(rows)
+		var equatorial_alignment := clampf(1.0 - absf(normalized_y - 0.5) * 2.0, 0.0, 1.0)
+		var elevation_preference := clampf(1.0 - absf(float(height_field[idx]) - preferred_elevation) * 3.0, 0.0, 1.0)
+		var score := density * 0.45 + humidity * 0.25 + equatorial_alignment * 0.15 + elevation_preference * 0.15
+		candidates.append({"coord": Vector2i(x, y), "score": score})
+	if candidates.is_empty():
+		return
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var lizard_frequency := _settlement_frequency_normalized("lizardmen")
+	var base_target := maxi(1, int(round(float(candidates.size()) / 3300.0)))
+	var max_cities := _structure_placement_limit(base_target, 18, _frequency_multiplier(lizard_frequency))
+	var min_distance := _adjusted_min_distance(18.0, lizard_frequency)
+	var min_distance_sq := float(min_distance * min_distance)
+	for candidate: Dictionary in candidates:
+		if _lizardmen_city_points.size() >= max_cities:
+			break
+		if float(candidate.get("score", 0.0)) < 0.33:
+			continue
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, _lizardmen_city_points) < min_distance_sq:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		var population := _roll_population_for_settlement_type("lizardmenCity", rng)
+		_register_scored_settlement(coord, LIZARDMEN_CITY_TILE, "lizardmenCity", OVERWORLD_CONTENT.generate_lizardmen_city_name(rng), "Lizardmen", population, rng)
+		blocked[idx] = 1
+		_lizardmen_city_points.append(coord)
 
 
 func _place_github_style_structures(
@@ -4509,6 +5377,8 @@ func _place_github_style_structures(
 		var tile_info := _tile_data.get(coord, {}) as Dictionary
 		if tile_info.has("settlement_type") or not String(tile_info.get("structure", "")).strip_edges().is_empty():
 			occupied.append(coord)
+	if _placement_fields.is_empty():
+		_placement_fields = _build_placement_fields(height_map)
 
 	var placer_started := Time.get_ticks_msec()
 	var placer_times := PackedStringArray()
@@ -4519,16 +5389,45 @@ func _place_github_style_structures(
 	_place_evil_keeps(rng, occupied, map_area)
 	placer_times.append("desert+keeps %d" % (Time.get_ticks_msec() - placer_started))
 	placer_started = Time.get_ticks_msec()
-	_place_hostile_camps(biome_map, moisture_map, rng, occupied, map_area)
-	placer_times.append("camps %d" % (Time.get_ticks_msec() - placer_started))
-	placer_started = Time.get_ticks_msec()
-	_place_caves_and_dungeons(biome_map, height_map, moisture_map, rng, occupied, map_area)
-	placer_times.append("caves %d" % (Time.get_ticks_msec() - placer_started))
+	# The passes above work off the occupied list; fold their placements
+	# into the shared blocked buffer before the browser-parity passes run.
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	for coord: Vector2i in occupied:
+		if coord.x >= 0 and coord.y >= 0 and coord.x < map_size.x and coord.y < map_size.y:
+			blocked[coord.y * map_size.x + coord.x] = 1
+	# Distance fields are built once from the settlement sets and reused by
+	# every rule below (browser computeNearestDistanceSq call sites).
+	var major_points: Array[Vector2i] = []
+	major_points.append_array(_town_points)
+	major_points.append_array(_dwarfhold_points)
+	major_points.append_array(_grove_points)
+	major_points.append_array(_lizardmen_city_points)
+	major_points.append_array(_desert_city_points)
+	var field_major := _chamfer_distance_field(major_points)
+	placer_times.append("fields %d" % (Time.get_ticks_msec() - placer_started))
 	placer_started = Time.get_ticks_msec()
 	_place_mines_hillholds_and_dams(height_map, rng, occupied, map_area)
-	_place_clergy_and_taverns(moisture_map, rng, occupied, map_area)
-	placer_times.append("mines+clergy %d" % (Time.get_ticks_msec() - placer_started))
+	placer_times.append("mines %d" % (Time.get_ticks_msec() - placer_started))
+	placer_started = Time.get_ticks_msec()
+	_place_goblin_caves(rng, occupied, map_area)
+	_place_dungeons(rng, occupied, map_area)
+	placer_times.append("caves %d" % (Time.get_ticks_msec() - placer_started))
+	placer_started = Time.get_ticks_msec()
+	var hostile_points := _place_war_camps(field_major, rng, occupied, map_area)
+	var field_hostile := _chamfer_distance_field(hostile_points)
+	var centaur_points := _place_centaur_encampments(field_major, field_hostile, rng, occupied, map_area)
+	var traveler_points := _place_traveler_camps(field_major, field_hostile, centaur_points, rng, occupied, map_area)
+	placer_times.append("camps %d" % (Time.get_ticks_msec() - placer_started))
+	placer_started = Time.get_ticks_msec()
+	_place_roadside_taverns(field_major, field_hostile, centaur_points, traveler_points, rng, occupied, map_area)
+	var monastery_points := _place_monasteries(field_major, field_hostile, centaur_points, rng, occupied, map_area)
+	_place_castles(field_major, rng, occupied, map_area)
+	var field_monastery := _chamfer_distance_field(monastery_points)
+	_place_saint_shrines(field_major, field_monastery, rng, occupied, map_area)
+	placer_times.append("taverns+clergy+castles %d" % (Time.get_ticks_msec() - placer_started))
 	print("[OverworldMap] ambient placers ms: %s" % " | ".join(placer_times))
+	# The shared buffers are only valid during generation; drop them.
+	_placement_fields = {}
 
 
 func _place_wizard_tower_settlements(
@@ -4582,93 +5481,503 @@ func _place_wizard_tower_settlements(
 		settlements_created += 1
 
 
-func _place_hostile_camps(
-	biome_map: Dictionary,
-	moisture_map: Dictionary,
+## Hostile war camps (browser main.js:26506-26706): grass/sand/marsh/
+## badlands sites >=6 tiles from settlements, dryness/hill/water scored,
+## then typed per terrain (trolls marsh/water, ogres hills, gnolls dry/sand,
+## orcs badlands, bandits near settlements ~9 tiles out).
+func _place_war_camps(
+	field_major: PackedFloat32Array,
 	rng: RandomNumberGenerator,
 	occupied: Array[Vector2i],
 	map_area: int
-) -> void:
-	var camp_types: Array[Dictionary] = [
-		{"id": "orcCamp", "tile": ORC_CAMP_TILE},
-		{"id": "gnollCamp", "tile": GNOLL_CAMP_TILE},
-		{"id": "trollCamp", "tile": TROLL_CAMP_TILE},
-		{"id": "ogreCamp", "tile": OGRE_CAMP_TILE},
-		{"id": "banditCamp", "tile": BANDIT_CAMP_TILE},
-		{"id": "travelerCamp", "tile": TRAVELERS_CAMP_TILE},
-		{"id": "centaurEncampment", "tile": CENTAUR_ENCAMPMENT_TILE}
-	]
-	var camp_candidates := STRUCTURE_PLACER.build_camp_candidates(
-		_tile_data,
-		biome_map,
-		moisture_map,
-		occupied,
-		_biome_lookup(),
-		rng
-	)
-	if camp_candidates.is_empty():
-		return
-	var max_camps := maxi(1, int(round(float(map_area) / 14000.0)))
-	var min_distance := 8.0
-	var placed := 0
-	for candidate: Dictionary in camp_candidates:
-		if placed >= max_camps:
+) -> Array[Vector2i]:
+	var w := map_size.x
+	var rows := map_size.y
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var water_id := _biome_to_id(BIOME_WATER)
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var hills_id := _biome_to_id(BIOME_HILLS)
+	var grass_id := _biome_to_id(BIOME_GRASSLAND)
+	var sand_id := _biome_to_id(BIOME_DESERT)
+	var marsh_id := _biome_to_id(BIOME_MARSH)
+	var badlands_id := _biome_to_id(BIOME_BADLANDS)
+	var noise_seed := map_seed + 0x4a1d2b7f
+	var edge_divisor := maxf(6.0, float(mini(w, rows)) / 3.2)
+	var candidates: Array[Dictionary] = []
+	var hostile_points: Array[Vector2i] = []
+	for cell_list_variant: Variant in [
+		_placement_fields["grass_cells"],
+		_placement_fields["sand_cells"],
+		_placement_fields["marsh_cells"],
+		_placement_fields["badlands_cells"]
+	]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var settlement_distance := float(field_major[idx])
+			if settlement_distance < 6.0:
+				continue
+			var x := idx % w
+			@warning_ignore("integer_division")
+			var y := idx / w
+			var cell_base := int(base_id[idx])
+			var rainfall := float(_rainfall_buffer[idx]) if idx < _rainfall_buffer.size() else 0.5
+			var dryness := clampf(1.0 - rainfall, 0.0, 1.0)
+			var base_score := 0.2
+			if cell_base == badlands_id:
+				base_score += 0.45
+			elif cell_base == sand_id:
+				base_score += 0.36
+			elif cell_base == marsh_id:
+				base_score += 0.28
+			else:
+				base_score += 0.24
+			var hill_present: bool = int(hill_id[idx]) == hills_id and cell_base != marsh_id
+			var hill_bonus := 0.16 if hill_present else 0.0
+			var water_adjacency := 0
+			for definition: Dictionary in RIVER_NEIGHBOR_DEFINITIONS:
+				var offset := definition.get("offset", Vector2i.ZERO) as Vector2i
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+					continue
+				if int(base_id[ny * w + nx]) == water_id:
+					water_adjacency += 1
+			var water_score := clampf(float(water_adjacency) * 0.08, 0.0, 0.18)
+			var settlement_penalty := clampf((10.0 - settlement_distance) * 0.05, 0.0, 0.35)
+			var border_distance := mini(mini(x, w - 1 - x), mini(y, rows - 1 - y))
+			var edge_score := clampf(float(border_distance) / edge_divisor, 0.0, 1.0) * 0.12
+			var noise := _hash_coords(x, y, noise_seed) - 0.5
+			var score := base_score + dryness * 0.35 + hill_bonus + water_score + edge_score + noise * 0.22 + rng.randf() * 0.18 - settlement_penalty
+			if score > 0.28:
+				candidates.append({
+					"coord": Vector2i(x, y),
+					"score": score,
+					"dryness": dryness,
+					"water_adjacency": water_adjacency,
+					"hill": hill_present,
+					"settlement_distance": settlement_distance,
+					"grass": cell_base == grass_id,
+					"sand": cell_base == sand_id,
+					"marsh": cell_base == marsh_id,
+					"badlands": cell_base == badlands_id,
+					"snow": false
+				})
+	if candidates.is_empty():
+		return hostile_points
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var max_camps := _structure_placement_limit(maxi(1, int(round(float(map_area) / 14000.0))), 16, 1.0)
+	var min_distance_sq := 64.0
+	var camp_tiles := {
+		"orcCamp": ORC_CAMP_TILE,
+		"gnollCamp": GNOLL_CAMP_TILE,
+		"trollCamp": TROLL_CAMP_TILE,
+		"ogreCamp": OGRE_CAMP_TILE,
+		"banditCamp": BANDIT_CAMP_TILE
+	}
+	for candidate: Dictionary in candidates:
+		if hostile_points.size() >= max_camps:
 			break
 		if float(candidate.get("score", 0.0)) < 0.3:
 			continue
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
-		if _is_too_close(coord, occupied, min_distance):
+		if _nearest_distance_sq_points(coord, hostile_points) < min_distance_sq:
 			continue
-		var camp_id := _select_camp_type_from_biome(_tile_base_biome_from_data(_tile_data.get(coord, {}) as Dictionary), rng)
-		var camp_def: Dictionary = {}
-		for def: Dictionary in camp_types:
-			if String(def.get("id", "")) == camp_id:
-				camp_def = def
-				break
-		if camp_def.is_empty():
-			camp_def = camp_types[0] as Dictionary
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		var camp_id := _select_war_camp_type(candidate, rng)
 		_place_structure_with_details(
 			coord,
-			camp_def.get("tile", ORC_CAMP_TILE) as Vector2i,
+			camp_tiles.get(camp_id, ORC_CAMP_TILE) as Vector2i,
 			camp_id,
 			{
 				"region_name": SETTLEMENT_NAMING.camp_name(camp_id, rng),
 				"settlement_classification": camp_id.capitalize()
 			}
 		)
+		blocked[idx] = 1
 		occupied.append(coord)
-		placed += 1
+		hostile_points.append(coord)
+	return hostile_points
 
 
+## Browser selectWarCampType (main.js:4549-4612): terrain-weighted typing.
+func _select_war_camp_type(candidate: Dictionary, rng: RandomNumberGenerator) -> String:
+	var types: Array[String] = ["orcCamp", "gnollCamp", "trollCamp", "ogreCamp", "banditCamp"]
+	var base_weights := {"orcCamp": 1.05, "gnollCamp": 0.95, "trollCamp": 0.85, "ogreCamp": 0.8, "banditCamp": 1.1}
+	var dryness := clampf(float(candidate.get("dryness", 0.0)), 0.0, 1.0)
+	var water_adjacency := maxi(0, int(candidate.get("water_adjacency", 0)))
+	var settlement_distance := float(candidate.get("settlement_distance", INF))
+	var weights: Array[float] = []
+	var total := 0.0
+	for camp_type: String in types:
+		var weight := float(base_weights.get(camp_type, 1.0))
+		match camp_type:
+			"orcCamp":
+				if bool(candidate.get("badlands", false)):
+					weight += 0.6
+				if bool(candidate.get("sand", false)):
+					weight += 0.4
+			"gnollCamp":
+				weight += dryness * 0.6
+				if bool(candidate.get("sand", false)):
+					weight += 0.5
+			"trollCamp":
+				if bool(candidate.get("marsh", false)):
+					weight += 0.7
+				weight += minf(float(water_adjacency) * 0.25, 0.75)
+				if bool(candidate.get("snow", false)):
+					weight -= 0.3
+			"ogreCamp":
+				if bool(candidate.get("hill", false)):
+					weight += 0.8
+				if bool(candidate.get("badlands", false)):
+					weight += 0.2
+			"banditCamp":
+				if bool(candidate.get("grass", false)):
+					weight += 0.25
+				if settlement_distance < INF:
+					weight += clampf(1.0 - absf(settlement_distance - 9.0) / 9.0, 0.0, 1.0) * 0.8
+		weight = maxf(0.01, weight)
+		weights.append(weight)
+		total += weight
+	var roll := rng.randf() * total
+	for type_index in types.size():
+		roll -= weights[type_index]
+		if roll <= 0.0:
+			return types[type_index]
+	return types[0]
 
-func _select_camp_type_from_biome(base_biome: String, rng: RandomNumberGenerator) -> String:
-	return STRUCTURE_PLACER.select_camp_type_from_biome(base_biome, rng, _biome_lookup())
 
-
-func _place_caves_and_dungeons(
-	biome_map: Dictionary,
-	height_map: Dictionary,
-	moisture_map: Dictionary,
+## Centaur encampments (browser main.js:26708-26840): grass/badlands/snow
+## with grass within 15 tiles, >=7 from settlements, >=8 from hostile camps.
+func _place_centaur_encampments(
+	field_major: PackedFloat32Array,
+	field_hostile: PackedFloat32Array,
 	rng: RandomNumberGenerator,
 	occupied: Array[Vector2i],
 	map_area: int
-) -> void:
-	var candidates := STRUCTURE_PLACER.build_cave_and_dungeon_candidates(
-		_tile_data,
-		biome_map,
-		height_map,
-		moisture_map,
-		occupied,
-		_biome_lookup(),
-		rng
-	)
-	var cave_candidates: Array[Dictionary] = candidates.get("caves", [])
-	var dungeon_candidates: Array[Dictionary] = candidates.get("dungeons", [])
+) -> Array[Vector2i]:
+	var w := map_size.x
+	var rows := map_size.y
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var canopy := _placement_fields["canopy"] as PackedFloat32Array
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var hills_id := _biome_to_id(BIOME_HILLS)
+	var grass_id := _biome_to_id(BIOME_GRASSLAND)
+	var badlands_id := _biome_to_id(BIOME_BADLANDS)
+	var centaur_points: Array[Vector2i] = []
+	var grass_cells := _placement_fields["grass_cells"] as PackedInt32Array
+	if grass_cells.is_empty():
+		return centaur_points
+	var grass_sources: Array[Vector2i] = []
+	for list_index in grass_cells.size():
+		var idx := grass_cells[list_index]
+		@warning_ignore("integer_division")
+		grass_sources.append(Vector2i(idx % w, idx / w))
+	var field_grass := _chamfer_distance_field(grass_sources)
+	var noise_seed := map_seed + 0x53d1c87b
+	var candidates: Array[Dictionary] = []
+	for cell_list_variant: Variant in [
+		_placement_fields["grass_cells"],
+		_placement_fields["badlands_cells"],
+		_placement_fields["snow_cells"]
+	]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var distance_to_grass := float(field_grass[idx])
+			if distance_to_grass > 15.0:
+				continue
+			if float(field_major[idx]) < 7.0:
+				continue
+			if float(field_hostile[idx]) < 8.0:
+				continue
+			var x := idx % w
+			@warning_ignore("integer_division")
+			var y := idx / w
+			var rainfall := clampf(float(_rainfall_buffer[idx]) if idx < _rainfall_buffer.size() else 0.5, 0.0, 1.0)
+			var rainfall_score := clampf(1.0 - absf(rainfall - 0.55) * 1.6, 0.0, 1.0)
+			var openness_score := clampf(1.0 - float(canopy[idx]), 0.0, 1.0)
+			var grass_proximity := clampf(1.0 - minf(distance_to_grass, 15.0) / 15.0, 0.0, 1.0)
+			var cell_base := int(base_id[idx])
+			var base_score := 0.43 if cell_base == grass_id else (0.41 if cell_base == badlands_id else 0.38)
+			var hill_penalty := 0.12 if int(hill_id[idx]) == hills_id else 0.0
+			var noise := _hash_coords(x, y, noise_seed) - 0.5
+			var score := base_score + grass_proximity * 0.35 + rainfall_score * 0.25 + openness_score * 0.2 - hill_penalty + noise * 0.18
+			if score > 0.3:
+				candidates.append({"coord": Vector2i(x, y), "score": score})
+	if candidates.is_empty():
+		return centaur_points
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var max_encampments := _structure_placement_limit(maxi(1, int(round(float(map_area) / 15000.0))), 14, 1.0)
+	var min_distance_sq := 81.0
+	for candidate: Dictionary in candidates:
+		if centaur_points.size() >= max_encampments:
+			break
+		if float(candidate.get("score", 0.0)) < 0.32:
+			continue
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, centaur_points) < min_distance_sq:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		_place_structure_with_details(coord, CENTAUR_ENCAMPMENT_TILE, "centaurEncampment", {
+			"region_name": SETTLEMENT_NAMING.camp_name("centaurEncampment", rng),
+			"settlement_classification": "Centaur Encampment"
+		})
+		blocked[idx] = 1
+		occupied.append(coord)
+		centaur_points.append(coord)
+	return centaur_points
 
-	var max_caves := maxi(1, int(round(float(map_area) / 18000.0)))
+
+## Traveler camps (browser main.js:26842-26974): 4-26 tiles from a
+## settlement (sweet spot 10), >=7 from hostile camps, >=8 from centaurs.
+func _place_traveler_camps(
+	field_major: PackedFloat32Array,
+	field_hostile: PackedFloat32Array,
+	centaur_points: Array[Vector2i],
+	rng: RandomNumberGenerator,
+	occupied: Array[Vector2i],
+	map_area: int
+) -> Array[Vector2i]:
+	var w := map_size.x
+	var rows := map_size.y
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var moisture_field := _placement_fields["moisture"] as PackedFloat32Array
+	var water_id := _biome_to_id(BIOME_WATER)
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var hills_id := _biome_to_id(BIOME_HILLS)
+	var noise_seed := map_seed + 0x579c3d11
+	var candidates: Array[Dictionary] = []
+	var traveler_points: Array[Vector2i] = []
+	for cell_list_variant: Variant in [
+		_placement_fields["grass_cells"],
+		_placement_fields["sand_cells"],
+		_placement_fields["badlands_cells"],
+		_placement_fields["marsh_cells"]
+	]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var distance := float(field_major[idx])
+			if distance < 4.0 or distance > 26.0:
+				continue
+			if float(field_hostile[idx]) < 7.0:
+				continue
+			var x := idx % w
+			@warning_ignore("integer_division")
+			var y := idx / w
+			var coord := Vector2i(x, y)
+			if _nearest_distance_sq_points(coord, centaur_points) < 64.0:
+				continue
+			var water_adjacency := 0
+			for definition: Dictionary in RIVER_NEIGHBOR_DEFINITIONS:
+				var offset := definition.get("offset", Vector2i.ZERO) as Vector2i
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+					continue
+				var n_idx := ny * w + nx
+				if int(base_id[n_idx]) == water_id or (int(flags[n_idx]) & TILE_OVERLAY_RIVER) != 0:
+					water_adjacency += 1
+			var rainfall := float(_rainfall_buffer[idx]) if idx < _rainfall_buffer.size() else 0.5
+			var dryness := clampf(1.0 - rainfall, 0.0, 1.0)
+			var soil_softness := clampf(float(moisture_field[idx]), 0.0, 1.0)
+			var hill_bonus := 0.08 if int(hill_id[idx]) == hills_id else 0.0
+			var distance_score := clampf(1.0 - absf(distance - 10.0) / 9.0, 0.0, 1.0) * 0.32
+			var water_score := clampf(float(water_adjacency) * 0.07, 0.0, 0.2)
+			var noise := _hash_coords(x, y, noise_seed) - 0.5
+			var score := 0.24 + distance_score + hill_bonus + water_score + dryness * 0.18 + soil_softness * 0.12 + noise * 0.18 + rng.randf() * 0.12
+			if score > 0.3:
+				candidates.append({"coord": coord, "score": score})
+	if candidates.is_empty():
+		return traveler_points
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var max_camps := _structure_placement_limit(maxi(1, int(round(float(map_area) / 20000.0))), 14, 1.0)
+	var min_distance_sq := 49.0
+	for candidate: Dictionary in candidates:
+		if traveler_points.size() >= max_camps:
+			break
+		if float(candidate.get("score", 0.0)) < 0.31:
+			continue
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, traveler_points) < min_distance_sq:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		_place_structure_with_details(coord, TRAVELERS_CAMP_TILE, "travelerCamp", {
+			"region_name": SETTLEMENT_NAMING.camp_name("travelerCamp", rng),
+			"settlement_classification": "Traveler Camp"
+		})
+		blocked[idx] = 1
+		occupied.append(coord)
+		traveler_points.append(coord)
+	return traveler_points
+
+
+## Goblin caves (browser main.js:25433-25553): grass/snow foothills (hill
+## overlay or mountain-adjacent), never on mountain overlay tiles, slope and
+## elevation scored, density area/9000.
+func _place_goblin_caves(rng: RandomNumberGenerator, occupied: Array[Vector2i], map_area: int) -> void:
+	var w := map_size.x
+	var rows := map_size.y
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var height_field := _placement_fields["height"] as PackedFloat32Array
+	var water_id := _biome_to_id(BIOME_WATER)
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var hills_id := _biome_to_id(BIOME_HILLS)
+	var noise_seed := map_seed + 0x21f0e1eb
+	var candidates: Array[Dictionary] = []
+	for cell_list_variant: Variant in [_placement_fields["grass_cells"], _placement_fields["snow_cells"]]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+				continue
+			# Tree overlays block caves; hill overlays are the sweet spot and
+			# mountain overlays are forbidden outright.
+			if (int(flags[idx]) & (TILE_OVERLAY_TREE | TILE_OVERLAY_FOREST)) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var overlay_is_hill: bool = int(hill_id[idx]) == hills_id
+			var x := idx % w
+			@warning_ignore("integer_division")
+			var y := idx / w
+			var height_value := float(height_field[idx])
+			var slope_sum := 0.0
+			var neighbor_count := 0
+			var mountain_neighbors := 0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+					continue
+				var n_idx := ny * w + nx
+				if int(base_id[n_idx]) == water_id:
+					continue
+				slope_sum += absf(height_value - float(height_field[n_idx]))
+				neighbor_count += 1
+				if int(hill_id[n_idx]) == mountain_id or int(base_id[n_idx]) == mountain_id:
+					mountain_neighbors += 1
+			var average_slope := (slope_sum / float(neighbor_count)) if neighbor_count > 0 else 0.0
+			var slope_score := clampf((average_slope - 0.009) * 36.0, 0.0, 1.0)
+			var hill_bonus := 0.35 if overlay_is_hill else 0.0
+			var mountain_bonus := minf(0.25, float(mountain_neighbors) * 0.08)
+			var elevation_score := clampf((height_value - water_level) * 1.9, 0.0, 1.0)
+			var noise := _hash_coords(x, y, noise_seed) - 0.5
+			var composite := hill_bonus + slope_score * 0.45 + mountain_bonus + elevation_score * 0.2 + noise * 0.15
+			if composite > 0.22:
+				candidates.append({"coord": Vector2i(x, y), "score": composite, "hill": overlay_is_hill})
+	if candidates.is_empty():
+		return
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var max_caves := _structure_placement_limit(maxi(1, int(round(float(map_area) / 9000.0))), 22, 1.0)
+	var min_distance := 6.0
+	var placed: Array[Vector2i] = []
+	for candidate: Dictionary in candidates:
+		if placed.size() >= max_caves:
+			break
+		if float(candidate.get("score", 0.0)) < 0.28:
+			continue
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		var required_distance := maxf(3.0, min_distance - 1.0) if bool(candidate.get("hill", false)) else min_distance
+		if _nearest_distance_sq_points(coord, placed) < required_distance * required_distance:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		_place_structure_with_details(coord, CAVE_TILE, "cave", {
+			"region_name": SETTLEMENT_NAMING.goblin_cave_name(rng),
+			"settlement_classification": "Goblin Cave",
+			"population": maxi(28, int(40.0 + rng.randf() * 180.0))
+		})
+		blocked[idx] = 1
+		occupied.append(coord)
+		placed.append(coord)
+
+
+## Dungeons keep their pre-existing dryness-scored placement, driven off
+## the flat buffers.
+func _place_dungeons(rng: RandomNumberGenerator, occupied: Array[Vector2i], map_area: int) -> void:
+	var w := map_size.x
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var moisture_field := _placement_fields["moisture"] as PackedFloat32Array
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var badlands_id := _biome_to_id(BIOME_BADLANDS)
+	var candidates: Array[Dictionary] = []
+	for cell_list_variant: Variant in [
+		_placement_fields["grass_cells"],
+		_placement_fields["snow_cells"],
+		_placement_fields["sand_cells"],
+		_placement_fields["marsh_cells"],
+		_placement_fields["badlands_cells"]
+	]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var dryness := clampf(1.0 - float(moisture_field[idx]), 0.0, 1.0)
+			var score := dryness * 0.45 + rng.randf_range(0.0, 0.35)
+			if int(base_id[idx]) == badlands_id:
+				score += 0.12
+			if score > 0.32:
+				@warning_ignore("integer_division")
+				candidates.append({"coord": Vector2i(idx % w, idx / w), "score": score})
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
 	var max_dungeons := maxi(1, int(round(float(map_area) / 22000.0)))
-	_place_scored_structure_batch(cave_candidates, occupied, 7.0, max_caves, 0.3, CAVE_TILE, "cave", rng)
-	_place_scored_structure_batch(dungeon_candidates, occupied, 9.0, max_dungeons, 0.32, DUNGEON_TILE, "dungeon", rng)
+	var placed := 0
+	for candidate: Dictionary in candidates:
+		if placed >= max_dungeons:
+			break
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _is_too_close(coord, occupied, 9.0):
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		_place_structure_with_details(coord, DUNGEON_TILE, "dungeon", {
+			"region_name": SETTLEMENT_NAMING.dungeon_name(rng),
+			"settlement_classification": "Dungeon"
+		})
+		blocked[idx] = 1
+		occupied.append(coord)
+		placed += 1
 
 
 func _place_mines_hillholds_and_dams(
@@ -4677,139 +5986,483 @@ func _place_mines_hillholds_and_dams(
 	occupied: Array[Vector2i],
 	map_area: int
 ) -> void:
-	var mountain_candidates: Array[Dictionary] = []
+	var w := map_size.x
+	var rows := map_size.y
+	var cell_count := w * rows
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var height_field := _placement_fields["height"] as PackedFloat32Array
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var hills_id := _biome_to_id(BIOME_HILLS)
+	var have_scores := _mountain_score_buffer.size() == cell_count
+	# Mines (browser main.js:24179-24270): mountain-overlay tiles with ridge
+	# score >= 0.18, spacing 3, and >= 3 tiles from any dwarfhold.
+	var mine_candidates: Array[Dictionary] = []
 	var hill_candidates: Array[Dictionary] = []
-	var occupied_set: Dictionary = {}
-	for occupied_coord: Vector2i in occupied:
-		occupied_set[occupied_coord] = true
-	for coord_variant: Variant in _tile_data.keys():
-		var coord := coord_variant as Vector2i
-		if occupied_set.has(coord):
+	for idx in range(cell_count):
+		if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
 			continue
-		var tile_info := _tile_data.get(coord, {}) as Dictionary
-		if tile_info.is_empty() or _tile_has_overlay_flag(tile_info, TILE_OVERLAY_RIVER):
-			continue
-		var base_biome := _tile_base_biome_from_data(tile_info)
-		var hill_overlay := _tile_hill_biome_from_data(tile_info)
-		if base_biome == BIOME_MOUNTAIN or hill_overlay == BIOME_MOUNTAIN:
-			mountain_candidates.append({"coord": coord, "score": float(height_map.get(coord, 0.0)) + rng.randf() * 0.1})
-		elif hill_overlay == BIOME_HILLS:
-			hill_candidates.append({"coord": coord, "score": float(height_map.get(coord, 0.0)) + rng.randf() * 0.1})
-
-	mountain_candidates = STRUCTURE_PLACER.sort_candidates_by_score(mountain_candidates)
+		var is_mountain: bool = int(hill_id[idx]) == mountain_id or int(base_id[idx]) == mountain_id
+		var x := idx % w
+		@warning_ignore("integer_division")
+		var y := idx / w
+		if is_mountain:
+			var score := float(_mountain_score_buffer[idx]) if have_scores else float(height_field[idx])
+			if score >= 0.18:
+				mine_candidates.append({"coord": Vector2i(x, y), "score": score})
+		elif int(hill_id[idx]) == hills_id:
+			hill_candidates.append({"coord": Vector2i(x, y), "score": float(height_field[idx]) + rng.randf() * 0.1})
+	mine_candidates = STRUCTURE_PLACER.sort_candidates_by_score(mine_candidates)
 	hill_candidates = STRUCTURE_PLACER.sort_candidates_by_score(hill_candidates)
 
-	var max_mines := maxi(1, int(round(float(map_area) / 24000.0)))
-	var max_hillholds := maxi(1, int(round(float(map_area) / 32000.0)))
-	var max_dams := maxi(1, int(round(float(map_area) / 52000.0)))
-	var placed_dwarf_sites: Array[Vector2i] = []
-
-	for candidate in mountain_candidates:
-		if max_mines <= 0:
+	var dwarf_frequency := _settlement_frequency_normalized("dwarves")
+	var max_mines := _structure_placement_limit(maxi(1, int(round(float(mine_candidates.size()) / 420.0))), 28, _frequency_multiplier(dwarf_frequency))
+	var mine_spacing := _adjusted_min_distance(3.0, dwarf_frequency)
+	var mine_spacing_sq := float(mine_spacing * mine_spacing)
+	var placed_mines: Array[Vector2i] = []
+	for candidate: Dictionary in mine_candidates:
+		if placed_mines.size() >= max_mines:
 			break
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
-		if _is_too_close(coord, occupied, 7.0):
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		if _nearest_distance_sq_points(coord, placed_mines) < mine_spacing_sq:
+			continue
+		if _nearest_distance_sq_points(coord, _dwarfhold_points) < 9.0:
+			continue
+		if _is_within_tiles_of_volcano(coord, 0):
 			continue
 		_place_structure_with_details(coord, MINE_TILE, "mine", {
 			"region_name": SETTLEMENT_NAMING.mine_name(rng),
 			"settlement_classification": "Mine"
 		})
+		blocked[idx] = 1
 		occupied.append(coord)
-		occupied_set[coord] = true
-		placed_dwarf_sites.append(coord)
-		max_mines -= 1
+		placed_mines.append(coord)
+	if placed_mines.is_empty():
+		for candidate: Dictionary in mine_candidates:
+			var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+			var idx := coord.y * w + coord.x
+			if blocked[idx] == 1 or _is_within_tiles_of_volcano(coord, 0):
+				continue
+			_place_structure_with_details(coord, MINE_TILE, "mine", {
+				"region_name": SETTLEMENT_NAMING.mine_name(rng),
+				"settlement_classification": "Mine"
+			})
+			blocked[idx] = 1
+			occupied.append(coord)
+			placed_mines.append(coord)
+			break
 
-	for candidate in hill_candidates:
+	var max_hillholds := maxi(1, int(round(float(map_area) / 32000.0)))
+	for candidate: Dictionary in hill_candidates:
 		if max_hillholds <= 0:
 			break
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
 		if _is_too_close(coord, occupied, 10.0):
 			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
 		_place_structure_with_details(coord, HILLHOLD_TILE, "hillhold", {
 			"region_name": SETTLEMENT_NAMING.hillhold_name(rng),
 			"settlement_classification": "Hillhold"
 		})
+		blocked[idx] = 1
 		occupied.append(coord)
-		occupied_set[coord] = true
-		placed_dwarf_sites.append(coord)
+		_hillhold_points.append(coord)
 		max_hillholds -= 1
 
-	if max_dams > 0:
+	var max_dams := maxi(1, int(round(float(map_area) / 52000.0)))
+	if max_dams > 0 and not _dwarfhold_points.is_empty():
 		# Browser rule: dams are dwarven engineering. They sit on RIVER
 		# tiles pinched between mountains, within 10 tiles of a dwarfhold,
 		# and even then only some sites (35%) get dammed.
-		var dwarfhold_coords: Array[Vector2i] = []
-		for hold_coord_variant: Variant in _tile_data.keys():
-			var hold_info := _tile_data.get(hold_coord_variant, {}) as Dictionary
-			if String(hold_info.get("settlement_type", "")).findn("dwarfhold") >= 0:
-				dwarfhold_coords.append(hold_coord_variant as Vector2i)
-		if not dwarfhold_coords.is_empty():
-			for y in range(1, map_size.y - 1):
-				for x in range(1, map_size.x - 1):
-					if max_dams <= 0:
-						break
-					var coord := Vector2i(x, y)
-					if occupied_set.has(coord):
-						continue
-					var dam_tile_info := _tile_data.get(coord, {}) as Dictionary
-					if not _tile_has_overlay_flag(dam_tile_info, TILE_OVERLAY_RIVER):
-						continue
-					var west_hill := _tile_hill_biome_from_data((_tile_data.get(Vector2i(x - 1, y), {}) as Dictionary))
-					var east_hill := _tile_hill_biome_from_data((_tile_data.get(Vector2i(x + 1, y), {}) as Dictionary))
-					var north_hill := _tile_hill_biome_from_data((_tile_data.get(Vector2i(x, y - 1), {}) as Dictionary))
-					var south_hill := _tile_hill_biome_from_data((_tile_data.get(Vector2i(x, y + 1), {}) as Dictionary))
-					var pinched := (west_hill == BIOME_MOUNTAIN and east_hill == BIOME_MOUNTAIN) \
-						or (north_hill == BIOME_MOUNTAIN and south_hill == BIOME_MOUNTAIN)
-					if not pinched:
-						continue
-					if not _is_too_close(coord, dwarfhold_coords, 10.0):
-						continue
-					if rng.randf() >= 0.35:
-						continue
-					_place_structure_with_details(coord, DAM_TILE, "dam", {"region_name": "Dam"})
-					occupied.append(coord)
-					occupied_set[coord] = true
-					max_dams -= 1
+		for y in range(1, rows - 1):
+			for x in range(1, w - 1):
+				if max_dams <= 0:
+					break
+				var idx := y * w + x
+				if blocked[idx] == 1:
+					continue
+				if (int(flags[idx]) & TILE_OVERLAY_RIVER) == 0:
+					continue
+				var west_mountain: bool = int(hill_id[idx - 1]) == mountain_id
+				var east_mountain: bool = int(hill_id[idx + 1]) == mountain_id
+				var north_mountain: bool = int(hill_id[idx - w]) == mountain_id
+				var south_mountain: bool = int(hill_id[idx + w]) == mountain_id
+				var pinched := (west_mountain and east_mountain) or (north_mountain and south_mountain)
+				if not pinched:
+					continue
+				var coord := Vector2i(x, y)
+				if _nearest_distance_sq_points(coord, _dwarfhold_points) > 100.0:
+					continue
+				if rng.randf() >= 0.35:
+					continue
+				_place_structure_with_details(coord, DAM_TILE, "dam", {"region_name": "Dam"})
+				blocked[idx] = 1
+				occupied.append(coord)
+				max_dams -= 1
 
 
-func _place_clergy_and_taverns(
-	moisture_map: Dictionary,
+## Roadside taverns (browser main.js:26976-27110): grass/sand/badlands,
+## 3-20 tiles from a civil settlement with the score peaking at 8.
+func _place_roadside_taverns(
+	field_civil: PackedFloat32Array,
+	field_hostile: PackedFloat32Array,
+	centaur_points: Array[Vector2i],
+	traveler_points: Array[Vector2i],
 	rng: RandomNumberGenerator,
 	occupied: Array[Vector2i],
 	map_area: int
 ) -> void:
-	var monastery_candidates: Array[Dictionary] = []
-	var shrine_candidates: Array[Dictionary] = []
-	var tavern_candidates: Array[Dictionary] = []
-	var occupied_set: Dictionary = {}
-	for occupied_coord: Vector2i in occupied:
-		occupied_set[occupied_coord] = true
-	for coord_variant: Variant in _tile_data.keys():
-		var coord := coord_variant as Vector2i
-		if occupied_set.has(coord):
+	var w := map_size.x
+	var rows := map_size.y
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var moisture_field := _placement_fields["moisture"] as PackedFloat32Array
+	var water_id := _biome_to_id(BIOME_WATER)
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var noise_seed := map_seed + 0x9324f8b1
+	var candidates: Array[Dictionary] = []
+	for cell_list_variant: Variant in [
+		_placement_fields["grass_cells"],
+		_placement_fields["sand_cells"],
+		_placement_fields["badlands_cells"]
+	]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var distance := float(field_civil[idx])
+			if distance < 3.0 or distance > 20.0:
+				continue
+			var x := idx % w
+			@warning_ignore("integer_division")
+			var y := idx / w
+			var river_adjacency := 0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+					continue
+				var n_idx := ny * w + nx
+				if int(base_id[n_idx]) == water_id or (int(flags[n_idx]) & TILE_OVERLAY_RIVER) != 0:
+					river_adjacency += 1
+			var rainfall := float(_rainfall_buffer[idx]) if idx < _rainfall_buffer.size() else 0.5
+			var fertility := clampf(rainfall * 0.6 + float(moisture_field[idx]) * 0.4, 0.0, 1.0)
+			var distance_score := clampf(1.0 - absf(distance - 8.0) / 6.5, 0.0, 1.0) * 0.36
+			var river_score := clampf(float(river_adjacency) * 0.09, 0.0, 0.24)
+			var noise := _hash_coords(x, y, noise_seed) - 0.5
+			var score := 0.26 + distance_score + river_score + fertility * 0.18 + noise * 0.18 + rng.randf() * 0.1
+			if score > 0.24:
+				candidates.append({"coord": Vector2i(x, y), "score": score})
+	if candidates.is_empty():
+		return
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var max_taverns := _structure_placement_limit(maxi(1, int(round(float(map_area) / 18000.0))), 12, 1.0)
+	var min_distance_sq := 16.0
+	var placed: Array[Vector2i] = []
+	for candidate: Dictionary in candidates:
+		if placed.size() >= max_taverns:
+			break
+		if float(candidate.get("score", 0.0)) < 0.26:
 			continue
-		var tile_info := _tile_data.get(coord, {}) as Dictionary
-		if tile_info.is_empty() or _tile_has_overlay_flag(tile_info, TILE_OVERLAY_RIVER):
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, placed) < min_distance_sq:
 			continue
-		var base := _tile_base_biome_from_data(tile_info)
-		if base == BIOME_WATER or base == BIOME_MARSH:
+		if _nearest_distance_sq_points(coord, traveler_points) < 25.0:
 			continue
-		var score := float(moisture_map.get(coord, 0.5)) + rng.randf() * 0.2
-		if base == BIOME_MOUNTAIN or base == BIOME_HILLS:
-			monastery_candidates.append({"coord": coord, "score": score + 0.15})
-		if base == BIOME_GRASSLAND or base == BIOME_FOREST:
-			shrine_candidates.append({"coord": coord, "score": score})
-		if base != BIOME_DESERT and base != BIOME_BADLANDS:
-			tavern_candidates.append({"coord": coord, "score": score})
+		if _nearest_distance_sq_points(coord, centaur_points) < 49.0:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1 or float(field_hostile[idx]) < 8.0:
+			continue
+		_place_structure_with_details(coord, ROADSIDE_TAVERN_TILE, "roadsideTavern", {
+			"region_name": SETTLEMENT_NAMING.tavern_name(rng),
+			"settlement_classification": "Roadside Tavern"
+		})
+		blocked[idx] = 1
+		occupied.append(coord)
+		placed.append(coord)
 
-	monastery_candidates = STRUCTURE_PLACER.sort_candidates_by_score(monastery_candidates)
-	shrine_candidates = STRUCTURE_PLACER.sort_candidates_by_score(shrine_candidates)
-	tavern_candidates = STRUCTURE_PLACER.sort_candidates_by_score(tavern_candidates)
 
-	_place_scored_structure_batch(monastery_candidates, occupied, 12.0, maxi(1, int(round(float(map_area) / 45000.0))), 0.35, MONASTERY_TILE, "monastery", rng)
-	_place_scored_structure_batch(shrine_candidates, occupied, 10.0, maxi(1, int(round(float(map_area) / 36000.0))), 0.32, SAINT_SHRINE_TILE, "saintShrine", rng)
-	_place_scored_structure_batch(tavern_candidates, occupied, 9.0, maxi(1, int(round(float(map_area) / 28000.0))), 0.3, ROADSIDE_TAVERN_TILE, "roadsideTavern", rng)
+## Monasteries (browser main.js:27269-27406): grass/marsh (never snow or
+## mountain), 4-46 tiles from a town or hold, river adjacency bonus,
+## spacing 11, cap area/24000.
+func _place_monasteries(
+	field_major: PackedFloat32Array,
+	field_hostile: PackedFloat32Array,
+	centaur_points: Array[Vector2i],
+	rng: RandomNumberGenerator,
+	occupied: Array[Vector2i],
+	map_area: int
+) -> Array[Vector2i]:
+	var w := map_size.x
+	var rows := map_size.y
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var height_field := _placement_fields["height"] as PackedFloat32Array
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var hills_id := _biome_to_id(BIOME_HILLS)
+	var grass_id := _biome_to_id(BIOME_GRASSLAND)
+	var noise_seed := map_seed + 0x6f12c43d
+	var latitude_seed := map_seed + 0x71c2d9a7
+	var candidates: Array[Dictionary] = []
+	var monastery_points: Array[Vector2i] = []
+	for cell_list_variant: Variant in [_placement_fields["grass_cells"], _placement_fields["marsh_cells"]]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var settlement_distance := float(field_major[idx])
+			if settlement_distance < 4.0 or settlement_distance > 46.0:
+				continue
+			if float(field_hostile[idx]) < 7.0:
+				continue
+			var x := idx % w
+			@warning_ignore("integer_division")
+			var y := idx / w
+			var coord := Vector2i(x, y)
+			if _nearest_distance_sq_points(coord, centaur_points) < 64.0:
+				continue
+			var river_adjacency := 0
+			for definition: Dictionary in RIVER_NEIGHBOR_DEFINITIONS:
+				var offset := definition.get("offset", Vector2i.ZERO) as Vector2i
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+					continue
+				if int(flags[ny * w + nx]) & TILE_OVERLAY_RIVER:
+					river_adjacency += 1
+			var hill_bonus := 0.18 if int(hill_id[idx]) == hills_id else 0.0
+			var river_score := clampf(0.18 + float(river_adjacency) * 0.08, 0.0, 0.3) if river_adjacency > 0 else 0.0
+			var distance_score := clampf((settlement_distance - 4.0) / 18.0, 0.0, 1.0) * 0.22
+			var elevation_score := clampf((float(height_field[idx]) - water_level) * 2.0, 0.0, 1.0) * 0.18
+			var base_suitability := 0.18 if int(base_id[idx]) == grass_id else 0.08
+			var latitude := (float(y) + 0.5) / float(rows)
+			var latitude_noise := _hash_coords(x, int(latitude * 1024.0), latitude_seed) - 0.5
+			var latitude_score := absf(sin((latitude + latitude_noise * 0.35) * PI * 2.0)) * 0.14
+			var noise := _hash_coords(x, y, noise_seed) - 0.5
+			var score := 0.28 + hill_bonus + river_score + distance_score + elevation_score + base_suitability + latitude_score + noise * 0.2 + rng.randf() * 0.12
+			candidates.append({"coord": coord, "score": score})
+	if candidates.is_empty():
+		return monastery_points
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var max_monasteries := _structure_placement_limit(maxi(1, int(round(float(map_area) / 24000.0))), 12, 1.0)
+	var min_distance_sq := 121.0
+	for candidate: Dictionary in candidates:
+		if monastery_points.size() >= max_monasteries:
+			break
+		if float(candidate.get("score", 0.0)) < 0.32:
+			continue
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, monastery_points) < min_distance_sq:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		_place_structure_with_details(coord, MONASTERY_TILE, "monastery", {
+			"region_name": SETTLEMENT_NAMING.monastery_name(rng),
+			"settlement_classification": "Monastery"
+		})
+		blocked[idx] = 1
+		occupied.append(coord)
+		monastery_points.append(coord)
+	return monastery_points
 
+
+## Castles (browser main.js:27407-27520): no longer a random town skin -
+## a scored structure pass on grass/snow with a hills bonus, >=6 tiles from
+## settlements, score > 0.34, spacing 12, cap area/26000 (max 10).
+func _place_castles(
+	field_major: PackedFloat32Array,
+	rng: RandomNumberGenerator,
+	occupied: Array[Vector2i],
+	map_area: int
+) -> void:
+	var w := map_size.x
+	var rows := map_size.y
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var height_field := _placement_fields["height"] as PackedFloat32Array
+	var water_id := _biome_to_id(BIOME_WATER)
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var hills_id := _biome_to_id(BIOME_HILLS)
+	var noise_seed := map_seed + 0x7be21a59
+	var edge_divisor := maxf(8.0, float(mini(w, rows)) / 2.6)
+	var overlay_block := TILE_OVERLAY_TREE | TILE_OVERLAY_FOREST | TILE_OVERLAY_RIVER
+	var candidates: Array[Dictionary] = []
+	for cell_list_variant: Variant in [_placement_fields["grass_cells"], _placement_fields["snow_cells"]]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & overlay_block) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var settlement_distance := float(field_major[idx])
+			if settlement_distance >= 1.0e8 or settlement_distance < 6.0:
+				continue
+			var x := idx % w
+			@warning_ignore("integer_division")
+			var y := idx / w
+			var hill_bonus := 0.24 if int(hill_id[idx]) == hills_id else 0.0
+			var edge_distance := mini(mini(x, w - 1 - x), mini(y, rows - 1 - y))
+			var edge_score := clampf(float(edge_distance) / edge_divisor, 0.0, 1.0) * 0.18
+			var height_value := float(height_field[idx])
+			var slope_sum := 0.0
+			var neighbor_count := 0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+					continue
+				var n_idx := ny * w + nx
+				if int(base_id[n_idx]) == water_id:
+					continue
+				slope_sum += absf(height_value - float(height_field[n_idx]))
+				neighbor_count += 1
+			var average_slope := (slope_sum / float(neighbor_count)) if neighbor_count > 0 else 0.0
+			var slope_score := clampf(average_slope * 42.0, 0.0, 0.35)
+			var settlement_score := clampf((settlement_distance - 6.0) / 20.0, 0.0, 1.0) * 0.28
+			var noise := _hash_coords(x, y, noise_seed) - 0.5
+			var score := hill_bonus + edge_score + slope_score + settlement_score + noise * 0.22 + rng.randf() * 0.12
+			if score > 0.32:
+				candidates.append({"coord": Vector2i(x, y), "score": score})
+	if candidates.is_empty():
+		return
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var max_castles := _structure_placement_limit(maxi(1, int(round(float(map_area) / 26000.0))), 10, 1.0)
+	var min_distance_sq := 144.0
+	var placed: Array[Vector2i] = []
+	for candidate: Dictionary in candidates:
+		if placed.size() >= max_castles:
+			break
+		if float(candidate.get("score", 0.0)) < 0.34:
+			continue
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, placed) < min_distance_sq:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		_place_structure_with_details(coord, CASTLE_TILE, "castle", {
+			"region_name": SETTLEMENT_NAMING.castle_name(rng),
+			"settlement_classification": "Castle"
+		})
+		blocked[idx] = 1
+		occupied.append(coord)
+		placed.append(coord)
+
+
+## Saint shrines (browser main.js:27524-27655): need a water/river
+## 8-neighbor AND a monastery 5-40 tiles away, >=5 from major settlements.
+func _place_saint_shrines(
+	field_major: PackedFloat32Array,
+	field_monastery: PackedFloat32Array,
+	rng: RandomNumberGenerator,
+	occupied: Array[Vector2i],
+	map_area: int
+) -> void:
+	var w := map_size.x
+	var rows := map_size.y
+	var base_id := _placement_fields["base_id"] as PackedByteArray
+	var hill_id := _placement_fields["hill_id"] as PackedByteArray
+	var flags := _placement_fields["flags"] as PackedByteArray
+	var blocked := _placement_fields["blocked"] as PackedByteArray
+	var moisture_field := _placement_fields["moisture"] as PackedFloat32Array
+	var water_id := _biome_to_id(BIOME_WATER)
+	var mountain_id := _biome_to_id(BIOME_MOUNTAIN)
+	var hills_id := _biome_to_id(BIOME_HILLS)
+	var grass_id := _biome_to_id(BIOME_GRASSLAND)
+	var snow_id := _biome_to_id(BIOME_TUNDRA)
+	var noise_seed := map_seed + 0x8cf43123
+	var latitude_seed := map_seed + 0x90a2f4c1
+	var candidates: Array[Dictionary] = []
+	for cell_list_variant: Variant in [
+		_placement_fields["grass_cells"],
+		_placement_fields["snow_cells"],
+		_placement_fields["marsh_cells"]
+	]:
+		var cell_list := cell_list_variant as PackedInt32Array
+		for list_index in cell_list.size():
+			var idx := cell_list[list_index]
+			if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
+				continue
+			if int(hill_id[idx]) == mountain_id:
+				continue
+			var monastery_distance := float(field_monastery[idx])
+			if monastery_distance < 5.0 or monastery_distance > 40.0:
+				continue
+			if float(field_major[idx]) < 5.0:
+				continue
+			var x := idx % w
+			@warning_ignore("integer_division")
+			var y := idx / w
+			var water_adjacency := 0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= w or ny >= rows:
+					continue
+				var n_idx := ny * w + nx
+				if int(base_id[n_idx]) == water_id or (int(flags[n_idx]) & TILE_OVERLAY_RIVER) != 0:
+					water_adjacency += 1
+			if water_adjacency == 0:
+				continue
+			var rainfall := float(_rainfall_buffer[idx]) if idx < _rainfall_buffer.size() else 0.5
+			var moisture := clampf(rainfall * 0.6 + float(moisture_field[idx]) * 0.4, 0.0, 1.0)
+			var moisture_score := clampf(moisture * 0.4, 0.0, 0.28)
+			var hill_bonus := 0.12 if int(hill_id[idx]) == hills_id else 0.0
+			var devotion_score := clampf((monastery_distance - 5.0) / 18.0, 0.0, 1.0) * 0.22
+			var cell_base := int(base_id[idx])
+			var base_suitability := 0.16 if cell_base == grass_id else (0.12 if cell_base == snow_id else 0.1)
+			var latitude := (float(y) + 0.5) / float(rows)
+			var latitude_noise := _hash_coords(x, int(latitude * 1024.0), latitude_seed) - 0.5
+			var latitude_score := absf(sin((latitude + latitude_noise * 0.3) * PI * 2.0)) * 0.12
+			var noise := _hash_coords(x, y, noise_seed) - 0.5
+			var score := 0.25 + moisture_score + hill_bonus + devotion_score + float(water_adjacency) * 0.05 + base_suitability + latitude_score + noise * 0.22 + rng.randf() * 0.12
+			candidates.append({"coord": Vector2i(x, y), "score": score})
+	if candidates.is_empty():
+		return
+	candidates = STRUCTURE_PLACER.sort_candidates_by_score(candidates)
+	var max_shrines := _structure_placement_limit(maxi(1, int(round(float(map_area) / 24000.0))), 14, 1.0)
+	var min_distance_sq := 81.0
+	var placed: Array[Vector2i] = []
+	for candidate: Dictionary in candidates:
+		if placed.size() >= max_shrines:
+			break
+		if float(candidate.get("score", 0.0)) < 0.3:
+			continue
+		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
+		if _nearest_distance_sq_points(coord, placed) < min_distance_sq:
+			continue
+		var idx := coord.y * w + coord.x
+		if blocked[idx] == 1:
+			continue
+		_place_structure_with_details(coord, SAINT_SHRINE_TILE, "saintShrine", {
+			"region_name": SETTLEMENT_NAMING.saint_shrine_name(rng),
+			"settlement_classification": "Saint Shrine"
+		})
+		blocked[idx] = 1
+		occupied.append(coord)
+		placed.append(coord)
 
 
 func _place_scored_structure_batch(
@@ -5299,51 +6952,6 @@ func _heap_pop(heap: Array[Dictionary]) -> Dictionary:
 
 func _is_too_close(coord: Vector2i, occupied: Array[Vector2i], min_distance: float) -> bool:
 	return OverworldSettlementService.is_too_close(coord, occupied, min_distance)
-
-func _settlement_biome_label(biome: String) -> String:
-	match biome:
-		BIOME_MOUNTAIN:
-			return "mountain"
-		BIOME_HILLS:
-			return "grass"
-		BIOME_TUNDRA:
-			return "snow"
-		BIOME_DESERT:
-			return "sand"
-		BIOME_BADLANDS:
-			return "badlands"
-		BIOME_FOREST, BIOME_JUNGLE:
-			return "forest"
-		BIOME_MARSH:
-			return "marsh"
-		BIOME_WATER:
-			return "water"
-		_:
-			return "grass"
-
-func _select_settlement_tile(
-	settlement_type: String,
-	biome_label: String,
-	rng: RandomNumberGenerator,
-	coord: Vector2i
-) -> Vector2i:
-	match settlement_type:
-		"town":
-			if biome_label == "snow":
-				return HAMLET_SNOW_TILE
-			var options: Array = SETTLEMENT_TILES.get("town", [TOWN_TILE]) as Array
-			return options[rng.randi_range(0, options.size() - 1)]
-		"dwarfhold":
-			# Browser rule: dark dwarfholds claim ground within 4 tiles
-			# of a volcano, not 8.
-			return DARK_DWARFHOLD_TILE if _is_within_tiles_of_volcano(coord, 4) else DWARFHOLD_TILE
-		"woodElfGrove":
-			var elf_tiles: Array = SETTLEMENT_TILES.get("woodElfGrove", [WOOD_ELF_GROVES_TILE]) as Array
-			return elf_tiles[rng.randi_range(0, elf_tiles.size() - 1)]
-		"lizardmenCity":
-			return LIZARDMEN_CITY_TILE
-		_:
-			return TOWN_TILE
 
 func _is_within_tiles_of_volcano(coord: Vector2i, radius: int) -> bool:
 	if highland_layer == null:
@@ -6900,6 +8508,7 @@ func _place_desert_cities(rng: RandomNumberGenerator, occupied: Array[Vector2i],
 		_tile_region_names[coord] = city_name
 		_tile_population_groups[coord] = {"major_population_groups": ["Desert Folk"], "minor_population_groups": ["Humans"]}
 		occupied.append(coord)
+		_desert_city_points.append(coord)
 		_stamp_desert_city_compound(coord, rng, occupied)
 		placed += 1
 

@@ -177,6 +177,9 @@ var _farm_animals: Array[Dictionary] = []
 var _farm_animal_textures: Dictionary = {}
 var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
 var _town_theme := ""
+## Hamlets/snow villages keep the Village classification regardless of
+## population (browser generateHamletDetails).
+var _town_is_village := false
 var _farm_sprites: Array[Node2D] = []
 var _farm_pens: Array = []
 var _farm_blocked_cells: Dictionary = {}
@@ -237,6 +240,7 @@ const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
 const TOWN_SCENE_NAME_KEY := "town_scene_name"
 const TOWN_SCENE_TILE_KEY := "town_scene_tile"
 const TOWN_SCENE_THEME_KEY := "town_scene_theme"
+const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
 
 ## Farmstead art from the web game's Farm tileset (16px art; town cells are
 ## 32px, so a 128px sprite spans four cells).
@@ -1021,6 +1025,7 @@ func _apply_cached_town_scene_seed() -> void:
 	var scene_seed := _hold_state.apply_world_settings(settings, TOWN_SCENE_SEED_KEY, TOWN_SCENE_POPULATION_KEY)
 	_town_name = String(settings.get(TOWN_SCENE_NAME_KEY, "")).strip_edges()
 	_town_theme = String(settings.get(TOWN_SCENE_THEME_KEY, "")).strip_edges().to_lower()
+	_town_is_village = bool(settings.get(TOWN_SCENE_VILLAGE_KEY, false))
 	if _town_theme == "desert":
 		var title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
 		if title_label != null:
@@ -1053,7 +1058,7 @@ func _generate_city() -> void:
 	var details_rng := RandomNumberGenerator.new()
 	details_rng.seed = hash("%s::town_details" % seed_text)
 	var display_name := _town_name if not _town_name.is_empty() else "Unnamed Town"
-	_town_details = TownDetailsGenerator.generate(display_name, _hold_state.selected_hold_population, details_rng)
+	_town_details = TownDetailsGenerator.generate(display_name, _hold_state.selected_hold_population, details_rng, {"village": _town_is_village})
 
 	var minimum_levels := mini(underground_level_count_range.x, underground_level_count_range.y)
 	var maximum_levels := maxi(underground_level_count_range.x, underground_level_count_range.y)

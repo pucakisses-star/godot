@@ -84,8 +84,12 @@ static func classification_for_population(population: int) -> String:
 		return "Town"
 	return "Village"
 
-static func generate(town_name: String, population: int, rng: RandomNumberGenerator) -> Dictionary:
-	var classification := classification_for_population(population)
+## options:
+##   "village": true  - force the Village classification regardless of
+##     population (hamlets and snow villages, browser generateHamletDetails
+##     main.js:3883-3922 keeps classification 'Village' at pop 28-168).
+static func generate(town_name: String, population: int, rng: RandomNumberGenerator, options: Dictionary = {}) -> Dictionary:
+	var classification := "Village" if bool(options.get("village", false)) else classification_for_population(population)
 	var gender_roll := rng.randf()
 	var first_names := FIRST_NAMES_NEUTRAL
 	var ruler_titles := RULER_TITLES_NEUTRAL
