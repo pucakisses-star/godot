@@ -135,6 +135,16 @@ var _surface_road_cells: Dictionary = {}
 var _surface_gates: Array[Dictionary] = []
 var _surface_gate_labels: Array[Label] = []
 var _surface_arrival_lock := false
+var _surface_road_paths: Array[Array] = []
+var _surface_anchor_cells: Array[Vector2i] = []
+var _surface_creatures: Array[Dictionary] = []
+var _surface_spawn_timer := 0.0
+var _surface_ambush_stamp := -1
+var _player_hp := PlayerStatsService.BASE_MAX_HP
+var _player_max_hp := PlayerStatsService.BASE_MAX_HP
+var _player_home_cell := Vector2i.ZERO
+var _hp_label: Label
+const SURFACE_CREATURE_TEXTURE := preload("res://resources/images/npc/creature_characters.png")
 var _factions_label: RichTextLabel
 var _faction_event_stamps: Dictionary = {}
 var _town_name := ""
@@ -493,6 +503,8 @@ func _ready() -> void:
 	_update_player_character_label()
 	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
 	_load_persistent_clock()
+	_load_player_combat_state()
+	_setup_hp_label()
 	_update_day_night_tint()
 	_update_clock_label()
 	_generate_city()
@@ -501,6 +513,7 @@ func _process(delta: float) -> void:
 	_advance_game_clock(delta)
 	_stream_surface_chunks()
 	_check_surface_arrival()
+	_update_surface_life(delta)
 	_update_player_turn_movement(delta)
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
@@ -635,7 +648,94 @@ func _exit_tree() -> void:
 	var settings: Dictionary = game_session.call("get_world_settings")
 	settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
 	settings["player_satiety"] = _player_satiety
+	settings["player_hp"] = _player_hp
 	game_session.call("set_world_settings", settings)
+
+## Health follows the walker between scenes the same way the clock does:
+## max HP from the character sheet plus gear, current HP from the shared
+## save. Above ground it only matters once the wilds start biting.
+func _load_player_combat_state() -> void:
+	var stats: Dictionary = PlayerStatsService.for_session(self)
+	_player_max_hp = float(stats.get("max_hp", _player_max_hp))
+	_player_hp = _player_max_hp
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_world_settings"):
+		var settings: Dictionary = game_session.call("get_world_settings")
+		_player_hp = clampf(float(settings.get("player_hp", _player_max_hp)), 1.0, _player_max_hp)
+
+func _save_player_hp() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings["player_hp"] = _player_hp
+	game_session.call("set_world_settings", settings)
+
+func _setup_hp_label() -> void:
+	var controls := get_node_or_null("Margin/Layout/Controls")
+	if controls == null:
+		return
+	_hp_label = Label.new()
+	_hp_label.add_theme_font_size_override("font_size", 13)
+	controls.add_child(_hp_label)
+	var clock := controls.get_node_or_null("ClockLabel")
+	if clock != null:
+		controls.move_child(_hp_label, clock.get_index() + 1)
+	_update_hp_label()
+
+func _update_hp_label() -> void:
+	if _hp_label == null:
+		return
+	_hp_label.text = "❤ %d / %d" % [int(ceil(_player_hp)), int(_player_max_hp)]
+	if _player_hp <= _player_max_hp * 0.3:
+		_hp_label.modulate = Color(1.0, 0.5, 0.5, 1.0)
+	else:
+		_hp_label.modulate = Color(0.95, 0.87, 0.87, 1.0)
+
+func _damage_player(damage: int, source_name: String = "the wilds") -> void:
+	if _player_sprite == null:
+		return
+	_player_hp = maxf(_player_hp - float(damage), 0.0)
+	_update_hp_label()
+	_flash_sprite(_player_sprite, Color(1.0, 0.35, 0.35, 1.0))
+	_spawn_floating_text("-%d" % damage, _player_sprite.position, Color(1.0, 0.4, 0.4, 1.0))
+	if _player_hp <= 0.0:
+		_handle_player_death(source_name)
+
+## Death in the wilds is a walk of shame, not a game over: you wake back
+## at your town doorstep with your wounds bound.
+func _handle_player_death(source_name: String) -> void:
+	_player_hp = _player_max_hp
+	_update_hp_label()
+	_player_move_path.clear()
+	_player_is_moving = false
+	if _player_sprite != null:
+		_player_cell = _player_home_cell
+		_actor_sprite_to_cell(_player_sprite, _player_home_cell)
+		_center_view_on_cell(_player_home_cell)
+	_save_player_hp()
+	_set_save_status("Slain by %s — you wake back in town." % source_name, Color(0.95, 0.5, 0.5, 1.0))
+
+func _flash_sprite(sprite: Sprite2D, flash_color: Color) -> void:
+	sprite.modulate = flash_color
+	var tween := create_tween()
+	tween.tween_property(sprite, "modulate", Color.WHITE, 0.25)
+
+func _spawn_floating_text(text: String, world_position: Vector2, color: Color) -> void:
+	var label := Label.new()
+	label.text = text
+	label.add_theme_font_size_override("font_size", 18)
+	label.add_theme_color_override("font_color", color)
+	label.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.1, 1.0))
+	label.add_theme_constant_override("outline_size", 4)
+	label.position = world_position + Vector2(-12.0, -30.0)
+	label.z_index = 30
+	city_layer.add_child(label)
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(label, "position:y", label.position.y - 22.0, 0.7)
+	tween.tween_property(label, "modulate:a", 0.0, 0.55).set_delay(0.15)
+	tween.chain().tween_callback(label.queue_free)
 
 func _update_player_character_label() -> void:
 	if player_character_label == null:
@@ -2282,6 +2382,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	)
 	_player_sprite = result.get("player_sprite")
 	_player_cell = result.get("player_cell", _player_cell)
+	_player_home_cell = _player_cell
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
@@ -2382,6 +2483,10 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	var clicked_cell := _cell_from_mouse_position(mouse_position)
 	if _is_chest_cell(clicked_cell):
 		_request_chest_interaction(clicked_cell)
+		return
+	var creature_index := _surface_creature_index_at_cell(clicked_cell)
+	if creature_index >= 0 and _is_player_adjacent_to_cell(clicked_cell):
+		_attack_surface_creature(creature_index)
 		return
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
@@ -2602,8 +2707,9 @@ func _update_npc_movement(delta: float) -> void:
 func _scheduled_states() -> Array[Dictionary]:
 	var living: Array[Dictionary] = []
 	for state: Dictionary in _npc_states:
-		if not SettlementAfflictionService.is_active_zombie(state):
-			living.append(state)
+		if SettlementAfflictionService.is_active_zombie(state) or bool(state.get("traveler", false)):
+			continue
+		living.append(state)
 	return living
 
 ## Clock-scale affliction bookkeeping: recovery, deaths, incubations,
@@ -2668,8 +2774,21 @@ func _setup_surface_world(grid: Dictionary) -> void:
 			gate_label.queue_free()
 	_surface_gate_labels.clear()
 	_surface_road_cells.clear()
+	_surface_road_paths.clear()
 	_surface_gates.clear()
+	_surface_anchor_cells.clear()
 	_surface_arrival_lock = false
+	for creature: Dictionary in _surface_creatures:
+		var creature_sprite := creature.get("sprite") as Sprite2D
+		if creature_sprite != null:
+			creature_sprite.queue_free()
+	_surface_creatures.clear()
+	for state_index in range(_npc_states.size() - 1, -1, -1):
+		if bool(_npc_states[state_index].get("traveler", false)):
+			var traveler_sprite := _npc_states[state_index].get("sprite") as Sprite2D
+			if traveler_sprite != null:
+				traveler_sprite.queue_free()
+			_npc_states.remove_at(state_index)
 	var seed_text := seed_input.text.strip_edges()
 	var settings: Dictionary = {}
 	var game_session := get_node_or_null("/root/GameSession")
@@ -2715,29 +2834,82 @@ func _plan_surface_sites(own_tile: Vector2i, town_center: Vector2i, settings: Di
 		reachable.append({"site": site, "anchor": anchor, "distance": tile_distance})
 	reachable.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return int(a.get("distance", 0)) < int(b.get("distance", 0)))
+	_surface_anchor_cells.append(town_center)
 	for entry_index in reachable.size():
 		var entry := reachable[entry_index]
 		var anchor := entry.get("anchor", Vector2i.ZERO) as Vector2i
+		# Settlements greet from their whole clearing; a hold's carved
+		# mountain door and a dungeon's mouth only open at the door itself.
+		var trigger_cells: Array[Vector2i] = []
+		match String((entry.get("site", {}) as Dictionary).get("class", "")):
+			"dwarfhold", "dungeon":
+				trigger_cells = [anchor, anchor + Vector2i(0, 1)]
 		_surface_gates.append({
 			"rect": Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7)),
 			"anchor": anchor,
 			"site": entry.get("site", {}),
-			"stamped": false
+			"stamped": false,
+			"trigger_cells": trigger_cells,
+			"label": null
 		})
+		_surface_anchor_cells.append(anchor)
 		if entry_index < SURFACE_ROAD_COUNT:
 			_trace_surface_road(town_center, anchor)
 
-## A two-cell-wide dirt road, cell by cell, into the shared road map.
+## A two-cell-wide dirt road, cell by cell, into the shared road map -
+## and an ordered polyline travelers can walk.
 func _trace_surface_road(from_cell: Vector2i, to_cell: Vector2i) -> void:
 	var delta := to_cell - from_cell
 	var steps := maxi(absi(delta.x), absi(delta.y))
 	if steps <= 0:
 		return
+	var path: Array = []
 	for step in range(steps + 1):
 		var t := float(step) / float(steps)
 		var cell := Vector2i(roundi(lerpf(from_cell.x, to_cell.x, t)), roundi(lerpf(from_cell.y, to_cell.y, t)))
 		_surface_road_cells[cell] = true
 		_surface_road_cells[cell + (Vector2i(1, 0) if absi(delta.y) >= absi(delta.x) else Vector2i(0, 1))] = true
+		path.append(cell)
+	_surface_road_paths.append(path)
+
+## The tileset has no truly dark grass, so the gloom is painted with
+## modulated alternative tiles: four danger buckets, each a dimmer,
+## colder cast of the same terrain. Bucket 0 is the plain tile.
+const SURFACE_SHADES := [1.0, 0.88, 0.76, 0.64]
+
+func _danger_shade_bucket(danger: float) -> int:
+	if danger < 0.35:
+		return 0
+	if danger < 0.55:
+		return 1
+	if danger < 0.75:
+		return 2
+	return 3
+
+func _place_surface_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String, danger: float) -> void:
+	var bucket := _danger_shade_bucket(danger)
+	if bucket == 0:
+		_place_tile(target_layer, cell, tile_key)
+		return
+	var atlas_coords := TILE_ATLAS.get(tile_key, Vector2i(-1, -1)) as Vector2i
+	if atlas_coords.x < 0:
+		return
+	target_layer.set_cell(cell, 0, atlas_coords, _shaded_alternative(target_layer.tile_set, atlas_coords, bucket))
+	_actor_passable_cache.erase(cell)
+
+## Alternative ids are deterministic (100 + bucket), so regeneration and
+## revisits reuse the same handful instead of leaking new ones.
+func _shaded_alternative(layer_tile_set: TileSet, atlas_coords: Vector2i, bucket: int) -> int:
+	var source := layer_tile_set.get_source(0) as TileSetAtlasSource
+	if source == null or not source.has_tile(atlas_coords):
+		return 0
+	var alternative_id := 100 + bucket
+	if not source.has_alternative_tile(atlas_coords, alternative_id):
+		if source.create_alternative_tile(atlas_coords, alternative_id) != alternative_id:
+			return 0
+		var shade := float(SURFACE_SHADES[bucket])
+		source.get_tile_data(atlas_coords, alternative_id).modulate = Color(shade * 0.94, shade, shade * 1.05, 1.0)
+	return alternative_id
 
 func _stream_surface_chunks() -> void:
 	if _surface_noise.is_empty() or _player_sprite == null:
@@ -2763,7 +2935,8 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			# fill every void right up to its walls.
 			if _latest_grid.has(cell) or city_layer.get_cell_source_id(cell) >= 0:
 				continue
-			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell + _surface_world_origin, _surface_noise)
+			var danger := SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells)
+			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell + _surface_world_origin, _surface_noise, danger)
 			var base_key := String(terrain.get("base", "grass"))
 			var decor_key := String(terrain.get("decor", ""))
 			# Flowers are transparent overlays: grass beneath, bloom above.
@@ -2774,16 +2947,17 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			if _surface_road_cells.has(cell):
 				base_key = "road" if (cell.x + cell.y) % 3 != 0 else "road_twig"
 				decor_key = ""
-			_place_tile(city_layer, cell, base_key)
+			_place_surface_tile(city_layer, cell, base_key, danger)
 			if not decor_key.is_empty():
-				_place_tile(decor_layer, cell, decor_key)
+				_place_surface_tile(decor_layer, cell, decor_key, danger)
 			painted.append(cell)
 	_surface_chunks[chunk] = painted
 	_stamp_gates_in_rect(rect)
 
-## A gate is the far site's doorstep in the wilds: a paved clearing, a
-## signpost, and the settlement's name floating above. Stepping onto it
-## arrives there.
+## A gate is the far site's doorstep in the wilds. Settlements greet you
+## with a paved clearing; a dwarfhold shows the carved mountain door you
+## descend through; a dungeon is a dark mouth in the ground. All bear the
+## site's name floating above.
 func _stamp_gates_in_rect(rect: Rect2i) -> void:
 	for gate: Dictionary in _surface_gates:
 		if bool(gate.get("stamped", false)):
@@ -2792,18 +2966,15 @@ func _stamp_gates_in_rect(rect: Rect2i) -> void:
 		if not rect.intersects(gate_rect):
 			continue
 		gate["stamped"] = true
-		for y in range(gate_rect.position.y, gate_rect.end.y):
-			for x in range(gate_rect.position.x, gate_rect.end.x):
-				var cell := Vector2i(x, y)
-				if _latest_grid.has(cell):
-					continue
-				var edge := x == gate_rect.position.x or y == gate_rect.position.y or x == gate_rect.end.x - 1 or y == gate_rect.end.y - 1
-				_place_tile(city_layer, cell, "plaza" if not edge else "road")
-				decor_layer.erase_cell(cell)
-				_actor_passable_cache.erase(cell)
 		var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
-		_place_tile(decor_layer, anchor + Vector2i(0, -2), "fence_post")
 		var site := gate.get("site", {}) as Dictionary
+		match String(site.get("class", "")):
+			"dwarfhold":
+				_stamp_dwarfhold_facade(anchor)
+			"dungeon":
+				_stamp_dungeon_mouth(anchor)
+			_:
+				_stamp_settlement_clearing(gate_rect, anchor)
 		var gate_label := Label.new()
 		gate_label.text = String(site.get("name", "Somewhere"))
 		gate_label.add_theme_font_size_override("font_size", 18)
@@ -2814,6 +2985,55 @@ func _stamp_gates_in_rect(rect: Rect2i) -> void:
 		gate_label.z_index = 30
 		city_layer.add_child(gate_label)
 		_surface_gate_labels.append(gate_label)
+		gate["label"] = gate_label
+
+func _stamp_settlement_clearing(gate_rect: Rect2i, anchor: Vector2i) -> void:
+	for y in range(gate_rect.position.y, gate_rect.end.y):
+		for x in range(gate_rect.position.x, gate_rect.end.x):
+			var cell := Vector2i(x, y)
+			if _latest_grid.has(cell):
+				continue
+			var edge := x == gate_rect.position.x or y == gate_rect.position.y or x == gate_rect.end.x - 1 or y == gate_rect.end.y - 1
+			_place_tile(city_layer, cell, "plaza" if not edge else "road")
+			decor_layer.erase_cell(cell)
+	_place_tile(decor_layer, anchor + Vector2i(0, -2), "fence_post")
+
+## The hold's face in the wilds: a stone front carved into the hillside,
+## hedge-flanked, with one door at its center and a paved apron leading
+## in. Only the door (and the apron cell before it) descends.
+func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
+	for y in range(anchor.y - 2, anchor.y + 1):
+		for x in range(anchor.x - 3, anchor.x + 4):
+			var cell := Vector2i(x, y)
+			if _latest_grid.has(cell):
+				continue
+			var wall_key := "wall_alt" if y == anchor.y - 2 else "wall"
+			_place_tile(city_layer, cell, wall_key)
+			decor_layer.erase_cell(cell)
+	_place_tile(city_layer, anchor, "door")
+	decor_layer.erase_cell(anchor)
+	for y in range(anchor.y + 1, anchor.y + 3):
+		for x in range(anchor.x - 2, anchor.x + 3):
+			var cell := Vector2i(x, y)
+			if _latest_grid.has(cell):
+				continue
+			_place_tile(city_layer, cell, "plaza")
+			decor_layer.erase_cell(cell)
+	_place_tile(decor_layer, Vector2i(anchor.x - 3, anchor.y + 1), "hedge")
+	_place_tile(decor_layer, Vector2i(anchor.x + 3, anchor.y + 1), "hedge_alt")
+
+## A dungeon shows barely anything: a ring of old stone open to the
+## south, a dark doorway at its heart.
+func _stamp_dungeon_mouth(anchor: Vector2i) -> void:
+	for y in range(anchor.y - 1, anchor.y + 2):
+		for x in range(anchor.x - 1, anchor.x + 2):
+			var cell := Vector2i(x, y)
+			if _latest_grid.has(cell) or cell == anchor:
+				continue
+			_place_tile(city_layer, cell, "plaza" if cell == anchor + Vector2i(0, 1) else "wall_alt")
+			decor_layer.erase_cell(cell)
+	_place_tile(city_layer, anchor, "door")
+	decor_layer.erase_cell(anchor)
 
 ## Walking onto a gate IS the journey: store the destination context
 ## and hand over to its scene.
@@ -2821,8 +3041,16 @@ func _check_surface_arrival() -> void:
 	if _surface_arrival_lock or _surface_gates.is_empty() or _player_sprite == null:
 		return
 	for gate: Dictionary in _surface_gates:
-		var gate_rect := gate.get("rect", Rect2i()) as Rect2i
-		if not gate_rect.has_point(_player_cell):
+		var trigger_cells := gate.get("trigger_cells", []) as Array
+		var triggered := false
+		if trigger_cells.is_empty():
+			triggered = (gate.get("rect", Rect2i()) as Rect2i).has_point(_player_cell)
+		else:
+			for trigger_variant: Variant in trigger_cells:
+				if trigger_variant as Vector2i == _player_cell:
+					triggered = true
+					break
+		if not triggered:
 			continue
 		var site := gate.get("site", {}) as Dictionary
 		var scene_path: String = WorldSitesService.scene_path_for(site)
@@ -2852,6 +3080,165 @@ func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 			decor_layer.erase_cell(cell)
 			_actor_passable_cache.erase(cell)
 		_surface_chunks.erase(chunk)
+		# A gate whose ground just evaporated must stamp itself anew on
+		# return, or the wilds would swallow its clearing for good.
+		var chunk_cells: Rect2i = SurfaceWorldService.chunk_rect(chunk)
+		for gate: Dictionary in _surface_gates:
+			if not bool(gate.get("stamped", false)):
+				continue
+			if not (gate.get("rect", Rect2i()) as Rect2i).intersects(chunk_cells):
+				continue
+			gate["stamped"] = false
+			var stale_label := gate.get("label") as Label
+			if stale_label != null and is_instance_valid(stale_label):
+				_surface_gate_labels.erase(stale_label)
+				stale_label.queue_free()
+			gate["label"] = null
+
+## --- Life on the surface -------------------------------------------------
+## The radial rule made flesh: danger at the player's feet decides how
+## many creatures stalk them and how mean those creatures are, deep-wild
+## hours roll ambush dice, and the roads carry travelers worth meeting.
+
+func _update_surface_life(delta: float) -> void:
+	if _surface_noise.is_empty() or _player_sprite == null:
+		return
+	var danger: float = SurfaceLifeService.danger_for_cell(_player_cell, _surface_anchor_cells)
+	_surface_spawn_timer -= delta
+	if _surface_spawn_timer <= 0.0:
+		_surface_spawn_timer = 2.5
+		_maintain_surface_creatures(danger)
+		_maintain_travelers()
+	_roll_surface_ambush(danger)
+	SurfaceLifeService.update_creatures(
+		delta, _surface_creatures, _player_cell,
+		Callable(self, "_is_walkable_cell"),
+		Callable(self, "_cell_center_position"),
+		_rng,
+		Callable(self, "_damage_player")
+	)
+	SurfaceLifeService.despawn_far_creatures(_surface_creatures, _player_cell)
+	var finished: Array[int] = SurfaceLifeService.update_travelers(delta, _npc_states, Callable(self, "_cell_center_position"))
+	for finished_position in range(finished.size() - 1, -1, -1):
+		var state_index := finished[finished_position]
+		var traveler_sprite := _npc_states[state_index].get("sprite") as Sprite2D
+		if traveler_sprite != null:
+			traveler_sprite.queue_free()
+		_npc_states.remove_at(state_index)
+
+func _maintain_surface_creatures(danger: float) -> void:
+	if _surface_creatures.size() >= SurfaceLifeService.desired_creature_count(danger):
+		return
+	var cell := _random_wild_cell_near_player(SurfaceLifeService.CREATURE_SPAWN_MIN, SurfaceLifeService.CREATURE_SPAWN_MAX)
+	if cell.x == 2147483647:
+		return
+	# The tier rolls off the SPAWN cell's danger, so a beast prowling in
+	# from the dark is as mean as the ground it rose from.
+	SurfaceLifeService.spawn_creature(
+		_surface_creatures, SURFACE_CREATURE_TEXTURE,
+		SurfaceLifeService.tier_def_index(SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells), _rng),
+		cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng
+	)
+
+## A walkable wild cell in a ring around the player - never inside the
+## town's protected ground.
+func _random_wild_cell_near_player(min_distance: int, max_distance: int) -> Vector2i:
+	for attempt in 10:
+		var angle := _rng.randf_range(0.0, TAU)
+		var distance := _rng.randf_range(float(min_distance), float(max_distance))
+		var cell := _player_cell + Vector2i(roundi(cos(angle) * distance), roundi(sin(angle) * distance))
+		if _surface_protect_rect.has_point(cell):
+			continue
+		if not _is_walkable_cell(cell):
+			continue
+		return cell
+	return Vector2i(2147483647, 2147483647)
+
+## Deep-wild hours carry ambush risk: at most one roll per game hour,
+## and a failed roll stays failed until the clock turns.
+func _roll_surface_ambush(danger: float) -> void:
+	if danger < SurfaceLifeService.AMBUSH_DANGER_FLOOR:
+		return
+	var hour_stamp := _game_day * 24 + int(_game_hour)
+	if hour_stamp == _surface_ambush_stamp:
+		return
+	_surface_ambush_stamp = hour_stamp
+	if _rng.randf() > SurfaceLifeService.AMBUSH_CHANCE_PER_HOUR:
+		return
+	var before := _surface_creatures.size()
+	for attempt in 12:
+		if _surface_creatures.size() >= before + 3:
+			break
+		var cell := _random_wild_cell_near_player(3, 7)
+		if cell.x == 2147483647:
+			continue
+		SurfaceLifeService.spawn_creature(
+			_surface_creatures, SURFACE_CREATURE_TEXTURE,
+			SurfaceLifeService.tier_def_index(danger, _rng),
+			cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng
+		)
+	if _surface_creatures.size() > before:
+		_set_save_status("Ambush! Shapes rush you from the treeline!", Color(0.95, 0.45, 0.4, 1.0))
+
+## Keeps company on the stretch of road nearest the player, so travelers
+## are actually met on the way somewhere, not simulated out of sight.
+func _maintain_travelers() -> void:
+	if _surface_road_paths.is_empty():
+		return
+	var traveler_count := 0
+	for state: Dictionary in _npc_states:
+		if bool(state.get("traveler", false)):
+			traveler_count += 1
+	if traveler_count >= SurfaceLifeService.TRAVELER_CAP:
+		return
+	var best_path_index := -1
+	var best_road_index := 0
+	var best_distance := 48.0 * 48.0
+	for path_index in _surface_road_paths.size():
+		var candidate_path: Array = _surface_road_paths[path_index]
+		for road_index in range(0, candidate_path.size(), 4):
+			var squared := Vector2(candidate_path[road_index] as Vector2i).distance_squared_to(Vector2(_player_cell))
+			if squared < best_distance:
+				best_distance = squared
+				best_path_index = path_index
+				best_road_index = road_index
+	if best_path_index < 0:
+		return
+	var road_path: Array = _surface_road_paths[best_path_index]
+	var traveler: Dictionary = SurfaceLifeService.spawn_traveler(road_path, "townsfolk", _rng, actor_layer, Callable(self, "_cell_center_position"), tile_size)
+	if traveler.is_empty():
+		return
+	var spawn_index := clampi(best_road_index + _rng.randi_range(-30, 30), 2, road_path.size() - 3)
+	traveler["road_index"] = spawn_index
+	traveler["cell"] = road_path[spawn_index] as Vector2i
+	(traveler.get("sprite") as Sprite2D).position = _cell_center_position(road_path[spawn_index] as Vector2i)
+	_npc_states.append(traveler)
+
+func _surface_creature_index_at_cell(cell: Vector2i) -> int:
+	for index in _surface_creatures.size():
+		if _surface_creatures[index].get("cell", Vector2i(2147483647, 2147483647)) as Vector2i == cell:
+			return index
+	return -1
+
+func _attack_surface_creature(creature_index: int) -> void:
+	var state := _surface_creatures[creature_index]
+	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
+	var swing := int(PlayerStatsService.for_session(self).get("attack", 2))
+	state["hp"] = int(state.get("hp", 1)) - swing
+	var sprite := state.get("sprite") as Sprite2D
+	if sprite != null:
+		_flash_sprite(sprite, Color(1.0, 0.4, 0.35, 1.0))
+		_spawn_floating_text("-%d" % swing, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
+	if int(state.get("hp", 0)) > 0:
+		return
+	var creature_name := String(def.get("name", "creature"))
+	var coins := _rng.randi_range(2, 6) + int(def.get("damage", 1)) * 2
+	_adjust_coins(coins)
+	if sprite != null:
+		_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
+		sprite.queue_free()
+	_surface_creatures.remove_at(creature_index)
+	_set_save_status("The %s falls — %d coins scavenged." % [creature_name, coins], Color(0.85, 0.95, 0.7, 1.0))
 
 func _is_walkable_cell(cell: Vector2i) -> bool:
 	# Above ground the green is open terrain: any rendered passable tile is
