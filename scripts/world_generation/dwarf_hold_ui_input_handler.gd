@@ -12,16 +12,19 @@ static func move_direction_from_event(event: InputEvent) -> Vector2i:
 		return Vector2i.DOWN
 	return Vector2i.ZERO
 
+## Polled every frame for held-key movement: arrows and WASD both count,
+## opposite keys cancel, and two axes together read as a diagonal.
 static func current_move_input_direction() -> Vector2i:
-	if Input.is_action_pressed("ui_left"):
-		return Vector2i.LEFT
-	if Input.is_action_pressed("ui_right"):
-		return Vector2i.RIGHT
-	if Input.is_action_pressed("ui_up"):
-		return Vector2i.UP
-	if Input.is_action_pressed("ui_down"):
-		return Vector2i.DOWN
-	return Vector2i.ZERO
+	var direction := Vector2i.ZERO
+	if Input.is_action_pressed("ui_left") or Input.is_physical_key_pressed(KEY_A):
+		direction.x -= 1
+	if Input.is_action_pressed("ui_right") or Input.is_physical_key_pressed(KEY_D):
+		direction.x += 1
+	if Input.is_action_pressed("ui_up") or Input.is_physical_key_pressed(KEY_W):
+		direction.y -= 1
+	if Input.is_action_pressed("ui_down") or Input.is_physical_key_pressed(KEY_S):
+		direction.y += 1
+	return direction
 
 static func handle_city_panel_event(
 	event: InputEvent,

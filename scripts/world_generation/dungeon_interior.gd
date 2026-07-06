@@ -1045,31 +1045,73 @@ func _try_step(direction: Vector2i) -> void:
 	_player_move_target_cell = next_cell
 	_player_move_target_position = _cell_center(next_cell)
 
+## A held key walks but never bumps: attacking monsters and looting stay
+## deliberate tap (or click) actions, so gliding past a spider is safe.
+func _try_held_step(direction: Vector2i) -> bool:
+	var next_cell := _player_cell + direction
+	if _creature_index_at_cell(next_cell) >= 0 or _pedestals.has(next_cell) or _chests.has(next_cell):
+		return false
+	if not _is_walkable(next_cell):
+		return false
+	_player_is_moving = true
+	_player_move_target_cell = next_cell
+	_player_move_target_position = _cell_center(next_cell)
+	return true
+
+func _start_next_dungeon_step() -> void:
+	var held := DwarfHoldUiInputHandler.current_move_input_direction()
+	if held != Vector2i.ZERO:
+		_player_move_path.clear()
+		if _try_held_step(held):
+			return
+		# Blocked diagonals slide along whichever axis is open.
+		if held.x != 0 and held.y != 0:
+			if _try_held_step(Vector2i(held.x, 0)):
+				return
+			var _slid := _try_held_step(Vector2i(0, held.y))
+		return
+	if _player_move_path.is_empty():
+		return
+	var next_cell := _player_move_path[0]
+	if _creature_index_at_cell(next_cell) >= 0:
+		_player_move_path.clear()
+		_try_step(next_cell - _player_cell)
+		return
+	if _pedestals.has(next_cell) or _chests.has(next_cell):
+		_player_move_path.clear()
+		_try_step(next_cell - _player_cell)
+		return
+	if not _is_walkable(next_cell):
+		_player_move_path.clear()
+		return
+	_player_move_path.pop_front()
+	_try_step(next_cell - _player_cell)
+
 func _update_player_movement(delta: float) -> void:
 	if _player_sprite == null:
 		return
-	if _player_is_moving:
-		_player_sprite.position = _player_sprite.position.move_toward(_player_move_target_position, PLAYER_MOVE_SPEED * delta)
-		if _player_sprite.position.distance_to(_player_move_target_position) <= 0.4:
-			_player_sprite.position = _player_move_target_position
-			_player_cell = _player_move_target_cell
-			_player_is_moving = false
-			_on_player_entered_cell(_player_cell)
-	elif not _player_move_path.is_empty():
-		var next_cell := _player_move_path[0]
-		if _creature_index_at_cell(next_cell) >= 0:
-			_player_move_path.clear()
-			_try_step(next_cell - _player_cell)
+	if not _player_is_moving:
+		_start_next_dungeon_step()
+		if not _player_is_moving:
 			return
-		if _pedestals.has(next_cell) or _chests.has(next_cell):
-			_player_move_path.clear()
-			_try_step(next_cell - _player_cell)
+	# Spend this frame's travel budget across tile boundaries so held
+	# keys read as one continuous glide instead of tap-per-tile.
+	var budget := PLAYER_MOVE_SPEED * delta
+	while _player_is_moving and budget > 0.0:
+		var remaining := _player_sprite.position.distance_to(_player_move_target_position)
+		if remaining > budget:
+			_player_sprite.position = _player_sprite.position.move_toward(_player_move_target_position, budget)
 			return
-		if not _is_walkable(next_cell):
-			_player_move_path.clear()
+		budget -= remaining
+		_player_sprite.position = _player_move_target_position
+		_player_cell = _player_move_target_cell
+		_player_is_moving = false
+		var depth_before := _depth
+		_on_player_entered_cell(_player_cell)
+		# Stairs may have rebuilt the floor (or left the dungeon entirely).
+		if _player_sprite == null or _depth != depth_before:
 			return
-		_player_move_path.pop_front()
-		_try_step(next_cell - _player_cell)
+		_start_next_dungeon_step()
 
 func _on_player_entered_cell(cell: Vector2i) -> void:
 	if cell == _entrance_cell:
