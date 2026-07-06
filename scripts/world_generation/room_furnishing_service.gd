@@ -468,6 +468,9 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 						break
 			try_place.call("int_plant_tree", Vector2i(box.end.x - 1, box.end.y - 1))
 		"guard":
+			# The rug goes first in the list: with furniture stacked by
+			# placement order, first placed means drawn underneath.
+			placements.insert(0, {"piece": "int_rug_green_square", "cell": center_top})
 			for x in range(box.position.x, box.end.x - 1):
 				if try_place.call("int_weapon_rack_pikes", Vector2i(x, box.position.y)):
 					break
@@ -478,7 +481,6 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 					break
 				if try_place.call(stands[rng.randi_range(0, stands.size() - 1)], interior[rng.randi_range(0, interior.size() - 1)]):
 					stand_count -= 1
-			placements.append({"piece": "int_rug_green_square", "cell": center_top})
 		"herbal":
 			var green_pool: Array[String] = ["int_plant_potted", "int_plant_tree", "int_urn_basket", "int_table_flower_blue", "int_table_flower_white", "int_table_plant_fern", "int_shelf_flowerpot"]
 			var green_count := rng.randi_range(3, 5)
@@ -591,7 +593,10 @@ static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_si
 		df_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 		df_sprite.scale = Vector2(float(tile_size.x) / 32.0, float(tile_size.y) / 32.0)
 		df_sprite.position = Vector2(base_cell * tile_size)
-		df_sprite.z_index = 8
+		# Furniture is scenery, treated as tiles: it lives on the decor
+		# layer at z 0 so walkers and their speech draw over it. Stacking
+		# among pieces (rug under table) comes from placement order.
+		df_sprite.z_index = 0
 		return df_sprite
 	var piece := PIECES.get(piece_name, {}) as Dictionary
 	if piece.is_empty():
@@ -615,7 +620,8 @@ static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_si
 	var rows_block := maxi(int(piece.get("rows_block", 1)), 1)
 	var base_bottom := float((base_cell.y + rows_block) * tile_size.y)
 	sprite.position = Vector2(float(base_cell.x * tile_size.x), base_bottom - rect.size.y * scale)
-	sprite.z_index = int(piece.get("z", 8))
+	# Treated as tiles: z 0 on the decor layer, under every walker.
+	sprite.z_index = 0
 	return sprite
 
 static func piece_emits_light(piece_name: String) -> bool:
