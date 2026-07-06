@@ -130,6 +130,11 @@ var _surface_noise: Dictionary = {}
 var _surface_chunks: Dictionary = {}
 var _surface_last_player_chunk := Vector2i(2147483647, 2147483647)
 var _surface_protect_rect := Rect2i()
+var _surface_world_origin := Vector2i.ZERO
+var _surface_road_cells: Dictionary = {}
+var _surface_gates: Array[Dictionary] = []
+var _surface_gate_labels: Array[Label] = []
+var _surface_arrival_lock := false
 var _factions_label: RichTextLabel
 var _faction_event_stamps: Dictionary = {}
 var _town_name := ""
@@ -203,6 +208,7 @@ const BACKPACK_SLOT_ROWS := 3
 const TOWN_SCENE_SEED_KEY := "town_scene_seed"
 const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
 const TOWN_SCENE_NAME_KEY := "town_scene_name"
+const TOWN_SCENE_TILE_KEY := "town_scene_tile"
 const TOWN_SCENE_THEME_KEY := "town_scene_theme"
 
 ## Farmstead art from the web game's Farm tileset (16px art; town cells are
@@ -494,6 +500,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_advance_game_clock(delta)
 	_stream_surface_chunks()
+	_check_surface_arrival()
 	_update_player_turn_movement(delta)
 	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
@@ -2645,9 +2652,31 @@ func _create_placeholder_tavern_character_texture() -> Texture2D:
 const SURFACE_GEN_RADIUS := 2
 const SURFACE_EVICT_RADIUS := 4
 
+## Every town's wilds live in ONE shared world space: an overworld tile
+## spans WORLD_CELLS_PER_OVERWORLD_TILE local cells, terrain derives
+## from the world seed at absolute world coordinates, and the gazetteer
+## places every neighboring site at its true walking distance - with
+## roads leading there and an arrival gate that hands the walker over
+## to that site's own scene.
+const WORLD_CELLS_PER_OVERWORLD_TILE := 64
+const SURFACE_SITE_REACH_TILES := 20
+const SURFACE_ROAD_COUNT := 4
+
 func _setup_surface_world(grid: Dictionary) -> void:
+	for gate_label: Label in _surface_gate_labels:
+		if is_instance_valid(gate_label):
+			gate_label.queue_free()
+	_surface_gate_labels.clear()
+	_surface_road_cells.clear()
+	_surface_gates.clear()
+	_surface_arrival_lock = false
 	var seed_text := seed_input.text.strip_edges()
-	_surface_noise = SurfaceWorldService.make_noise_set(hash("surface|%s" % seed_text))
+	var settings: Dictionary = {}
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_world_settings"):
+		settings = game_session.call("get_world_settings")
+	var world_seed_text := str(settings.get("world_seed", seed_text))
+	_surface_noise = SurfaceWorldService.make_noise_set(hash("surface|%s" % world_seed_text))
 	var min_cell := Vector2i(2147483647, 2147483647)
 	var max_cell := Vector2i(-2147483648, -2147483648)
 	for cell_variant: Variant in grid.keys():
@@ -2658,6 +2687,57 @@ func _setup_surface_world(grid: Dictionary) -> void:
 		_surface_protect_rect = Rect2i()
 		return
 	_surface_protect_rect = Rect2i(min_cell, max_cell - min_cell + Vector2i.ONE).grow(8)
+	# Anchor: this town's grid center sits at the middle of its own
+	# overworld tile in shared world space.
+	var own_tile_variant: Variant = settings.get(TOWN_SCENE_TILE_KEY)
+	var own_tile := Vector2i.ZERO
+	if own_tile_variant is Dictionary:
+		own_tile = Vector2i(int((own_tile_variant as Dictionary).get("x", 0)), int((own_tile_variant as Dictionary).get("y", 0)))
+	var bbox_center := min_cell + (max_cell - min_cell) / 2
+	_surface_world_origin = own_tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2) - bbox_center
+	_plan_surface_sites(own_tile, bbox_center, settings)
+
+## Neighboring gazetteer sites become gates in the wilds, the nearest
+## few joined to town by a dirt road.
+func _plan_surface_sites(own_tile: Vector2i, town_center: Vector2i, settings: Dictionary) -> void:
+	var reachable: Array[Dictionary] = []
+	for site_variant: Variant in WorldSitesService.sites_from_settings(settings):
+		var site := site_variant as Dictionary
+		var tile: Vector2i = WorldSitesService.site_tile(site)
+		if tile == own_tile:
+			continue
+		if WorldSitesService.scene_path_for(site).is_empty():
+			continue
+		var tile_distance := maxi(absi(tile.x - own_tile.x), absi(tile.y - own_tile.y))
+		if tile_distance > SURFACE_SITE_REACH_TILES:
+			continue
+		var anchor: Vector2i = tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2) - _surface_world_origin
+		reachable.append({"site": site, "anchor": anchor, "distance": tile_distance})
+	reachable.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("distance", 0)) < int(b.get("distance", 0)))
+	for entry_index in reachable.size():
+		var entry := reachable[entry_index]
+		var anchor := entry.get("anchor", Vector2i.ZERO) as Vector2i
+		_surface_gates.append({
+			"rect": Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7)),
+			"anchor": anchor,
+			"site": entry.get("site", {}),
+			"stamped": false
+		})
+		if entry_index < SURFACE_ROAD_COUNT:
+			_trace_surface_road(town_center, anchor)
+
+## A two-cell-wide dirt road, cell by cell, into the shared road map.
+func _trace_surface_road(from_cell: Vector2i, to_cell: Vector2i) -> void:
+	var delta := to_cell - from_cell
+	var steps := maxi(absi(delta.x), absi(delta.y))
+	if steps <= 0:
+		return
+	for step in range(steps + 1):
+		var t := float(step) / float(steps)
+		var cell := Vector2i(roundi(lerpf(from_cell.x, to_cell.x, t)), roundi(lerpf(from_cell.y, to_cell.y, t)))
+		_surface_road_cells[cell] = true
+		_surface_road_cells[cell + (Vector2i(1, 0) if absi(delta.y) >= absi(delta.x) else Vector2i(0, 1))] = true
 
 func _stream_surface_chunks() -> void:
 	if _surface_noise.is_empty() or _player_sprite == null:
@@ -2683,18 +2763,81 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			# fill every void right up to its walls.
 			if _latest_grid.has(cell) or city_layer.get_cell_source_id(cell) >= 0:
 				continue
-			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell, _surface_noise)
+			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell + _surface_world_origin, _surface_noise)
 			var base_key := String(terrain.get("base", "grass"))
 			var decor_key := String(terrain.get("decor", ""))
 			# Flowers are transparent overlays: grass beneath, bloom above.
 			if base_key.begins_with("flowers_"):
 				decor_key = base_key
 				base_key = "grass"
+			# Roads cut through everything and stay clear of trees.
+			if _surface_road_cells.has(cell):
+				base_key = "road" if (cell.x + cell.y) % 3 != 0 else "road_twig"
+				decor_key = ""
 			_place_tile(city_layer, cell, base_key)
 			if not decor_key.is_empty():
 				_place_tile(decor_layer, cell, decor_key)
 			painted.append(cell)
 	_surface_chunks[chunk] = painted
+	_stamp_gates_in_rect(rect)
+
+## A gate is the far site's doorstep in the wilds: a paved clearing, a
+## signpost, and the settlement's name floating above. Stepping onto it
+## arrives there.
+func _stamp_gates_in_rect(rect: Rect2i) -> void:
+	for gate: Dictionary in _surface_gates:
+		if bool(gate.get("stamped", false)):
+			continue
+		var gate_rect := gate.get("rect", Rect2i()) as Rect2i
+		if not rect.intersects(gate_rect):
+			continue
+		gate["stamped"] = true
+		for y in range(gate_rect.position.y, gate_rect.end.y):
+			for x in range(gate_rect.position.x, gate_rect.end.x):
+				var cell := Vector2i(x, y)
+				if _latest_grid.has(cell):
+					continue
+				var edge := x == gate_rect.position.x or y == gate_rect.position.y or x == gate_rect.end.x - 1 or y == gate_rect.end.y - 1
+				_place_tile(city_layer, cell, "plaza" if not edge else "road")
+				decor_layer.erase_cell(cell)
+				_actor_passable_cache.erase(cell)
+		var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		_place_tile(decor_layer, anchor + Vector2i(0, -2), "fence_post")
+		var site := gate.get("site", {}) as Dictionary
+		var gate_label := Label.new()
+		gate_label.text = String(site.get("name", "Somewhere"))
+		gate_label.add_theme_font_size_override("font_size", 18)
+		gate_label.add_theme_color_override("font_color", Color(0.98, 0.94, 0.82, 1.0))
+		gate_label.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.06, 1.0))
+		gate_label.add_theme_constant_override("outline_size", 5)
+		gate_label.position = city_layer.map_to_local(anchor + Vector2i(-2, -4))
+		gate_label.z_index = 30
+		city_layer.add_child(gate_label)
+		_surface_gate_labels.append(gate_label)
+
+## Walking onto a gate IS the journey: store the destination context
+## and hand over to its scene.
+func _check_surface_arrival() -> void:
+	if _surface_arrival_lock or _surface_gates.is_empty() or _player_sprite == null:
+		return
+	for gate: Dictionary in _surface_gates:
+		var gate_rect := gate.get("rect", Rect2i()) as Rect2i
+		if not gate_rect.has_point(_player_cell):
+			continue
+		var site := gate.get("site", {}) as Dictionary
+		var scene_path: String = WorldSitesService.scene_path_for(site)
+		if scene_path.is_empty():
+			continue
+		_surface_arrival_lock = true
+		var game_session := get_node_or_null("/root/GameSession")
+		if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+			return
+		var settings: Dictionary = game_session.call("get_world_settings")
+		WorldSitesService.store_journey_context(settings, site)
+		game_session.call("set_world_settings", settings)
+		_set_save_status("You arrive at %s." % String(site.get("name", "your destination")), Color(0.85, 0.9, 0.7, 1.0))
+		SceneCacheService.request_change(self, scene_path)
+		return
 
 func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 	var to_evict: Array[Vector2i] = []

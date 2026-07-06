@@ -1781,6 +1781,7 @@ func _generate_map() -> void:
 	_biome_map = _biome_buffer_to_dictionary(_biome_buffer)
 	_update_height_texture()
 	_apply_coast_overlay()
+	_persist_world_sites()
 	_build_map_snapshot()
 	_mark_all_overlays_dirty()
 	_ensure_overlay_texture("elevation")
@@ -1805,6 +1806,42 @@ func _generate_map() -> void:
 	var generation_memory_after := _current_generation_memory_bytes()
 	print("Overworld generation memory bytes (before/after/peak): %d / %d / %d" % [generation_memory_before, generation_memory_after, generation_peak_memory])
 	_log_tile_metadata_profile(Time.get_ticks_msec() - map_generation_started_ms)
+
+## Writes the gazetteer of enterable sites (tile, class, name, seed)
+## into world settings so local scenes know their neighbors and walkers
+## can arrive on foot.
+func _persist_world_sites() -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var sites: Array = []
+	for coord_variant: Variant in _tile_data.keys():
+		var details := _tile_data[coord_variant] as Dictionary
+		var coord := coord_variant as Vector2i
+		var site_class := ""
+		var seed_text := ""
+		if _is_dwarfhold_structure(details):
+			site_class = "dwarfhold"
+			seed_text = _dwarfhold_scene_seed_for_tile(coord, details)
+		elif _is_town_settlement(details):
+			site_class = "town"
+			seed_text = _town_scene_seed_for_tile(coord, details)
+		elif _is_dungeon_structure(details):
+			site_class = "dungeon"
+			seed_text = _dungeon_scene_seed_for_tile(coord, details)
+		else:
+			continue
+		sites.append({
+			"x": coord.x, "y": coord.y,
+			"class": site_class,
+			"seed": seed_text,
+			"name": _tile_region_name(coord, details),
+			"population": maxi(0, int(details.get("population", 0))),
+			"theme": _town_theme_for_details(details)
+		})
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings[WorldSitesService.SETTINGS_KEY] = sites
+	game_session.call("set_world_settings", settings)
 
 func _apply_base_tiles(base_biome_map: Dictionary) -> void:
 	for y in range(map_size.y):
