@@ -87,6 +87,8 @@ func _cache_key(scene_path: String) -> String:
 ## Convenience for call sites that may run before the autoload exists
 ## (tests instancing scenes directly): falls back to a plain change.
 static func request_change(from_node: Node, target_path: String) -> void:
+	# Crossing between scenes is the natural autosave moment.
+	SaveGameService.autosave(from_node)
 	var service := from_node.get_node_or_null("/root/SceneCache")
 	if service != null and service.has_method("change_scene"):
 		service.call("change_scene", target_path)

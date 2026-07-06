@@ -7,6 +7,18 @@ const SAVE_FORMAT_VERSION := 1
 
 var world_settings: Dictionary = {}
 var player_character: Dictionary = {}
+## The slot this session was last saved to or loaded from ("" = none).
+var current_slot_id: String = ""
+
+func set_current_slot(slot_id: String) -> void:
+	current_slot_id = slot_id
+
+func get_current_slot() -> String:
+	return current_slot_id
+
+## Public JSON-safe encoding for the save service.
+func encode_settings_for_save(value: Variant) -> Variant:
+	return _encode_for_json(value)
 
 func set_world_settings(settings: Dictionary) -> void:
 	world_settings = WorldSettings.merge_with_defaults(settings)
