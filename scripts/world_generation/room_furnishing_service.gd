@@ -9,9 +9,12 @@ class_name RoomFurnishingService
 ## anchor by their floor footprint and overhang the wall behind them,
 ## which is where the depth comes from.
 
-const HOUSE_INTERIOR_TEXTURE := preload("res://resources/images/webgame_tiles/Farm/Tiled_files/House_interior.png")
-const BARN_INTERIOR_TEXTURE := preload("res://resources/images/webgame_tiles/Farm/Tiled_files/Barn_interior.png")
-const TAVERN_BAR_TEXTURE := preload("res://resources/images/webgame_tiles/extra/tavern_bar.png")
+## The 16px web sheets are pre-upscaled 2x with EPX so they render at
+## the same one-world-pixel-per-art-pixel density as the 32px tilesheet
+## and character art, instead of standing out twice as chunky.
+const HOUSE_INTERIOR_TEXTURE := preload("res://resources/images/webgame_tiles/Farm/Tiled_files/House_interior_2x.png")
+const BARN_INTERIOR_TEXTURE := preload("res://resources/images/webgame_tiles/Farm/Tiled_files/Barn_interior_2x.png")
+const TAVERN_BAR_TEXTURE := preload("res://resources/images/webgame_tiles/extra/tavern_bar_2x.png")
 
 ## rect: source pixels (16px art). cells_w: floor cells wide at 2x.
 ## rows_block: floor rows that block movement (0 = walk-through decor).
@@ -19,7 +22,7 @@ const DF_FURNITURE_TEXTURE := preload("res://resources/images/dwarfhold/df_furni
 
 ## The rustic interior sheet: rugs, hearths, anvils, armor stands,
 ## stocked counters and houseplants (16px art like the house sheets).
-const INTERIOR_TILESET_TEXTURE := preload("res://resources/images/dwarfhold/Interior_Tileset.png")
+const INTERIOR_TILESET_TEXTURE := preload("res://resources/images/dwarfhold/Interior_Tileset_2x.png")
 
 const PIECES := {
 	"round_rug": {"sheet": "house", "rect": Rect2(0, 0, 52, 52), "cells_w": 4, "rows_block": 0, "z": 4},
@@ -613,9 +616,12 @@ static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_si
 			sprite.texture = HOUSE_INTERIOR_TEXTURE
 	sprite.region_enabled = true
 	sprite.centered = false
-	var rect := piece.get("rect", Rect2()) as Rect2
+	var source_rect := piece.get("rect", Rect2()) as Rect2
+	# rects are authored against the 16px originals; the sheets on disk
+	# are their 2x EPX upscales.
+	var rect := Rect2(source_rect.position * 2.0, source_rect.size * 2.0)
 	sprite.region_rect = rect
-	var scale := float(tile_size.x) / 16.0
+	var scale := float(tile_size.x) / 32.0
 	sprite.scale = Vector2.ONE * scale
 	var rows_block := maxi(int(piece.get("rows_block", 1)), 1)
 	var base_bottom := float((base_cell.y + rows_block) * tile_size.y)

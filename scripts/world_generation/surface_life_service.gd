@@ -160,7 +160,7 @@ static func spawn_traveler(road_path: Array, kind: String, rng: RandomNumberGene
 	var sprite := Sprite2D.new()
 	sprite.texture = DwarfSpriteComposer.compose(layers)
 	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	sprite.scale = Vector2(float(tile_size.x) / 32.0, float(tile_size.y) / 32.0) * 0.9 * float(layers.get("body_scale", 1.0))
+	sprite.scale = Vector2(float(tile_size.x) / 32.0, float(tile_size.y) / 32.0) * float(layers.get("body_scale", 1.0))
 	sprite.z_index = 11
 	var cell := road_path[index] as Vector2i
 	sprite.position = cell_center_position.call(cell)

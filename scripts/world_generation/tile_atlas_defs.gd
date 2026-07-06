@@ -210,6 +210,15 @@ const DWARFHOLD_PASSABLE_TILE_KEYS := ["floor", "dirt", "door", "stairway_up", "
 ## resources/images/town/town_tileset.png (a 2x upscale of the village
 ## interior sheet so it matches the rest of the game's 32px tiles).
 const TOWN_TILE_ATLAS_TEXTURE := "res://resources/images/town/town_tileset.png"
+## Town tiles whose art spans multiple atlas cells (the full trees):
+## created as one atlas tile of the given size and drawn offset so the
+## TRUNK cell - the bottom-middle of the region - is the map cell. The
+## single-quadrant stamps these replace looked like broken tree strips.
+const TOWN_MULTI_CELL_TILES := {
+	Vector2i(0, 16): {"size": Vector2i(3, 2), "origin": Vector2i(0, -16)},
+	Vector2i(0, 18): {"size": Vector2i(3, 3), "origin": Vector2i(0, -32)}
+}
+
 const TOWN_TILE_ATLAS := {
 	"grass": Vector2i(1, 1),
 	"grass_dark": Vector2i(5, 1),
@@ -233,8 +242,8 @@ const TOWN_TILE_ATLAS := {
 	"fence_post": Vector2i(9, 8),
 	"hedge": Vector2i(15, 7),
 	"hedge_alt": Vector2i(16, 7),
-	"tree": Vector2i(1, 17),
-	"tree_dark": Vector2i(1, 20),
+	"tree": Vector2i(0, 16),
+	"tree_dark": Vector2i(0, 18),
 	"bed": Vector2i(28, 22),
 	"bed_top": Vector2i(28, 21),
 	"bed_alt": Vector2i(31, 22),

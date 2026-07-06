@@ -2863,7 +2863,7 @@ func _apply_identity_appearances() -> void:
 		sprite.scale = Vector2(
 			float(tile_size.x) / 32.0,
 			float(tile_size.y) / 32.0
-		) * 0.9 * float(layers.get("body_scale", 1.0))
+		) * float(layers.get("body_scale", 1.0))
 		state["composed"] = true
 
 func _assign_npc_identities() -> void:
