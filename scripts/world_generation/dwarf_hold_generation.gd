@@ -161,8 +161,6 @@ var _player_pending_chest_interaction := Vector2i(2147483647, 2147483647)
 var _hover_tooltip_cell := Vector2i(2147483647, 2147483647)
 var _hover_tooltip_npc := ""
 var _hover_tooltip_layer: TileMapLayer
-var _last_move_direction := Vector2i.ZERO
-var _move_repeat_timer := 0.0
 var _npc_states: Array[Dictionary] = []
 var _settlement_factions: Array[Dictionary] = []
 var _factions_label: RichTextLabel
@@ -177,8 +175,6 @@ var _calendar_start_year := 250
 var _bed_cells: Array[Vector2i] = []
 var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
 
-const PLAYER_MOVE_REPEAT_INITIAL_DELAY := 0.22
-const PLAYER_MOVE_REPEAT_INTERVAL := 0.10
 const PLAYER_MOVE_SPEED := 260.0
 ## Base values live in PlayerStatsService; the profession chosen at
 ## character creation shifts them per player.
@@ -939,7 +935,6 @@ func _update_wild_darkness(delta: float) -> void:
 		if _player_sprite != null:
 			_player_glow.position = _player_sprite.position
 	_update_player_turn_movement(delta)
-	_update_player_hold_movement(delta)
 	_update_npc_movement(delta)
 
 func _advance_game_clock(delta: float) -> void:
@@ -1023,13 +1018,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_use_hotbar_slot(hotbar_index)
 			get_viewport().set_input_as_handled()
 			return
-	if _player_sprite == null or not _player_control_enabled:
-		return
-	if _is_text_input_focused():
-		return
-	var move_direction := DwarfHoldUiInputHandler.move_direction_from_event(event)
-	if move_direction != Vector2i.ZERO:
-		_handle_player_move_input(move_direction)
+	# Movement keys are polled continuously in _update_player_turn_movement,
+	# so held keys glide tile to tile with no tap-per-step.
 
 func _on_back_button_pressed() -> void:
 	SceneCacheService.request_change(self, OVERWORLD_SCENE_PATH)
@@ -1075,39 +1065,42 @@ func _update_player_character_label() -> void:
 		header += " — %s" % profession
 	player_character_label.text = header
 
-func _handle_player_move_input(direction: Vector2i) -> void:
-	_request_player_move_to_cell(_player_cell + direction)
-	_last_move_direction = direction
-	_move_repeat_timer = PLAYER_MOVE_REPEAT_INITIAL_DELAY
-
-func _update_player_hold_movement(delta: float) -> void:
-	if _player_sprite == null or not _player_control_enabled:
-		_reset_player_hold_state()
-		return
-	if _is_text_input_focused():
-		_reset_player_hold_state()
-		return
-
-	var move_direction := _current_move_input_direction()
-	if move_direction == Vector2i.ZERO:
-		_reset_player_hold_state()
-		return
-
-	if move_direction != _last_move_direction:
-		_handle_player_move_input(move_direction)
-		return
-
-	_move_repeat_timer -= delta
-	while _move_repeat_timer <= 0.0:
-		_request_player_move_to_cell(_player_cell + move_direction)
-		_move_repeat_timer += PLAYER_MOVE_REPEAT_INTERVAL
-
 func _current_move_input_direction() -> Vector2i:
 	return DwarfHoldUiInputHandler.current_move_input_direction()
 
-func _reset_player_hold_state() -> void:
-	_last_move_direction = Vector2i.ZERO
-	_move_repeat_timer = 0.0
+## Picks the player's next tile: held movement keys rule (and cancel any
+## click-path), then the click-path continues. Blocked diagonals slide
+## along whichever axis is open, so walls never stall a held key.
+func _start_next_player_step() -> void:
+	var held := _current_move_input_direction()
+	if held != Vector2i.ZERO and not _is_text_input_focused():
+		_player_move_path.clear()
+		if _try_move_player(held):
+			return
+		if held.x != 0 and held.y != 0:
+			if _try_move_player(Vector2i(held.x, 0)):
+				return
+			var _slid := _try_move_player(Vector2i(0, held.y))
+		return
+	while not _player_move_path.is_empty():
+		var next_cell := _player_move_path[0]
+		if next_cell == _player_cell:
+			_player_move_path.pop_front()
+			continue
+		if _is_cell_occupied_by_npc(next_cell):
+			_player_move_path.clear()
+			return
+		if _try_move_player(next_cell - _player_cell):
+			_player_move_path.pop_front()
+		return
+
+func _finish_idle_interactions() -> void:
+	if not _player_move_path.is_empty():
+		return
+	if _player_pending_chest_interaction.x != 2147483647:
+		if _is_player_adjacent_to_cell(_player_pending_chest_interaction):
+			_handle_chest_click(_screen_position_from_cell(_player_pending_chest_interaction))
+		_player_pending_chest_interaction = Vector2i(2147483647, 2147483647)
 
 func _update_player_turn_movement(delta: float) -> void:
 	if _player_sprite == null or not _player_control_enabled:
@@ -1116,49 +1109,41 @@ func _update_player_turn_movement(delta: float) -> void:
 		_player_pending_chest_interaction = Vector2i(2147483647, 2147483647)
 		return
 
-	if _player_is_moving:
-		var next_position := _player_sprite.position.move_toward(_player_move_target_position, PLAYER_MOVE_SPEED * delta)
-		_player_sprite.position = next_position
-		_center_view_on_world_position(next_position)
-		if next_position.distance_to(_player_move_target_position) > 0.5:
+	if not _player_is_moving:
+		_start_next_player_step()
+		if not _player_is_moving:
+			_finish_idle_interactions()
 			return
+
+	# Spend this frame's travel budget, flowing across tile boundaries so
+	# held keys read as one continuous Core Keeper-style glide instead of
+	# a step, a stall, and another step.
+	var budget := PLAYER_MOVE_SPEED * delta
+	var crossed_tile := false
+	while _player_is_moving and budget > 0.0:
+		var remaining := _player_sprite.position.distance_to(_player_move_target_position)
+		if remaining > budget:
+			_player_sprite.position = _player_sprite.position.move_toward(_player_move_target_position, budget)
+			break
+		budget -= remaining
 		_player_sprite.position = _player_move_target_position
 		_player_cell = _player_move_target_cell
 		_player_is_moving = false
+		crossed_tile = true
 		if _try_use_stairs_at_player_cell():
+			_center_view_on_world_position(_player_sprite.position)
 			return
-		if not _latest_grid.is_empty():
-			_update_shattered_visibility(_latest_grid)
-			_refresh_lighting(_latest_grid)
-
-	if _player_move_path.is_empty():
-		if _player_pending_chest_interaction.x != 2147483647:
-			if _is_player_adjacent_to_cell(_player_pending_chest_interaction):
-				_handle_chest_click(_screen_position_from_cell(_player_pending_chest_interaction))
-			_player_pending_chest_interaction = Vector2i(2147483647, 2147483647)
-		return
-
-	var next_cell := _player_move_path[0]
-	if _player_cell == next_cell:
-		_player_move_path.pop_front()
-		return
-
-	if _is_cell_occupied_by_npc(next_cell):
-		_player_move_path.clear()
-		return
-
-	if _try_move_player(next_cell - _player_cell):
-		_player_move_path.pop_front()
+		_start_next_player_step()
+	_center_view_on_world_position(_player_sprite.position)
+	if crossed_tile and not _latest_grid.is_empty():
+		_update_shattered_visibility(_latest_grid)
+		_refresh_lighting(_latest_grid)
+	if not _player_is_moving:
+		_finish_idle_interactions()
 
 func _is_text_input_focused() -> bool:
 	var focused := get_viewport().gui_get_focus_owner()
 	return focused is LineEdit or focused is TextEdit
-
-func _is_move_pressed(event: InputEvent, action_name: StringName, wasd_key: Key) -> bool:
-	if event.is_action_pressed(action_name):
-		return true
-	var key_event := event as InputEventKey
-	return key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == wasd_key
 
 func _update_zone_legend() -> void:
 	var lines: PackedStringArray = ["[b]Zone Overlay Legend[/b]"]
