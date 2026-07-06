@@ -196,7 +196,12 @@ static func layout_generation_preset(layout_label: String) -> Dictionary:
 			"landmass_falloff_scale": 2.0,
 			"edge_ocean_strength": 0.06,
 			"edge_ocean_falloff": 0.1,
-			"water_level": 0.45
+			"water_level": 0.45,
+			# Browser worldGenerationProfiles (main.js:20044-20108):
+			# seaLevelShift feeds targetWaterRatio = 0.47 + shift,
+			# rainfallBias feeds the rainfall field directly.
+			"sea_level_shift": 0.02,
+			"rainfall_bias": 0.0
 		},
 		"major continent": {
 			# One dominant ragged landmass surrounded by open ocean.
@@ -211,7 +216,9 @@ static func layout_generation_preset(layout_label: String) -> Dictionary:
 			"landmass_falloff_scale": 1.5,
 			"edge_ocean_strength": 0.3,
 			"edge_ocean_falloff": 0.28,
-			"water_level": 0.45
+			"water_level": 0.45,
+			"sea_level_shift": 0.0,
+			"rainfall_bias": 0.0
 		},
 		"twin continents": {
 			# Two forced lobes far apart with a sea channel between them.
@@ -226,7 +233,9 @@ static func layout_generation_preset(layout_label: String) -> Dictionary:
 			"landmass_falloff_scale": 1.1,
 			"edge_ocean_strength": 0.12,
 			"edge_ocean_falloff": 0.14,
-			"water_level": 0.45
+			"water_level": 0.45,
+			"sea_level_shift": -0.02,
+			"rainfall_bias": -0.02
 		},
 		"inland sea": {
 			# Inverted radial profile: sea at the centre, a ragged ring of
@@ -243,7 +252,9 @@ static func layout_generation_preset(layout_label: String) -> Dictionary:
 			"landmass_falloff_scale": 1.6,
 			"edge_ocean_strength": 0.05,
 			"edge_ocean_falloff": 0.08,
-			"water_level": 0.49
+			"water_level": 0.49,
+			"sea_level_shift": 0.04,
+			"rainfall_bias": 0.03
 		},
 		"archipelago": {
 			# High-frequency mask with no continental anchors: island fields.
@@ -258,7 +269,9 @@ static func layout_generation_preset(layout_label: String) -> Dictionary:
 			"landmass_falloff_scale": 1.35,
 			"edge_ocean_strength": 0.06,
 			"edge_ocean_falloff": 0.08,
-			"water_level": 0.5
+			"water_level": 0.5,
+			"sea_level_shift": 0.08,
+			"rainfall_bias": 0.05
 		}
 	}
 	var key := layout_label.strip_edges().to_lower()

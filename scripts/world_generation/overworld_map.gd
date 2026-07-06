@@ -617,7 +617,21 @@ var _coast_source_id := -1
 var _temperature_noise: FastNoiseLite
 var _snow_edge_noise: FastNoiseLite
 var _rainfall_noise: FastNoiseLite
+var _rainfall_detail_noise: FastNoiseLite
+var _desert_band_noise: FastNoiseLite
+var _desert_heat_noise: FastNoiseLite
+var _desert_detail_noise: FastNoiseLite
+var _marsh_variation_noise: FastNoiseLite
 var _vegetation_noise: FastNoiseLite
+var _rainfall_buffer: PackedFloat32Array = PackedFloat32Array()
+var _desert_suitability_buffer: PackedFloat32Array = PackedFloat32Array()
+var _desert_heat_buffer: PackedFloat32Array = PackedFloat32Array()
+## Per-layout knobs (browser worldGenerationProfiles, main.js:20044-20108).
+var _sea_level_shift := 0.02
+var _rainfall_bias := 0.0
+## Slider biases (browser main.js:21300-21331).
+var _mountain_ratio := 0.5
+var _forest_bias := 0.0
 var _tile_data: Dictionary = {}
 var _tile_region_names: Dictionary = {}
 var _tile_population_groups: Dictionary = {}
@@ -704,6 +718,24 @@ const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
 const MORE_INFO_IMAGE_FOLDER := "res://resources/images/overworld/more_info"
 const GENERATION_YIELD_ROW_INTERVAL := 32
 const GENERATION_YIELD_CELL_INTERVAL := 1024
+
+const NEIGHBOR_OFFSETS_8: Array[Vector2i] = [
+	Vector2i(-1, -1), Vector2i(0, -1), Vector2i(1, -1),
+	Vector2i(-1, 0), Vector2i(1, 0),
+	Vector2i(-1, 1), Vector2i(0, 1), Vector2i(1, 1)
+]
+## Index-paired opposites for NEIGHBOR_OFFSETS_8 (browser directionOpposites).
+const NEIGHBOR_OPPOSITES_8: Array[int] = [7, 6, 5, 4, 3, 2, 1, 0]
+
+## Browser computeSnowPresence band (main.js:21607-21635): snow is NORTH-only,
+## guaranteed above latitude 0.86, noise-thinned through 0.5..0.86, absent
+## south of 0.5. latitude = 1 - normalizedY (north = top of the map).
+const SNOW_LATITUDE_START := 0.5
+const SNOW_LATITUDE_FULL := 0.86
+
+## Browser marsh model (main.js:21671-21673).
+const MARSH_BASE_THRESHOLD := 0.65
+const MARSH_WETNESS_THRESHOLD := 0.66
 
 var _more_info_image_paths: Array[String] = []
 var _more_info_texture_cache: Dictionary = {}
@@ -1716,24 +1748,78 @@ func _generate_map() -> void:
 	_temperature_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	_temperature_noise.fractal_octaves = 3
 
-	# The snow line gets its own CELL-SCALE noise. Every other field is
-	# scaled by 1/map width, which on big maps flattens to a constant
-	# across the whole map - that constant is what drew the ruler-straight
-	# treeline. This one keeps an absolute frequency so the boundary
-	# wanders at 10-50 cell wavelengths no matter the map size.
+	# Browser computeSnowPresence noise (main.js:21610-21613): 3 octaves,
+	# 0.55 persistence, 2.2 lacunarity, scale 5.3 + rng()*3.2 across the
+	# normalized map width. The scale comes from a seed hash so the snow
+	# line stays deterministic per world seed.
 	_snow_edge_noise = FastNoiseLite.new()
-	_snow_edge_noise.seed = map_seed + 313
+	_snow_edge_noise.seed = map_seed + 0x27d4eb2d
 	_snow_edge_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_snow_edge_noise.frequency = 0.055
 	_snow_edge_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	_snow_edge_noise.fractal_octaves = 4
+	_snow_edge_noise.fractal_octaves = 3
+	_snow_edge_noise.fractal_gain = 0.55
+	_snow_edge_noise.fractal_lacunarity = 2.2
+	var snow_noise_scale := 5.3 + _hash_coords(3, 11, map_seed + 0x27d4eb2d) * 3.2
+	_snow_edge_noise.frequency = snow_noise_scale / frequency_divisor
 
+	# Browser rainfall octabands (main.js:21459-21486): a broad base band
+	# (3 octaves, 0.6, 2.05) and a finer detail band (4 octaves, 0.55, 2.25)
+	# mixed 0.65/0.35 inside _build_rainfall_buffer.
 	_rainfall_noise = FastNoiseLite.new()
 	_rainfall_noise.seed = map_seed + 211
 	_rainfall_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	_rainfall_noise.frequency = rainfall_frequency / frequency_divisor
 	_rainfall_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	_rainfall_noise.fractal_octaves = 4
+	_rainfall_noise.fractal_octaves = 3
+	_rainfall_noise.fractal_gain = 0.6
+	_rainfall_noise.fractal_lacunarity = 2.05
+
+	_rainfall_detail_noise = FastNoiseLite.new()
+	_rainfall_detail_noise.seed = map_seed + 223
+	_rainfall_detail_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_rainfall_detail_noise.frequency = (rainfall_frequency * 2.6) / frequency_divisor
+	_rainfall_detail_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_rainfall_detail_noise.fractal_octaves = 4
+	_rainfall_detail_noise.fractal_gain = 0.55
+	_rainfall_detail_noise.fractal_lacunarity = 2.25
+
+	# Browser desert fields (main.js:21991-22117): the equatorial band warp,
+	# the heat jitter and the acceptance noise each get their own octave set.
+	_desert_band_noise = FastNoiseLite.new()
+	_desert_band_noise.seed = map_seed + 0x2545f491
+	_desert_band_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_desert_band_noise.frequency = 2.4 / frequency_divisor
+	_desert_band_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_desert_band_noise.fractal_octaves = 4
+	_desert_band_noise.fractal_gain = 0.55
+	_desert_band_noise.fractal_lacunarity = 2.1
+
+	_desert_heat_noise = FastNoiseLite.new()
+	_desert_heat_noise.seed = map_seed + 0x1c69b3f7
+	_desert_heat_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_desert_heat_noise.frequency = 3.1 / frequency_divisor
+	_desert_heat_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_desert_heat_noise.fractal_octaves = 4
+	_desert_heat_noise.fractal_gain = 0.55
+	_desert_heat_noise.fractal_lacunarity = 2.2
+
+	_desert_detail_noise = FastNoiseLite.new()
+	_desert_detail_noise.seed = map_seed + 0x3ab41d7b
+	_desert_detail_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_desert_detail_noise.frequency = 4.4 / frequency_divisor
+	_desert_detail_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_desert_detail_noise.fractal_octaves = 3
+	_desert_detail_noise.fractal_gain = 0.55
+	_desert_detail_noise.fractal_lacunarity = 2.15
+
+	_marsh_variation_noise = FastNoiseLite.new()
+	_marsh_variation_noise.seed = map_seed + 0x51a7f5d3
+	_marsh_variation_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_marsh_variation_noise.frequency = 4.6 / frequency_divisor
+	_marsh_variation_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_marsh_variation_noise.fractal_octaves = 4
+	_marsh_variation_noise.fractal_gain = 0.55
+	_marsh_variation_noise.fractal_lacunarity = 2.1
 
 	_vegetation_noise = FastNoiseLite.new()
 	_vegetation_noise.seed = map_seed + 317
@@ -1751,9 +1837,22 @@ func _generate_map() -> void:
 
 	_smooth_height_buffer(height_buffer, 1, 0.35)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "height smoothing")
+	# Browser estimateSeaLevels (main.js:11590-11601): the sea level is the
+	# exact height percentile that puts targetWaterRatio of the map under
+	# water (0.47 + the layout's seaLevelShift, main.js:21308).
+	water_level = _estimate_sea_level(height_buffer)
 	_ensure_landmass_presence_buffer(height_buffer)
 	var height_map_for_biome := _float_buffer_to_dictionary(height_buffer)
+	_desert_suitability_buffer.resize(cell_count)
+	_desert_suitability_buffer.fill(0.0)
+	_desert_heat_buffer.resize(cell_count)
+	_desert_heat_buffer.fill(0.0)
+	var stage_started_ms := Time.get_ticks_msec()
+	_build_rainfall_buffer(height_buffer)
+	_log_generation_stage("rainfall field", stage_started_ms)
+	await _yield_generation_wave()
 
+	stage_started_ms = Time.get_ticks_msec()
 	for y in range(map_size.y):
 		for x in range(map_size.x):
 			var coord := Vector2i(x, y)
@@ -1769,6 +1868,8 @@ func _generate_map() -> void:
 		if y > 0 and y % GENERATION_YIELD_ROW_INTERVAL == 0:
 			await _yield_generation_wave()
 
+	_log_generation_stage("climate + base biomes", stage_started_ms)
+	stage_started_ms = Time.get_ticks_msec()
 	_guarantee_minimum_landmass_buffer(height_buffer, temperature_buffer, moisture_buffer, base_biome_buffer)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "climate sampling")
 	var height_map := _float_buffer_to_dictionary(height_buffer)
@@ -1778,23 +1879,44 @@ func _generate_map() -> void:
 	var base_biome_map := _biome_buffer_to_dictionary(base_biome_buffer)
 	_landmass_masks = _generate_landmass_masks_from_biome_map(base_biome_map)
 
+	stage_started_ms = Time.get_ticks_msec()
 	_smooth_biomes(base_biome_map, 2)
+	# The snow field is a direct function of latitude+height (browser
+	# main.js:21607-21635); smoothing may never drag tundra south of the
+	# band nor thin the guaranteed polar cap, so re-assert it.
+	_enforce_snow_presence(base_biome_map, height_buffer)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "biome smoothing")
+	_log_generation_stage("biome smoothing + snow", stage_started_ms)
+	await _yield_generation_wave()
+	stage_started_ms = Time.get_ticks_msec()
+	_refine_desert_biomes(base_biome_map)
+	_log_generation_stage("desert refinement", stage_started_ms)
+	await _yield_generation_wave()
+	stage_started_ms = Time.get_ticks_msec()
+	_refine_marsh_biomes(base_biome_map, height_buffer, moisture_buffer, height_map, rng)
+	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "desert and marsh refinement")
+	_log_generation_stage("marsh refinement", stage_started_ms)
+	await _yield_generation_wave()
 	if _count_biome(base_biome_map, BIOME_DESERT) == 0:
 		_seed_desert_biomes(base_biome_map, temperature_map, moisture_map, height_map)
 		_smooth_biomes(base_biome_map, 1)
+		_enforce_snow_presence(base_biome_map, height_buffer)
 	base_biome_buffer = _dictionary_to_biome_buffer(base_biome_map)
+	stage_started_ms = Time.get_ticks_msec()
+	highland_map = _build_highland_overlays(base_biome_map, height_buffer, height_map, rng)
+	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "highland ridges")
+	_log_generation_stage("highland ridges", stage_started_ms)
+	await _yield_generation_wave()
 	var tree_biome_map: Dictionary = base_biome_map.duplicate()
 	var tree_map := _apply_tree_overlays(
 		tree_biome_map,
-		temperature_map,
 		moisture_map,
 		vegetation_map,
 		height_map,
+		highland_map,
 		rng
 	)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "tree overlays")
-	highland_map = _build_highland_overlays(base_biome_map, height_map)
 	var river_map := _build_river_map_buffers(height_buffer, moisture_buffer, base_biome_buffer, rng)
 	# Browser ensureRiverConnectionsToWater: landlocked river networks get a
 	# terminal pond so every river visibly reaches water.
@@ -2019,7 +2141,7 @@ func _apply_overlays_and_metadata(
 			if highland_layer != null:
 				if highland_map.has(coord):
 					var highland_biome := highland_map[coord] as String
-					var highland_tile := _highland_tile_for_biome(highland_biome, base_biome)
+					var highland_tile := _highland_tile_for_biome(highland_biome, base_biome, coord)
 					highland_layer.set_cell(coord, _atlas_source_id, highland_tile)
 				else:
 					highland_layer.erase_cell(coord)
@@ -2346,9 +2468,22 @@ func _guarantee_minimum_landmass(
 				moisture_map[coord] = moisture
 				base_biome_map[coord] = _assign_base_biome(coord, new_height, temperature, moisture, height_map)
 
-func _highland_tile_for_biome(highland_biome: String, base_biome: String) -> Vector2i:
-	if highland_biome == BIOME_HILLS and base_biome == BIOME_TUNDRA:
-		return Vector2i(HILLS_TILE.x + 1, HILLS_TILE.y)
+## Browser hill overlays (main.js:25238-25292): snow and badlands bases get
+## their dedicated hill art, plain hills hash-pick between HILLS and the two
+## unused-until-now variants (selectBaseHillOverlayKey).
+func _highland_tile_for_biome(highland_biome: String, base_biome: String, coord: Vector2i) -> Vector2i:
+	if highland_biome == BIOME_HILLS:
+		if base_biome == BIOME_TUNDRA:
+			return HILLS_SNOW_TILE
+		if base_biome == BIOME_BADLANDS:
+			return HILLS_BADLANDS_TILE
+		var variant_noise := _hash_coords(coord.x, coord.y, map_seed + 0x3ab41d7f)
+		var variant_index := clampi(int(floor(variant_noise * 3.0)), 0, 2)
+		if variant_index == 1:
+			return HILLS_VARIANT_A_TILE
+		if variant_index == 2:
+			return HILLS_VARIANT_B_TILE
+		return HILLS_TILE
 	return _biome_to_tile(highland_biome)
 
 func _yield_generation_wave() -> void:
@@ -2402,20 +2537,6 @@ func _tile_lookup() -> Dictionary:
 		"water": WATER_TILE,
 		"mountain": MOUNTAIN_TILE,
 		"hills": HILLS_TILE
-	}
-
-
-func _biome_thresholds() -> Dictionary:
-	return {
-		"water_level": water_level,
-		"tundra_threshold": tundra_threshold,
-		"marsh_threshold": marsh_threshold,
-		"hot_threshold": hot_threshold,
-		"desert_threshold": desert_threshold,
-		"desert_temperature_bias": desert_temperature_bias,
-		"desert_moisture_bias": desert_moisture_bias,
-		"warm_threshold": warm_threshold,
-		"badlands_threshold": badlands_threshold
 	}
 
 
@@ -2549,26 +2670,150 @@ func _sample_temperature(x: int, y: int, elevation: float) -> float:
 	return clampf((layered_noise * 0.55 + (1.0 - latitudinal_cold) * 0.45) - elevation_cooling - north_bias, 0.0, 1.0)
 
 
-func _sample_snow_latitude_strength(coord: Vector2i) -> float:
-	var y_ratio := float(coord.y) / maxf(1.0, float(map_size.y - 1))
-	var latitude := absf(y_ratio * 2.0 - 1.0)
-	var latitude_strength := pow(latitude, 1.35)
+## Browser latitude convention (main.js:21616): latitude = 1 - normalizedY,
+## so the NORTH pole is the top row and the south holds no snow at all.
+func _north_latitude(y: int) -> float:
+	return 1.0 - (float(y) + 0.5) / maxf(1.0, float(map_size.y))
+
+
+## Browser computeSnowPresence (main.js:21607-21635): guaranteed snow above
+## latitude 0.86; through 0.5..0.86 coverage = bandFactor*0.7 +
+## elevationFactor*0.3 thinned by octave noise; never south of 0.5.
+func _compute_snow_presence(x: int, y: int, height_value: float) -> bool:
+	var latitude := _north_latitude(y)
+	if latitude >= SNOW_LATITUDE_FULL:
+		return true
+	if latitude <= SNOW_LATITUDE_START:
+		return false
+	var band_factor := clampf((latitude - SNOW_LATITUDE_START) / (SNOW_LATITUDE_FULL - SNOW_LATITUDE_START), 0.0, 1.0)
+	var elevation_factor := clampf((height_value - water_level) * 3.8, 0.0, 1.0)
+	var coverage := clampf(band_factor * 0.7 + elevation_factor * 0.3, 0.0, 1.0)
 	if _snow_edge_noise == null:
-		return clampf(latitude_strength, 0.0, 1.0)
-	var x := float(coord.x)
-	var y := float(coord.y)
-	# Broad lobes sweep the snow line in whole-peninsula pushes; the
-	# ragged octave chews the edge at a few-cell scale.
-	var lobes := _to_normalized(_snow_edge_noise.get_noise_2d(x * 0.35, y * 0.35))
-	var ragged := _to_normalized(_snow_edge_noise.get_noise_2d(x * 1.6 + 71.0, y * 1.6 - 37.0))
-	var band_breakup := (lobes - 0.5) * 0.34 + (ragged - 0.5) * 0.14
-	return clampf(latitude_strength + band_breakup, 0.0, 1.0)
+		return band_factor >= 0.5
+	return _to_normalized(_snow_edge_noise.get_noise_2d(float(x), float(y))) < coverage
 
 
-func _sample_rainfall(x: int, y: int, elevation: float) -> float:
-	var humidity := _to_normalized(_rainfall_noise.get_noise_2d(float(x), float(y)))
-	var orographic := maxf(0.0, mountain_level - elevation) * 0.25
-	return clampf(humidity + orographic, 0.0, 1.0)
+## Re-asserts the snow-presence contract on the whole base-biome map: land
+## is tundra exactly where the snow field says so.
+func _enforce_snow_presence(base_biome_map: Dictionary, height_buffer: PackedFloat32Array) -> void:
+	for y in range(map_size.y):
+		var latitude := _north_latitude(y)
+		if latitude <= SNOW_LATITUDE_START:
+			# South of the band only stray tundra needs clearing.
+			for x in range(map_size.x):
+				var coord := Vector2i(x, y)
+				if String(base_biome_map.get(coord, "")) == BIOME_TUNDRA:
+					base_biome_map[coord] = BIOME_GRASSLAND
+			continue
+		for x in range(map_size.x):
+			var coord := Vector2i(x, y)
+			var biome := String(base_biome_map.get(coord, ""))
+			if biome == BIOME_WATER:
+				continue
+			var idx := _xy_to_index(x, y)
+			if idx < 0 or idx >= height_buffer.size():
+				continue
+			if _compute_snow_presence(x, y, float(height_buffer[idx])):
+				base_biome_map[coord] = BIOME_TUNDRA
+			elif biome == BIOME_TUNDRA:
+				base_biome_map[coord] = BIOME_GRASSLAND
+
+
+func _rainfall_at(idx: int) -> float:
+	if idx >= 0 and idx < _rainfall_buffer.size():
+		return float(_rainfall_buffer[idx])
+	return 0.5
+
+
+## Browser rainfall model (main.js:21459-21531): base/detail octabands mixed
+## 0.65/0.35, then value*0.55 + latitudeInfluence*0.25 + coastalInfluence*0.2
+## + the layout's rainfallBias, followed by the rain-shadow sweeps.
+func _build_rainfall_buffer(height_buffer: PackedFloat32Array) -> void:
+	var cell_count := height_buffer.size()
+	_rainfall_buffer.resize(cell_count)
+	var width := map_size.x
+	for y in range(map_size.y):
+		var ny := (float(y) + 0.5) / maxf(1.0, float(map_size.y))
+		var latitude_influence := 1.0 - absf(ny - 0.5) * 1.8
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			var elevation := float(height_buffer[idx])
+			var base_rain := _to_normalized(_rainfall_noise.get_noise_2d(float(x), float(y)))
+			var detail_rain := _to_normalized(_rainfall_detail_noise.get_noise_2d(float(x), float(y)))
+			var coastal_influence := clampf(1.0 - absf(elevation - water_level) * 2.4, 0.0, 1.0)
+			var rainfall := base_rain * 0.65 + detail_rain * 0.35
+			_rainfall_buffer[idx] = clampf(rainfall * 0.55 + latitude_influence * 0.25 + coastal_influence * 0.2 + _rainfall_bias, 0.0, 1.0)
+	_apply_rain_shadow(height_buffer, _rainfall_buffer)
+
+
+## Browser applyRainShadow (main.js:20539-20564): walking each row both
+## west->east and east->west, slopes over 0.05 dry the lee side by slope*0.5
+## while descents recover (-slope)*0.35, then the field is re-normalized.
+func _apply_rain_shadow(elevation: PackedFloat32Array, rainfall: PackedFloat32Array) -> void:
+	var adjusted := rainfall.duplicate()
+	_rain_shadow_sweep(elevation, rainfall, adjusted, 0, map_size.x, 1)
+	_rain_shadow_sweep(elevation, rainfall, adjusted, map_size.x - 1, -1, -1)
+	_normalize_field(adjusted)
+	for i in range(rainfall.size()):
+		rainfall[i] = adjusted[i]
+
+
+func _rain_shadow_sweep(
+	elevation: PackedFloat32Array,
+	rainfall: PackedFloat32Array,
+	adjusted: PackedFloat32Array,
+	start_x: int,
+	end_x: int,
+	step: int
+) -> void:
+	var width := map_size.x
+	for y in range(map_size.y):
+		var row := y * width
+		var carried := float(rainfall[row + start_x])
+		var x := start_x + step
+		while (x < end_x) if step > 0 else (x > end_x):
+			var idx := row + x
+			var slope := float(elevation[idx - step]) - float(elevation[idx])
+			if slope > 0.05:
+				carried -= slope * 0.5
+			elif slope < -0.05:
+				carried += (-slope) * 0.35
+			carried = clampf(carried, 0.0, 1.0)
+			adjusted[idx] = clampf((float(adjusted[idx]) * 2.0 + carried) / 3.0, 0.0, 1.0)
+			x += step
+
+
+## Browser normalizeField (main.js:20478-20495).
+func _normalize_field(field: PackedFloat32Array) -> void:
+	var min_value := INF
+	var max_value := -INF
+	for i in range(field.size()):
+		var value := float(field[i])
+		min_value = minf(min_value, value)
+		max_value = maxf(max_value, value)
+	var value_range := max_value - min_value
+	if value_range <= 0.0:
+		return
+	for i in range(field.size()):
+		field[i] = (float(field[i]) - min_value) / value_range
+
+
+## Browser estimateSeaLevels (main.js:11590-11601) with the layout's
+## seaLevelShift folded into targetWaterRatio (main.js:21308).
+func _estimate_sea_level(height_buffer: PackedFloat32Array) -> float:
+	var total := height_buffer.size()
+	if total == 0:
+		return water_level
+	var sorted_heights := height_buffer.duplicate()
+	sorted_heights.sort()
+	var clamped_ratio := clampf(0.47 + _sea_level_shift, 0.2, 0.8)
+	var water_index := clampi(int(floor(float(total) * clamped_ratio)), 0, total - 1)
+	return clampf(float(sorted_heights[water_index]), 0.25, 0.65)
+
+
+func _sample_rainfall(x: int, y: int, _elevation: float) -> float:
+	return _rainfall_at(_xy_to_index(x, y))
 
 
 func _sample_moisture(x: int, y: int, elevation: float) -> float:
@@ -2590,48 +2835,683 @@ func _sample_vegetation(x: int, y: int, elevation: float, moisture: float, tempe
 func _assign_base_biome(
 	coord: Vector2i,
 	height: float,
-	temperature: float,
+	_temperature: float,
 	moisture: float,
 	height_map: Dictionary
 ) -> String:
-	var biomes := _biome_lookup()
-	var base_biome := BIOME_CLASSIFIER.assign_base_biome(coord, height, temperature, moisture, height_map, _biome_thresholds(), biomes)
-	# The snow strength contour owns the treeline in both directions:
-	# warm valleys bite north into the tundra, snowy fingers reach south
-	# into the grass. Temperature still fences how far a finger may go.
-	var snow_strength := _sample_snow_latitude_strength(coord)
-	if base_biome == String(biomes.get("tundra", BIOME_TUNDRA)):
-		if snow_strength < snow_latitude_threshold:
-			return String(biomes.get("grassland", BIOME_GRASSLAND))
-	elif base_biome == String(biomes.get("grassland", BIOME_GRASSLAND)):
-		if snow_strength >= snow_latitude_threshold + 0.05 and temperature < tundra_threshold + 0.12:
-			return String(biomes.get("tundra", BIOME_TUNDRA))
-	return base_biome
+	if height < water_level:
+		return BIOME_WATER
+	# Desert fields are evaluated for every land tile so the blur re-masking
+	# pass (browser main.js:22366-22525) sees a complete suitability field.
+	var desert_candidate := _evaluate_desert_cell(coord.x, coord.y, height)
+	# North-only snow owns the tundra line (browser main.js:21607-21635).
+	if _compute_snow_presence(coord.x, coord.y, height):
+		return BIOME_TUNDRA
+	var marsh := _marsh_suitability(coord.x, coord.y, height, moisture, height_map)
+	if marsh.z > 0.5:
+		return BIOME_MARSH
+	if desert_candidate:
+		return BIOME_DESERT
+	return BIOME_GRASSLAND
 
 
-func _tree_overlay_biome(temperature: float, moisture: float) -> String:
-	return BIOME_CLASSIFIER.tree_overlay_biome(temperature, moisture, jungle_threshold, hot_threshold, tundra_threshold, _biome_lookup())
+## Browser desert suitability (main.js:21991-22117): aridity*0.68 + heat*0.42
+## where heat rides a noise-warped equatorial band; acceptance threshold is
+## lerp(0.58, 0.52, equatorialAlignment). Also records the suitability and
+## heat fields the refinement/badlands passes read later.
+func _evaluate_desert_cell(x: int, y: int, height: float) -> bool:
+	var idx := _xy_to_index(x, y)
+	var rainfall := _rainfall_at(idx)
+	var ny := (float(y) + 0.5) / maxf(1.0, float(map_size.y))
+	var equatorial := clampf(1.0 - absf(ny - 0.5) * 2.0, 0.0, 1.0)
+	if _desert_band_noise != null:
+		equatorial = clampf(equatorial + _desert_band_noise.get_noise_2d(float(x), float(y)) * 0.22, 0.0, 1.0)
+	# Deviation: the rainfall belt (latitudeInfluence, main.js:21503) keeps
+	# the map's equator wet enough that the browser constants alone never
+	# dry it here, pushing every desert poleward. Discounting that belt
+	# inside the aridity term restores the browser's equatorial banding.
+	var aridity := clampf(1.0 - rainfall * 1.2 + equatorial * 0.3, 0.0, 1.0)
+	var elevation_factor := clampf((height - water_level) * 2.6, 0.0, 1.0)
+	var heat_noise := 0.0
+	if _desert_heat_noise != null:
+		heat_noise = _desert_heat_noise.get_noise_2d(float(x), float(y)) * 0.25
+	var heat := clampf(equatorial * 0.55 + (1.0 - elevation_factor) * 0.3 + heat_noise, 0.0, 1.0)
+	var suitability := clampf(aridity * 0.68 + heat * 0.42, 0.0, 1.0)
+	if idx >= 0 and idx < _desert_suitability_buffer.size():
+		_desert_suitability_buffer[idx] = suitability
+		_desert_heat_buffer[idx] = heat
+	if suitability <= 0.52:
+		return false
+	if suitability <= lerpf(0.58, 0.52, equatorial):
+		return false
+	var desert_noise := 0.5
+	if _desert_detail_noise != null:
+		desert_noise = _to_normalized(_desert_detail_noise.get_noise_2d(float(x), float(y)))
+	return desert_noise < suitability
 
 
-func _build_highland_overlays(biome_map: Dictionary, height_map: Dictionary) -> Dictionary:
+## Browser calculateMarshSuitability (main.js:21758-21939): wetness =
+## rainfall*0.75 + (1-drainage)*0.25 (drainage proxied by 1-moisture, same
+## proxy the river service uses), lowland and heat gates, then either water
+## adjacency or the inland-basin rule. The browser's 75-tile snow exclusion
+## (main.js:24565-24591) becomes an equator latitude cutoff because snow is
+## north-only. Returns Vector3(score, threshold, qualifies ? 1 : 0); score
+## is -1 on hard failure.
+func _marsh_suitability(x: int, y: int, height: float, moisture: float, height_map: Dictionary) -> Vector3:
+	if height <= water_level:
+		return Vector3(-1.0, MARSH_BASE_THRESHOLD, 0.0)
+	var ny := (float(y) + 0.5) / maxf(1.0, float(map_size.y))
+	if ny < 0.5:
+		# Snow can only exist north of the equator; marsh stays south of it.
+		return Vector3(-1.0, MARSH_BASE_THRESHOLD, 0.0)
+	var rainfall := _rainfall_at(_xy_to_index(x, y))
+	var equatorial := clampf(1.0 - absf(ny - 0.5) * 2.0, 0.0, 1.0)
+	var elevation_above := maxf(0.0, height - water_level)
+	var elevation_penalty := clampf(elevation_above * 3.4, 0.0, 1.0)
+	var heat := clampf(equatorial * 0.6 + (1.0 - elevation_penalty) * 0.4, 0.0, 1.0)
+	var wetness := clampf(rainfall * 0.75 + moisture * 0.25, 0.0, 1.0)
+	var lowland_factor := clampf(1.0 - elevation_above * 4.2, 0.0, 1.0)
+	if wetness <= MARSH_WETNESS_THRESHOLD or lowland_factor <= 0.22 or heat <= 0.45:
+		return Vector3(-1.0, MARSH_BASE_THRESHOLD, 0.0)
+	var suitability := clampf(wetness * 0.68 + lowland_factor * 0.2 + heat * 0.12, 0.0, 1.0)
+	if _marsh_variation_noise != null:
+		suitability = clampf(suitability + _marsh_variation_noise.get_noise_2d(float(x), float(y)) * 0.06, 0.0, 1.0)
+	var threshold := MARSH_BASE_THRESHOLD
+	var touches_surface_water := false
+	var near_sea_level_neighbors := 0
+	var lower_neighbors := 0
+	var coord := Vector2i(x, y)
+	for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+		var neighbor_height := float(height_map.get(coord + offset, height))
+		if neighbor_height <= water_level:
+			touches_surface_water = true
+		if neighbor_height <= water_level + 0.02:
+			near_sea_level_neighbors += 1
+		if neighbor_height < height:
+			lower_neighbors += 1
+	var drainage := clampf(1.0 - moisture, 0.0, 1.0)
+	var inland_candidate := (
+		not touches_surface_water
+		and near_sea_level_neighbors >= 4
+		and wetness > MARSH_WETNESS_THRESHOLD + 0.05
+		and drainage < 0.42
+		and lowland_factor > 0.34
+		and lower_neighbors >= 2
+	)
+	if inland_candidate:
+		threshold = clampf(threshold + 0.03, 0.5, 0.75)
+	if not touches_surface_water and not inland_candidate:
+		return Vector3(-1.0, threshold, 0.0)
+	return Vector3(suitability, threshold, 1.0 if suitability > threshold else 0.0)
+
+
+## Browser tree biome pick (main.js:25603-25679): jungle needs an equatorial
+## alignment of 1 - |ny-0.5|*3.4 >= 0.45, humidity >= 0.74, heat >= 0.68 and
+## no snow within 100 tiles - with north-only snow that buffer becomes an
+## equator latitude cutoff (jungle only south of ny = 0.5).
+func _tree_overlay_biome(coord: Vector2i, base_biome: String, moisture: float, height: float) -> String:
+	if base_biome == BIOME_TUNDRA:
+		return BIOME_TUNDRA
+	var ny := (float(coord.y) + 0.5) / maxf(1.0, float(map_size.y))
+	if ny >= 0.5:
+		var equatorial := clampf(1.0 - absf(ny - 0.5) * 3.4, 0.0, 1.0)
+		if equatorial >= 0.45:
+			var rainfall := _rainfall_at(_xy_to_index(coord.x, coord.y))
+			var humidity := clampf(rainfall * 0.82 + moisture * 0.18, 0.0, 1.0)
+			var elevation_penalty := clampf(maxf(0.0, height - water_level) * 3.1, 0.0, 1.0)
+			var heat := clampf(equatorial * 0.85 + (1.0 - elevation_penalty) * 0.25, 0.0, 1.0)
+			if heat >= 0.68 and humidity >= 0.74:
+				return BIOME_JUNGLE
+	return BIOME_FOREST
+
+
+## Chebyshev dilation of a 0/1 mask by `radius`, done as two separable
+## passes so the coastal buffer stays O(cells * radius).
+func _dilate_mask(mask: PackedByteArray, radius: int) -> PackedByteArray:
+	var width := map_size.x
+	var rows := map_size.y
+	var horizontal := PackedByteArray()
+	horizontal.resize(mask.size())
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var found := 0
+			for dx in range(-radius, radius + 1):
+				var nx := x + dx
+				if nx < 0 or nx >= width:
+					continue
+				if mask[row + nx] == 1:
+					found = 1
+					break
+			horizontal[row + x] = found
+	var result := PackedByteArray()
+	result.resize(mask.size())
+	for y in range(rows):
+		for x in range(width):
+			var found := 0
+			for dy in range(-radius, radius + 1):
+				var ny := y + dy
+				if ny < 0 or ny >= rows:
+					continue
+				if horizontal[ny * width + x] == 1:
+					found = 1
+					break
+			result[y * width + x] = found
+	return result
+
+
+## Browser traceDirection (main.js:23457-23496): walk from a seed along the
+## local ridge direction, claiming cells while the ridge score holds up.
+func _trace_ridge_direction(
+	start_x: int,
+	start_y: int,
+	start_dir: int,
+	max_steps: int,
+	initial_reliability: float,
+	candidate_floor: float,
+	water_mask: PackedByteArray,
+	scores: PackedFloat32Array,
+	dir_index: PackedInt32Array,
+	dir_strength: PackedFloat32Array,
+	mountain_mask: PackedByteArray
+) -> void:
+	var width := map_size.x
+	var rows := map_size.y
+	var cx := start_x
+	var cy := start_y
+	var current_dir := start_dir
+	var reliability := initial_reliability
+	for _step in range(max_steps):
+		var offset: Vector2i = NEIGHBOR_OFFSETS_8[current_dir]
+		var nx := cx + offset.x
+		var ny := cy + offset.y
+		if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+			break
+		var n_idx := ny * width + nx
+		if water_mask[n_idx] == 1:
+			break
+		if float(scores[n_idx]) < candidate_floor:
+			break
+		mountain_mask[n_idx] = 1
+		cx = nx
+		cy = ny
+		var next_dir := int(dir_index[n_idx])
+		if next_dir >= 0:
+			current_dir = next_dir
+		reliability = maxf(float(dir_strength[n_idx]), reliability * 0.82)
+		if reliability < 0.06:
+			break
+
+
+## Browser ridge-traced mountain ranges (main.js:23151-23592) and composite
+## hills (main.js:25238-25401), ported onto the existing highland_map
+## interface. The ridge score field combines ridged noise, slope magnitude
+## and local contrast (Godot has no tectonic-activity field, so the ridged
+## noise doubles as the tectonic proxy); seeds above the slider-shifted
+## threshold trace chains along the local ridge direction (up to 18 steps),
+## two stochastic growth passes thicken the ranges, coastal cells (within 2
+## tiles of water) are suppressed and isolated singles pruned. Ridge cores
+## nudge the height field upward so the absolute height>=0.97 peak-overlay
+## rule still fires. Rivers still erase mountains downstream
+## (OverworldRiverService.apply_river_tiles, browser main.js:24823-24840).
+func _build_highland_overlays(
+	base_biome_map: Dictionary,
+	height_buffer: PackedFloat32Array,
+	height_map: Dictionary,
+	rng: RandomNumberGenerator
+) -> Dictionary:
 	var overlay_map: Dictionary = {}
-	for coord: Vector2i in biome_map.keys():
-		if biome_map[coord] == BIOME_WATER:
+	var width := map_size.x
+	var rows := map_size.y
+	var cell_count := width * rows
+	if cell_count <= 0 or height_buffer.size() != cell_count:
+		return overlay_map
+
+	var water_mask := PackedByteArray()
+	water_mask.resize(cell_count)
+	# 0 = other land, 1 = grass, 2 = tundra, 3 = badlands (hill-capable bases).
+	var base_kind := PackedByteArray()
+	base_kind.resize(cell_count)
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var biome := String(base_biome_map.get(Vector2i(x, y), BIOME_GRASSLAND))
+			var idx := row + x
+			if biome == BIOME_WATER:
+				water_mask[idx] = 1
+			elif biome == BIOME_GRASSLAND:
+				base_kind[idx] = 1
+			elif biome == BIOME_TUNDRA:
+				base_kind[idx] = 2
+			elif biome == BIOME_BADLANDS:
+				base_kind[idx] = 3
+	var coastal_mask := _dilate_mask(water_mask, 2)
+
+	# Slider bias (main.js:21325-21331): the Mountain ratio becomes a signed
+	# bias with a 0.8 power curve, a scarcity factor and a growth factor.
+	var bias_linear := _mountain_ratio * 2.0 - 1.0
+	var mountain_bias := 0.0
+	if not is_zero_approx(bias_linear):
+		mountain_bias = signf(bias_linear) * pow(absf(bias_linear), 0.8)
+	var mountain_scarcity := 1.0 - _mountain_ratio
+	var mountain_growth_factor := 0.42 + _mountain_ratio * 0.7
+
+	# Height window (main.js:22268-22284). Deviation: the browser's eroded
+	# heightfield keeps high ground rare, while Godot's carries broad high
+	# plateaus - anchoring the window's floor to the land-height
+	# distribution (80th percentile) keeps ranges as chains instead of
+	# flooding every plateau.
+	var land_heights := PackedFloat32Array()
+	for idx in range(cell_count):
+		if water_mask[idx] == 0:
+			land_heights.append(float(height_buffer[idx]))
+	var plateau_floor := 0.0
+	if not land_heights.is_empty():
+		land_heights.sort()
+		plateau_floor = float(land_heights[int(float(land_heights.size() - 1) * 0.8)])
+	var base_threshold := minf(maxf(maxf(water_level + 0.1, 0.58), plateau_floor), 0.9)
+	var full_threshold := minf(0.98, base_threshold + 0.35)
+	var threshold_shift := mountain_bias * 0.18
+	var min_base_threshold := minf(maxf(water_level + 0.08 + mountain_scarcity * 0.05, 0.5), 0.92)
+	base_threshold = clampf(base_threshold - threshold_shift, min_base_threshold, 0.92)
+	full_threshold = clampf(full_threshold - threshold_shift * 1.3, base_threshold + 0.12, 0.99)
+	var height_range := maxf(full_threshold - base_threshold, 0.0001)
+
+	# Seed/candidate/prune thresholds (main.js:23160-23177).
+	var seed_threshold := clampf(0.8 - mountain_bias * 0.32, 0.52, 0.97)
+	var candidate_threshold := clampf(0.52 - mountain_bias * 0.28, 0.2, 0.78)
+	var prune_threshold := clampf(0.9 - mountain_bias * 0.2, 0.62, 0.97)
+
+	var ridge_detail_noise := FastNoiseLite.new()
+	ridge_detail_noise.seed = map_seed + 0x165667b1
+	ridge_detail_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	ridge_detail_noise.frequency = 7.4 / maxf(1.0, float(width))
+	ridge_detail_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	ridge_detail_noise.fractal_octaves = 5
+	ridge_detail_noise.fractal_gain = 0.47
+	ridge_detail_noise.fractal_lacunarity = 2.28
+
+	var orientation_noise := FastNoiseLite.new()
+	orientation_noise.seed = map_seed + 0xd3a2646c
+	orientation_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	orientation_noise.frequency = 9.2 / maxf(1.0, float(width))
+	orientation_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	orientation_noise.fractal_octaves = 3
+	orientation_noise.fractal_gain = 0.58
+	orientation_noise.fractal_lacunarity = 2.05
+
+	var norm_height := PackedFloat32Array()
+	norm_height.resize(cell_count)
+	var ridged_field := PackedFloat32Array()
+	ridged_field.resize(cell_count)
+	var tectonic_field := PackedFloat32Array()
+	tectonic_field.resize(cell_count)
+	var ridge_field := PackedFloat32Array()
+	ridge_field.resize(cell_count)
+	var dir_index := PackedInt32Array()
+	dir_index.resize(cell_count)
+	dir_index.fill(-1)
+	var dir_strength := PackedFloat32Array()
+	dir_strength.resize(cell_count)
+	var scores := PackedFloat32Array()
+	scores.resize(cell_count)
+	var mountain_mask := PackedByteArray()
+	mountain_mask.resize(cell_count)
+
+	# Pass A: ridged noise and normalized height. The browser's tectonic
+	# activity field is near zero away from plate boundaries, so the proxy
+	# keeps only the crest of the ridged noise (raw > 0.55 remapped and
+	# squared) - feeding 1-|noise| in directly floods the map in mountains.
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if water_mask[idx] == 1:
+				continue
+			var ridged_raw := 1.0 - absf(ridge_detail_noise.get_noise_2d(float(x), float(y)))
+			ridged_field[idx] = pow(ridged_raw, 1.25)
+			tectonic_field[idx] = pow(clampf((ridged_raw - 0.55) / 0.45, 0.0, 1.0), 2.0)
+			norm_height[idx] = clampf((float(height_buffer[idx]) - base_threshold) / height_range, 0.0, 1.0)
+
+	# Pass B: ridge score + local ridge direction (main.js:23179-23303).
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if water_mask[idx] == 1:
+				continue
+			var height_value := float(height_buffer[idx])
+			var left := float(height_buffer[idx - 1]) if x > 0 else height_value
+			var right := float(height_buffer[idx + 1]) if x < width - 1 else height_value
+			var up := float(height_buffer[idx - width]) if y > 0 else height_value
+			var down := float(height_buffer[idx + width]) if y < rows - 1 else height_value
+			var grad_x := (right - left) * 0.5
+			var grad_y := (down - up) * 0.5
+			var slope_magnitude := sqrt(grad_x * grad_x + grad_y * grad_y)
+
+			var tect := float(tectonic_field[idx])
+			var tect_left := float(tectonic_field[idx - 1]) if x > 0 else tect
+			var tect_right := float(tectonic_field[idx + 1]) if x < width - 1 else tect
+			var tect_up := float(tectonic_field[idx - width]) if y > 0 else tect
+			var tect_down := float(tectonic_field[idx + width]) if y < rows - 1 else tect
+			var tect_grad_x := (tect_right - tect_left) * 0.5
+			var tect_grad_y := (tect_down - tect_up) * 0.5
+			var tect_mag := sqrt(tect_grad_x * tect_grad_x + tect_grad_y * tect_grad_y)
+
+			var neighbor_sum := 0.0
+			var neighbor_count := 0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+					continue
+				neighbor_sum += float(height_buffer[ny * width + nx])
+				neighbor_count += 1
+			var neighbor_avg := (neighbor_sum / float(neighbor_count)) if neighbor_count > 0 else height_value
+			var local_contrast := maxf(0.0, height_value - neighbor_avg)
+
+			var dir_x := 0.0
+			var dir_y := 0.0
+			if tect_mag > 0.0003:
+				dir_x += -tect_grad_y * 1.6
+				dir_y += tect_grad_x * 1.6
+			if slope_magnitude > 0.00035:
+				dir_x += -grad_y * 0.7
+				dir_y += grad_x * 0.7
+			var noise_angle := orientation_noise.get_noise_2d(float(x), float(y)) * PI
+			if absf(dir_x) + absf(dir_y) < 0.0001:
+				dir_x = cos(noise_angle)
+				dir_y = sin(noise_angle)
+			else:
+				var dir_mag := maxf(sqrt(dir_x * dir_x + dir_y * dir_y), 0.0001)
+				dir_x = (dir_x / dir_mag) * 0.8 + cos(noise_angle) * 0.2
+				dir_y = (dir_y / dir_mag) * 0.8 + sin(noise_angle) * 0.2
+			var final_mag := sqrt(dir_x * dir_x + dir_y * dir_y)
+			if final_mag > 0.0001:
+				dir_x /= final_mag
+				dir_y /= final_mag
+				dir_strength[idx] = clampf(sqrt(tect_mag) * 3.5 + slope_magnitude * 2.1, 0.0, 1.0)
+				var best_index := -1
+				var best_dot := 0.35
+				for i in range(NEIGHBOR_OFFSETS_8.size()):
+					var offset: Vector2i = NEIGHBOR_OFFSETS_8[i]
+					var offset_length := sqrt(float(offset.x * offset.x + offset.y * offset.y))
+					var dot := (dir_x * float(offset.x) + dir_y * float(offset.y)) / offset_length
+					if dot > best_dot:
+						best_dot = dot
+						best_index = i
+				dir_index[idx] = best_index
+
+			var nh := float(norm_height[idx])
+			var erosion_penalty := maxf(0.0, neighbor_avg - height_value) * 0.35
+			var raw_ridge_score := (
+				nh * 0.28
+				+ pow(maxf(0.0, nh), 1.6) * 0.3
+				+ local_contrast * 0.9
+				+ clampf(slope_magnitude * 2.4, 0.0, 1.0) * 0.55
+				+ pow(tect, 0.85) * 0.75
+				+ float(ridged_field[idx]) * 0.4
+				- erosion_penalty
+			)
+			ridge_field[idx] = maxf(0.0, raw_ridge_score)
+
+	# Directional smoothing, 2 iterations (main.js:23306-23358).
+	var ridge_buffer := PackedFloat32Array()
+	ridge_buffer.resize(cell_count)
+	for _iteration in range(2):
+		for y in range(rows):
+			var row := y * width
+			for x in range(width):
+				var idx := row + x
+				if water_mask[idx] == 1:
+					ridge_buffer[idx] = 0.0
+					continue
+				var cell_dir := int(dir_index[idx])
+				if cell_dir < 0:
+					ridge_buffer[idx] = float(ridge_field[idx])
+					continue
+				var strength := float(dir_strength[idx])
+				var weight := 1.0
+				var weighted_sum := float(ridge_field[idx])
+				for dir_choice: int in [cell_dir, NEIGHBOR_OPPOSITES_8[cell_dir]]:
+					var offset: Vector2i = NEIGHBOR_OFFSETS_8[dir_choice]
+					var nx := x + offset.x
+					var ny := y + offset.y
+					if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+						continue
+					var n_idx := ny * width + nx
+					if water_mask[n_idx] == 1:
+						continue
+					var neighbor_weight := 0.8 + strength * 0.6
+					weighted_sum += float(ridge_field[n_idx]) * neighbor_weight
+					weight += neighbor_weight
+				ridge_buffer[idx] = weighted_sum / weight
+		var swap := ridge_field
+		ridge_field = ridge_buffer
+		ridge_buffer = swap
+	_normalize_field(ridge_field)
+
+	# Combined mountain scores (main.js:23360-23385).
+	for idx in range(cell_count):
+		if water_mask[idx] == 1:
 			continue
-		var height: float = height_map.get(coord, 0.0)
-		if height > mountain_level:
-			overlay_map[coord] = BIOME_MOUNTAIN
-		elif height > hill_level:
-			overlay_map[coord] = BIOME_HILLS
+		var tect := float(tectonic_field[idx])
+		var nh := float(norm_height[idx])
+		scores[idx] = clampf(
+			float(ridge_field[idx]) * 0.6
+			+ pow(maxf(0.0, nh), 1.6) * 0.25
+			+ nh * 0.18
+			+ pow(tect, 0.9) * 0.35
+			+ float(dir_strength[idx]) * 0.18,
+			0.0,
+			1.0
+		)
+
+	# Seeds (main.js:23410-23455) with a fallback for barren worlds.
+	var seed_count := 0
+	for idx in range(cell_count):
+		if water_mask[idx] == 1 or coastal_mask[idx] == 1:
+			continue
+		if float(scores[idx]) >= seed_threshold:
+			mountain_mask[idx] = 1
+			seed_count += 1
+	if seed_count == 0:
+		var fallback_candidates: Array[int] = []
+		for idx in range(cell_count):
+			if water_mask[idx] == 1 or coastal_mask[idx] == 1:
+				continue
+			if float(scores[idx]) >= seed_threshold * 0.85:
+				fallback_candidates.append(idx)
+		fallback_candidates.sort_custom(func(a: int, b: int) -> bool:
+			return float(scores[a]) > float(scores[b])
+		)
+		var fallback_limit := mini(maxi(1, int(round(4.0 * _mountain_ratio))), fallback_candidates.size())
+		for i in range(fallback_limit):
+			mountain_mask[fallback_candidates[i]] = 1
+
+	# Range tracing (main.js:23457-23521): forward up to 18 steps, backward
+	# 45% of that, following the local ridge direction.
+	var seed_indices: Array[int] = []
+	for idx in range(cell_count):
+		if mountain_mask[idx] == 1:
+			seed_indices.append(idx)
+	seed_indices.sort_custom(func(a: int, b: int) -> bool:
+		return float(scores[a]) > float(scores[b])
+	)
+	var candidate_floor := candidate_threshold * 0.85
+	for seed_idx: int in seed_indices:
+		var base_dir := int(dir_index[seed_idx])
+		var reliability := float(dir_strength[seed_idx])
+		if base_dir < 0 or reliability < 0.05:
+			continue
+		var range_scale := (float(scores[seed_idx]) * 4.0 + float(ridge_field[seed_idx]) * 3.0) * (0.5 + reliability * 0.4)
+		var base_length := 2 + int(floor(range_scale))
+		var forward_steps := mini(18, base_length + rng.randi_range(0, 2))
+		var backward_steps := maxi(1, int(floor(float(forward_steps) * 0.45)))
+		var sx := seed_idx % width
+		var sy := int(seed_idx / float(width))
+		_trace_ridge_direction(sx, sy, base_dir, forward_steps, reliability, candidate_floor, water_mask, scores, dir_index, dir_strength, mountain_mask)
+		_trace_ridge_direction(sx, sy, NEIGHBOR_OPPOSITES_8[base_dir], backward_steps, reliability * 0.85, candidate_floor, water_mask, scores, dir_index, dir_strength, mountain_mask)
+
+	# Stochastic growth, 2 passes (main.js:23523-23592): probability
+	# (0.12 + score*0.6 + orientation*0.25) * (0.42 + ratio*0.7).
+	var high_score_threshold := 0.75 + mountain_scarcity * 0.12
+	for _growth_pass in range(2):
+		for y in range(rows):
+			var row := y * width
+			for x in range(width):
+				var idx := row + x
+				if water_mask[idx] == 1 or mountain_mask[idx] == 1 or coastal_mask[idx] == 1:
+					continue
+				var score := float(scores[idx])
+				if score <= 0.0:
+					continue
+				var mountain_neighbors := 0
+				for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+					var nx := x + offset.x
+					var ny := y + offset.y
+					if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+						continue
+					if mountain_mask[ny * width + nx] == 1:
+						mountain_neighbors += 1
+				var orientation_strength := float(dir_strength[idx])
+				var min_neighbors := 3
+				if score > 0.82 or orientation_strength > 0.7:
+					min_neighbors = 1
+				elif score > 0.66:
+					min_neighbors = 1 if orientation_strength > 0.45 else 2
+				elif orientation_strength > 0.55:
+					min_neighbors = 2
+				var directional_support := false
+				var cell_dir := int(dir_index[idx])
+				if cell_dir >= 0:
+					for dir_choice: int in [cell_dir, NEIGHBOR_OPPOSITES_8[cell_dir]]:
+						var offset: Vector2i = NEIGHBOR_OFFSETS_8[dir_choice]
+						var nx := x + offset.x
+						var ny := y + offset.y
+						if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+							continue
+						if mountain_mask[ny * width + nx] == 1:
+							directional_support = true
+							break
+				var probability := minf(0.85, (0.12 + score * 0.6 + orientation_strength * 0.25) * mountain_growth_factor)
+				if not directional_support:
+					probability *= 0.45
+					if orientation_strength > 0.6:
+						probability *= 0.6
+				if mountain_neighbors >= min_neighbors and (score > high_score_threshold or rng.randf() < probability):
+					mountain_mask[idx] = 1
+
+	# Consolidation (main.js:23594-23627): well-supported candidates join.
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if water_mask[idx] == 1 or mountain_mask[idx] == 1 or coastal_mask[idx] == 1:
+				continue
+			if float(scores[idx]) < candidate_threshold:
+				continue
+			var mountain_neighbors := 0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+					continue
+				if mountain_mask[ny * width + nx] == 1:
+					mountain_neighbors += 1
+			var orientation_strength := float(dir_strength[idx])
+			var base_required := 2 if orientation_strength > 0.6 else (3 if orientation_strength > 0.35 else 4)
+			var scarcity_penalty := 2 if mountain_scarcity > 0.6 else (1 if mountain_scarcity > 0.35 else 0)
+			if mountain_neighbors >= mini(7, base_required + scarcity_penalty):
+				mountain_mask[idx] = 1
+
+	# Coastal scrub: traces/growth may have brushed the shoreline buffer.
+	for idx in range(cell_count):
+		if mountain_mask[idx] == 1 and coastal_mask[idx] == 1:
+			mountain_mask[idx] = 0
+
+	# Prune isolated singles (main.js:23629-23657).
+	var prune_boost := lerpf(1.18, 0.85, _mountain_ratio)
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if mountain_mask[idx] == 0:
+				continue
+			var mountain_neighbors := 0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+					continue
+				if mountain_mask[ny * width + nx] == 1:
+					mountain_neighbors += 1
+			var orientation_strength := float(dir_strength[idx])
+			var min_support := 0 if orientation_strength > 0.65 else 1
+			var effective_threshold := prune_threshold * prune_boost * (1.0 - orientation_strength * 0.25)
+			if mountain_neighbors <= min_support and float(scores[idx]) < effective_threshold:
+				mountain_mask[idx] = 0
+
+	# Composite hills (main.js:25238-25401): slope + height window +
+	# mountain adjacency, on grass/snow/badlands bases only.
+	var hill_upper := base_threshold
+	var hill_lower := clampf(base_threshold - maxf(0.16, height_range * 0.9), water_level + 0.08, hill_upper - 0.04)
+	if hill_upper - hill_lower > 0.015:
+		var hill_range := maxf(hill_upper - hill_lower, 0.0001)
+		var hill_presence_seed := map_seed + 0x0d4d0015
+		for y in range(rows):
+			var row := y * width
+			for x in range(width):
+				var idx := row + x
+				if water_mask[idx] == 1 or mountain_mask[idx] == 1 or base_kind[idx] == 0:
+					continue
+				var height_value := float(height_buffer[idx])
+				if height_value < hill_lower or height_value >= hill_upper:
+					continue
+				var slope_sum := 0.0
+				var neighbor_count := 0
+				var has_mountain_neighbor := false
+				for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+					var nx := x + offset.x
+					var ny := y + offset.y
+					if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+						continue
+					var n_idx := ny * width + nx
+					slope_sum += absf(height_value - float(height_buffer[n_idx]))
+					neighbor_count += 1
+					if mountain_mask[n_idx] == 1:
+						has_mountain_neighbor = true
+				var average_slope := (slope_sum / float(neighbor_count)) if neighbor_count > 0 else 0.0
+				var slope_score := clampf((average_slope - 0.01) * 32.0, 0.0, 1.0)
+				if slope_score < 0.08 and not has_mountain_neighbor:
+					continue
+				var height_score := clampf((height_value - hill_lower) / hill_range, 0.0, 1.0)
+				var mountain_bonus := 0.25 if has_mountain_neighbor else clampf(float(scores[idx]) * 0.2, 0.0, 0.2)
+				var noise_value := _hash_coords(x, y, hill_presence_seed) - 0.5
+				var composite := height_score * 0.6 + slope_score * 0.3 + mountain_bonus + noise_value * 0.12
+				if composite > 0.5 - mountain_bonus * 0.18:
+					overlay_map[Vector2i(x, y)] = BIOME_HILLS
+
+	# Mountains land last so they always win over hills, and their ridge
+	# cores push the height field up (peaks need height >= 0.97 in
+	# OverworldTerrainFeatureService.apply_mountain_overlay_variants).
+	for idx in range(cell_count):
+		if mountain_mask[idx] == 0:
+			continue
+		var coord := Vector2i(idx % width, int(idx / float(width)))
+		overlay_map[coord] = BIOME_MOUNTAIN
+		var nudged := maxf(float(height_buffer[idx]), mountain_level + 0.01 + float(scores[idx]) * 0.15)
+		height_buffer[idx] = nudged
+		height_map[coord] = nudged
 	return overlay_map
 
 
 func _apply_tree_overlays(
 	biome_map: Dictionary,
-	temperature_map: Dictionary,
 	moisture_map: Dictionary,
 	vegetation_map: Dictionary,
 	height_map: Dictionary,
+	highland_map: Dictionary,
 	rng: RandomNumberGenerator
 ) -> Dictionary:
 	var tree_map: Dictionary = {}
@@ -2639,9 +3519,17 @@ func _apply_tree_overlays(
 	var tree_work_map: Dictionary = {}
 	var original_biomes: Dictionary = {}
 	var tree_density_map: Dictionary = {}
-	var density_threshold := maxf(0.2, forest_threshold * 0.55)
+	# Browser forest slider (main.js:21300-21306, 25691-25770): forestBias
+	# lowers the seed threshold (x0.13), raises the growth baseline and the
+	# per-neighbor bonus, scales the growth iteration count, multiplies the
+	# density by 1 + bias*0.2 and adds bias*0.08 on top.
+	var density_threshold := clampf(maxf(0.2, forest_threshold * 0.55) - _forest_bias * 0.13, 0.12, 0.92)
+	var neighbor_bonus := clampf(0.07 + _forest_bias * 0.03, 0.02, 0.12)
+	var growth_baseline := clampf(0.08 + _forest_bias * 0.06, 0.0, 0.3)
+	var growth_passes := maxi(1, 2 + int(roundf(_forest_bias)))
+	var max_coverage := clampf(forest_max_coverage + _forest_bias * 0.15, 0.2, 0.95)
 	for coord: Vector2i in biome_map.keys():
-		if height_map.get(coord, 0.0) > mountain_level:
+		if String(highland_map.get(coord, "")) == BIOME_MOUNTAIN:
 			continue
 		if not TREE_BASE_BIOMES.has(biome_map[coord]):
 			continue
@@ -2660,6 +3548,7 @@ func _apply_tree_overlays(
 		density *= (0.75 + elevation_preference * 0.65)
 		density *= (0.55 + moisture * 0.9)
 		density += moisture * 0.2 + vegetation * 0.1
+		density = density * (1.0 + _forest_bias * 0.2) + _forest_bias * 0.08
 		tree_density_map[coord] = clampf(density, 0.0, 1.0)
 
 	for coord: Vector2i in tree_density_map.keys():
@@ -2672,16 +3561,15 @@ func _apply_tree_overlays(
 			var soft_chance := clampf((density - (density_threshold - 0.18)) / 0.18, 0.0, 1.0)
 			if rng.randf() > soft_chance:
 				continue
-		var seed_temperature: float = temperature_map.get(coord, 0.0)
 		var seed_moisture: float = moisture_map.get(coord, 0.0)
-		var seed_biome := _tree_overlay_biome(seed_temperature, seed_moisture)
+		var seed_biome := _tree_overlay_biome(coord, String(biome_map.get(coord, BIOME_GRASSLAND)), seed_moisture, float(height_map.get(coord, 0.0)))
 		if not original_biomes.has(coord):
 			original_biomes[coord] = biome_map.get(coord, BIOME_GRASSLAND)
 		biome_map[coord] = seed_biome
 		tree_map[coord] = seed_biome
 		tree_source_map[coord] = seed_biome
 
-	for _spread_pass in range(3):
+	for _spread_pass in range(growth_passes):
 		var grown_this_pass := false
 		tree_work_map.clear()
 		for coord: Vector2i in tree_source_map.keys():
@@ -2695,13 +3583,12 @@ func _apply_tree_overlays(
 			var neighbor_trees := _count_tree_neighbors_in_map(coord, tree_source_map)
 			if neighbor_trees <= 0:
 				continue
-			var cluster_boost := minf(0.36, float(neighbor_trees) * 0.07)
-			var spread_chance := clampf(0.08 + density * 0.58 + cluster_boost, 0.0, 0.96)
+			var cluster_boost := minf(0.36, float(neighbor_trees) * neighbor_bonus)
+			var spread_chance := clampf(growth_baseline + density * 0.58 + cluster_boost, 0.0, 0.96)
 			if rng.randf() > spread_chance:
 				continue
-			var temperature: float = temperature_map.get(coord, 0.0)
 			var moisture: float = moisture_map.get(coord, 0.0)
-			var tree_biome := _tree_overlay_biome(temperature, moisture)
+			var tree_biome := _tree_overlay_biome(coord, String(biome_map.get(coord, BIOME_GRASSLAND)), moisture, float(height_map.get(coord, 0.0)))
 			if not original_biomes.has(coord):
 				original_biomes[coord] = biome_map.get(coord, BIOME_GRASSLAND)
 			biome_map[coord] = tree_biome
@@ -2730,7 +3617,7 @@ func _apply_tree_overlays(
 		elif base_biome == BIOME_GRASSLAND:
 			cleaned_tree_map[coord] = TREE_VARIANT_FOREST_LONE
 
-	var max_tree_tiles := int(ceil(float(tree_density_map.size()) * clampf(forest_max_coverage, 0.2, 0.95)))
+	var max_tree_tiles := int(ceil(float(tree_density_map.size()) * max_coverage))
 	if cleaned_tree_map.size() > max_tree_tiles:
 		var trim_entries: Array[Dictionary] = []
 		for coord: Vector2i in cleaned_tree_map.keys():
@@ -2850,10 +3737,6 @@ func _build_tree_coverage_biome_map(base_biome_map: Dictionary, tree_map: Dictio
 	return coverage_map
 
 
-func _is_marsh(coord: Vector2i, height: float, moisture: float, height_map: Dictionary) -> bool:
-	return BIOME_CLASSIFIER.is_marsh(coord, height, moisture, height_map, marsh_threshold, water_level)
-
-
 func _smooth_biomes(biome_map: Dictionary, passes: int) -> void:
 	var read_map := biome_map
 	var write_map: Dictionary = {}
@@ -2945,6 +3828,477 @@ func _seed_desert_biomes(
 		biome_map[candidates[index]] = BIOME_DESERT
 
 
+## Browser desert shaping (main.js:22366-22820): two weighted-blur
+## re-masking iterations (add above 0.62, remove below 0.5), orphan-sand
+## removal, badlands cores inside the desert (main.js:22539-22719), a 2-tile
+## sand-snow clearing buffer, and sand<->grass edge smoothing.
+func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
+	var width := map_size.x
+	var rows := map_size.y
+	var cell_count := width * rows
+	if cell_count <= 0 or _desert_suitability_buffer.size() != cell_count:
+		return
+
+	var water_mask := PackedByteArray()
+	water_mask.resize(cell_count)
+	var snow_mask := PackedByteArray()
+	snow_mask.resize(cell_count)
+	var grass_mask := PackedByteArray()
+	grass_mask.resize(cell_count)
+	var desert_mask := PackedByteArray()
+	desert_mask.resize(cell_count)
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			var biome := String(base_biome_map.get(Vector2i(x, y), BIOME_GRASSLAND))
+			if biome == BIOME_WATER:
+				water_mask[idx] = 1
+			elif biome == BIOME_TUNDRA:
+				snow_mask[idx] = 1
+			elif biome == BIOME_DESERT or biome == BIOME_BADLANDS:
+				desert_mask[idx] = 1
+			elif biome == BIOME_GRASSLAND:
+				grass_mask[idx] = 1
+
+	# Weighted blur of the suitability field: radius 2, weight 1/(1+d)
+	# (1.25 at the centre), 2 iterations, skipping water and snow.
+	var offsets_dx := PackedInt32Array()
+	var offsets_dy := PackedInt32Array()
+	var offsets_weight := PackedFloat32Array()
+	for dy in range(-2, 3):
+		for dx in range(-2, 3):
+			offsets_dx.append(dx)
+			offsets_dy.append(dy)
+			if dx == 0 and dy == 0:
+				offsets_weight.append(1.25)
+			else:
+				offsets_weight.append(1.0 / (1.0 + sqrt(float(dx * dx + dy * dy))))
+	var sample_count := offsets_dx.size()
+	var blur_current := _desert_suitability_buffer.duplicate()
+	var blur_buffer := PackedFloat32Array()
+	blur_buffer.resize(cell_count)
+	for _iteration in range(2):
+		for y in range(rows):
+			var row := y * width
+			for x in range(width):
+				var idx := row + x
+				if water_mask[idx] == 1 or snow_mask[idx] == 1:
+					blur_buffer[idx] = 0.0
+					continue
+				var weight_sum := 0.0
+				var sample_sum := 0.0
+				for i in range(sample_count):
+					var nx := x + offsets_dx[i]
+					var ny := y + offsets_dy[i]
+					if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+						continue
+					var n_idx := ny * width + nx
+					if water_mask[n_idx] == 1 or snow_mask[n_idx] == 1:
+						continue
+					var sample_weight := float(offsets_weight[i])
+					sample_sum += float(blur_current[n_idx]) * sample_weight
+					weight_sum += sample_weight
+				blur_buffer[idx] = (sample_sum / weight_sum) if weight_sum > 0.0 else float(blur_current[idx])
+		var swap := blur_current
+		blur_current = blur_buffer
+		blur_buffer = swap
+
+	# Re-mask (main.js:22425-22470).
+	var updated_mask := PackedByteArray()
+	updated_mask.resize(cell_count)
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if water_mask[idx] == 1 or snow_mask[idx] == 1:
+				continue
+			var base_suitability := float(_desert_suitability_buffer[idx])
+			var neighbor_desert := 0
+			var neighbor_count := 0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+					continue
+				var n_idx := ny * width + nx
+				if water_mask[n_idx] == 1 or snow_mask[n_idx] == 1:
+					continue
+				neighbor_desert += desert_mask[n_idx]
+				neighbor_count += 1
+			var local_density := (float(neighbor_desert) / float(neighbor_count)) if neighbor_count > 0 else float(desert_mask[idx])
+			var combined := base_suitability * 0.55 + float(blur_current[idx]) * 0.45 + local_density * 0.15
+			if combined > 0.62 and base_suitability > 0.48:
+				updated_mask[idx] = 1
+			elif combined < 0.5 or base_suitability < 0.45:
+				updated_mask[idx] = 0
+			else:
+				updated_mask[idx] = desert_mask[idx]
+	desert_mask = updated_mask
+
+	# Orphan removal (main.js:22472-22525): vertically isolated rows, then
+	# singles with no desert neighbor at all.
+	for y in range(1, rows - 1):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if desert_mask[idx] == 0:
+				continue
+			if desert_mask[idx - width] == 0 and desert_mask[idx + width] == 0:
+				desert_mask[idx] = 0
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if desert_mask[idx] == 0:
+				continue
+			var has_desert_neighbor := false
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+					continue
+				if desert_mask[ny * width + nx] == 1:
+					has_desert_neighbor = true
+					break
+			if not has_desert_neighbor:
+				desert_mask[idx] = 0
+
+	# Badlands cores (main.js:22539-22719): only inside deserts where
+	# heat > 0.58 and dryness > 0.5, never touching water, always touching
+	# sand. Assigned live in scan order like the browser.
+	var badlands_mask := PackedByteArray()
+	badlands_mask.resize(cell_count)
+	var badlands_seed := map_seed + 0x7f4a7c15
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if desert_mask[idx] == 0:
+				continue
+			var heat := float(_desert_heat_buffer[idx])
+			var dryness := float(_desert_suitability_buffer[idx])
+			if heat <= 0.58 or dryness <= 0.5:
+				continue
+			var likelihood := clampf((heat - 0.58) * 1.25 + (dryness - 0.5) * 0.85, 0.0, 1.0)
+			if _value_noise(float(x) * 0.11, float(y) * 0.11, badlands_seed) >= likelihood:
+				continue
+			if _mask_has_neighbor(water_mask, x, y):
+				continue
+			if not _has_adjacent_sand(desert_mask, badlands_mask, x, y):
+				continue
+			badlands_mask[idx] = 1
+
+	# Bridge-fill, radius 2, 2 iterations (main.js:22576-22656).
+	for _fill_iteration in range(2):
+		var additions: Array[int] = []
+		for y in range(rows):
+			var row := y * width
+			for x in range(width):
+				var idx := row + x
+				if desert_mask[idx] == 0 or badlands_mask[idx] == 1:
+					continue
+				if _mask_has_neighbor(water_mask, x, y):
+					continue
+				var neighbor_count := 0
+				var has_left := false
+				var has_right := false
+				var has_up := false
+				var has_down := false
+				for dy in range(-2, 3):
+					var ny := y + dy
+					if ny < 0 or ny >= rows:
+						continue
+					for dx in range(-2, 3):
+						if dx == 0 and dy == 0:
+							continue
+						var nx := x + dx
+						if nx < 0 or nx >= width:
+							continue
+						if badlands_mask[ny * width + nx] == 0:
+							continue
+						neighbor_count += 1
+						if dx < 0:
+							has_left = true
+						elif dx > 0:
+							has_right = true
+						if dy < 0:
+							has_up = true
+						elif dy > 0:
+							has_down = true
+				var has_bridge := (has_left and has_right) or (has_up and has_down) or ((has_left or has_right) and (has_up or has_down) and neighbor_count >= 3)
+				if neighbor_count >= 2 and has_bridge and _has_adjacent_sand(desert_mask, badlands_mask, x, y):
+					additions.append(idx)
+		if additions.is_empty():
+			break
+		var addition_set: Dictionary = {}
+		for addition_idx: int in additions:
+			addition_set[addition_idx] = true
+		var applied_any := false
+		for addition_idx: int in additions:
+			var ax := addition_idx % width
+			var ay := int(addition_idx / float(width))
+			if _has_adjacent_sand(desert_mask, badlands_mask, ax, ay, addition_set):
+				badlands_mask[addition_idx] = 1
+				applied_any = true
+		if not applied_any:
+			break
+
+	# Revert violators (main.js:22658-22680).
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if badlands_mask[idx] == 0:
+				continue
+			if _mask_has_neighbor(water_mask, x, y) or not _has_adjacent_sand(desert_mask, badlands_mask, x, y):
+				badlands_mask[idx] = 0
+
+	# Sand fully enclosed by badlands converts (main.js:22682-22719).
+	var enclosed: Array[int] = []
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if desert_mask[idx] == 0 or badlands_mask[idx] == 1:
+				continue
+			var has_neighbor := false
+			var all_badlands := true
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+					all_badlands = false
+					continue
+				has_neighbor = true
+				if badlands_mask[ny * width + nx] == 0:
+					all_badlands = false
+					break
+			if has_neighbor and all_badlands:
+				enclosed.append(idx)
+	for enclosed_idx: int in enclosed:
+		badlands_mask[enclosed_idx] = 1
+		desert_mask[enclosed_idx] = 1
+
+	# 2-tile sand-snow clearing buffer (main.js:22721-22762).
+	var snow_buffer := _dilate_mask(snow_mask, 2)
+	for idx in range(cell_count):
+		if desert_mask[idx] == 1 and snow_buffer[idx] == 1 and snow_mask[idx] == 0:
+			desert_mask[idx] = 0
+			badlands_mask[idx] = 0
+			grass_mask[idx] = 1
+
+	# Sand<->grass edge smoothing (main.js:22764-22820): cardinal-complete
+	# lone tiles flip to match their surroundings.
+	var flips: Array[int] = []
+	for y in range(1, rows - 1):
+		var row := y * width
+		for x in range(1, width - 1):
+			var idx := row + x
+			var is_sand := desert_mask[idx] == 1 and badlands_mask[idx] == 0
+			var is_grass := desert_mask[idx] == 0 and grass_mask[idx] == 1
+			if not is_sand and not is_grass:
+				continue
+			var all_grass := true
+			var all_sand := true
+			for offset: Vector2i in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0)]:
+				var n_idx := (y + offset.y) * width + (x + offset.x)
+				var neighbor_sand: bool = desert_mask[n_idx] == 1 and badlands_mask[n_idx] == 0
+				var neighbor_grass: bool = desert_mask[n_idx] == 0 and grass_mask[n_idx] == 1
+				if not neighbor_grass:
+					all_grass = false
+				if not neighbor_sand:
+					all_sand = false
+				if not all_grass and not all_sand:
+					break
+			if is_sand and all_grass:
+				flips.append(idx)
+			elif is_grass and all_sand:
+				flips.append(idx)
+	for flip_idx: int in flips:
+		if desert_mask[flip_idx] == 1:
+			desert_mask[flip_idx] = 0
+			badlands_mask[flip_idx] = 0
+			grass_mask[flip_idx] = 1
+		else:
+			desert_mask[flip_idx] = 1
+			grass_mask[flip_idx] = 0
+
+	# Write the refined masks back to the biome dictionary.
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if water_mask[idx] == 1 or snow_mask[idx] == 1:
+				continue
+			var coord := Vector2i(x, y)
+			var biome := String(base_biome_map.get(coord, BIOME_GRASSLAND))
+			if desert_mask[idx] == 1:
+				var target := BIOME_BADLANDS if badlands_mask[idx] == 1 else BIOME_DESERT
+				if biome != target:
+					base_biome_map[coord] = target
+			elif biome == BIOME_DESERT or biome == BIOME_BADLANDS:
+				base_biome_map[coord] = BIOME_GRASSLAND
+
+
+## True when any 8-neighbor is set in `mask`.
+func _mask_has_neighbor(mask: PackedByteArray, x: int, y: int) -> bool:
+	var width := map_size.x
+	var rows := map_size.y
+	for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+		var nx := x + offset.x
+		var ny := y + offset.y
+		if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+			continue
+		if mask[ny * width + nx] == 1:
+			return true
+	return false
+
+
+## True when any 8-neighbor is bare sand (desert but not badlands). Indices
+## in `exclusions` are treated as badlands-to-be (browser hasAdjacentSand).
+func _has_adjacent_sand(desert_mask: PackedByteArray, badlands_mask: PackedByteArray, x: int, y: int, exclusions: Dictionary = {}) -> bool:
+	var width := map_size.x
+	var rows := map_size.y
+	for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+		var nx := x + offset.x
+		var ny := y + offset.y
+		if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+			continue
+		var n_idx := ny * width + nx
+		if desert_mask[n_idx] == 1 and badlands_mask[n_idx] == 0 and not exclusions.has(n_idx):
+			return true
+	return false
+
+
+## Browser marsh cellular automaton (main.js:22920-23062): two grow/decay
+## iterations driven by live suitability, then isolated-marsh removal.
+func _refine_marsh_biomes(
+	base_biome_map: Dictionary,
+	height_buffer: PackedFloat32Array,
+	moisture_buffer: PackedFloat32Array,
+	height_map: Dictionary,
+	rng: RandomNumberGenerator
+) -> void:
+	var width := map_size.x
+	var rows := map_size.y
+	var cell_count := width * rows
+	if cell_count <= 0 or height_buffer.size() != cell_count or moisture_buffer.size() != cell_count:
+		return
+	var water_mask := PackedByteArray()
+	water_mask.resize(cell_count)
+	var grass_mask := PackedByteArray()
+	grass_mask.resize(cell_count)
+	var marsh_mask := PackedByteArray()
+	marsh_mask.resize(cell_count)
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			var biome := String(base_biome_map.get(Vector2i(x, y), BIOME_GRASSLAND))
+			if biome == BIOME_WATER:
+				water_mask[idx] = 1
+			elif biome == BIOME_GRASSLAND:
+				grass_mask[idx] = 1
+			elif biome == BIOME_MARSH:
+				marsh_mask[idx] = 1
+
+	for _iteration in range(2):
+		var next_mask := PackedByteArray()
+		next_mask.resize(cell_count)
+		for y in range(rows):
+			var row := y * width
+			for x in range(width):
+				var idx := row + x
+				if water_mask[idx] == 1:
+					continue
+				var currently_marsh := marsh_mask[idx] == 1
+				if not currently_marsh and grass_mask[idx] == 0:
+					continue
+				var marsh_neighbors := 0
+				for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+					var nx := x + offset.x
+					var ny := y + offset.y
+					if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+						continue
+					var n_idx := ny * width + nx
+					if water_mask[n_idx] == 0 and marsh_mask[n_idx] == 1:
+						marsh_neighbors += 1
+				var suitability := _marsh_suitability(x, y, float(height_buffer[idx]), float(moisture_buffer[idx]), height_map)
+				var score := suitability.x
+				var threshold := suitability.y
+				var qualifies := suitability.z > 0.5
+				var next_is_marsh := currently_marsh
+				if currently_marsh:
+					if not qualifies and marsh_neighbors <= 1:
+						next_is_marsh = false
+					elif marsh_neighbors <= 2 and score < threshold:
+						next_is_marsh = false
+					elif score < threshold - 0.08:
+						next_is_marsh = false
+				else:
+					next_is_marsh = false
+					if qualifies and (marsh_neighbors >= 3 or (marsh_neighbors >= 2 and score > threshold + 0.05)):
+						next_is_marsh = true
+					elif marsh_neighbors >= 4 and score > threshold - 0.02:
+						next_is_marsh = true
+				if score < 0.0:
+					next_is_marsh = false
+				if next_is_marsh:
+					next_mask[idx] = 1
+		marsh_mask = next_mask
+
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if water_mask[idx] == 1:
+				continue
+			var coord := Vector2i(x, y)
+			var biome := String(base_biome_map.get(coord, BIOME_GRASSLAND))
+			if marsh_mask[idx] == 1:
+				if biome != BIOME_MARSH:
+					base_biome_map[coord] = BIOME_MARSH
+			elif biome == BIOME_MARSH:
+				base_biome_map[coord] = BIOME_GRASSLAND
+
+	# Isolated marsh tiles convert to a random neighbor base
+	# (main.js:23016-23062).
+	var isolated: Array[Dictionary] = []
+	for y in range(rows):
+		var row := y * width
+		for x in range(width):
+			var idx := row + x
+			if marsh_mask[idx] == 0:
+				continue
+			var coord := Vector2i(x, y)
+			var neighbor_options: Array[String] = []
+			var marsh_neighbor_count := 0
+			var valid_neighbor_count := 0
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var neighbor := coord + offset
+				if not _is_valid_map_coord(neighbor):
+					continue
+				valid_neighbor_count += 1
+				var neighbor_biome := String(base_biome_map.get(neighbor, BIOME_GRASSLAND))
+				if neighbor_biome == BIOME_MARSH:
+					marsh_neighbor_count += 1
+				else:
+					neighbor_options.append(neighbor_biome)
+			if valid_neighbor_count > 0 and marsh_neighbor_count == 0 and neighbor_options.size() == valid_neighbor_count:
+				var picked_base := neighbor_options[rng.randi_range(0, neighbor_options.size() - 1)]
+				if picked_base == BIOME_WATER:
+					# Never mint new water here: the landmass masks are
+					# already frozen for this generation.
+					picked_base = BIOME_GRASSLAND
+				isolated.append({
+					"coord": coord,
+					"base": picked_base
+				})
+	for entry: Dictionary in isolated:
+		base_biome_map[entry.get("coord", Vector2i.ZERO) as Vector2i] = String(entry.get("base", BIOME_GRASSLAND))
+
+
 func _biome_to_tile(biome: String) -> Vector2i:
 	return BIOME_CLASSIFIER.biome_to_tile(biome, _tile_lookup(), _biome_lookup())
 
@@ -2953,17 +4307,14 @@ func _biome_to_tile(biome: String) -> Vector2i:
 ## (b) 18% of overlay-free water tiles inside the snow-presence band get a
 ##     berg - per-coordinate hash, not RNG order, shoreline placement allowed;
 ## (c) 1-in-50 of snow-band water tiles seed lone drift ice.
-## The browser band is north-only (latitude = 1 - y/height, full above 0.86,
-## partial 0.5-0.86); Godot's climate freezes at BOTH map poles, so the same
-## band is measured from whichever pole is nearer.
-const ICEBERG_SNOW_LATITUDE_START := 0.5
-const ICEBERG_SNOW_LATITUDE_FULL := 0.86
+## The band is the browser's NORTH-only snow band (latitude = 1 - y/height,
+## full above 0.86, partial 0.5-0.86) - the same _compute_snow_presence
+## field that drives tundra, so drift ice and snowfields always agree.
 const ICEBERG_SHORELINE_CHANCE := 0.18
 const ICEBERG_OPEN_WATER_CHANCE := 0.02
 const ICEBERG_SHORELINE_SEED_OFFSET := 0x91bd4a2f
 const ICEBERG_PRESENCE_SEED_OFFSET := 0x5ad1f32b
 const ICEBERG_VARIANT_SEED_OFFSET := 0x3d0e12f7
-const ICEBERG_SNOW_NOISE_SEED_OFFSET := 0x27d4eb2d
 
 func _place_icebergs(
 	base_biome_map: Dictionary,
@@ -3032,7 +4383,7 @@ func _place_icebergs(
 			if not _iceberg_snow_presence(coord, float(height_map.get(coord, 0.0))):
 				continue
 			var placed := _hash_coords(x, y, map_seed + ICEBERG_SHORELINE_SEED_OFFSET) < ICEBERG_SHORELINE_CHANCE
-			if not placed and _polar_latitude(y) >= ICEBERG_SNOW_LATITUDE_START:
+			if not placed and _north_latitude(y) >= SNOW_LATITUDE_START:
 				placed = _hash_coords(x, y, map_seed + ICEBERG_PRESENCE_SEED_OFFSET) < ICEBERG_OPEN_WATER_CHANCE
 			if placed:
 				iceberg_layer.set_cell(coord, _atlas_source_id, _iceberg_tile_for_coord(coord))
@@ -3045,21 +4396,10 @@ func _is_iceberg_water(coord: Vector2i, base_biome_map: Dictionary, water_biome_
 		return int(info.get("base_biome_id", -1)) == water_biome_id
 	return String(base_biome_map.get(coord, "")) == BIOME_WATER
 
-func _polar_latitude(y: int) -> float:
-	var normalized_y := (float(y) + 0.5) / maxf(1.0, float(map_size.y))
-	return absf(normalized_y * 2.0 - 1.0)
-
+## Browser needSnowPresenceField (main.js:21637-21646): icebergs read the
+## same NORTH-only snow-presence field that assigns tundra.
 func _iceberg_snow_presence(coord: Vector2i, tile_height: float) -> bool:
-	var latitude := _polar_latitude(coord.y)
-	if latitude >= ICEBERG_SNOW_LATITUDE_FULL:
-		return true
-	if latitude <= ICEBERG_SNOW_LATITUDE_START:
-		return false
-	var band_factor := clampf((latitude - ICEBERG_SNOW_LATITUDE_START) / (ICEBERG_SNOW_LATITUDE_FULL - ICEBERG_SNOW_LATITUDE_START), 0.0, 1.0)
-	var elevation_factor := clampf((tile_height - water_level) * 3.8, 0.0, 1.0)
-	var coverage := clampf(band_factor * 0.7 + elevation_factor * 0.3, 0.0, 1.0)
-	var snow_noise := _value_noise(float(coord.x) * 0.13, float(coord.y) * 0.13, map_seed + ICEBERG_SNOW_NOISE_SEED_OFFSET)
-	return snow_noise < coverage
+	return _compute_snow_presence(coord.x, coord.y, tile_height)
 
 func _iceberg_tile_for_coord(coord: Vector2i) -> Vector2i:
 	if iceberg_tile_options.is_empty():
@@ -5923,16 +7263,17 @@ func _apply_terrain_ratio_settings(terrain_ratios: Dictionary) -> void:
 	var mountain_ratio := clampf(float(terrain_ratios.get("mountain", 0.5)), 0.0, 1.0)
 	var river_ratio := clampf(float(terrain_ratios.get("river", 0.5)), 0.0, 1.0)
 
-	var forest_delta := forest_ratio - 0.5
-	var mountain_delta := mountain_ratio - 0.5
-
-	# Browser parity: the river slider only drives buildRiverMap's frequency
-	# knobs (source density and thresholds, main.js:20588-20628). It never
-	# reshapes the sea level or the landmass falloff.
+	# Browser parity: every slider drives only its own feature pass and none
+	# of them reshape the heightfield, the sea level or the landmass falloff.
+	# River (main.js:20588-20628) -> buildRiverMap frequency knobs.
+	# Mountain (main.js:21325-21331) -> mountainBias, which shifts the ridge
+	# seed/candidate/prune thresholds and the growth factor inside
+	# _build_highland_overlays.
+	# Forest (main.js:21300-21306) -> forestBias, which scales tree seeding
+	# thresholds, growth and density inside _apply_tree_overlays.
 	river_frequency = river_ratio
-	water_level = clampf(water_level - (mountain_delta * 0.04), 0.2, 0.7)
-	noise_frequency = clampf(noise_frequency + (mountain_delta * 1.2) - (forest_delta * 0.3), 0.6, 4.0)
-	landmass_falloff_scale = clampf(landmass_falloff_scale + (mountain_delta * 0.35), 0.8, 2.2)
+	_mountain_ratio = mountain_ratio
+	_forest_bias = clampf((forest_ratio - 0.5) * 2.0, -1.5, 1.5)
 
 func _apply_cached_world_settings() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -5962,6 +7303,9 @@ func _apply_cached_world_settings() -> void:
 			edge_ocean_falloff = float(layout_preset.get("edge_ocean_falloff", 0.32))
 			water_level = float(layout_preset.get("water_level", 0.45))
 			falloff_power = float(layout_preset.get("falloff_power", 2.4))
+			# Browser worldGenerationProfiles (main.js:20044-20108).
+			_sea_level_shift = float(layout_preset.get("sea_level_shift", 0.02))
+			_rainfall_bias = float(layout_preset.get("rainfall_bias", 0.0))
 		if settings.has("terrain_ratios") and settings["terrain_ratios"] is Dictionary:
 			_apply_terrain_ratio_settings(settings["terrain_ratios"])
 		_world_name = String(settings.get("world_name", "")).strip_edges()
