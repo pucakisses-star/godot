@@ -3510,6 +3510,13 @@ func _setup_inventory_screen() -> void:
 		Callable(self, "_on_equipment_changed")
 	)
 	chest_popup.get_parent().add_child(_inventory_screen)
+	# UI must outdraw the world: furnishing sprites carry z 8-14 and
+	# speech bubbles z 40 in the same canvas, and z_index beats tree
+	# order - without this, pots and stoves render over open menus.
+	_inventory_screen.z_index = 50
+	chest_popup.z_index = 50
+	if tile_hover_tooltip != null:
+		tile_hover_tooltip.z_index = 50
 
 func _on_equipment_changed() -> void:
 	_refresh_player_stats_town()
@@ -3528,6 +3535,7 @@ func _setup_hotbar() -> void:
 		Callable(self, "_use_hotbar_slot")
 	)
 	chest_popup.get_parent().add_child(_player_hotbar)
+	_player_hotbar.z_index = 50
 	_player_hotbar.refresh()
 	_player_hotbar.reposition.call_deferred()
 

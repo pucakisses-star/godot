@@ -575,8 +575,7 @@ var _map_lod_active := false
 ## The Dwarf Fortress region zoom: double-clicking swaps the whole map for
 ## a walkable-detail rendering of the same world — streamed tile by tile
 ## around the camera, panned and zoomed exactly like the overworld itself.
-const REGION_RENDER_BUDGET_PER_FRAME := 10
-const REGION_ENTER_BUDGET := 120
+const REGION_ENTER_BUDGET := 48
 const REGION_KEEP_TILES := 1400
 var _region_mode := false
 var _region_layer: Node2D
@@ -586,6 +585,8 @@ var _region_queued := {}
 var _region_noise := {}
 var _region_site_anchors: Array[Vector2i] = []
 var _region_hint_panel: PanelContainer
+var _region_jobs: Array[Dictionary] = []
+var _region_cache_stamp := 0
 var _is_generating := false
 @onready var tooltip_title: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipTitle")
 @onready var tooltip_biome: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipBiome")
@@ -876,19 +877,18 @@ func _build_map_snapshot() -> void:
 	_map_snapshot_sprite.scale = Vector2.ONE * (float(tile_size) / float(MAP_LOD_PX_PER_TILE))
 
 func _update_map_lod() -> void:
-	# Detail mode manages layer visibility itself.
+	# Full detail at every zoom: the painted tile layers ARE the map.
+	# (The old far-zoom snapshot swap read as "simplified" - gone.)
 	if _region_mode:
 		return
-	if _map_snapshot_sprite == null or overworld_camera == null:
+	if _map_snapshot_sprite != null and _map_snapshot_sprite.visible:
+		_map_snapshot_sprite.visible = false
+	if not _map_lod_active:
 		return
-	var far_out: bool = overworld_camera.zoom.x < MAP_LOD_ZOOM_THRESHOLD and not (_is_globe_view or _is_scene3d_view)
-	if far_out == _map_lod_active:
-		return
-	_map_lod_active = far_out
-	_map_snapshot_sprite.visible = far_out and not (_is_globe_view or _is_scene3d_view)
+	_map_lod_active = false
 	for layer: TileMapLayer in [map_layer, tree_layer, river_layer, highland_layer, iceberg_layer, _coast_layer]:
 		if layer != null:
-			layer.visible = not far_out
+			layer.visible = true
 
 func _process(delta: float) -> void:
 	_update_map_tooltip()
@@ -1635,6 +1635,8 @@ func _generate_map() -> void:
 	_region_queued.clear()
 	_region_noise.clear()
 	_region_site_anchors = []
+	# In-flight worker results from the old world must not be applied.
+	_region_cache_stamp += 1
 	map_layer.clear()
 	if tree_layer != null:
 		tree_layer.clear()
@@ -5961,13 +5963,14 @@ func _enter_region_mode() -> void:
 	_set_base_map_layers_visible(false)
 	_region_layer.visible = true
 	_region_hint_panel.visible = true
-	# Render the first screenful synchronously so the switch lands on
-	# detail rather than blackness; panning streams the rest.
+	# A synchronous first ring lands the switch on detail instantly;
+	# worker threads flood the rest of the screen in parallel.
 	_queue_visible_region_tiles()
 	var budget := REGION_ENTER_BUDGET
 	while budget > 0 and not _region_render_queue.is_empty():
 		_render_region_tile(_region_render_queue.pop_front() as Vector2i)
 		budget -= 1
+	_dispatch_region_jobs()
 
 func _exit_region_mode() -> void:
 	if not _region_mode:
@@ -6035,34 +6038,105 @@ func _queue_visible_region_tiles() -> void:
 		_region_render_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 			return Vector2(a - center).length_squared() < Vector2(b - center).length_squared())
 
-## Runs every frame while the mode is on: nearest missing tiles first,
-## a fixed budget per frame so panning never hitches.
+## Runs every frame while the mode is on: finished worker renders become
+## sprites, and fresh jobs fan out across the thread pool - the screen
+## fills in parallel instead of ten tiles a frame.
 func _stream_region_tiles() -> void:
 	_queue_visible_region_tiles()
-	var budget := REGION_RENDER_BUDGET_PER_FRAME
-	while budget > 0 and not _region_render_queue.is_empty():
-		_render_region_tile(_region_render_queue.pop_front() as Vector2i)
-		budget -= 1
+	_collect_region_jobs()
+	_dispatch_region_jobs()
 	_evict_far_region_tiles()
 
+## Everything a worker thread needs, snapshotted on the main thread:
+## neighbor water/river-ness for coastline and river-course blending,
+## danger at the four corners (interpolated per cell - settlement lists
+## are too long to scan 4096 times per tile), and iceberg placement.
+func _make_region_job(tile: Vector2i) -> Dictionary:
+	var water := PackedFloat32Array()
+	water.resize(9)
+	var rivers := PackedFloat32Array()
+	rivers.resize(9)
+	var own_water := 1.0 if _region_biome_for_tile(tile) == TILE_ATLAS_DEFS.BIOME_WATER else 0.0
+	for ny in 3:
+		for nx in 3:
+			var neighbor := tile + Vector2i(nx - 1, ny - 1)
+			var index := ny * 3 + nx
+			if neighbor.x < 0 or neighbor.y < 0 or neighbor.x >= map_size.x or neighbor.y >= map_size.y:
+				water[index] = own_water
+				rivers[index] = 0.0
+				continue
+			water[index] = 1.0 if _region_biome_for_tile(neighbor) == TILE_ATLAS_DEFS.BIOME_WATER else 0.0
+			rivers[index] = 1.0 if _region_river_for_tile(neighbor) else 0.0
+	var corners := PackedFloat32Array()
+	corners.resize(4)
+	var origin := tile * RegionMapService.CELLS_PER_TILE
+	var span := RegionMapService.CELLS_PER_TILE
+	corners[0] = RegionMapService.danger_for_world_cell(origin, _region_site_anchors)
+	corners[1] = RegionMapService.danger_for_world_cell(origin + Vector2i(span, 0), _region_site_anchors)
+	corners[2] = RegionMapService.danger_for_world_cell(origin + Vector2i(0, span), _region_site_anchors)
+	corners[3] = RegionMapService.danger_for_world_cell(origin + Vector2i(span, span), _region_site_anchors)
+	var has_iceberg := iceberg_layer != null and iceberg_layer.get_cell_source_id(tile) >= 0
+	return RegionMapService.make_render_job(
+		_region_world_seed_text(), tile,
+		_region_biome_for_tile(tile), _region_river_for_tile(tile),
+		has_iceberg, water, rivers, corners
+	)
+
+## Synchronous render for the first screenful on entry.
 func _render_region_tile(tile: Vector2i) -> void:
 	_region_queued.erase(tile)
 	if _region_sprites.has(tile) or _region_layer == null:
 		return
-	var texture := RegionMapService.render_tile(
-		_region_noise, tile,
-		_region_biome_for_tile(tile),
-		_region_river_for_tile(tile),
-		_region_site_anchors, 1
-	)
+	var job := _make_region_job(tile)
+	RegionMapService.render_job(job)
+	_apply_region_job(tile, job)
+
+func _apply_region_job(tile: Vector2i, job: Dictionary) -> void:
+	if _region_sprites.has(tile) or _region_layer == null:
+		return
+	var image := job.get("image") as Image
+	if image == null:
+		return
 	var sprite := Sprite2D.new()
 	sprite.centered = false
-	sprite.texture = texture
+	sprite.texture = ImageTexture.create_from_image(image)
 	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	sprite.position = Vector2(tile * tile_size)
 	sprite.scale = Vector2.ONE * (float(tile_size) / float(RegionMapService.CELLS_PER_TILE))
 	_region_layer.add_child(sprite)
 	_region_sprites[tile] = sprite
+
+func _dispatch_region_jobs() -> void:
+	# Keep the pool's queue deep: dispatch happens once per frame, so
+	# capping in-flight jobs at the core count would starve workers
+	# between frames and throttle streaming to one batch per frame.
+	var max_inflight := clampi(OS.get_processor_count() * 12, 48, 192)
+	while _region_jobs.size() < max_inflight and not _region_render_queue.is_empty():
+		var tile := _region_render_queue.pop_front() as Vector2i
+		if _region_sprites.has(tile):
+			_region_queued.erase(tile)
+			continue
+		var job := _make_region_job(tile)
+		var task_id := WorkerThreadPool.add_task(RegionMapService.render_job.bind(job), false, "region detail tile")
+		_region_jobs.append({"tile": tile, "task": task_id, "job": job, "stamp": _region_cache_stamp})
+
+func _collect_region_jobs() -> void:
+	var index := 0
+	while index < _region_jobs.size():
+		var entry := _region_jobs[index]
+		var task_id := int(entry.get("task", -1))
+		if not WorkerThreadPool.is_task_completed(task_id):
+			index += 1
+			continue
+		WorkerThreadPool.wait_for_task_completion(task_id)
+		_region_jobs.remove_at(index)
+		var tile := entry.get("tile", Vector2i.ZERO) as Vector2i
+		_region_queued.erase(tile)
+		# Results from before a regenerate describe a world that no
+		# longer exists.
+		if int(entry.get("stamp", -1)) != _region_cache_stamp:
+			continue
+		_apply_region_job(tile, entry.get("job", {}) as Dictionary)
 
 func _evict_far_region_tiles() -> void:
 	if _region_sprites.size() <= REGION_KEEP_TILES:
