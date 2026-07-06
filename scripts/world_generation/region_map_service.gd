@@ -65,6 +65,28 @@ static func render_region(
 							image.set_pixel(px + ox, py + oy, color)
 	return ImageTexture.create_from_image(image)
 
+## One overworld tile as a 64x64-cell detail texture (cell_px pixels
+## per cell), for the streaming full-map region view.
+static func render_tile(
+	noise_set: Dictionary,
+	tile: Vector2i,
+	biome: String,
+	has_river: bool,
+	site_anchors: Array[Vector2i],
+	cell_px: int = 1
+) -> ImageTexture:
+	var image := Image.create(CELLS_PER_TILE * cell_px, CELLS_PER_TILE * cell_px, false, Image.FORMAT_RGB8)
+	var tile_origin := tile * CELLS_PER_TILE
+	for cy in CELLS_PER_TILE:
+		for cx in CELLS_PER_TILE:
+			var world_cell := tile_origin + Vector2i(cx, cy)
+			var danger := danger_for_world_cell(world_cell, site_anchors)
+			var color := _cell_color(world_cell, noise_set, biome, has_river, danger)
+			for oy in cell_px:
+				for ox in cell_px:
+					image.set_pixel(cx * cell_px + ox, cy * cell_px + oy, color)
+	return ImageTexture.create_from_image(image)
+
 static func danger_for_world_cell(world_cell: Vector2i, site_anchors: Array[Vector2i]) -> float:
 	var nearest := 999999.0
 	for anchor: Vector2i in site_anchors:
