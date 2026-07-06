@@ -88,6 +88,9 @@ var _player_inventory: Dictionary = {}
 var _inventory_label: Label
 var _creature_states: Array[Dictionary] = []
 var _creature_texture: Texture2D
+var _companion: Dictionary = {}
+var _staff_cooldown := 0.0
+var _gear_label: Label
 var _creature_repop_timer := 0.0
 var _player_hp := 20.0
 var _player_attack_timer := 0.0
@@ -846,6 +849,7 @@ func _ready() -> void:
 	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
 	_load_persistent_player_state()
 	_update_clock_label()
+	GameAudioService.play_music(self, "hold")
 	_setup_inventory_label()
 	_setup_hp_label()
 	_setup_coins_label()
@@ -900,6 +904,8 @@ func _process(delta: float) -> void:
 	_stream_world_chunks()
 	_update_wild_darkness(delta)
 	_player_attack_timer = maxf(_player_attack_timer - delta, 0.0)
+	_staff_cooldown = maxf(_staff_cooldown - delta, 0.0)
+	_update_companion(delta)
 	_update_creature_spawning(delta)
 	_update_creatures(delta)
 	_update_player_regen(delta)
@@ -933,10 +939,18 @@ func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
 		return
 	var delta_hours := delta * 24.0 / (minutes_per_game_day * 60.0)
+	var hour_before := int(_game_hour)
 	_game_hour += delta_hours
 	while _game_hour >= 24.0:
 		_game_hour -= 24.0
 		_game_day += 1
+	if int(_game_hour) != hour_before:
+		# Buffs and other clock-keyed state read the shared settings
+		# clock; keep it honest while the scene runs.
+		var clock_settings: Dictionary = _world_settings_snapshot()
+		clock_settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
+		_store_world_settings(clock_settings)
+		_refresh_player_stats_from_session()
 	_advance_hunger(delta_hours)
 	_advance_afflictions(delta_hours)
 	_update_faction_events()
@@ -985,6 +999,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_E and not _is_text_input_focused():
 		_handle_quick_eat_action()
+		get_viewport().set_input_as_handled()
+		return
+	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_Q and not _is_text_input_focused():
+		_handle_quick_drink_action()
 		get_viewport().set_input_as_handled()
 		return
 	if _player_sprite == null or not _player_control_enabled:
@@ -2107,6 +2125,7 @@ func _relocate_player_to_city_heart(grid: Dictionary) -> void:
 				_player_cell = candidate
 				_player_sprite.position = _cell_center_position(candidate)
 				_center_view_on_cell(candidate)
+				_ensure_companion()
 				return
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
@@ -2350,49 +2369,113 @@ func _try_search_furnishing(cell: Vector2i) -> bool:
 ## into permanent gear: first a blade (+attack), then a plate (+max HP).
 const FORGE_FIRE_PIECES := ["int_hearth_arch", "int_kiln_beehive"]
 
+func _world_settings_snapshot() -> Dictionary:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings"):
+		return {}
+	return game_session.call("get_world_settings")
+
+func _store_world_settings(settings: Dictionary) -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("set_world_settings"):
+		game_session.call("set_world_settings", settings)
+
+## The workshops answer by station: a lit furnace smelts whatever ore
+## the pack holds (richest first), the anvil walks the whole gear ladder
+## in order, the clay pot brews potions from herbs and the hunt, and an
+## open bookshelf reads runestones into enchants.
 func _try_work_forge(cell: Vector2i) -> bool:
 	if not _is_player_adjacent_to_cell(cell) and cell != _player_cell:
 		return false
 	var piece := String(_furnishing_by_cell.get(cell, ""))
 	if FORGE_FIRE_PIECES.has(piece):
-		var ore := int(_player_inventory.get("Starmetal Ore", 0))
-		if ore < PlayerStatsService.SMELT_ORE_PER_BAR:
-			_set_save_status("The furnace roars. %d starmetal ore smelts into a bar." % PlayerStatsService.SMELT_ORE_PER_BAR, Color(0.75, 0.8, 0.9, 1.0))
+		var smelt: Dictionary = GearService.smelt_option(_player_inventory)
+		if smelt.is_empty():
+			_set_save_status("The furnace roars, hungry for ore: two of a kind smelt one bar.", Color(0.75, 0.8, 0.9, 1.0))
 			return true
-		_add_to_inventory("Starmetal Ore", -PlayerStatsService.SMELT_ORE_PER_BAR)
-		_add_to_inventory("Starmetal Bar", 1)
-		_spawn_floating_text("Starmetal Bar", _cell_center_position(cell), Color(0.7, 0.85, 1.0, 1.0))
-		_set_save_status("The fire flares white: a starmetal bar, still humming.", Color(0.7, 0.85, 1.0, 1.0))
+		_add_to_inventory(String(smelt.get("ore", "")), -int(smelt.get("count", 2)))
+		_add_to_inventory(String(smelt.get("bar", "")), 1)
+		GameAudioService.play_sfx(self, "forge")
+		_spawn_floating_text(String(smelt.get("bar", "")), _cell_center_position(cell), Color(0.7, 0.85, 1.0, 1.0))
+		_set_save_status("The fire flares: %s, hot from the mold." % String(smelt.get("bar", "")), Color(0.7, 0.85, 1.0, 1.0))
 		return true
 	if piece == "int_anvil":
-		var has_blade := PlayerStatsService.has_gear(self, PlayerStatsService.GEAR_STARMETAL_BLADE)
-		var has_plate := PlayerStatsService.has_gear(self, PlayerStatsService.GEAR_STARMETAL_PLATE)
-		if has_blade and has_plate:
-			_set_save_status("Your starmetal blade and plate are already the anvil's best work.", Color(0.75, 0.8, 0.9, 1.0))
+		var settings: Dictionary = _world_settings_snapshot()
+		var owned: Dictionary = GearService.owned_gear(settings)
+		var option: Dictionary = GearService.forge_option(owned, _player_inventory)
+		if option.is_empty():
+			var goal: Dictionary = GearService.next_forge_goal(owned)
+			if goal.is_empty():
+				_set_save_status("The anvil rests: every piece it knows is already yours.", Color(0.75, 0.8, 0.9, 1.0))
+			else:
+				_set_save_status("The anvil waits: %s asks %s." % [String(goal.get("name", "")), GearService.craft_costs_text(goal)], Color(0.75, 0.8, 0.9, 1.0))
 			return true
-		var bars := int(_player_inventory.get("Starmetal Bar", 0))
-		if bars < PlayerStatsService.FORGE_BARS_PER_PIECE:
-			var next_piece := "blade" if not has_blade else "plate"
-			_set_save_status("The anvil waits: %d starmetal bars forge a %s." % [PlayerStatsService.FORGE_BARS_PER_PIECE, next_piece], Color(0.75, 0.8, 0.9, 1.0))
-			return true
-		_add_to_inventory("Starmetal Bar", -PlayerStatsService.FORGE_BARS_PER_PIECE)
-		if not has_blade:
-			PlayerStatsService.grant_gear(self, PlayerStatsService.GEAR_STARMETAL_BLADE)
-			_spawn_floating_text("Starmetal Blade! +%d ⚔" % PlayerStatsService.STARMETAL_BLADE_ATTACK, _cell_center_position(cell), Color(0.7, 0.85, 1.0, 1.0))
-			_set_save_status("You forge a starmetal blade. It sings when it swings (+%d attack)." % PlayerStatsService.STARMETAL_BLADE_ATTACK, Color(0.7, 0.85, 1.0, 1.0))
-		else:
-			PlayerStatsService.grant_gear(self, PlayerStatsService.GEAR_STARMETAL_PLATE)
-			_spawn_floating_text("Starmetal Plate! +%d ❤" % int(PlayerStatsService.STARMETAL_PLATE_HP), _cell_center_position(cell), Color(0.7, 0.85, 1.0, 1.0))
-			_set_save_status("You forge a starmetal plate. Blows land softer now (+%d max HP)." % int(PlayerStatsService.STARMETAL_PLATE_HP), Color(0.7, 0.85, 1.0, 1.0))
+		var costs := option.get("craft", {}) as Dictionary
+		for cost_item: Variant in costs.keys():
+			_add_to_inventory(String(cost_item), -int(costs[cost_item]))
+		GearService.grant(settings, String(option.get("name", "")))
+		_store_world_settings(settings)
+		GameAudioService.play_sfx(self, "forge")
+		_spawn_floating_text("%s!" % String(option.get("name", "")), _cell_center_position(cell), Color(0.7, 0.85, 1.0, 1.0))
+		_set_save_status("You forge %s. The ladder climbs." % String(option.get("name", "")), Color(0.7, 0.85, 1.0, 1.0))
 		_refresh_player_stats_from_session()
+		_ensure_companion()
 		return true
+	if piece == "int_pot_clay":
+		return _try_brew_potion()
+	if piece.begins_with("int_bookshelf"):
+		return _try_enchant()
 	return false
+
+func _try_brew_potion() -> bool:
+	for potion_name: String in GearService.POTION_DEFS.keys():
+		var recipe := (GearService.POTION_DEFS[potion_name] as Dictionary).get("brew", {}) as Dictionary
+		var brewable := true
+		for herb_variant: Variant in recipe.keys():
+			if int(_player_inventory.get(String(herb_variant), 0)) < int(recipe[herb_variant]):
+				brewable = false
+				break
+		if not brewable:
+			continue
+		for herb_variant: Variant in recipe.keys():
+			_add_to_inventory(String(herb_variant), -int(recipe[herb_variant]))
+		_add_to_inventory(potion_name, 1)
+		GameAudioService.play_sfx(self, "drink")
+		_set_save_status("The pot bubbles: %s, corked and ready (Q to drink)." % potion_name, Color(0.75, 0.9, 0.75, 1.0))
+		return true
+	_set_save_status("The pot waits for makings — a Healing Potion asks 1 Scarlet Blossom and 2 Mushrooms.", Color(0.75, 0.8, 0.9, 1.0))
+	return true
+
+func _try_enchant() -> bool:
+	if int(_player_inventory.get("Runestone", 0)) < 1:
+		_set_save_status("The open book hums — bring a Runestone and %d coins to bind an enchant." % GearService.ENCHANT_COIN_COST, Color(0.75, 0.8, 0.9, 1.0))
+		return true
+	if _player_coins < GearService.ENCHANT_COIN_COST:
+		_set_save_status("The binding asks %d coins alongside the stone." % GearService.ENCHANT_COIN_COST, Color(0.95, 0.75, 0.45, 1.0))
+		return true
+	_add_to_inventory("Runestone", -1)
+	_adjust_coins(-GearService.ENCHANT_COIN_COST)
+	var settings: Dictionary = _world_settings_snapshot()
+	var line: String = GearService.apply_runestone(settings, _rng)
+	_store_world_settings(settings)
+	GameAudioService.play_sfx(self, "enchant")
+	_set_save_status(line, Color(0.8, 0.75, 0.95, 1.0))
+	_refresh_player_stats_from_session()
+	return true
 
 func _refresh_player_stats_from_session() -> void:
 	var stats := PlayerStatsService.for_session(self)
 	_player_max_hp = float(stats.get("max_hp", _player_max_hp))
 	_player_attack_damage = int(stats.get("attack", _player_attack_damage))
+	_player_hp = minf(_player_hp, _player_max_hp)
 	_update_hp_label()
+	_update_gear_label()
+
+func _update_gear_label() -> void:
+	if _gear_label == null:
+		return
+	var loadout := PlayerStatsService.for_session(self).get("loadout", {}) as Dictionary
+	_gear_label.text = GearService.loadout_line(loadout, int(_player_inventory.get("Arrows", 0)))
 
 func _try_harvest_decor(cell: Vector2i) -> bool:
 	if not _is_player_adjacent_to_cell(cell):
@@ -3064,6 +3147,30 @@ func _handle_cook_action() -> void:
 
 ## Quick-eat: pick the smallest-heal edible in the pack so nothing big is
 ## wasted on a scratch.
+## Q: knock back a potion. Heals wait for wounds; buffs go down whenever.
+func _handle_quick_drink_action() -> void:
+	for potion_name: String in GearService.POTION_DEFS.keys():
+		if int(_player_inventory.get(potion_name, 0)) < 1:
+			continue
+		var def := GearService.POTION_DEFS[potion_name] as Dictionary
+		if def.has("heal") and _player_hp >= _player_max_hp:
+			continue
+		var settings: Dictionary = _world_settings_snapshot()
+		settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
+		var result: Dictionary = GearService.drink(settings, potion_name, float(_game_day) * 24.0 + _game_hour)
+		_store_world_settings(settings)
+		_add_to_inventory(potion_name, -1)
+		GameAudioService.play_sfx(self, "drink")
+		if result.has("heal"):
+			_player_hp = minf(_player_hp + float(int(result.get("heal", 0))), _player_max_hp)
+			_update_hp_label()
+			_set_save_status("You drink the %s (+%d HP)." % [potion_name, int(result.get("heal", 0))], Color(0.9, 0.6, 0.6, 1.0))
+		else:
+			_refresh_player_stats_from_session()
+			_set_save_status("You drink the %s — %s hums in your blood." % [potion_name, String(result.get("buff", ""))], Color(0.8, 0.75, 0.95, 1.0))
+		return
+	_set_save_status("No potions in the pack. Herbalists sell them; a clay pot brews them.", Color(0.8, 0.8, 0.8, 1.0))
+
 func _handle_quick_eat_action() -> void:
 	if _player_hp >= _player_max_hp and _player_satiety > PlayerStatsService.SATIETY_MAX * 0.9:
 		_set_save_status("You're at full health and well fed", Color(0.7, 0.9, 0.7, 1.0))
@@ -3140,6 +3247,8 @@ func _clear_creatures() -> void:
 		if sprite != null:
 			sprite.queue_free()
 	_creature_states = []
+	CompanionService.despawn(_companion)
+	_companion = {}
 
 func _creature_index_at_cell(cell: Vector2i) -> int:
 	for index in range(_creature_states.size()):
@@ -3327,20 +3436,27 @@ func _animate_creature(state: Dictionary, sprite: Sprite2D, def: Dictionary) -> 
 	CreatureCombatService.animate_creature(state, sprite, def)
 
 func _attack_creature(creature_index: int) -> void:
-	if creature_index < 0 or creature_index >= _creature_states.size():
-		return
 	if _player_attack_timer > 0.0:
 		return
 	_player_attack_timer = PLAYER_ATTACK_COOLDOWN
+	GameAudioService.play_sfx(self, "swing")
+	_hurt_creature(creature_index, _player_attack_damage)
+
+## Shared blade-edge for the player, the bow, the staff and the loyal
+## sporeling: damage, loot, and the dying animation.
+func _hurt_creature(creature_index: int, damage: int) -> void:
+	if creature_index < 0 or creature_index >= _creature_states.size():
+		return
 	var state := _creature_states[creature_index]
 	if bool(state.get("dying", false)):
 		return
 	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
 	var sprite := state.get("sprite") as Sprite2D
-	state["hp"] = int(state.get("hp", 1)) - _player_attack_damage
+	state["hp"] = int(state.get("hp", 1)) - damage
+	GameAudioService.play_sfx(self, "hit")
 	if sprite != null:
 		_flash_sprite(sprite, Color(1.0, 0.45, 0.45, 1.0))
-		_spawn_floating_text("-%d" % _player_attack_damage, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
+		_spawn_floating_text("-%d" % damage, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
 	if int(state.get("hp", 0)) > 0:
 		_set_creature_anim(state, "hurt")
 		return
@@ -3360,6 +3476,79 @@ func _attack_creature(creature_index: int) -> void:
 	if not loot_parts.is_empty():
 		message += " — " + ", ".join(loot_parts)
 	_set_save_status(message, Color(0.85, 0.95, 0.7, 1.0))
+
+## Reaching weapons. The staff bursts over a knot of beasts on its own
+## cooldown; the bow spends an arrow a shot. Melee stays king up close.
+func _try_ranged_attack(creature_index: int, cell: Vector2i) -> bool:
+	var distance := maxi(absi(cell.x - _player_cell.x), absi(cell.y - _player_cell.y))
+	var stats: Dictionary = PlayerStatsService.for_session(self)
+	var loadout := stats.get("loadout", {}) as Dictionary
+	var staff := loadout.get("staff", {}) as Dictionary
+	if not staff.is_empty() and distance <= 3 and _staff_cooldown <= 0.0:
+		_staff_cooldown = float(staff.get("cooldown", 9.0))
+		var radius := int(staff.get("radius", 1))
+		var burst := int(stats.get("attack", 2)) + int(staff.get("attack", 1))
+		GameAudioService.play_sfx(self, "magic")
+		_spawn_floating_text("✦", _cell_center_position(cell), Color(0.8, 0.6, 1.0, 1.0))
+		for index in range(_creature_states.size() - 1, -1, -1):
+			var creature_cell := _creature_states[index].get("cell", Vector2i(9999, 9999)) as Vector2i
+			if maxi(absi(creature_cell.x - cell.x), absi(creature_cell.y - cell.y)) <= radius:
+				_hurt_creature(index, burst)
+		return true
+	var bow := loadout.get("bow", {}) as Dictionary
+	if not bow.is_empty() and distance <= int(bow.get("range", 4)):
+		if int(_player_inventory.get("Arrows", 0)) < 1:
+			_set_save_status("Your quiver is empty — tinkers and peddlers sell Arrows.", Color(0.95, 0.75, 0.45, 1.0))
+			return true
+		if _player_attack_timer > 0.0:
+			return true
+		_player_attack_timer = PLAYER_ATTACK_COOLDOWN
+		_add_to_inventory("Arrows", -1)
+		GameAudioService.play_sfx(self, "bow")
+		_spawn_arrow_flight(_player_cell, cell)
+		_hurt_creature(creature_index, int(stats.get("attack", 2)) + int(bow.get("attack", 0)))
+		return true
+	return false
+
+func _spawn_arrow_flight(from_cell: Vector2i, to_cell: Vector2i) -> void:
+	var arrow_image := Image.create(8, 2, false, Image.FORMAT_RGBA8)
+	arrow_image.fill(Color(0.85, 0.78, 0.6, 1.0))
+	var arrow := Sprite2D.new()
+	arrow.texture = ImageTexture.create_from_image(arrow_image)
+	arrow.position = _cell_center_position(from_cell)
+	var target: Vector2 = _cell_center_position(to_cell)
+	arrow.rotation = (target - arrow.position).angle()
+	arrow.z_index = 20
+	actor_layer.add_child(arrow)
+	var tween := create_tween()
+	tween.tween_property(arrow, "position", target, 0.14)
+	tween.tween_callback(arrow.queue_free)
+
+## The Beast Charm's sporeling: spawned while the charm is owned, fights
+## whatever the dark sends, burrows home if left behind.
+func _ensure_companion() -> void:
+	if not _companion.is_empty() or _player_sprite == null or _creature_texture == null:
+		return
+	var loadout := PlayerStatsService.for_session(self).get("loadout", {}) as Dictionary
+	var charm := loadout.get("charm", {}) as Dictionary
+	if charm.is_empty():
+		return
+	_companion = CompanionService.spawn(charm, _creature_texture, _player_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size)
+	if not _companion.is_empty():
+		_set_save_status("Something small and loyal pads out of the dark to walk with you.", Color(0.75, 0.92, 0.75, 1.0))
+
+func _update_companion(delta: float) -> void:
+	if _companion.is_empty() or _player_sprite == null:
+		return
+	CompanionService.update(
+		delta, _companion, _player_cell, _creature_states,
+		Callable(self, "_creature_can_step_to_from_companion"),
+		Callable(self, "_cell_center_position"),
+		Callable(self, "_hurt_creature")
+	)
+
+func _creature_can_step_to_from_companion(cell: Vector2i) -> bool:
+	return bool(_creature_can_step_to(cell))
 
 func _damage_player(amount: int, source_name: String) -> void:
 	if _player_sprite == null:
@@ -3421,12 +3610,18 @@ func _setup_hp_label() -> void:
 	_hunger_label = Label.new()
 	_hunger_label.add_theme_font_size_override("font_size", 13)
 	controls.add_child(_hunger_label)
+	_gear_label = Label.new()
+	_gear_label.add_theme_font_size_override("font_size", 12)
+	_gear_label.modulate = Color(0.85, 0.88, 0.95, 1.0)
+	controls.add_child(_gear_label)
 	var clock := controls.get_node_or_null("ClockLabel")
 	if clock != null:
 		controls.move_child(_hp_label, clock.get_index() + 1)
 		controls.move_child(_hunger_label, clock.get_index() + 2)
+		controls.move_child(_gear_label, clock.get_index() + 3)
 	_update_hp_label()
 	_update_hunger_label()
+	_update_gear_label()
 
 func _update_hunger_label() -> void:
 	if _hunger_label == null:
@@ -3727,6 +3922,9 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 		_open_trade_popup(clicked_cell, shop_type)
 		return
 	if _try_work_forge(clicked_cell):
+		return
+	var far_creature := _creature_index_at_cell(clicked_cell)
+	if far_creature >= 0 and not _is_player_adjacent_to_cell(clicked_cell) and _try_ranged_attack(far_creature, clicked_cell):
 		return
 	if _try_search_furnishing(clicked_cell):
 		return

@@ -78,7 +78,26 @@ const ITEM_VALUES := {
 	"Loaf of Bread": 3, "Wheel of Cheese": 6, "Jar of Honey": 5,
 	"Ale Keg": 10, "Bolt of Cloth": 8, "Wax Candles": 3,
 	"Skein of Wool": 4, "Iron Horseshoes": 6, "Lizard Scale": 6,
-	"Orcish Tooth": 5
+	"Orcish Tooth": 5,
+
+	# The armory ladder and its trimmings.
+	"Copper Blade": 12, "Iron Blade": 20, "Gold Blade": 35,
+	"Copper Plate": 15, "Iron Plate": 25, "Gold Plate": 40,
+	"Short Bow": 18, "War Bow": 40, "Oak Staff": 25, "Runed Staff": 60,
+	"Beast Charm": 45, "Hunter's Garb": 30, "Warcaster's Robe": 30,
+	"Beastmaster's Cloak": 30, "Wolf Fang Charm": 35, "Hearthstone Amulet": 35,
+	"Fleetfoot Boots": 40, "Warding Ring": 60, "Arrows": 1, "Runestone": 45,
+
+	# The alchemist's shelf.
+	"Healing Potion": 12, "Ironhide Draught": 16, "Hunter's Tonic": 16,
+	"Fleetfoot Philter": 14,
+
+	# The field, the pen, and the road.
+	"Iron Hoe": 12, "Coracle": 30, "Sow Saddle": 50, "Timber": 2,
+	"Carrot Seeds": 3, "Beetroot Seeds": 3, "Tomato Seeds": 3,
+	"Carrot": 3, "Beetroot": 3, "Tomato": 3, "Garden Stew": 9,
+	"Egg": 3, "Truffle": 12, "Milk Pail": 4,
+	"Chicken Crate": 20, "Piglet Crate": 30, "Calf Crate": 45
 }
 
 ## What each kind of shop keeps behind the counter. Keys cover both the
@@ -98,9 +117,26 @@ const SHOP_STOCK_POOLS := {
 	"forge": ["Iron Ingot", "Steel Ingot", "Steel Billet", "Miner's Pickaxe", "Steel Pickaxe", "Forged Blade", "Whetstone", "Smith's Tongs", "Mason's Chisel"],
 	"weapon_shop": ["Iron Ingot", "Steel Pickaxe", "Geologist's Hammer", "Fishing Spear", "Sledgehammer"],
 	"armor_shop": ["Iron Ingot", "Leather Strap", "Stone Hammer", "Miner's Lantern"],
-	"apothecary": ["Mushrooms", "Glowcap", "Spore Dust", "Frostcap", "Violet Veil", "Jar of Honey", "Mandrake Root", "Foxglove Sprig", "Frostleaf", "Firebloom", "Nightcap Bells", "Rowanberries", "Garlic Sprout"],
+	"apothecary": ["Mushrooms", "Glowcap", "Spore Dust", "Frostcap", "Violet Veil", "Jar of Honey", "Mandrake Root", "Foxglove Sprig", "Frostleaf", "Firebloom", "Nightcap Bells", "Rowanberries", "Garlic Sprout", "Healing Potion", "Ironhide Draught", "Hunter's Tonic", "Fleetfoot Philter"],
 	"gemcutters_studio": ["Gem Shard", "Gold Nugget", "Gold Trinket", "Amber"],
-	"bank_vaults": ["Gold Nugget", "Gold Trinket", "Gem Shard", "Skeleton Keys"]
+	"bank_vaults": ["Gold Nugget", "Gold Trinket", "Gem Shard", "Skeleton Keys"],
+
+	# Wandering vendors: what walks the roads in a pack or a cart.
+	# Peddler carries a bit of everything; the tinker tools and travel
+	# gear; the drover live animals and tack; the pilgrim remedies and
+	# blessed odds and ends.
+	"peddler_pack": ["Loaf of Bread", "Arrows", "Carrot Seeds", "Beetroot Seeds", "Tomato Seeds", "Healing Potion", "Wax Candles", "Jerky Strip", "Wheel of Cheese", "Wolf Fang Charm"],
+	"tinker_cart": ["Arrows", "Iron Hoe", "Coracle", "Whetstone", "Miner's Lantern", "Iron Nails", "Old Fishing Rod", "Casting Net", "Fleetfoot Boots"],
+	"drover_stock": ["Chicken Crate", "Piglet Crate", "Calf Crate", "Sow Saddle", "Skein of Wool", "Egg", "Milk Pail", "Jerky Strip"],
+	"pilgrim_satchel": ["Healing Potion", "Wax Candles", "Rowanberries", "Garlic Sprout", "Ironhide Draught", "Runestone", "Hearthstone Amulet"]
+}
+
+## Which pack a traveler opens when you trade on the road.
+const TRAVELER_STOCK_TYPES := {
+	"Peddler": "peddler_pack",
+	"Tinker": "tinker_cart",
+	"Drover": "drover_stock",
+	"Pilgrim": "pilgrim_satchel"
 }
 
 const DWARF_FIRST_NAMES: Array[String] = [

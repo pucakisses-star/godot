@@ -265,7 +265,21 @@ const TOWN_TILE_ATLAS := {
 	"forge": Vector2i(20, 22),
 	"forge_top": Vector2i(20, 21),
 	"oven": Vector2i(23, 22),
-	"oven_top": Vector2i(23, 21)
+	"oven_top": Vector2i(23, 21),
+	# Row 23 additions: open water, worked earth, and the three field
+	# crops (three growth stages each, lifted from the Farm plants sheet).
+	"water": Vector2i(0, 23),
+	"water_calm": Vector2i(1, 23),
+	"tilled_soil": Vector2i(2, 23),
+	"crop_carrot_0": Vector2i(3, 23),
+	"crop_carrot_1": Vector2i(4, 23),
+	"crop_carrot_2": Vector2i(5, 23),
+	"crop_beetroot_0": Vector2i(6, 23),
+	"crop_beetroot_1": Vector2i(7, 23),
+	"crop_beetroot_2": Vector2i(8, 23),
+	"crop_tomato_0": Vector2i(9, 23),
+	"crop_tomato_1": Vector2i(10, 23),
+	"crop_tomato_2": Vector2i(11, 23)
 }
 ## The *_top keys are the upper halves of two-tile-tall furniture sprites.
 ## They render as visual caps over the cell above the furniture, so they
@@ -275,7 +289,12 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	"road", "road_twig", "sand", "sand_alt", "sand_pebbles",
 	"plaza", "plaza_alt", "floor", "door", "rug",
 	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",
-	"forge_top", "oven_top"
+	"forge_top", "oven_top",
+	# Water is deliberately absent: it blocks walkers unless they boat.
+	"tilled_soil",
+	"crop_carrot_0", "crop_carrot_1", "crop_carrot_2",
+	"crop_beetroot_0", "crop_beetroot_1", "crop_beetroot_2",
+	"crop_tomato_0", "crop_tomato_1", "crop_tomato_2"
 ]
 
 static func validate_atlas_no_duplicates(atlas_name: String, atlas: Dictionary) -> bool:

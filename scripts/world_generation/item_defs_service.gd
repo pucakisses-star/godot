@@ -15,6 +15,10 @@ const ITEM_ICONS2_TEXTURE := preload("res://resources/images/items/item_icons2.p
 ## Third sheet: mounted fish trophies (0-19), cut from the freshwater-fish
 ## poster and set on little wooden plaques. Entries with "sheet": 3.
 const ITEM_ICONS3_TEXTURE := preload("res://resources/images/items/item_icons3.png")
+## Fourth sheet: the armory and the farmstead - tiered weapons and armor,
+## trinkets, potions, seeds, crops, animal produce, and travel gear.
+## Entries with "sheet": 4.
+const ITEM_ICONS4_TEXTURE := preload("res://resources/images/items/item_icons4.png")
 const ATLAS_COLUMNS := 12
 const ICON_SIZE := 32
 
@@ -299,7 +303,7 @@ const ITEM_DEFS := {
 	"Gold Dust": {"icon": 99, "sheet": 2, "flavor": "Sweep the smithy floor. Carefully."},
 	"Smith's Hammer": {"icon": 100, "sheet": 2, "flavor": "Ten thousand strikes and counting."},
 	"Metal File": {"icon": 101, "sheet": 2, "flavor": "Patience, with teeth."},
-	"Copper Plate": {"icon": 102, "sheet": 2, "flavor": "Curls at the edge like old paper."},
+	"Copper Sheeting": {"icon": 102, "sheet": 2, "flavor": "Curls at the edge like old paper."},
 	"Polishing Cloth": {"icon": 103, "sheet": 2, "flavor": "Green with use, priceless with skill."},
 	"Brass Sheet": {"icon": 104, "sheet": 2, "flavor": "Hammered thin as a rumor."},
 	"Wire Spool": {"icon": 105, "sheet": 2, "flavor": "A mile of maybe."},
@@ -386,7 +390,58 @@ const ITEM_DEFS := {
 	"Trophy Baltic Eel": {"icon": 38, "sheet": 3, "flavor": "It crossed an ocean twice for this wall."},
 	"Trophy Sea Trout": {"icon": 39, "sheet": 3, "flavor": "Silver as the tide it rode in on."},
 	"Trophy Emerald Piranha": {"icon": 40, "sheet": 3, "flavor": "Its grin outshines its scales."},
-	"Trophy Sardine": {"icon": 41, "sheet": 3, "flavor": "One escaped the tin, into legend."}
+	"Trophy Sardine": {"icon": 41, "sheet": 3, "flavor": "One escaped the tin, into legend."},
+
+	# --- the armory ladder (sheet 4) ---
+	"Copper Blade": {"icon": 0, "sheet": 4, "flavor": "Soft-edged, but it's a start."},
+	"Iron Blade": {"icon": 1, "sheet": 4, "flavor": "Honest steel for honest trouble."},
+	"Gold Blade": {"icon": 2, "sheet": 4, "flavor": "Heavier than it looks, prouder than it should be."},
+	"Copper Plate": {"icon": 4, "sheet": 4, "flavor": "It dents so you don't."},
+	"Iron Plate": {"icon": 5, "sheet": 4, "flavor": "The hold's standard-issue stubbornness."},
+	"Gold Plate": {"icon": 6, "sheet": 4, "flavor": "Armor that pays its own ransom."},
+	"Short Bow": {"icon": 8, "sheet": 4, "flavor": "Reach out and touch trouble first."},
+	"War Bow": {"icon": 9, "sheet": 4, "flavor": "Strung with intent."},
+	"Oak Staff": {"icon": 10, "sheet": 4, "flavor": "The green orb hums when beasts crowd close."},
+	"Runed Staff": {"icon": 11, "sheet": 4, "flavor": "Old runes, new arguments."},
+	"Beast Charm": {"icon": 12, "sheet": 4, "flavor": "Something loyal answers when you wear it."},
+	"Hunter's Garb": {"icon": 13, "sheet": 4, "flavor": "Green as the treeline you vanish into."},
+	"Warcaster's Robe": {"icon": 14, "sheet": 4, "flavor": "The hems are singed. That's experience."},
+	"Beastmaster's Cloak": {"icon": 15, "sheet": 4, "flavor": "Smells faintly of kennel and courage."},
+
+	# --- trinkets ---
+	"Wolf Fang Charm": {"icon": 16, "sheet": 4, "flavor": "Bite back."},
+	"Hearthstone Amulet": {"icon": 17, "sheet": 4, "flavor": "Warm as the fire you left burning."},
+	"Fleetfoot Boots": {"icon": 18, "sheet": 4, "flavor": "The road feels shorter in these."},
+	"Warding Ring": {"icon": 19, "sheet": 4, "flavor": "Old silver, older promises."},
+
+	# --- the alchemist's shelf ---
+	"Healing Potion": {"icon": 20, "sheet": 4, "flavor": "Tastes like copper and second chances."},
+	"Ironhide Draught": {"icon": 21, "sheet": 4, "flavor": "Your skin remembers being a mountain."},
+	"Hunter's Tonic": {"icon": 22, "sheet": 4, "flavor": "The world slows; your hands don't."},
+	"Fleetfoot Philter": {"icon": 23, "sheet": 4, "flavor": "Fizzes like a rumor."},
+
+	# --- travel and toil ---
+	"Arrows": {"icon": 24, "sheet": 4, "flavor": "A quiver's worth of persuasion."},
+	"Runestone": {"icon": 25, "sheet": 4, "flavor": "It glows faintly near an open book."},
+	"Iron Hoe": {"icon": 26, "sheet": 4, "flavor": "Turns wild ground into a promise."},
+	"Coracle": {"icon": 27, "sheet": 4, "flavor": "A round little boat with no fear of ponds."},
+	"Sow Saddle": {"icon": 37, "sheet": 4, "flavor": "For riding the noblest steed: a very fast pig."},
+	"Timber": {"icon": 38, "sheet": 4, "flavor": "Fresh-felled and full of splinters."},
+
+	# --- the field and the pen ---
+	"Carrot Seeds": {"icon": 28, "sheet": 4, "flavor": "Orange dreams in a paper pouch."},
+	"Beetroot Seeds": {"icon": 29, "sheet": 4, "flavor": "Plant deep, harvest red."},
+	"Tomato Seeds": {"icon": 30, "sheet": 4, "flavor": "Every one a little sun."},
+	"Carrot": {"icon": 31, "sheet": 4, "flavor": "Pulled fresh, tops and all."},
+	"Beetroot": {"icon": 32, "sheet": 4, "flavor": "Stains everything. Worth it."},
+	"Tomato": {"icon": 33, "sheet": 4, "flavor": "Sun-warm and heavy in the hand."},
+	"Egg": {"icon": 34, "sheet": 4, "flavor": "Still warm from the nest."},
+	"Truffle": {"icon": 35, "sheet": 4, "flavor": "The sow found it. The sow gets a cut."},
+	"Milk Pail": {"icon": 36, "sheet": 4, "flavor": "Fresh from a very patient cow."},
+	"Garden Stew": {"icon": 39, "flavor": "Everything the field gave, simmered soft."},
+	"Chicken Crate": {"icon": 39, "sheet": 4, "flavor": "It clucks. Release near your homestead."},
+	"Piglet Crate": {"icon": 40, "sheet": 4, "flavor": "It squeals. Release near your homestead."},
+	"Calf Crate": {"icon": 41, "sheet": 4, "flavor": "It lows. Release near your homestead."}
 }
 
 ## Everything edible: how much it heals, and (for raw food) the dish a
@@ -517,7 +572,16 @@ const FOOD_DEFS := {
 	"Bitterberries": {"heal": 1},
 	"Nightberries": {"heal": 2},
 	"Rowanberries": {"heal": 2},
-	"Garlic Sprout": {"heal": 1}
+	"Garlic Sprout": {"heal": 1},
+
+	# --- the field's yield (crops simmer into Garden Stew) ---
+	"Carrot": {"heal": 2, "cooked_into": "Garden Stew"},
+	"Beetroot": {"heal": 2, "cooked_into": "Garden Stew"},
+	"Tomato": {"heal": 2, "cooked_into": "Garden Stew"},
+	"Garden Stew": {"heal": 10},
+	"Egg": {"heal": 3},
+	"Milk Pail": {"heal": 4},
+	"Truffle": {"heal": 3}
 }
 
 static var _texture_cache: Dictionary = {}
@@ -538,6 +602,8 @@ static func icon_texture(item_name: String) -> Texture2D:
 	var icon_index := int(item_def.get("icon", 0))
 	var atlas := AtlasTexture.new()
 	match int(item_def.get("sheet", 1)):
+		4:
+			atlas.atlas = ITEM_ICONS4_TEXTURE
 		3:
 			atlas.atlas = ITEM_ICONS3_TEXTURE
 		2:

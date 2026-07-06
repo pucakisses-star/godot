@@ -697,6 +697,7 @@ func _ready() -> void:
 	if map_layer == null:
 		push_error("Overworld map is missing a TileMapLayer named MapLayer.")
 		return
+	GameAudioService.play_music(self, "overworld")
 	_escape_menu = EscapeMenu.new()
 	add_child(_escape_menu)
 	_show_loading_screen()

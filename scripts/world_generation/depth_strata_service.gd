@@ -62,9 +62,10 @@ const IGNEOUS := {
 	"name": "Igneous Deep",
 	"ore_drops": [
 		{"name": "Gold Nugget", "weight": 35, "min": 1, "max": 2},
-		{"name": "Gem Shard", "weight": 25, "min": 1, "max": 2},
-		{"name": "Iron Ore", "weight": 25, "min": 2, "max": 4},
-		{"name": "Copper Ore", "weight": 15, "min": 1, "max": 3}
+		{"name": "Gem Shard", "weight": 24, "min": 1, "max": 2},
+		{"name": "Iron Ore", "weight": 24, "min": 2, "max": 4},
+		{"name": "Copper Ore", "weight": 14, "min": 1, "max": 3},
+		{"name": "Runestone", "weight": 3, "min": 1, "max": 1}
 	],
 	"vein_count_range": Vector2i(16, 26),
 	"mushroom_count_range": Vector2i(3, 7),
@@ -78,10 +79,11 @@ const STARMETAL_DEPTH := {
 	"relic_pieces": ["df_tool_16_1", "df_tool_17_1", "df_tool_26_2", "df_tool_26_3", "df_tool_25_0", "df_box_0_1"],
 	"name": "The Starmetal Vein",
 	"ore_drops": [
-		{"name": "Gold Nugget", "weight": 30, "min": 1, "max": 2},
-		{"name": "Gem Shard", "weight": 30, "min": 1, "max": 2},
-		{"name": "Iron Ore", "weight": 25, "min": 2, "max": 4},
-		{"name": "Copper Ore", "weight": 15, "min": 1, "max": 3}
+		{"name": "Gold Nugget", "weight": 29, "min": 1, "max": 2},
+		{"name": "Gem Shard", "weight": 29, "min": 1, "max": 2},
+		{"name": "Iron Ore", "weight": 24, "min": 2, "max": 4},
+		{"name": "Copper Ore", "weight": 14, "min": 1, "max": 3},
+		{"name": "Runestone", "weight": 4, "min": 1, "max": 1}
 	],
 	"vein_count_range": Vector2i(18, 26),
 	"mushroom_count_range": Vector2i(2, 5),

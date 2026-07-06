@@ -179,6 +179,7 @@ var _creatures: Array[Dictionary] = []
 var _player_attack_timer := 0.0
 
 func _ready() -> void:
+	GameAudioService.play_music(self, "hold")
 	_load_scene_context()
 	_load_player_inventory()
 	leave_button.pressed.connect(_leave_dungeon)
