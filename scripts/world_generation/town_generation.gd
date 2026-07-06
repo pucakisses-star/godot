@@ -163,6 +163,7 @@ var _next_raid_day := 0
 var _music_timer := 0.0
 var _wall_damage: Dictionary = {}
 var _speed_scale_cache := 1.0
+var _inventory_screen: PlayerInventoryPanel
 var _factions_label: RichTextLabel
 var _faction_event_stamps: Dictionary = {}
 var _town_name := ""
@@ -523,6 +524,7 @@ func _ready() -> void:
 	_load_persistent_clock()
 	_load_player_combat_state()
 	_setup_hp_label()
+	_setup_inventory_screen()
 	GameAudioService.play_music(self, "town")
 	_update_day_night_tint()
 	_update_clock_label()
@@ -635,6 +637,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 			KEY_M:
 				_toggle_mount()
+				get_viewport().set_input_as_handled()
+				return
+			KEY_I:
+				if _inventory_screen != null:
+					_inventory_screen.toggle()
 				get_viewport().set_input_as_handled()
 				return
 	if _player_sprite == null or not _player_control_enabled:
@@ -2324,6 +2331,10 @@ func _load_player_inventory() -> void:
 	var inventory_variant: Variant = settings.get("player_inventory", {})
 	_player_inventory = (inventory_variant as Dictionary).duplicate() if inventory_variant is Dictionary else {}
 	_player_coins = int(settings.get("player_coins", 0))
+	# Old saves wore gear as flags; hang it on the paper doll once.
+	if GearService.ensure_equipment_migrated(settings, _player_inventory):
+		game_session.call("set_world_settings", settings)
+		_save_player_inventory()
 
 func _save_player_inventory() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -3415,6 +3426,24 @@ func _update_gear_label() -> void:
 		return
 	var loadout := PlayerStatsService.for_session(self).get("loadout", {}) as Dictionary
 	_gear_label.text = GearService.loadout_line(loadout, int(_player_inventory.get("Arrows", 0)))
+
+## The inventory screen (I): paper-doll equipment beside the backpack.
+func _setup_inventory_screen() -> void:
+	if chest_popup == null:
+		return
+	_inventory_screen = PlayerInventoryPanel.new()
+	_inventory_screen.setup(
+		Callable(self, "_world_settings_snapshot"),
+		Callable(self, "_store_world_settings"),
+		func() -> Dictionary: return _player_inventory,
+		Callable(self, "_on_equipment_changed")
+	)
+	chest_popup.get_parent().add_child(_inventory_screen)
+
+func _on_equipment_changed() -> void:
+	_refresh_player_stats_town()
+	_populate_backpack_slots()
+	_save_player_inventory()
 
 func _player_speed_scale() -> float:
 	return maxf(_speed_scale_cache * (1.65 if _player_mounted else 1.0), 0.25)

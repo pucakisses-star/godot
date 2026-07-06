@@ -91,6 +91,7 @@ var _creature_texture: Texture2D
 var _companion: Dictionary = {}
 var _staff_cooldown := 0.0
 var _gear_label: Label
+var _inventory_screen: PlayerInventoryPanel
 var _creature_repop_timer := 0.0
 var _player_hp := 20.0
 var _player_attack_timer := 0.0
@@ -849,6 +850,7 @@ func _ready() -> void:
 	_game_hour = clampf(clock_start_hour, 0.0, 23.99)
 	_load_persistent_player_state()
 	_update_clock_label()
+	_setup_inventory_screen()
 	GameAudioService.play_music(self, "hold")
 	_setup_inventory_label()
 	_setup_hp_label()
@@ -1003,6 +1005,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_Q and not _is_text_input_focused():
 		_handle_quick_drink_action()
+		get_viewport().set_input_as_handled()
+		return
+	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_I and not _is_text_input_focused():
+		if _inventory_screen != null:
+			_inventory_screen.toggle()
 		get_viewport().set_input_as_handled()
 		return
 	if _player_sprite == null or not _player_control_enabled:
@@ -1253,6 +1260,10 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 	var inventory_variant: Variant = settings.get("player_inventory", {})
 	_player_inventory = (inventory_variant as Dictionary).duplicate() if inventory_variant is Dictionary else {}
 	_player_coins = int(settings.get("player_coins", 0))
+	# Old saves wore gear as flags; hang it on the paper doll once.
+	if GearService.ensure_equipment_migrated(settings, _player_inventory):
+		_store_world_settings(settings)
+		_save_player_inventory()
 	if scene_seed.is_empty():
 		return
 	seed_input.text = scene_seed
@@ -2401,7 +2412,7 @@ func _try_work_forge(cell: Vector2i) -> bool:
 		return true
 	if piece == "int_anvil":
 		var settings: Dictionary = _world_settings_snapshot()
-		var owned: Dictionary = GearService.owned_gear(settings)
+		var owned: Dictionary = GearService.owned_gear(settings, _player_inventory)
 		var option: Dictionary = GearService.forge_option(owned, _player_inventory)
 		if option.is_empty():
 			var goal: Dictionary = GearService.next_forge_goal(owned)
@@ -2413,8 +2424,11 @@ func _try_work_forge(cell: Vector2i) -> bool:
 		var costs := option.get("craft", {}) as Dictionary
 		for cost_item: Variant in costs.keys():
 			_add_to_inventory(String(cost_item), -int(costs[cost_item]))
-		GearService.grant(settings, String(option.get("name", "")))
+		GearService.grant(settings, _player_inventory, String(option.get("name", "")))
 		_store_world_settings(settings)
+		_save_player_inventory()
+		if _inventory_screen != null and _inventory_screen.visible:
+			_inventory_screen.refresh()
 		GameAudioService.play_sfx(self, "forge")
 		_spawn_floating_text("%s!" % String(option.get("name", "")), _cell_center_position(cell), Color(0.7, 0.85, 1.0, 1.0))
 		_set_save_status("You forge %s. The ladder climbs." % String(option.get("name", "")), Color(0.7, 0.85, 1.0, 1.0))
@@ -2476,6 +2490,24 @@ func _update_gear_label() -> void:
 		return
 	var loadout := PlayerStatsService.for_session(self).get("loadout", {}) as Dictionary
 	_gear_label.text = GearService.loadout_line(loadout, int(_player_inventory.get("Arrows", 0)))
+
+## The inventory screen (I): paper-doll equipment beside the backpack.
+func _setup_inventory_screen() -> void:
+	if chest_popup == null:
+		return
+	_inventory_screen = PlayerInventoryPanel.new()
+	_inventory_screen.setup(
+		Callable(self, "_world_settings_snapshot"),
+		Callable(self, "_store_world_settings"),
+		func() -> Dictionary: return _player_inventory,
+		Callable(self, "_on_equipment_changed")
+	)
+	chest_popup.get_parent().add_child(_inventory_screen)
+
+func _on_equipment_changed() -> void:
+	_refresh_player_stats_from_session()
+	_update_inventory_label()
+	_save_player_inventory()
 
 func _try_harvest_decor(cell: Vector2i) -> bool:
 	if not _is_player_adjacent_to_cell(cell):
