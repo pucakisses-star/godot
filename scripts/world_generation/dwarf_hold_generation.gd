@@ -4400,7 +4400,9 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 		var sprite: Sprite2D = RoomFurnishingService.create_piece_sprite(piece_name, base_cell, tile_size)
 		if sprite == null:
 			continue
-		actor_layer.add_child(sprite)
+		# Furniture is scenery, treated as tiles: the decor layer, under
+		# every walker, tinted by the same day/night modulate.
+		decor_layer.add_child(sprite)
 		_furnishing_sprites.append(sprite)
 		for footprint_cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
 			_furnishing_by_cell[footprint_cell] = piece_name
