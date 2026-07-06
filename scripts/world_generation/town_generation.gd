@@ -190,6 +190,13 @@ var _furnishing_blocked_cells: Dictionary = {}
 var _glow_sprites: Array[Node2D] = []
 var _pending_glows: Array[Dictionary] = []
 var _light_overlay_sprite: Sprite2D
+# Core Keeper-style shoreline reflections: a screen-sampling shader quad
+# follows the view, masked to the water cells it currently covers.
+const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
+var _reflection_sprite: Sprite2D
+var _reflection_mask_texture: ImageTexture
+var _reflection_rect_cells := Rect2i()
+var _reflection_rebuild_timer := 0.0
 var _passable_atlas_set: Dictionary = {}
 var _actor_passable_cache: Dictionary = {}
 var _last_clock_stamp := -1
@@ -550,6 +557,7 @@ func _process(delta: float) -> void:
 	_update_npc_movement(delta)
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
+	_update_water_reflection(delta)
 
 func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
@@ -2462,6 +2470,8 @@ func _update_city_layer_transform() -> void:
 		_place_hover_tooltip(tile_hover_tooltip.position - city_panel.global_position)
 	lighting_layer.scale = city_layer.scale
 	lighting_layer.position = city_layer.position
+	if _reflection_sprite != null and is_instance_valid(_reflection_sprite):
+		(_reflection_sprite.material as ShaderMaterial).set_shader_parameter("view_zoom", _zoom_level)
 	_update_zone_overlay()
 
 func _spawn_tavern_characters(grid: Dictionary) -> void:
@@ -3721,6 +3731,88 @@ func _is_water_cell(cell: Vector2i) -> bool:
 		return false
 	var atlas_coords := city_layer.get_cell_atlas_coords(cell)
 	return atlas_coords == (TILE_ATLAS.get("water") as Vector2i) or atlas_coords == (TILE_ATLAS.get("water_calm") as Vector2i)
+
+## --- Water reflections -------------------------------------------------------
+## The shore mirrors whoever stands on it, Core Keeper style: a quad over
+## the visible water re-samples the drawn screen a mirrored distance above
+## each pixel. The quad follows the view; its cell mask (water flag +
+## rows-of-water-above, which locates each column's shoreline) rebuilds
+## when the view moves to new cells or the refresh timer laps, so
+## streamed wilds ponds and coasts reflect too.
+
+const REFLECTION_VIEW_MARGIN_CELLS := 6
+const REFLECTION_REFRESH_SECONDS := 2.0
+const REFLECTION_MAX_MASK_CELLS := Vector2i(220, 150)
+
+func _update_water_reflection(delta: float) -> void:
+	_reflection_rebuild_timer -= delta
+	var panel_size := city_panel.size
+	if panel_size.x <= 0.0 or panel_size.y <= 0.0 or _latest_grid.is_empty():
+		return
+	var zoom := maxf(_zoom_level, 0.001)
+	var top_left := (Vector2.ZERO - city_layer.position) / zoom
+	var bottom_right := (panel_size - city_layer.position) / zoom
+	var min_cell := Vector2i(
+		floori(top_left.x / float(tile_size.x)) - REFLECTION_VIEW_MARGIN_CELLS,
+		floori(top_left.y / float(tile_size.y)) - REFLECTION_VIEW_MARGIN_CELLS
+	)
+	var max_cell := Vector2i(
+		ceili(bottom_right.x / float(tile_size.x)) + REFLECTION_VIEW_MARGIN_CELLS,
+		ceili(bottom_right.y / float(tile_size.y)) + REFLECTION_VIEW_MARGIN_CELLS
+	)
+	var rect := Rect2i(min_cell, (max_cell - min_cell).clamp(Vector2i.ONE, REFLECTION_MAX_MASK_CELLS))
+	if rect == _reflection_rect_cells and _reflection_rebuild_timer > 0.0:
+		return
+	_reflection_rect_cells = rect
+	_reflection_rebuild_timer = REFLECTION_REFRESH_SECONDS
+	_rebuild_reflection_mask(rect)
+
+func _rebuild_reflection_mask(rect: Rect2i) -> void:
+	_ensure_reflection_sprite()
+	var image := Image.create(rect.size.x, rect.size.y, false, Image.FORMAT_RG8)
+	var any_water := false
+	for y in rect.size.y:
+		for x in rect.size.x:
+			var cell := rect.position + Vector2i(x, y)
+			if not _is_water_cell(cell):
+				continue
+			any_water = true
+			var rows_above := 0
+			while rows_above < 15 and _is_water_cell(cell + Vector2i(0, -(rows_above + 1))):
+				rows_above += 1
+			image.set_pixel(x, y, Color(1.0, float(rows_above) / 16.0, 0.0))
+	_reflection_sprite.visible = any_water
+	if not any_water:
+		return
+	if _reflection_mask_texture != null and Vector2i(_reflection_mask_texture.get_size()) == rect.size:
+		_reflection_mask_texture.update(image)
+	else:
+		_reflection_mask_texture = ImageTexture.create_from_image(image)
+	var reflection_material := _reflection_sprite.material as ShaderMaterial
+	reflection_material.set_shader_parameter("reflection_mask", _reflection_mask_texture)
+	reflection_material.set_shader_parameter("mask_cells", Vector2(rect.size))
+	reflection_material.set_shader_parameter("tile_px", float(tile_size.x))
+	reflection_material.set_shader_parameter("view_zoom", _zoom_level)
+	_reflection_sprite.position = Vector2(rect.position * tile_size)
+	_reflection_sprite.scale = Vector2(rect.size * tile_size)
+
+func _ensure_reflection_sprite() -> void:
+	if _reflection_sprite != null and is_instance_valid(_reflection_sprite) and _reflection_sprite.get_parent() == actor_layer:
+		return
+	_reflection_sprite = Sprite2D.new()
+	_reflection_sprite.name = "WaterReflection"
+	_reflection_sprite.centered = false
+	var white := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	white.fill(Color.WHITE)
+	_reflection_sprite.texture = ImageTexture.create_from_image(white)
+	# Above every reflectable actor and prop, below the light overlay
+	# (14) and floating text (30), so lighting still dims the water and
+	# UI chatter never shows in it.
+	_reflection_sprite.z_index = 13
+	var reflection_material := ShaderMaterial.new()
+	reflection_material.shader = WATER_REFLECTION_SHADER
+	_reflection_sprite.material = reflection_material
+	actor_layer.add_child(_reflection_sprite)
 
 func _set_boating(boating: bool) -> void:
 	if _player_boating == boating:
