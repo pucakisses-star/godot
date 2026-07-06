@@ -83,6 +83,9 @@ const ITEM_VALUES := {
 	# The armory ladder and its trimmings.
 	"Copper Blade": 12, "Iron Blade": 20, "Gold Blade": 35,
 	"Copper Plate": 15, "Iron Plate": 25, "Gold Plate": 40,
+	"Copper Helm": 10, "Iron Helm": 18, "Gold Helm": 30, "Starmetal Helm": 90,
+	"Copper Greaves": 12, "Iron Greaves": 20, "Gold Greaves": 34, "Starmetal Greaves": 100,
+	"Copper Sabatons": 10, "Iron Sabatons": 18, "Gold Sabatons": 30, "Starmetal Sabatons": 90,
 	"Short Bow": 18, "War Bow": 40, "Oak Staff": 25, "Runed Staff": 60,
 	"Beast Charm": 45, "Hunter's Garb": 30, "Warcaster's Robe": 30,
 	"Beastmaster's Cloak": 30, "Wolf Fang Charm": 35, "Hearthstone Amulet": 35,
