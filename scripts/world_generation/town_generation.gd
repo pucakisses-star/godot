@@ -960,7 +960,16 @@ func _configure_tile_layer() -> void:
 	for atlas_coords: Vector2i in TILE_ATLAS.values():
 		unique_atlas_coords[atlas_coords] = true
 	for atlas_coords: Vector2i in unique_atlas_coords.keys():
-		atlas.create_tile(atlas_coords)
+		if TILE_ATLAS_DEFS.TOWN_MULTI_CELL_TILES.has(atlas_coords):
+			# Full trees: one logical tile whose art spans several atlas
+			# cells, anchored so the trunk sits on the map cell.
+			var multi := TILE_ATLAS_DEFS.TOWN_MULTI_CELL_TILES[atlas_coords] as Dictionary
+			atlas.create_tile(atlas_coords, multi.get("size", Vector2i.ONE) as Vector2i)
+			var multi_data := atlas.get_tile_data(atlas_coords, 0)
+			if multi_data != null:
+				multi_data.texture_origin = multi.get("origin", Vector2i.ZERO) as Vector2i
+		else:
+			atlas.create_tile(atlas_coords)
 
 	var tile_set := TileSet.new()
 	tile_set.tile_size = tile_size
