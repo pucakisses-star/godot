@@ -586,6 +586,7 @@ var _region_queued := {}
 var _region_noise := {}
 var _region_site_anchors: Array[Vector2i] = []
 var _region_hint_panel: PanelContainer
+var _is_generating := false
 @onready var tooltip_title: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipTitle")
 @onready var tooltip_biome: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipBiome")
 @onready var tooltip_climate: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipClimate")
@@ -709,6 +710,11 @@ var _more_info_image_paths: Array[String] = []
 var _more_info_texture_cache: Dictionary = {}
 var _more_info_cache_initialized := false
 var _landmass_masks: Dictionary = {}
+
+## Re-attached from the scene cache: parked AudioStreamPlayers stop, so
+## strike the theme back up.
+func _on_scene_resumed() -> void:
+	GameAudioService.play_music(self, "overworld")
 
 func _ready() -> void:
 	if map_layer == null:
@@ -995,6 +1001,10 @@ func _configure_structure_context_menu() -> void:
 		structure_context_menu.id_pressed.connect(_on_structure_context_menu_id_pressed)
 
 func _handle_structure_context_menu_input(event: InputEvent) -> bool:
+	# Globe and 3D views have no meaningful tile under the mouse - the
+	# reparented map layer would resolve an arbitrary one near the origin.
+	if _is_globe_view or _is_scene3d_view:
+		return false
 	var mouse_button_event := event as InputEventMouseButton
 	if mouse_button_event == null:
 		return false
@@ -1136,10 +1146,15 @@ func _dive_into_tile(tile_coord: Vector2i) -> void:
 	var enterable := _tile_supports_journey(details)
 	var landing := map_layer.to_global(map_layer.map_to_local(tile_coord))
 	var target_zoom := maxf(overworld_camera.zoom.x * 2.4, DIVE_ZOOM) if enterable else clampf(overworld_camera.zoom.x * 2.0, 0.2, DIVE_ZOOM)
+	var was_region_mode := _region_mode
 	_dive_pending = true
 	var tween: Tween = overworld_camera.dive_to(landing, target_zoom, DIVE_SECONDS)
 	await tween.finished
 	_dive_pending = false
+	# Esc (or a view toggle) mid-dive changed the mode already - honor
+	# that choice instead of undoing it on landing.
+	if _region_mode != was_region_mode:
+		return
 	# Dwarf Fortress style: the first dive switches the whole map into
 	# the detailed region view; diving again inside it walks into
 	# settlements (right-click Begin Journey works there too).
@@ -1529,6 +1544,9 @@ func _tile_population_groups_for_coord(coord: Vector2i) -> Dictionary:
 	return _tile_population_groups.get(coord, {}) as Dictionary
 
 func _regenerate_map() -> void:
+	# One forge at a time: interleaving two generators corrupts the map.
+	if _is_generating:
+		return
 	_show_loading_screen()
 	await get_tree().process_frame
 	map_seed = 0
@@ -1604,6 +1622,19 @@ func _generate_map() -> void:
 	if _atlas_source_id < 0:
 		push_error("Overworld map tileset is missing a valid atlas source.")
 		return
+	if _is_generating:
+		return
+	_is_generating = true
+	# A new world invalidates every cached region-detail tile.
+	_exit_region_mode()
+	if _region_layer != null:
+		for region_child: Node in _region_layer.get_children():
+			region_child.queue_free()
+	_region_sprites.clear()
+	_region_render_queue.clear()
+	_region_queued.clear()
+	_region_noise.clear()
+	_region_site_anchors = []
 	map_layer.clear()
 	if tree_layer != null:
 		tree_layer.clear()
@@ -1868,6 +1899,7 @@ func _generate_map() -> void:
 	var generation_memory_after := _current_generation_memory_bytes()
 	print("Overworld generation memory bytes (before/after/peak): %d / %d / %d" % [generation_memory_before, generation_memory_after, generation_peak_memory])
 	_log_tile_metadata_profile(Time.get_ticks_msec() - map_generation_started_ms)
+	_is_generating = false
 
 ## Writes the gazetteer of enterable sites (tile, class, name, seed)
 ## into world settings so local scenes know their neighbors and walkers
@@ -4447,6 +4479,10 @@ func _get_world_rect() -> Rect2:
 	return Rect2(Vector2.ZERO, Vector2(world_width, world_height))
 
 func _set_globe_view(enabled: bool) -> void:
+	if enabled:
+		# The globe reads the tile layers; region mode has them hidden
+		# and would draw its detail sprites over the 3D view.
+		_exit_region_mode()
 	_is_globe_view = enabled
 	if globe_view != null:
 		globe_view.visible = enabled
@@ -4477,6 +4513,8 @@ func _set_globe_view(enabled: bool) -> void:
 	_refresh_scale_bar()
 
 func _set_scene3d_view(enabled: bool) -> void:
+	if enabled:
+		_exit_region_mode()
 	_is_scene3d_view = enabled
 	if scene3d_view != null:
 		scene3d_view.visible = enabled
@@ -4544,6 +4582,11 @@ func _move_map_layer_to_viewport() -> void:
 			map_overlays.get_parent().remove_child(map_overlays)
 		map_viewport_root.add_child(map_overlays)
 		map_overlays.position = Vector2.ZERO
+	if _coast_layer != null:
+		if _coast_layer.get_parent() != null:
+			_coast_layer.get_parent().remove_child(_coast_layer)
+		map_viewport_root.add_child(_coast_layer)
+		_coast_layer.position = Vector2.ZERO
 
 func _update_map_tooltip() -> void:
 	if tooltip_panel == null or map_layer == null:
@@ -4842,6 +4885,12 @@ func _restore_map_layer_parent() -> void:
 		else:
 			_settlement_layer_original_parent.add_child(settlement_layer)
 		settlement_layer.position = Vector2.ZERO
+	if _coast_layer != null and map_layer.get_parent() == self:
+		if _coast_layer.get_parent() != null:
+			_coast_layer.get_parent().remove_child(_coast_layer)
+		add_child(_coast_layer)
+		move_child(_coast_layer, map_layer.get_index() + 1)
+		_coast_layer.position = map_layer.position
 	if map_overlays == null or _overlays_original_parent == null:
 		return
 	if map_overlays.get_parent() == _overlays_original_parent:

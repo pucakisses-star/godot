@@ -439,4 +439,15 @@ func _apply_cached_world_settings() -> void:
 	if chronology.has("year"):
 		year_input.value = int(chronology.get("year", 1485))
 	if chronology.has("age"):
-		age_input.value = max(1, int(chronology.get("age", 18)))
+		# Settings normalization stores the age as "Age N"; int("Age 18")
+		# parses to 0 and the SpinBox would silently reset the field.
+		age_input.value = max(1, _chronology_age_number(chronology.get("age")))
+
+static func _chronology_age_number(age_value: Variant) -> int:
+	if age_value is int or age_value is float:
+		return int(age_value)
+	var digits := ""
+	for age_char in String(age_value):
+		if age_char >= "0" and age_char <= "9":
+			digits += age_char
+	return int(digits) if not digits.is_empty() else 18

@@ -53,6 +53,11 @@ static func save_slot(context: Node, slot_id: String, label: String = "") -> Err
 	var session := _session(context)
 	if session == null:
 		return ERR_UNAVAILABLE
+	# Scenes keep clock/HP/satiety local until they exit; ask the live
+	# scene to flush so the save captures NOW, not scene-entry time.
+	var current_scene := context.get_tree().current_scene if context.is_inside_tree() else null
+	if current_scene != null and current_scene.has_method("flush_session_state"):
+		current_scene.call("flush_session_state")
 	DirAccess.make_dir_recursive_absolute(SAVE_DIR)
 	var settings: Dictionary = session.call("get_world_settings")
 	var character: Dictionary = session.call("get_player_character")
@@ -80,7 +85,9 @@ static func save_slot(context: Node, slot_id: String, label: String = "") -> Err
 		return FileAccess.get_open_error()
 	file.store_string(JSON.stringify(payload, "\t"))
 	file.close()
-	if session.has_method("set_current_slot"):
+	# Autosaves must not steal the session's slot binding, or the next
+	# manual "Save Game" forks a fresh slot instead of updating yours.
+	if slot_id != AUTOSAVE_SLOT and session.has_method("set_current_slot"):
 		session.call("set_current_slot", slot_id)
 	return OK
 
@@ -155,7 +162,12 @@ static func next_free_slot_id() -> String:
 
 ## The pre-slot single save file becomes slot_1 once, so nothing is lost.
 static func migrate_legacy_save() -> void:
-	if not FileAccess.file_exists(LEGACY_SAVE_PATH) or has_any_save():
+	if not FileAccess.file_exists(LEGACY_SAVE_PATH):
+		return
+	# Slots already exist: the legacy file is stale, not precious - drop
+	# it so deleting every slot later can't resurrect an old world.
+	if has_any_save():
+		DirAccess.remove_absolute(LEGACY_SAVE_PATH)
 		return
 	var file := FileAccess.open(LEGACY_SAVE_PATH, FileAccess.READ)
 	if file == null:

@@ -46,10 +46,13 @@ static func _load_stream(path: String, looped: bool) -> AudioStream:
 		return null
 	var stream := load(path) as AudioStream
 	if stream is AudioStreamWAV and looped:
-		var wav := stream as AudioStreamWAV
+		# load() returns the one shared resource: mutate a copy, or the
+		# same file fetched non-looped would loop forever too.
+		var wav := stream.duplicate() as AudioStreamWAV
 		wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
 		wav.loop_begin = 0
 		wav.loop_end = wav.data.size() / 2
+		stream = wav
 	_stream_cache[cache_key] = stream
 	return stream
 
@@ -60,7 +63,9 @@ static func play_music(scene_root: Node, music_key: String) -> void:
 	if stream == null:
 		return
 	var player := scene_root.get_node_or_null("MusicPlayer") as AudioStreamPlayer
-	if player != null and String(player.get_meta("music_key", "")) == music_key:
+	# Same key only counts while actually playing - a scene revived from
+	# the cache carries a stopped player that must strike up again.
+	if player != null and String(player.get_meta("music_key", "")) == music_key and player.playing:
 		return
 	if player != null:
 		# Fade the old theme out and free it; the new one fades in beside it.

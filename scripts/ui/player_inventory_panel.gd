@@ -9,6 +9,7 @@ extends PanelContainer
 const SLOT_SIZE := Vector2(46, 46)
 const BACKPACK_COLUMNS := 8
 const BACKPACK_SLOTS := 40
+const DEFAULT_HINT := "Click gear to wear it · click other items to bind them to the hotbar · I closes"
 
 var _get_settings: Callable
 var _store_settings: Callable
@@ -21,6 +22,7 @@ var _backpack_counts: Array[Label] = []
 var _backpack_items: Array[String] = []
 var _stats_label: Label
 var _hint_label: Label
+var _pack_grid: GridContainer
 
 func setup(get_settings: Callable, store_settings: Callable, get_inventory: Callable, on_changed: Callable) -> void:
 	_get_settings = get_settings
@@ -33,6 +35,7 @@ func setup(get_settings: Callable, store_settings: Callable, get_inventory: Call
 func toggle() -> void:
 	visible = not visible
 	if visible:
+		_hint_label.text = DEFAULT_HINT
 		refresh()
 		reset_size()
 		var parent_control := get_parent() as Control
@@ -102,24 +105,22 @@ func _build_ui() -> void:
 	pack_title.text = "Backpack"
 	pack_title.add_theme_color_override("font_color", Color(0.85, 0.78, 0.62, 1.0))
 	pack_box.add_child(pack_title)
-	var pack_grid := GridContainer.new()
-	pack_grid.columns = BACKPACK_COLUMNS
-	pack_grid.add_theme_constant_override("h_separation", 6)
-	pack_grid.add_theme_constant_override("v_separation", 6)
-	pack_box.add_child(pack_grid)
+	# The grid scrolls: a pack can hold more distinct items than one
+	# screenful of slots, and every one of them must stay reachable.
+	var pack_scroll := ScrollContainer.new()
+	pack_scroll.custom_minimum_size = Vector2(
+		BACKPACK_COLUMNS * (SLOT_SIZE.x + 6.0) + 14.0,
+		(BACKPACK_SLOTS / BACKPACK_COLUMNS) * (SLOT_SIZE.y + 6.0)
+	)
+	pack_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	pack_box.add_child(pack_scroll)
+	_pack_grid = GridContainer.new()
+	_pack_grid.columns = BACKPACK_COLUMNS
+	_pack_grid.add_theme_constant_override("h_separation", 6)
+	_pack_grid.add_theme_constant_override("v_separation", 6)
+	pack_scroll.add_child(_pack_grid)
 	for index in BACKPACK_SLOTS:
-		var pack_button := _make_slot_button()
-		pack_button.pressed.connect(_on_backpack_slot_pressed.bind(index))
-		pack_grid.add_child(pack_button)
-		_backpack_buttons.append(pack_button)
-		var count := Label.new()
-		count.add_theme_font_size_override("font_size", 11)
-		count.add_theme_color_override("font_color", Color(0.95, 0.92, 0.8, 1.0))
-		count.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.06, 1.0))
-		count.add_theme_constant_override("outline_size", 3)
-		count.position = Vector2(SLOT_SIZE.x - 22.0, SLOT_SIZE.y - 18.0)
-		pack_button.add_child(count)
-		_backpack_counts.append(count)
+		_add_backpack_slot()
 
 	_stats_label = Label.new()
 	_stats_label.add_theme_font_size_override("font_size", 13)
@@ -128,8 +129,22 @@ func _build_ui() -> void:
 	_hint_label = Label.new()
 	_hint_label.add_theme_font_size_override("font_size", 11)
 	_hint_label.modulate = Color(0.75, 0.72, 0.65, 1.0)
-	_hint_label.text = "Click gear to wear it · click other items to bind them to the hotbar · I closes"
+	_hint_label.text = DEFAULT_HINT
 	layout.add_child(_hint_label)
+
+func _add_backpack_slot() -> void:
+	var pack_button := _make_slot_button()
+	pack_button.pressed.connect(_on_backpack_slot_pressed.bind(_backpack_buttons.size()))
+	_pack_grid.add_child(pack_button)
+	_backpack_buttons.append(pack_button)
+	var count := Label.new()
+	count.add_theme_font_size_override("font_size", 11)
+	count.add_theme_color_override("font_color", Color(0.95, 0.92, 0.8, 1.0))
+	count.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.06, 1.0))
+	count.add_theme_constant_override("outline_size", 3)
+	count.position = Vector2(SLOT_SIZE.x - 22.0, SLOT_SIZE.y - 18.0)
+	pack_button.add_child(count)
+	_backpack_counts.append(count)
 
 func _make_slot_button() -> Button:
 	var slot_button := Button.new()
@@ -162,9 +177,14 @@ func _on_equipment_slot_pressed(slot: String) -> void:
 		_on_changed.call()
 
 func _on_backpack_slot_pressed(index: int) -> void:
-	if index >= _backpack_items.size():
+	if index >= _backpack_buttons.size():
 		return
-	var item_name := _backpack_items[index]
+	# The name stamped at render time, not a positional lookup - the
+	# sorted list can shift under an open panel (e.g. drinking the last
+	# potion of a type from the hotbar).
+	var item_name := String(_backpack_buttons[index].get_meta("item_name", ""))
+	if item_name.is_empty():
+		return
 	if GearService.equip_slot_for(item_name).is_empty():
 		# Not wearable: clicking binds it to (or frees it from) the hotbar.
 		var bind_settings: Dictionary = _get_settings.call()
@@ -218,12 +238,16 @@ func refresh() -> void:
 	_backpack_items.clear()
 	var item_names := inventory.keys()
 	item_names.sort()
+	# Grow the grid when the pack outnumbers the slots (it scrolls).
+	while _backpack_buttons.size() < item_names.size():
+		_add_backpack_slot()
 	for index in _backpack_buttons.size():
 		var pack_button := _backpack_buttons[index]
 		var count_label := _backpack_counts[index]
 		if index < item_names.size():
 			var item_name := String(item_names[index])
 			_backpack_items.append(item_name)
+			pack_button.set_meta("item_name", item_name)
 			pack_button.icon = ItemDefsService.icon_texture(item_name)
 			pack_button.text = "" if pack_button.icon != null else item_name.left(2)
 			pack_button.modulate = Color.WHITE
@@ -242,7 +266,7 @@ func refresh() -> void:
 				tooltip += "\nHotbar key %d" % [(bound_key + 1) % 10]
 			pack_button.tooltip_text = tooltip
 		else:
-			_hint_label.text = "Click gear to wear it · click other items to bind them to the hotbar · I closes"
+			pack_button.set_meta("item_name", "")
 			pack_button.icon = null
 			pack_button.text = ""
 			pack_button.tooltip_text = ""

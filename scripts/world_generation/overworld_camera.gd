@@ -22,6 +22,10 @@ var _has_world_bounds := false
 var _dive_tween: Tween
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Disabled while the globe or 3D view drives - a hidden camera must
+	# not silently drift from wheel/drag/WASD meant for those views.
+	if not enabled:
+		return
 	var mouse_event := event as InputEventMouseButton
 	if mouse_event != null:
 		if mouse_event.button_index == MOUSE_BUTTON_WHEEL_UP:
@@ -75,7 +79,7 @@ func _apply_dive_zoom(zoom_level: float) -> void:
 	zoom_changed.emit(zoom_level)
 
 func _physics_process(delta: float) -> void:
-	if is_diving():
+	if not enabled or is_diving():
 		return
 	var direction := Vector2.ZERO
 	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):

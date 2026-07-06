@@ -19,6 +19,11 @@ func _refresh_load_button() -> void:
 	load_game_button.disabled = not SaveGameService.has_any_save()
 
 func _on_start_button_pressed() -> void:
+	# A new game must not inherit the previously loaded save's slot, or
+	# the first manual save would overwrite that older world.
+	var session := get_node_or_null("/root/GameSession")
+	if session != null and session.has_method("set_current_slot"):
+		session.call("set_current_slot", "")
 	get_tree().change_scene_to_file("res://scenes/character_creator.tscn")
 
 func _on_options_button_pressed() -> void:
