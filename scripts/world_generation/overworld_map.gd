@@ -8441,7 +8441,9 @@ func _update_caravans_visibility() -> void:
 	if _ships_layer != null:
 		_ships_layer.visible = overlays_visible
 	if _roads_layer != null:
-		_roads_layer.visible = overlays_visible
+		# The detailed view redraws roads as dirt tracks inside its own
+		# images; the world-scale brushwork would smear over them.
+		_roads_layer.visible = overlays_visible and not _region_mode
 
 func _create_caravan_texture() -> Texture2D:
 	var image := Image.create(14, 11, false, Image.FORMAT_RGBA8)
@@ -9080,6 +9082,9 @@ func _region_biome_for_tile(tile: Vector2i) -> String:
 func _region_river_for_tile(tile: Vector2i) -> bool:
 	return _tile_has_overlay_flag(_tile_data.get(tile, {}) as Dictionary, TILE_OVERLAY_RIVER)
 
+func _region_road_for_tile(tile: Vector2i) -> bool:
+	return _roads_layer != null and _roads_layer.get_cell_source_id(tile) >= 0
+
 ## The detail sprites live on a sibling of the tile layers so hiding the
 ## painted map leaves them (and the settlement layer above) untouched.
 func _ensure_region_layer() -> void:
@@ -9169,6 +9174,8 @@ func _set_base_map_layers_visible(layers_visible: bool) -> void:
 			layer.visible = layers_visible
 	if terrain_shading_overlay != null:
 		terrain_shading_overlay.visible = layers_visible
+	# Roads are world-scale brush art; the detail images draw their own.
+	_update_caravans_visibility()
 	if not layers_visible and _map_snapshot_sprite != null:
 		_map_snapshot_sprite.visible = false
 
@@ -9230,7 +9237,12 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 	water.resize(9)
 	var rivers := PackedFloat32Array()
 	rivers.resize(9)
-	var own_water := 1.0 if _region_biome_for_tile(tile) == TILE_ATLAS_DEFS.BIOME_WATER else 0.0
+	var roads := PackedFloat32Array()
+	roads.resize(9)
+	var biomes := PackedStringArray()
+	biomes.resize(9)
+	var own_biome := _region_biome_for_tile(tile)
+	var own_water := 1.0 if own_biome == TILE_ATLAS_DEFS.BIOME_WATER else 0.0
 	for ny in 3:
 		for nx in 3:
 			var neighbor := tile + Vector2i(nx - 1, ny - 1)
@@ -9238,9 +9250,13 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 			if neighbor.x < 0 or neighbor.y < 0 or neighbor.x >= map_size.x or neighbor.y >= map_size.y:
 				water[index] = own_water
 				rivers[index] = 0.0
+				roads[index] = 0.0
+				biomes[index] = own_biome
 				continue
 			water[index] = 1.0 if _region_biome_for_tile(neighbor) == TILE_ATLAS_DEFS.BIOME_WATER else 0.0
 			rivers[index] = 1.0 if _region_river_for_tile(neighbor) else 0.0
+			roads[index] = 1.0 if _region_road_for_tile(neighbor) else 0.0
+			biomes[index] = _region_biome_for_tile(neighbor)
 	var corners := PackedFloat32Array()
 	corners.resize(4)
 	var origin := tile * RegionMapService.CELLS_PER_TILE
@@ -9255,8 +9271,9 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 		tile_ruggedness = 0.45
 	return RegionMapService.make_render_job(
 		_region_world_seed_text(), tile,
-		_region_biome_for_tile(tile), _region_river_for_tile(tile),
-		has_iceberg, water, rivers, corners, tile_ruggedness
+		own_biome, _region_river_for_tile(tile),
+		has_iceberg, water, rivers, corners, tile_ruggedness,
+		biomes, roads
 	)
 
 ## Synchronous render for the first screenful on entry.
