@@ -82,6 +82,7 @@ var _last_clock_stamp := -1
 var _restoring_hold_diffs := false
 var _last_player_chunk := Vector2i(2147483647, 2147483647)
 var _world_seed_hash := 0
+var _hold_market: Dictionary = {}
 var _underdeep_sites: Array = []
 var _sites_by_chunk: Dictionary = {}
 var _player_inventory: Dictionary = {}
@@ -92,6 +93,7 @@ var _companion: Dictionary = {}
 var _staff_cooldown := 0.0
 var _gear_label: Label
 var _inventory_screen: PlayerInventoryPanel
+var _npc_inspection_card: NpcInspectionCard
 var _player_hotbar: PlayerHotbar
 var _creature_repop_timer := 0.0
 var _player_hp := 20.0
@@ -942,6 +944,7 @@ func _advance_game_clock(delta: float) -> void:
 		return
 	var delta_hours := delta * 24.0 / (minutes_per_game_day * 60.0)
 	var hour_before := int(_game_hour)
+	var day_before := _game_day
 	_game_hour += delta_hours
 	while _game_hour >= 24.0:
 		_game_hour -= 24.0
@@ -953,10 +956,24 @@ func _advance_game_clock(delta: float) -> void:
 		clock_settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
 		_store_world_settings(clock_settings)
 		_refresh_player_stats_from_session()
+		if _game_day != day_before:
+			_advance_world_events()
 	_advance_hunger(delta_hours)
 	_advance_afflictions(delta_hours)
 	_update_faction_events()
 	_update_clock_label()
+
+## A new day means new history: roll the shared world-event log forward
+## and surface the freshest news on the status ticker.
+func _advance_world_events() -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	if settings.is_empty():
+		return
+	var world_seed_text := str(settings.get("world_seed", seed_input.text.strip_edges()))
+	var fresh_events: Array[Dictionary] = WorldEventsService.advance(settings, world_seed_text, _game_day)
+	_store_world_settings(settings)
+	for event: Dictionary in fresh_events:
+		_set_save_status("News: " + String(event.get("text", "")), Color(0.75, 0.8, 0.95))
 
 func _update_clock_label() -> void:
 	if clock_label == null:
@@ -1303,6 +1320,9 @@ func _generate_city() -> void:
 
 	_rng.seed = hash(seed_text)
 	_world_seed_hash = hash(seed_text)
+	# Holds carry no generated details dict; the market derives from a
+	# seeded stub of mountain exports (ore, ingots, gems, stone).
+	_hold_market = SettlementEconomyService.settlement_market(SettlementEconomyService.hold_details_stub(_world_seed_hash), _world_seed_hash)
 	_hold_state.generated_levels.clear()
 
 	var minimum_levels := mini(underground_level_count_range.x, underground_level_count_range.y)
@@ -2019,7 +2039,7 @@ func _populate_backpack_slots() -> void:
 		_backpack_slot_items.append(item_name)
 		_fill_inventory_slot(i, _backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons, item_name, int(_player_inventory[item_name]))
 		if _is_trade_mode():
-			_backpack_slot_panels[i].tooltip_text += "\nSell for %d coins" % SettlementEconomyService.sell_price(item_name)
+			_backpack_slot_panels[i].tooltip_text += "\nSell for %d coins" % SettlementEconomyService.local_sell_price(item_name, _hold_market)
 
 ## Clicking a backpack slot that holds something edible eats one of it.
 func _on_backpack_slot_gui_input(event: InputEvent, slot_index: int) -> void:
@@ -2051,7 +2071,8 @@ func _on_city_panel_gui_input(event: InputEvent) -> void:
 		Callable(self, "_set_is_panning"),
 		_is_panning,
 		Callable(self, "_pan_city_view"),
-		Callable(self, "_update_city_layer_transform")
+		Callable(self, "_update_city_layer_transform"),
+		Callable(self, "_handle_player_right_click")
 	)
 
 func _set_is_panning(value: bool) -> void:
@@ -2541,16 +2562,41 @@ func _setup_inventory_screen() -> void:
 		Callable(self, "_world_settings_snapshot"),
 		Callable(self, "_store_world_settings"),
 		func() -> Dictionary: return _player_inventory,
-		Callable(self, "_on_equipment_changed")
+		Callable(self, "_on_equipment_changed"),
+		Callable(self, "_inventory_screen_context")
 	)
 	chest_popup.get_parent().add_child(_inventory_screen)
+	_npc_inspection_card = NpcInspectionCard.new()
+	chest_popup.get_parent().add_child(_npc_inspection_card)
 	# UI must outdraw the world: furnishing sprites carry z 8-14 and
 	# speech bubbles z 40 in the same canvas, and z_index beats tree
 	# order - without this, pots and stoves render over open menus.
 	_inventory_screen.z_index = 50
+	_npc_inspection_card.z_index = 50
 	chest_popup.z_index = 50
 	if tile_hover_tooltip != null:
 		tile_hover_tooltip.z_index = 50
+
+## Live scene state for the character-sheet columns; the panel reads
+## everything else from the session stores.
+func _inventory_screen_context() -> Dictionary:
+	var discovery_count := 0
+	for label_variant: Variant in _latest_district_labels:
+		if label_variant is Dictionary and bool((label_variant as Dictionary).get("wild", false)):
+			discovery_count += 1
+	return {
+		"hp": _player_hp,
+		"max_hp": _player_max_hp,
+		"satiety": _player_satiety,
+		"coins": _player_coins,
+		"game_day": _game_day,
+		"game_hour": _game_hour,
+		"calendar_start_year": _calendar_start_year,
+		"place_name": "Level %d — %s" % [_hold_state.current_level_index + 1, String(_current_stratum.get("name", "the hold"))],
+		"factions": _settlement_factions,
+		"companion_attack": int(_companion.get("attack", 0)),
+		"discoveries": discovery_count
+	}
 
 func _on_equipment_changed() -> void:
 	_refresh_player_stats_from_session()
@@ -2775,7 +2821,8 @@ func _open_trade_popup(cell: Vector2i, shop_type: String) -> void:
 	chest_popup_take_all_button.disabled = true
 	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
 	if section_label != null:
-		section_label.text = "Wares for sale"
+		var hint := SettlementEconomyService.market_hint_line(_hold_market)
+		section_label.text = "Wares for sale" if hint.is_empty() else "Wares for sale — %s" % hint
 	_refresh_trade_panel()
 
 func _refresh_trade_panel() -> void:
@@ -2788,7 +2835,7 @@ func _refresh_trade_panel() -> void:
 		var item_name := String(entry.get("name", "Supplies"))
 		var quantity := int(entry.get("quantity", 1))
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, item_name, quantity)
-		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.buy_price(item_name, _price_scale())
+		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.local_buy_price(item_name, _price_scale(), _hold_market)
 	_populate_backpack_slots()
 	chest_popup_status_label.text = "🪙 %d coins — click wares to buy, click your pack to sell" % _player_coins
 	if stock.is_empty():
@@ -2800,7 +2847,7 @@ func _buy_trade_item(slot_index: int) -> void:
 		return
 	var entry := stock[slot_index] as Dictionary
 	var item_name := String(entry.get("name", "Supplies"))
-	var price := SettlementEconomyService.buy_price(item_name, _price_scale())
+	var price := SettlementEconomyService.local_buy_price(item_name, _price_scale(), _hold_market)
 	if _player_coins < price:
 		chest_popup_status_label.text = "Not enough coins for %s (%d needed)" % [item_name, price]
 		return
@@ -2815,7 +2862,7 @@ func _buy_trade_item(slot_index: int) -> void:
 func _sell_item(item_name: String) -> void:
 	if int(_player_inventory.get(item_name, 0)) < 1:
 		return
-	var price := SettlementEconomyService.sell_price(item_name)
+	var price := SettlementEconomyService.local_sell_price(item_name, _hold_market)
 	_add_to_inventory(item_name, -1)
 	_adjust_coins(price)
 	_refresh_trade_panel()
@@ -2952,16 +2999,25 @@ func _show_npc_dialogue(state: Dictionary) -> void:
 	# guilds, and everyone still has personal news and map rumors.
 	var line: String
 	var faction_roll := _rng.randf()
-	if state.has("faction_name") and faction_roll < 0.35:
+	if int(state.get("role", 0)) == ROLE_GOLDSMITH and _rng.randf() < 0.4:
+		# The hold's traders talk shop: what goes cheap here, what pays.
+		line = SettlementEconomyService.dialogue_line(role_title, SettlementEconomyService.merchant_market_line(_hold_market, _rng), _rng)
+	elif state.has("faction_name") and faction_roll < 0.35:
 		line = SettlementEconomyService.dialogue_line(role_title, SettlementFactionService.member_line(state, _rng), _rng)
 	elif faction_roll < 0.5 and not _settlement_factions.is_empty():
 		line = SettlementEconomyService.dialogue_line(role_title, SettlementFactionService.faction_rumor(_settlement_factions, _rng), _rng)
 	elif _rng.randf() < 0.4:
 		line = SettlementEconomyService.dialogue_line(role_title, NpcIdentityService.personal_line(identity, _rng), _rng)
 	else:
-		var rumor: String = SettlementEconomyService.rumor_from_labels(
-			_latest_district_labels, _latest_district_cell_map, _player_cell, _rng
-		)
+		# World news travels even underground: sometimes the gossip is
+		# about far-off wars and caravans instead of the local deeps.
+		var rumor := ""
+		if _rng.randf() < 0.4:
+			rumor = WorldEventsService.rumor_from_events(_world_settings_snapshot(), _game_day, _rng)
+		if rumor.is_empty():
+			rumor = SettlementEconomyService.rumor_from_labels(
+				_latest_district_labels, _latest_district_cell_map, _player_cell, _rng
+			)
 		line = SettlementEconomyService.dialogue_line(role_title, rumor, _rng)
 	var sprite := state.get("sprite") as Sprite2D
 	var anchor_position: Vector2 = sprite.position if sprite != null else _player_sprite.position
@@ -4038,7 +4094,33 @@ func _create_player_character_sprite() -> Sprite2D:
 func _create_placeholder_actor_texture() -> Texture2D:
 	return DwarfHoldTavernService.create_placeholder_actor_texture()
 
+## Right-click on a living citizen opens their inspection card - a look,
+## not a touch, so it works at any distance. Returns whether the click
+## was claimed; unclaimed right-presses fall through to map panning.
+func _handle_player_right_click(mouse_position: Vector2) -> bool:
+	var clicked_cell := _cell_from_mouse_position(mouse_position)
+	var npc_state := _npc_state_at_cell(clicked_cell)
+	# The risen dead have no pockets worth rifling.
+	if npc_state.is_empty() or SettlementAfflictionService.is_active_zombie(npc_state):
+		if _npc_inspection_card != null:
+			_npc_inspection_card.close()
+		return false
+	_open_npc_inspection(npc_state)
+	return true
+
+func _open_npc_inspection(npc_state: Dictionary) -> void:
+	if _npc_inspection_card == null:
+		return
+	var role_title := String(ROLE_TITLES.get(int(npc_state.get("role", 0)), "Dwarf"))
+	if not npc_state.has("identity"):
+		npc_state["identity"] = NpcIdentityService.generate(_rng, role_title, "dwarf")
+		npc_state["npc_name"] = String((npc_state["identity"] as Dictionary).get("name", "A dwarf"))
+	_npc_inspection_card.open(npc_state, role_title, hash(seed_input.text.strip_edges()))
+
 func _handle_player_click_action(mouse_position: Vector2) -> void:
+	# Any left-click on the map is a click-away for an open inspection.
+	if _npc_inspection_card != null and _npc_inspection_card.visible:
+		_npc_inspection_card.close()
 	if _player_sprite == null or not _player_control_enabled:
 		return
 	var clicked_cell := _cell_from_mouse_position(mouse_position)

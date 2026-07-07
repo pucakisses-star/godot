@@ -142,6 +142,38 @@ const TRAVELER_STOCK_TYPES := {
 	"Pilgrim": "pilgrim_satchel"
 }
 
+## What each profession keeps in their pockets when inspected. "tools"
+## always yields one pick (the trade's instrument); "wares" is either a
+## SHOP_STOCK_POOLS key (crafts-folk carry what they sell) or an inline
+## item list. "coin_max" caps the purse - merchants jingle, farmers don't.
+## Keys cover both settlement vocabularies plus the road professions.
+const NPC_KIT_TABLE := {
+	"Blacksmith": {"tools": ["Smith's Hammer", "Smith's Tongs"], "wares": "smithy", "coin_max": 16},
+	"Smith": {"tools": ["Smith's Hammer", "Smith's Tongs"], "wares": "forge", "coin_max": 16},
+	"Merchant": {"tools": [], "wares": "market_stall", "coin_max": 30},
+	"Goldsmith": {"tools": ["Mason's Chisel"], "wares": "gemcutters_studio", "coin_max": 30},
+	"Brewer": {"tools": [], "wares": "brewery", "coin_max": 14},
+	"Town Guard": {"tools": ["Whetstone"], "wares": ["Arrows", "Jerky Strip", "Mushroom Ration", "Loaf of Bread", "Dried Fish"], "coin_max": 12},
+	"Warrior of the Watch": {"tools": ["Whetstone"], "wares": ["Arrows", "Mushroom Ration", "Jerky Strip", "Dried Fish"], "coin_max": 12},
+	"Farmer": {"tools": ["Spade"], "wares": ["Carrot Seeds", "Beetroot Seeds", "Tomato Seeds", "Carrot", "Beetroot", "Tomato", "Egg"], "coin_max": 8},
+	"Homesteader": {"tools": [], "wares": ["Egg", "Milk Pail", "Loaf of Bread", "Wheel of Cheese", "Skein of Wool", "Truffle"], "coin_max": 8},
+	"Cleric": {"tools": ["Wax Candles"], "wares": ["Old Tome", "Healing Potion", "Rowanberries", "Jar of Honey"], "coin_max": 10},
+	"Elder": {"tools": ["Wax Candles"], "wares": ["Old Tome", "Healing Potion", "Carved Curio", "Jar of Honey"], "coin_max": 14},
+	"Hold Elder": {"tools": ["Wax Candles"], "wares": ["Old Tome", "Runestone", "Healing Potion", "Carved Curio"], "coin_max": 14},
+	"Miner": {"tools": ["Rusty Pickaxe", "Worn Pickaxe", "Copper Pick"], "wares": ["Stone", "Iron Ore", "Copper Ore", "Mushrooms", "Miner's Lantern"], "coin_max": 8},
+	"Runescribe": {"tools": ["Mason's Chisel"], "wares": ["Runed Tablet", "Old Tome", "Gem Shard", "Wax Candles"], "coin_max": 12},
+	"Peddler": {"tools": [], "wares": "peddler_pack", "coin_max": 24},
+	"Tinker": {"tools": [], "wares": "tinker_cart", "coin_max": 20},
+	"Drover": {"tools": [], "wares": "drover_stock", "coin_max": 16},
+	"Pilgrim": {"tools": [], "wares": "pilgrim_satchel", "coin_max": 8}
+}
+## Villagers and anyone without a listed trade: bread, cloth, trinkets.
+const NPC_KIT_GENERIC := {
+	"tools": [],
+	"wares": ["Loaf of Bread", "Bolt of Cloth", "Wax Candles", "Carved Curio", "Wheel of Cheese", "Skein of Wool"],
+	"coin_max": 6
+}
+
 const DWARF_FIRST_NAMES: Array[String] = [
 	"Borin", "Dagna", "Thrain", "Vigdis", "Kelda", "Rurik", "Brokk",
 	"Eydis", "Snorri", "Hilda", "Orin", "Magna", "Durgan", "Sigrun",
@@ -167,6 +199,191 @@ const PROFESSION_LINES: Array[String] = [
 	"Been a %s all my life, like my kin before me.",
 	"The hold feeds well when a %s does their job."
 ]
+
+## --- Local supply and demand -------------------------------------------------
+## Each settlement's export goods trade CHEAP at home and its demanded
+## goods DEAR - both buying and selling - so hauling wares between
+## settlements earns a real margin.
+
+const MARKET_EXPORT_SCALE := 0.6
+const MARKET_DEMAND_SCALE := 1.7
+
+## Maps the flavor export strings in settlement details ("Salted riverfish
+## and smoked eel") onto real ITEM_VALUES names by keyword, so new flavor
+## text degrades to "no match" instead of pricing phantom goods.
+const EXPORT_KEYWORD_ITEMS := {
+	"fish": ["Dried Fish", "Grilled Fish"],
+	"eel": ["Dried Fish", "Grilled Fish"],
+	"wool": ["Skein of Wool", "Bolt of Cloth"],
+	"textile": ["Bolt of Cloth", "Skein of Wool"],
+	"grain": ["Loaf of Bread"],
+	"wine": ["Ale Keg"],
+	"ale": ["Ale Keg"],
+	"brew": ["Ale Keg"],
+	"cordial": ["Ale Keg"],
+	"timber": ["Timber"],
+	"hardwood": ["Timber", "Carved Curio"],
+	"furniture": ["Carved Curio", "Timber"],
+	"ceramic": ["Carved Curio"],
+	"pottery": ["Carved Curio"],
+	"ironmongery": ["Iron Ingot", "Iron Nails", "Iron Horseshoes"],
+	"iron": ["Iron Ore", "Iron Ingot"],
+	"ore": ["Iron Ore", "Copper Ore", "Iron Ingot"],
+	"ingot": ["Iron Ingot", "Copper Ingot"],
+	"gem": ["Gem Shard"],
+	"stone": ["Stone Block", "Stone"],
+	"manuscript": ["Old Tome"],
+	"scroll": ["Old Tome"],
+	"oil": ["Wax Candles"],
+	"soap": ["Wax Candles"],
+	"instrument": ["Carved Curio"],
+	"saddle": ["Leather Strap", "Iron Horseshoes"],
+	"tack": ["Leather Strap", "Iron Horseshoes"],
+	"leather": ["Leather Strap"],
+	"honey": ["Jar of Honey"],
+	"cheese": ["Wheel of Cheese"]
+}
+
+## What a settlement might be short of; demands roll from here EXCLUDING
+## anything the settlement itself exports.
+const DEMAND_ITEM_GROUPS := [
+	["Iron Ingot", "Iron Ore"],
+	["Dried Fish", "Grilled Fish"],
+	["Skein of Wool", "Bolt of Cloth"],
+	["Ale Keg"],
+	["Timber"],
+	["Gem Shard", "Gold Nugget"],
+	["Loaf of Bread", "Wheel of Cheese"],
+	["Healing Potion"],
+	["Old Tome"],
+	["Leather Strap", "Iron Horseshoes"],
+	["Wax Candles"],
+	["Whetstone", "Iron Nails"]
+]
+
+## Dwarfholds carry no generated details dict; their exports are what a
+## mountain sells, rolled from the hold seed.
+const HOLD_EXPORT_OPTIONS: Array[String] = [
+	"Iron ore and forged ingots",
+	"Cut gems and polished amber",
+	"Dressed stone blocks",
+	"Copper ore and cast ingots"
+]
+
+const MERCHANT_MARKET_LINES: Array[String] = [
+	"We ship %s by the barrel here — but %s fetches triple.",
+	"Nobody pays full coin for %s in this market; bring us %s and you'll leave rich.",
+	"Everyone here sells %s. What we can't get enough of is %s."
+]
+
+## The settlement's price sheet: exports trade at export_scale of normal,
+## demands at demand_scale, everything else unchanged. Pure function of
+## the details and seed, so every visit prices the same.
+static func settlement_market(town_details: Dictionary, settlement_seed: int) -> Dictionary:
+	var exports: Array[String] = []
+	for export_variant: Variant in (town_details.get("major_exports", []) as Array):
+		var lowered := String(export_variant).to_lower()
+		for keyword: String in EXPORT_KEYWORD_ITEMS.keys():
+			if not lowered.contains(keyword):
+				continue
+			for item_variant: Variant in (EXPORT_KEYWORD_ITEMS[keyword] as Array):
+				var item_name := String(item_variant)
+				if not exports.has(item_name):
+					exports.append(item_name)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("market|%d" % settlement_seed)
+	# A settlement whose flavor exports map to nothing still undercuts on
+	# something, so every market has a cheap side.
+	if exports.is_empty():
+		exports.assign(DEMAND_ITEM_GROUPS[rng.randi_range(0, DEMAND_ITEM_GROUPS.size() - 1)] as Array)
+	var demand_pool: Array[int] = []
+	for group_index: int in range(DEMAND_ITEM_GROUPS.size()):
+		var overlaps := false
+		for item_variant: Variant in (DEMAND_ITEM_GROUPS[group_index] as Array):
+			if exports.has(String(item_variant)):
+				overlaps = true
+				break
+		if not overlaps:
+			demand_pool.append(group_index)
+	var demands: Array[String] = []
+	var want := mini(rng.randi_range(2, 3), demand_pool.size())
+	for _pick_index: int in range(want):
+		var pool_index := rng.randi_range(0, demand_pool.size() - 1)
+		for item_variant: Variant in (DEMAND_ITEM_GROUPS[demand_pool[pool_index]] as Array):
+			demands.append(String(item_variant))
+		demand_pool.remove_at(pool_index)
+	return {
+		"exports": exports,
+		"demands": demands,
+		"export_scale": MARKET_EXPORT_SCALE,
+		"demand_scale": MARKET_DEMAND_SCALE
+	}
+
+## A details-like dict for settlements without one (dwarfholds), feeding
+## settlement_market the same way town details do.
+static func hold_details_stub(settlement_seed: int) -> Dictionary:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("hold_exports|%d" % settlement_seed)
+	var pool := HOLD_EXPORT_OPTIONS.duplicate()
+	var exports: Array[String] = []
+	for _pick_index: int in range(2):
+		var pool_index := rng.randi_range(0, pool.size() - 1)
+		exports.append(String(pool[pool_index]))
+		pool.remove_at(pool_index)
+	return {"major_exports": exports}
+
+static func market_price_multiplier(item_name: String, market: Dictionary) -> float:
+	if (market.get("exports", []) as Array).has(item_name):
+		return float(market.get("export_scale", MARKET_EXPORT_SCALE))
+	if (market.get("demands", []) as Array).has(item_name):
+		return float(market.get("demand_scale", MARKET_DEMAND_SCALE))
+	return 1.0
+
+static func local_buy_price(item_name: String, price_scale: float, market: Dictionary) -> int:
+	return maxi(1, int(round(float(buy_price(item_name, price_scale)) * market_price_multiplier(item_name, market))))
+
+static func local_sell_price(item_name: String, market: Dictionary) -> int:
+	return maxi(1, int(round(float(sell_price(item_name)) * market_price_multiplier(item_name, market))))
+
+## One-line shop hint: "Cheap here: Dried Fish, Grilled Fish · Dear here:
+## Iron Ingot, Ale Keg" - first couple of names from each side.
+static func market_hint_line(market: Dictionary) -> String:
+	var cheap := _joined_leading_names(market.get("exports", []) as Array, 2)
+	var dear := _joined_leading_names(market.get("demands", []) as Array, 2)
+	if cheap.is_empty() and dear.is_empty():
+		return ""
+	return "Cheap here: %s · Dear here: %s" % [cheap, dear]
+
+static func _joined_leading_names(names: Array, count: int) -> String:
+	var picked: Array[String] = []
+	for name_index: int in range(mini(count, names.size())):
+		picked.append(String(names[name_index]))
+	return ", ".join(picked)
+
+## What a merchant says about the local market, quoting real wares.
+static func merchant_market_line(market: Dictionary, rng: RandomNumberGenerator) -> String:
+	var exports := market.get("exports", []) as Array
+	var demands := market.get("demands", []) as Array
+	if exports.is_empty() or demands.is_empty():
+		return ""
+	var export_name := String(exports[rng.randi_range(0, exports.size() - 1)]).to_lower()
+	var demand_name := String(demands[rng.randi_range(0, demands.size() - 1)]).to_lower()
+	return MERCHANT_MARKET_LINES[rng.randi_range(0, MERCHANT_MARKET_LINES.size() - 1)] % [export_name, demand_name]
+
+## --- Caravan escort pay --------------------------------------------------------
+
+const CARAVAN_BASE_PAY := 30
+const CARAVAN_DANGER_PAY_SCALE := 1.5
+
+## Escort pay grows with the road and spikes while the news says the
+## roads are dangerous (lost caravans, raided settlements).
+static func caravan_pay(distance_cells: int, recent_world_events: Array) -> int:
+	var pay := CARAVAN_BASE_PAY + distance_cells / 2
+	for event_variant: Variant in recent_world_events:
+		var kind := String((event_variant as Dictionary).get("kind", ""))
+		if kind == "caravan_lost" or kind == "settlement_raided":
+			return int(round(float(pay) * CARAVAN_DANGER_PAY_SCALE))
+	return pay
 
 static func item_value(item_name: String) -> int:
 	return int(ITEM_VALUES.get(item_name, DEFAULT_ITEM_VALUE))
@@ -195,6 +412,33 @@ static func generate_shop_stock(shop_type: String, rng: RandomNumberGenerator) -
 		var quantity := rng.randi_range(2, 5) if item_value(item_name) <= 6 else rng.randi_range(1, 2)
 		stock.append({"name": item_name, "quantity": quantity})
 	return stock
+
+## Rolls what a citizen carries: 2-5 role-appropriate items and a small
+## purse. Seeded from name+profession (plus the caller's scene salt), so
+## a second look at the same NPC always shows the same pockets - callers
+## store the result on the NPC state so trade systems can mutate it later.
+static func npc_belongings(identity: Dictionary, role: int, seed_value: int) -> Dictionary:
+	var profession := String(identity.get("profession", ""))
+	var kit := NPC_KIT_TABLE.get(profession, NPC_KIT_GENERIC) as Dictionary
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s|%s|%d|%d" % [String(identity.get("name", "")), profession, role, seed_value])
+	var items: Array[Dictionary] = []
+	var tools := kit.get("tools", []) as Array
+	if not tools.is_empty():
+		items.append({"name": String(tools[rng.randi_range(0, tools.size() - 1)]), "quantity": 1})
+	var wares_variant: Variant = kit.get("wares", [])
+	var pool: Array = (SHOP_STOCK_POOLS.get(wares_variant, []) as Array).duplicate() if wares_variant is String else (wares_variant as Array).duplicate()
+	var want := rng.randi_range(2, 5) - items.size()
+	for _pick_index in range(want):
+		if pool.is_empty():
+			break
+		var pick_index := rng.randi_range(0, pool.size() - 1)
+		var item_name := String(pool[pick_index])
+		pool.remove_at(pick_index)
+		# Staples stack a little; anything dear is carried singly.
+		var quantity := rng.randi_range(1, 3) if item_value(item_name) <= 6 else 1
+		items.append({"name": item_name, "quantity": quantity})
+	return {"items": items, "coins": rng.randi_range(0, int(kit.get("coin_max", 6)))}
 
 static func dwarf_npc_name(rng: RandomNumberGenerator) -> String:
 	return "%s %s" % [

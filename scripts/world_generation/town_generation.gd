@@ -163,11 +163,16 @@ var _music_timer := 0.0
 var _wall_damage: Dictionary = {}
 var _speed_scale_cache := 1.0
 var _inventory_screen: PlayerInventoryPanel
+var _npc_inspection_card: NpcInspectionCard
 var _player_hotbar: PlayerHotbar
 var _factions_label: RichTextLabel
 var _faction_event_stamps: Dictionary = {}
 var _town_name := ""
 var _town_details: Dictionary = {}
+var _town_market: Dictionary = {}
+var _caravan_job: Dictionary = {}
+var _caravan_next_offer_stamp := 0.0
+var _caravan_offer_dialog: ConfirmationDialog
 var _game_hour := 9.0
 var _game_day := 1
 var _calendar_start_year := 250
@@ -202,6 +207,16 @@ var _actor_passable_cache: Dictionary = {}
 var _last_clock_stamp := -1
 var _applied_day_night_tint := Color(-1.0, -1.0, -1.0, -1.0)
 var _player_satiety := PlayerStatsService.SATIETY_MAX
+# Daily weather: a pure function of (world seed, absolute day), refreshed
+# on entry and at each midnight rollover, never saved.
+var _current_weather: Dictionary = {}
+var _weather_overlay: Node2D
+var _rain_particles: CPUParticles2D
+var _snow_particles: CPUParticles2D
+var _lightning_rect: ColorRect
+var _lightning_countdown := 0.0
+var _weather_overlay_active := true
+var _weather_refill_frame := -1
 
 const PLAYER_MOVE_SPEED := 260.0
 const SPD_NEIGHBOR_OFFSETS := [
@@ -539,6 +554,7 @@ func _ready() -> void:
 	_setup_inventory_screen()
 	_setup_hotbar()
 	GameAudioService.play_music(self, "town")
+	_refresh_weather(false)
 	_update_day_night_tint()
 	_update_clock_label()
 	_generate_city()
@@ -552,18 +568,21 @@ func _process(delta: float) -> void:
 	_update_surface_life(delta)
 	_update_companion(delta)
 	_update_raid(delta)
+	_update_caravan_job(delta)
 	_update_music(delta)
 	_update_player_turn_movement(delta)
 	_update_npc_movement(delta)
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
+	_update_weather_frame(delta)
 
 func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
 		return
 	var delta_hours := delta * 24.0 / (minutes_per_game_day * 60.0)
 	var hour_before := int(_game_hour)
+	var day_before := _game_day
 	_game_hour += delta_hours
 	while _game_hour >= 24.0:
 		_game_hour -= 24.0
@@ -575,12 +594,27 @@ func _advance_game_clock(delta: float) -> void:
 		_refresh_player_stats_town()
 		_advance_farm_growth()
 		_maybe_start_raid()
+		if _game_day != day_before:
+			_advance_world_events()
+			_refresh_weather(true)
 	# Strolling the market works up an appetite too.
 	_player_satiety = clampf(_player_satiety - delta_hours * PlayerStatsService.SATIETY_DRAIN_PER_GAME_HOUR, 0.0, PlayerStatsService.SATIETY_MAX)
 	_advance_afflictions(delta_hours)
 	_update_faction_events()
 	_update_day_night_tint()
 	_update_clock_label()
+
+## A new day means new history: roll the shared world-event log forward
+## and surface the freshest news on the status ticker.
+func _advance_world_events() -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	if settings.is_empty():
+		return
+	var world_seed_text := str(settings.get("world_seed", seed_input.text.strip_edges()))
+	var fresh_events: Array[Dictionary] = WorldEventsService.advance(settings, world_seed_text, _game_day)
+	_store_world_settings(settings)
+	for event: Dictionary in fresh_events:
+		_set_save_status("News: " + String(event.get("text", "")), Color(0.75, 0.8, 0.95))
 
 func _update_clock_label() -> void:
 	if clock_label == null:
@@ -592,12 +626,13 @@ func _update_clock_label() -> void:
 		return
 	_last_clock_stamp = clock_stamp
 	var is_night := _game_hour >= 20.0 or _game_hour < 6.0
-	clock_label.text = "%s %02d:%02d — %s (%s)" % [
+	clock_label.text = "%s %02d:%02d — %s (%s) · %s" % [
 		"🌙" if is_night else "☀",
 		hour,
 		minute,
 		GameCalendar.date_text(_game_day - 1, _calendar_start_year),
-		GameCalendar.season_for_day(_game_day - 1)
+		GameCalendar.season_for_day(_game_day - 1),
+		String(_current_weather.get("kind", "clear")).capitalize()
 	]
 
 ## Sky tint over the whole scene: white at noon, deep blue at night, warm
@@ -620,7 +655,7 @@ func _day_night_tint(hour: float) -> Color:
 
 func _update_day_night_tint() -> void:
 	# Tint only the map layers so the side panel stays readable at night.
-	var tint := _day_night_tint(_game_hour)
+	var tint := _day_night_tint(_game_hour) * WeatherService.tint_multiplier(_current_weather)
 	if tint.is_equal_approx(_applied_day_night_tint):
 		return
 	_applied_day_night_tint = tint
@@ -630,6 +665,197 @@ func _update_day_night_tint() -> void:
 		decor_layer.modulate = tint
 	if actor_layer != null:
 		actor_layer.modulate = tint
+
+## --- Weather -----------------------------------------------------------------
+## The sky is WeatherService.weather_for_day(world seed, absolute day):
+## the same day always looks the same, so nothing weather-shaped persists.
+## Precipitation is a screen-space veil in panel coordinates (parented
+## beside the zoomed map layers, not inside them), so it covers the
+## visible panel at any pan or zoom.
+
+const WEATHER_TICKER_LINES := {
+	"clear": "The clouds break; sunlight returns to the streets.",
+	"overcast": "Grey clouds roll in over the rooftops.",
+	"rain": "Rain sets in over the fields.",
+	"storm": "A storm breaks over the town — folk hurry indoors.",
+	"snow": "Snow begins to fall, hushing the streets."
+}
+const WEATHER_TICKER_COLOR := Color(0.7, 0.82, 0.95, 1.0)
+const WEATHER_EMIT_MARGIN := 48.0
+const RAIN_FALL_SPEED := 620.0
+const SNOW_FALL_SPEED := 55.0
+const LIGHTNING_INTERVAL_RANGE := Vector2(6.0, 14.0)
+
+func _refresh_weather(announce: bool) -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var world_seed_text := str(settings.get("world_seed", seed_input.text.strip_edges()))
+	var previous_kind := String(_current_weather.get("kind", ""))
+	_current_weather = WeatherService.weather_for_day(world_seed_text, _game_day - 1)
+	var kind := String(_current_weather.get("kind", "clear"))
+	if announce and kind != previous_kind and WEATHER_TICKER_LINES.has(kind):
+		_set_save_status(String(WEATHER_TICKER_LINES[kind]), WEATHER_TICKER_COLOR)
+	# The weather multiplies into the cached tint and the clock suffix.
+	_applied_day_night_tint = Color(-1.0, -1.0, -1.0, -1.0)
+	_last_clock_stamp = -1
+	_update_day_night_tint()
+	_update_clock_label()
+	_update_weather_visuals()
+
+func _update_weather_visuals() -> void:
+	_ensure_weather_overlay()
+	var kind := String(_current_weather.get("kind", "clear"))
+	var intensity := clampf(float(_current_weather.get("intensity", 0.5)), 0.0, 1.0)
+	# Rain and snow fall on the surface level only; cellars stay dry.
+	var active := _weather_overlay_active and _hold_state.current_level_index == 0
+	_weather_overlay.visible = active
+	var rain_amount := maxi(1, int(140.0 * intensity * (1.6 if kind == "storm" else 1.0)))
+	_configure_precipitation(_rain_particles, rain_amount, active and (kind == "rain" or kind == "storm"))
+	_configure_precipitation(_snow_particles, maxi(1, int(110.0 * intensity)), active and kind == "snow")
+	if not (active and kind == "storm"):
+		_lightning_rect.modulate.a = 0.0
+	_apply_weather_to_reflection()
+
+## Touching CPUParticles2D.amount clears the live pool without re-running
+## preprocess, leaving a bare sky for a full fall cycle — so only apply
+## changes, then queue a restart (which re-runs preprocess) for a later
+## frame: a restart on the scene's add/_ready frame never takes.
+func _configure_precipitation(particles: CPUParticles2D, target_amount: int, emit: bool) -> void:
+	if particles.amount == target_amount and particles.emitting == emit:
+		return
+	particles.amount = target_amount
+	particles.emitting = emit
+	if emit:
+		_weather_refill_frame = int(Engine.get_process_frames())
+
+## Per-frame: pause the veil while the panel is hidden and roll the
+## lightning clock during storms (the tree's pause stops _process itself).
+func _update_weather_frame(delta: float) -> void:
+	if _weather_overlay == null or not is_instance_valid(_weather_overlay):
+		return
+	var active := city_panel.is_visible_in_tree()
+	if active != _weather_overlay_active:
+		_weather_overlay_active = active
+		_update_weather_visuals()
+	if not active or _hold_state.current_level_index != 0:
+		return
+	# A stalled frame (city generation, window drags) fast-forwards the
+	# particle pool past its lifetime and empties the sky; refill on a
+	# later calm frame, when preprocess can re-fill the whole drop.
+	if delta > 0.5:
+		_weather_refill_frame = int(Engine.get_process_frames())
+	elif _weather_refill_frame >= 0 and int(Engine.get_process_frames()) > _weather_refill_frame:
+		_weather_refill_frame = -1
+		if _rain_particles.emitting:
+			_rain_particles.restart()
+		if _snow_particles.emitting:
+			_snow_particles.restart()
+	if String(_current_weather.get("kind", "")) != "storm":
+		return
+	_lightning_countdown -= delta
+	if _lightning_countdown > 0.0:
+		return
+	_lightning_countdown = _rng.randf_range(LIGHTNING_INTERVAL_RANGE.x, LIGHTNING_INTERVAL_RANGE.y)
+	_flash_lightning()
+
+func _flash_lightning() -> void:
+	_lightning_rect.size = city_panel.size
+	var tween := create_tween()
+	tween.tween_property(_lightning_rect, "modulate:a", 0.25, 0.06)
+	tween.tween_property(_lightning_rect, "modulate:a", 0.0, 0.3)
+
+func _ensure_weather_overlay() -> void:
+	if _weather_overlay != null and is_instance_valid(_weather_overlay):
+		return
+	_weather_overlay = Node2D.new()
+	_weather_overlay.name = "WeatherOverlay"
+	# Above the light overlay (14), below floating text (30); clipped by
+	# the panel like every other map layer.
+	_weather_overlay.z_index = 15
+	city_panel.add_child(_weather_overlay)
+	_rain_particles = CPUParticles2D.new()
+	_rain_particles.name = "RainParticles"
+	_rain_particles.texture = _make_weather_texture(Vector2i(2, 6), Color(0.72, 0.82, 1.0, 0.85), false)
+	_rain_particles.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_rain_particles.emitting = false
+	_rain_particles.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	_rain_particles.direction = Vector2(0.12, 1.0)
+	_rain_particles.spread = 2.0
+	_rain_particles.gravity = Vector2.ZERO
+	_rain_particles.initial_velocity_min = RAIN_FALL_SPEED * 0.9
+	_rain_particles.initial_velocity_max = RAIN_FALL_SPEED * 1.1
+	# Streaks lean into their down-right fall (canvas rotation is y-down).
+	_rain_particles.angle_min = -7.0
+	_rain_particles.angle_max = -7.0
+	_weather_overlay.add_child(_rain_particles)
+	_snow_particles = CPUParticles2D.new()
+	_snow_particles.name = "SnowParticles"
+	_snow_particles.texture = _make_weather_texture(Vector2i(3, 3), Color(1.0, 1.0, 1.0, 0.9), true)
+	_snow_particles.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_snow_particles.emitting = false
+	_snow_particles.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	_snow_particles.direction = Vector2(0.0, 1.0)
+	_snow_particles.spread = 25.0
+	_snow_particles.gravity = Vector2(0.0, 8.0)
+	_snow_particles.initial_velocity_min = SNOW_FALL_SPEED * 0.7
+	_snow_particles.initial_velocity_max = SNOW_FALL_SPEED * 1.3
+	# Flakes wander sideways instead of falling plumb.
+	_snow_particles.tangential_accel_min = -14.0
+	_snow_particles.tangential_accel_max = 14.0
+	_weather_overlay.add_child(_snow_particles)
+	_lightning_rect = ColorRect.new()
+	_lightning_rect.name = "LightningFlash"
+	_lightning_rect.color = Color(1.0, 1.0, 1.0, 1.0)
+	_lightning_rect.modulate.a = 0.0
+	_lightning_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_weather_overlay.add_child(_lightning_rect)
+	if not city_panel.resized.is_connected(_layout_weather_overlay):
+		city_panel.resized.connect(_layout_weather_overlay)
+	_layout_weather_overlay()
+
+## Emission spans the panel plus a margin; lifetimes cover the full drop
+## so drift fills the view (preprocess hides the empty first seconds).
+func _layout_weather_overlay() -> void:
+	if _weather_overlay == null or not is_instance_valid(_weather_overlay):
+		return
+	var panel_size := city_panel.size
+	var drop_height := panel_size.y + WEATHER_EMIT_MARGIN * 2.0
+	var emit_center := Vector2(panel_size.x * 0.5, -WEATHER_EMIT_MARGIN)
+	var emit_extents := Vector2(panel_size.x * 0.5 + WEATHER_EMIT_MARGIN, 8.0)
+	_rain_particles.position = emit_center
+	_rain_particles.emission_rect_extents = emit_extents
+	_rain_particles.lifetime = maxf(0.4, drop_height / RAIN_FALL_SPEED)
+	_rain_particles.preprocess = _rain_particles.lifetime
+	_snow_particles.position = emit_center
+	_snow_particles.emission_rect_extents = emit_extents
+	_snow_particles.lifetime = maxf(2.0, drop_height / SNOW_FALL_SPEED)
+	_snow_particles.preprocess = _snow_particles.lifetime
+	_lightning_rect.position = Vector2.ZERO
+	_lightning_rect.size = panel_size
+	# New lifetimes only take hold on a fresh cycle; refill active veils.
+	if _rain_particles.emitting or _snow_particles.emitting:
+		_weather_refill_frame = int(Engine.get_process_frames())
+
+func _make_weather_texture(texture_size: Vector2i, color: Color, round_corners: bool) -> ImageTexture:
+	var image := Image.create(texture_size.x, texture_size.y, false, Image.FORMAT_RGBA8)
+	image.fill(color)
+	if round_corners:
+		var clear := Color(0.0, 0.0, 0.0, 0.0)
+		image.set_pixel(0, 0, clear)
+		image.set_pixel(texture_size.x - 1, 0, clear)
+		image.set_pixel(0, texture_size.y - 1, clear)
+		image.set_pixel(texture_size.x - 1, texture_size.y - 1, clear)
+	return ImageTexture.create_from_image(image)
+
+func _apply_weather_to_reflection() -> void:
+	if _reflection_sprite == null or not is_instance_valid(_reflection_sprite):
+		return
+	(_reflection_sprite.material as ShaderMaterial).set_shader_parameter("rain_ripple", _weather_rain_ripple())
+
+func _weather_rain_ripple() -> float:
+	var kind := String(_current_weather.get("kind", "clear"))
+	if kind != "rain" and kind != "storm":
+		return 0.0
+	return clampf(float(_current_weather.get("intensity", 0.5)), 0.3, 1.0)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and not _is_text_input_focused():
@@ -710,6 +936,7 @@ func _on_scene_resumed() -> void:
 	_load_persistent_clock()
 	_last_clock_stamp = -1
 	_applied_day_night_tint = Color(-1.0, -1.0, -1.0, -1.0)
+	_refresh_weather(false)
 	_update_day_night_tint()
 	_update_clock_label()
 
@@ -1076,6 +1303,7 @@ func _generate_city() -> void:
 	details_rng.seed = hash("%s::town_details" % seed_text)
 	var display_name := _town_name if not _town_name.is_empty() else "Unnamed Town"
 	_town_details = TownDetailsGenerator.generate(display_name, _hold_state.selected_hold_population, details_rng, {"village": _town_is_village})
+	_town_market = SettlementEconomyService.settlement_market(_town_details, hash(seed_text))
 
 	var minimum_levels := mini(underground_level_count_range.x, underground_level_count_range.y)
 	var maximum_levels := maxi(underground_level_count_range.x, underground_level_count_range.y)
@@ -1311,6 +1539,7 @@ func _show_level(target_level_index: int) -> void:
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
 	_update_depth_controls()
+	_update_weather_visuals()
 
 func _update_depth_controls() -> void:
 	var level_count := _hold_state.generated_levels.size()
@@ -2113,6 +2342,10 @@ func _shop_anchor_for_cell(cell: Vector2i) -> Vector2i:
 func _price_scale() -> float:
 	return 1.0 + float(absi(hash(seed_input.text.strip_edges())) % 40) / 100.0
 
+func _with_market_hint(section_text: String) -> String:
+	var hint := SettlementEconomyService.market_hint_line(_town_market)
+	return section_text if hint.is_empty() else "%s — %s" % [section_text, hint]
+
 func _is_trade_mode() -> bool:
 	return _trade_shop_cell.x != 2147483647
 
@@ -2130,7 +2363,7 @@ func _open_trade_popup(cell: Vector2i, shop_type: String) -> void:
 	chest_popup_take_all_button.disabled = true
 	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
 	if section_label != null:
-		section_label.text = "Wares for sale"
+		section_label.text = _with_market_hint("Wares for sale")
 	_refresh_trade_panel()
 
 func _refresh_trade_panel() -> void:
@@ -2143,7 +2376,7 @@ func _refresh_trade_panel() -> void:
 		var item_name := String(entry.get("name", "Supplies"))
 		var quantity := int(entry.get("quantity", 1))
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, item_name, quantity)
-		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.buy_price(item_name, _price_scale())
+		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
 	_populate_backpack_slots()
 	chest_popup_status_label.text = "🪙 %d coins — click wares to buy, click your pack to sell" % _player_coins
 	if stock.is_empty():
@@ -2155,7 +2388,7 @@ func _buy_trade_item(slot_index: int) -> void:
 		return
 	var entry := stock[slot_index] as Dictionary
 	var item_name := String(entry.get("name", "Supplies"))
-	var price := SettlementEconomyService.buy_price(item_name, _price_scale())
+	var price := SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
 	if _player_coins < price:
 		chest_popup_status_label.text = "Not enough coins for %s (%d needed)" % [item_name, price]
 		return
@@ -2171,7 +2404,7 @@ func _buy_trade_item(slot_index: int) -> void:
 func _sell_item(item_name: String) -> void:
 	if int(_player_inventory.get(item_name, 0)) < 1:
 		return
-	var price := SettlementEconomyService.sell_price(item_name)
+	var price := SettlementEconomyService.local_sell_price(item_name, _town_market)
 	_player_inventory[item_name] = int(_player_inventory.get(item_name, 0)) - 1
 	if int(_player_inventory.get(item_name, 0)) <= 0:
 		_player_inventory.erase(item_name)
@@ -2323,18 +2556,29 @@ func _show_npc_dialogue(state: Dictionary) -> void:
 	# guilds, and everyone still has personal news and town rumors.
 	var line: String
 	var faction_roll := _rng.randf()
-	if state.has("faction_name") and faction_roll < 0.35:
+	if int(state.get("role", 0)) == ROLE_MERCHANT and _rng.randf() < 0.4:
+		# Merchants talk shop: what this market dumps cheap and pays dear for.
+		line = SettlementEconomyService.dialogue_line(role_title, SettlementEconomyService.merchant_market_line(_town_market, _rng), _rng)
+	elif state.has("faction_name") and faction_roll < 0.35:
 		line = SettlementEconomyService.dialogue_line(role_title, SettlementFactionService.member_line(state, _rng), _rng)
 	elif faction_roll < 0.5 and not _settlement_factions.is_empty():
 		line = SettlementEconomyService.dialogue_line(role_title, SettlementFactionService.faction_rumor(_settlement_factions, _rng), _rng)
 	elif _rng.randf() < 0.4:
 		line = SettlementEconomyService.dialogue_line(role_title, NpcIdentityService.personal_line(identity, _rng), _rng)
 	else:
-		var rumor: String = SettlementEconomyService.rumor_from_town_details(_town_details, _rng)
+		# World news travels: sometimes the gossip is about far-off wars
+		# and caravans instead of the town's own affairs.
+		var rumor := ""
+		if _rng.randf() < 0.4:
+			rumor = WorldEventsService.rumor_from_events(_world_settings_snapshot(), _game_day, _rng)
+		if rumor.is_empty():
+			rumor = SettlementEconomyService.rumor_from_town_details(_town_details, _rng)
 		line = SettlementEconomyService.dialogue_line(role_title, rumor, _rng)
 	var sprite := state.get("sprite") as Sprite2D
 	var anchor_position: Vector2 = sprite.position if sprite != null else _player_sprite.position
 	_spawn_speech_bubble("%s\n%s" % [NpcIdentityService.summary_line(identity), line], anchor_position)
+	if _caravan_offer_pay(state) > 0:
+		_show_caravan_offer()
 
 func _spawn_speech_bubble(text: String, world_position: Vector2) -> void:
 	if _active_speech_bubble != null and is_instance_valid(_active_speech_bubble):
@@ -2409,7 +2653,7 @@ func _populate_backpack_slots() -> void:
 		_backpack_slot_items.append(item_name)
 		_fill_inventory_slot(i, _backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons, item_name, int(_player_inventory[item_name]))
 		if _is_trade_mode():
-			_backpack_slot_panels[i].tooltip_text += "\nSell for %d coins" % SettlementEconomyService.sell_price(item_name)
+			_backpack_slot_panels[i].tooltip_text += "\nSell for %d coins" % SettlementEconomyService.local_sell_price(item_name, _town_market)
 
 func _item_abbreviation(item_name: String) -> String:
 	return DwarfHoldChestService.item_abbreviation(item_name)
@@ -2426,7 +2670,8 @@ func _on_city_panel_gui_input(event: InputEvent) -> void:
 		Callable(self, "_set_is_panning"),
 		_is_panning,
 		Callable(self, "_pan_city_view"),
-		Callable(self, "_update_city_layer_transform")
+		Callable(self, "_update_city_layer_transform"),
+		Callable(self, "_handle_player_right_click")
 	)
 
 func _set_is_panning(value: bool) -> void:
@@ -2560,7 +2805,7 @@ func _assign_npc_daily_lives(grid: Dictionary) -> void:
 		var sprite := state.get("sprite") as Sprite2D
 		if sprite == null:
 			continue
-		var mode: String = SettlementNpcScheduler.mode_for_hour(state, _game_hour)
+		var mode: String = SettlementNpcScheduler.mode_for_hour(state, _game_hour, WeatherService.is_storm(_current_weather))
 		var anchor: Vector2i = SettlementNpcScheduler.anchor_for_mode(state, mode)
 		if anchor.x != 2147483647 and _is_walkable_cell(anchor):
 			sprite.position = _cell_center_position(anchor)
@@ -2600,7 +2845,33 @@ func _create_player_character_sprite() -> Sprite2D:
 func _create_placeholder_actor_texture() -> Texture2D:
 	return DwarfHoldTavernService.create_placeholder_actor_texture()
 
+## Right-click on a living citizen opens their inspection card - a look,
+## not a touch, so it works at any distance. Returns whether the click
+## was claimed; unclaimed right-presses fall through to map panning.
+func _handle_player_right_click(mouse_position: Vector2) -> bool:
+	var clicked_cell := _cell_from_mouse_position(mouse_position)
+	var npc_state := _npc_state_at_cell(clicked_cell)
+	# The risen dead have no pockets worth rifling.
+	if npc_state.is_empty() or SettlementAfflictionService.is_active_zombie(npc_state):
+		if _npc_inspection_card != null:
+			_npc_inspection_card.close()
+		return false
+	_open_npc_inspection(npc_state)
+	return true
+
+func _open_npc_inspection(npc_state: Dictionary) -> void:
+	if _npc_inspection_card == null:
+		return
+	var role_title := String(ROLE_TITLES.get(int(npc_state.get("role", 0)), "Villager"))
+	if not npc_state.has("identity"):
+		npc_state["identity"] = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		npc_state["npc_name"] = String((npc_state["identity"] as Dictionary).get("name", "A villager"))
+	_npc_inspection_card.open(npc_state, role_title, hash(seed_input.text.strip_edges()))
+
 func _handle_player_click_action(mouse_position: Vector2) -> void:
+	# Any left-click on the map is a click-away for an open inspection.
+	if _npc_inspection_card != null and _npc_inspection_card.visible:
+		_npc_inspection_card.close()
 	if _player_sprite == null or not _player_control_enabled:
 		return
 	var clicked_cell := _cell_from_mouse_position(mouse_position)
@@ -2873,7 +3144,8 @@ func _update_npc_movement(delta: float) -> void:
 		delta, _scheduled_states(), city_layer, _rng,
 		tile_size, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),
-		Callable(self, "_cell_center_position")
+		Callable(self, "_cell_center_position"),
+		WeatherService.is_storm(_current_weather)
 	)
 
 ## The dead answer to their hunger, not the clock.
@@ -2951,6 +3223,7 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	_surface_gates.clear()
 	_surface_anchor_cells.clear()
 	_surface_arrival_lock = false
+	_clear_caravan_job()
 	for creature: Dictionary in _surface_creatures:
 		var creature_sprite := creature.get("sprite") as Sprite2D
 		if creature_sprite != null:
@@ -3475,6 +3748,9 @@ const CROP_DEFS := {
 	"tomato": {"seed": "Tomato Seeds", "yield": "Tomato", "tiles": ["crop_tomato_0", "crop_tomato_1", "crop_tomato_2"]}
 }
 const FARM_STAGE_HOURS := 8.0
+## Season re-rates the growing hour; rain (or a storm) waters for free.
+const FARM_SEASON_GROWTH := {"Spring": 1.15, "Summer": 1.0, "Autumn": 0.85, "Winter": 0.2}
+const FARM_RAIN_GROWTH_BONUS := 1.25
 const ANIMAL_CRATES := {"Chicken Crate": "chicken", "Piglet Crate": "pig", "Calf Crate": "cow"}
 const ANIMAL_PRODUCE := {"chicken": "Egg", "pig": "Truffle", "cow": "Milk Pail"}
 
@@ -3533,16 +3809,36 @@ func _setup_inventory_screen() -> void:
 		Callable(self, "_world_settings_snapshot"),
 		Callable(self, "_store_world_settings"),
 		func() -> Dictionary: return _player_inventory,
-		Callable(self, "_on_equipment_changed")
+		Callable(self, "_on_equipment_changed"),
+		Callable(self, "_inventory_screen_context")
 	)
 	chest_popup.get_parent().add_child(_inventory_screen)
+	_npc_inspection_card = NpcInspectionCard.new()
+	chest_popup.get_parent().add_child(_npc_inspection_card)
 	# UI must outdraw the world: furnishing sprites carry z 8-14 and
 	# speech bubbles z 40 in the same canvas, and z_index beats tree
 	# order - without this, pots and stoves render over open menus.
 	_inventory_screen.z_index = 50
+	_npc_inspection_card.z_index = 50
 	chest_popup.z_index = 50
 	if tile_hover_tooltip != null:
 		tile_hover_tooltip.z_index = 50
+
+## Live scene state for the character-sheet columns; the panel reads
+## everything else from the session stores.
+func _inventory_screen_context() -> Dictionary:
+	return {
+		"hp": _player_hp,
+		"max_hp": _player_max_hp,
+		"satiety": _player_satiety,
+		"coins": _player_coins,
+		"game_day": _game_day,
+		"game_hour": _game_hour,
+		"calendar_start_year": _calendar_start_year,
+		"place_name": _town_name if not _town_name.is_empty() else "Unnamed Town",
+		"factions": _settlement_factions,
+		"companion_attack": int(_companion.get("attack", 0))
+	}
 
 func _on_equipment_changed() -> void:
 	_refresh_player_stats_town()
@@ -3811,6 +4107,7 @@ func _ensure_reflection_sprite() -> void:
 	_reflection_sprite.z_index = 13
 	var reflection_material := ShaderMaterial.new()
 	reflection_material.shader = WATER_REFLECTION_SHADER
+	reflection_material.set_shader_parameter("rain_ripple", _weather_rain_ripple())
 	_reflection_sprite.material = reflection_material
 	actor_layer.add_child(_reflection_sprite)
 
@@ -4065,11 +4362,17 @@ func _try_farm_action(cell: Vector2i) -> bool:
 
 func _advance_farm_growth() -> void:
 	var now_hours := float(_game_day) * 24.0 + _game_hour
+	# Stages read elapsed hours since planted_h, so season and rain re-rate
+	# growth by sliding the planting stamp on each hourly tick.
+	var stamp_shift := 1.0 - _farm_growth_multiplier()
 	var changed := false
 	for cell_variant: Variant in _farm_plots.keys():
 		var plot := _farm_plots[cell_variant] as Dictionary
 		if String(plot.get("crop", "")).is_empty():
 			continue
+		if absf(stamp_shift) > 0.001:
+			plot["planted_h"] = float(plot.get("planted_h", now_hours)) + stamp_shift
+			changed = true
 		var stage := clampi(int((now_hours - float(plot.get("planted_h", now_hours))) / FARM_STAGE_HOURS), 0, 2)
 		if stage != int(plot.get("stage", 0)):
 			plot["stage"] = stage
@@ -4077,6 +4380,13 @@ func _advance_farm_growth() -> void:
 			changed = true
 	if changed:
 		_persist_farm()
+
+func _farm_growth_multiplier() -> float:
+	var multiplier := float(FARM_SEASON_GROWTH.get(GameCalendar.season_for_day(_game_day - 1), 1.0))
+	var kind := String(_current_weather.get("kind", "clear"))
+	if kind == WeatherService.KIND_RAIN or kind == WeatherService.KIND_STORM:
+		multiplier *= FARM_RAIN_GROWTH_BONUS
+	return multiplier
 
 func _persist_farm() -> void:
 	var settings: Dictionary = _world_settings_snapshot()
@@ -4262,9 +4572,303 @@ func _try_open_traveler_trade(state: Dictionary) -> bool:
 	chest_popup_take_all_button.disabled = true
 	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
 	if section_label != null:
-		section_label.text = "Wares from the pack"
+		section_label.text = _with_market_hint("Wares from the pack")
 	_refresh_trade_panel()
 	return true
+
+## --- caravan escort ------------------------------------------------------------
+## The market's merchant doubles as caravan master: sign on, walk beside
+## the wagon out to a waypost in the wilds, fight off the ambushes, get
+## paid on arrival. Scene-local - leaving town abandons the job.
+
+const CARAVAN_STEP_SECONDS := 0.4
+const CARAVAN_SPRITE_SPEED := 96.0
+const CARAVAN_GUARD_RANGE := 10
+const CARAVAN_ROUTE_MIN := 90
+const CARAVAN_ROUTE_MAX := 130
+const CARAVAN_WAGON_HP := 6
+const CARAVAN_HIT_BEAT_SECONDS := 1.2
+const CARAVAN_OFFER_COOLDOWN_HOURS := 24.0
+## The covered stall from the farm sheet reads as a covered wagon in motion.
+const CARAVAN_WAGON_CROP := Rect2(132, 90, 74, 52)
+
+func _caravan_master_state() -> Dictionary:
+	for state: Dictionary in _npc_states:
+		if int(state.get("role", -1)) == ROLE_MERCHANT and not bool(state.get("traveler", false)):
+			return state
+	return {}
+
+## Coins the master would offer this NPC's caller right now; 0 means no
+## offer (not the master, job running, or cooling down after the last run).
+func _caravan_offer_pay(state: Dictionary) -> int:
+	if not _caravan_job.is_empty() or _surface_road_paths.is_empty():
+		return 0
+	if not is_same(state, _caravan_master_state()):
+		return 0
+	if float(_game_day) * 24.0 + _game_hour < _caravan_next_offer_stamp:
+		return 0
+	return SettlementEconomyService.caravan_pay((CARAVAN_ROUTE_MIN + CARAVAN_ROUTE_MAX) / 2, WorldEventsService.recent_events(_world_settings_snapshot(), 12))
+
+func _show_caravan_offer() -> void:
+	if _caravan_offer_dialog == null:
+		_caravan_offer_dialog = ConfirmationDialog.new()
+		_caravan_offer_dialog.title = "Caravan Escort"
+		_caravan_offer_dialog.ok_button_text = "Sign on"
+		_caravan_offer_dialog.cancel_button_text = "Not today"
+		_caravan_offer_dialog.confirmed.connect(_on_caravan_offer_confirmed)
+		add_child(_caravan_offer_dialog)
+	var pay := _caravan_offer_pay(_caravan_master_state())
+	_caravan_offer_dialog.dialog_text = "\"Wagon's loaded for the waypost and the roads are ugly.\nWalk guard beside it and there's ~%d coins on arrival.\"" % pay
+	_caravan_offer_dialog.popup_centered()
+
+func _on_caravan_offer_confirmed() -> void:
+	_start_caravan_job(_caravan_master_state())
+
+func _start_caravan_job(master_state: Dictionary) -> void:
+	if not _caravan_job.is_empty() or master_state.is_empty():
+		return
+	var route := _build_caravan_route(master_state.get("cell", _player_cell) as Vector2i)
+	if route.size() < CARAVAN_ROUTE_MIN / 2:
+		_set_save_status("The caravan master squints at the roads and shakes his head — no route today.", Color(0.8, 0.8, 0.8, 1.0))
+		return
+	var pay := SettlementEconomyService.caravan_pay(route.size(), WorldEventsService.recent_events(_world_settings_snapshot(), 12))
+	var start_position := _cell_center_position(route[0])
+	var wagon_sprite := Sprite2D.new()
+	wagon_sprite.texture = FARM_HOUSES_TEXTURE
+	wagon_sprite.region_enabled = true
+	wagon_sprite.region_rect = CARAVAN_WAGON_CROP
+	wagon_sprite.position = start_position
+	wagon_sprite.z_index = 12
+	actor_layer.add_child(wagon_sprite)
+	var traders: Array[Dictionary] = []
+	for trader_index: int in range(2):
+		traders.append(_spawn_caravan_trader(route[0], trader_index))
+	_caravan_job = {
+		"route": route,
+		"route_index": 0,
+		"wagon_sprite": wagon_sprite,
+		"wagon_hp": CARAVAN_WAGON_HP,
+		"traders": traders,
+		"waypost_nodes": _spawn_caravan_waypost(route[route.size() - 1]),
+		"pay": pay,
+		"step_timer": CARAVAN_STEP_SECONDS,
+		"hit_beat": CARAVAN_HIT_BEAT_SECONDS,
+		"nag_timer": 0.0,
+		"ambush_marks": [route.size() / 3, (route.size() * 2) / 3]
+	}
+	_set_save_status("The caravan rolls out — stay within %d paces of the wagon." % CARAVAN_GUARD_RANGE, Color(0.85, 0.9, 0.75, 1.0))
+
+func _spawn_caravan_trader(cell: Vector2i, trader_index: int) -> Dictionary:
+	var identity: Dictionary = NpcIdentityService.generate(_rng, "Merchant", "townsfolk")
+	var layers: Dictionary = NpcIdentityService.appearance_for_identity(identity, "human")
+	var sprite := Sprite2D.new()
+	sprite.texture = DwarfSpriteComposer.compose(layers)
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.scale = Vector2(float(tile_size.x) / 32.0, float(tile_size.y) / 32.0) * float(layers.get("body_scale", 1.0))
+	sprite.z_index = 11
+	sprite.position = _cell_center_position(cell)
+	actor_layer.add_child(sprite)
+	return {"sprite": sprite, "hp": 6, "cell": cell, "trail": trader_index + 1}
+
+## The waypost camp at the route's end: a roadside shelter and a name.
+func _spawn_caravan_waypost(cell: Vector2i) -> Array:
+	var shelter := Sprite2D.new()
+	shelter.texture = FARM_HOUSES_TEXTURE
+	shelter.region_enabled = true
+	shelter.region_rect = FARM_BUILDING_CROPS["open_barn"] as Rect2
+	shelter.centered = false
+	shelter.position = _cell_center_position(cell) - Vector2(48.0, 70.0)
+	shelter.z_index = 10
+	actor_layer.add_child(shelter)
+	var post_label := Label.new()
+	post_label.text = "Trade Waypost"
+	post_label.add_theme_font_size_override("font_size", 18)
+	post_label.add_theme_color_override("font_color", Color(0.98, 0.94, 0.82, 1.0))
+	post_label.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.06, 1.0))
+	post_label.add_theme_constant_override("outline_size", 5)
+	post_label.position = city_layer.map_to_local(cell + Vector2i(-2, -4))
+	post_label.z_index = 30
+	city_layer.add_child(post_label)
+	return [shelter, post_label]
+
+## The wagon's road: pathfind from the master's stand to the head of the
+## longest surface road, then follow it out until the roll of 90-130
+## cells is spent - stopping shy of the far gate so the waypost stays a
+## camp, not a doorstep.
+func _build_caravan_route(start_cell: Vector2i) -> Array[Vector2i]:
+	var best_path: Array = []
+	for path_variant: Array in _surface_road_paths:
+		if path_variant.size() > best_path.size():
+			best_path = path_variant
+	if best_path.size() < 24:
+		return []
+	var route: Array[Vector2i] = [start_cell]
+	var road_head := best_path[0] as Vector2i
+	route.append_array(_build_player_path(start_cell, road_head))
+	if route[route.size() - 1] != road_head:
+		# No walkable lane to the road head; muster on the road instead.
+		route = [road_head]
+	var end_index := clampi(_rng.randi_range(CARAVAN_ROUTE_MIN, CARAVAN_ROUTE_MAX) - route.size(), 8, best_path.size() - 12)
+	for road_index: int in range(1, end_index + 1):
+		route.append(best_path[road_index] as Vector2i)
+	return route
+
+func _update_caravan_job(delta: float) -> void:
+	if _caravan_job.is_empty():
+		return
+	var wagon_sprite := _caravan_job.get("wagon_sprite") as Sprite2D
+	if wagon_sprite == null or not is_instance_valid(wagon_sprite):
+		_finish_caravan_job("The caravan is lost.")
+		return
+	var route := _caravan_job.get("route", []) as Array
+	var route_index := int(_caravan_job.get("route_index", 0))
+	var wagon_cell := route[route_index] as Vector2i
+	if maxi(absi(wagon_cell.x - _player_cell.x), absi(wagon_cell.y - _player_cell.y)) > CARAVAN_GUARD_RANGE:
+		_caravan_job["nag_timer"] = float(_caravan_job.get("nag_timer", 0.0)) - delta
+		if float(_caravan_job.get("nag_timer", 0.0)) <= 0.0:
+			_caravan_job["nag_timer"] = 4.0
+			_set_save_status("The caravan waits for its guard.", Color(0.95, 0.85, 0.55, 1.0))
+	else:
+		_caravan_job["nag_timer"] = 0.0
+		_caravan_job["step_timer"] = float(_caravan_job.get("step_timer", 0.0)) - delta
+		if float(_caravan_job.get("step_timer", 0.0)) <= 0.0 and route_index < route.size() - 1:
+			_caravan_job["step_timer"] = CARAVAN_STEP_SECONDS
+			route_index += 1
+			_caravan_job["route_index"] = route_index
+			wagon_sprite.flip_h = (route[route_index] as Vector2i).x < wagon_cell.x
+			wagon_cell = route[route_index] as Vector2i
+			_maybe_spring_caravan_ambush(route_index, wagon_cell)
+	wagon_sprite.position = wagon_sprite.position.move_toward(_cell_center_position(wagon_cell), CARAVAN_SPRITE_SPEED * delta)
+	_update_caravan_traders(delta, route, route_index)
+	_update_caravan_damage(delta, wagon_cell)
+	if _caravan_job.is_empty():
+		return
+	if route_index >= route.size() - 1 and wagon_sprite.position.distance_to(_cell_center_position(wagon_cell)) < 2.0:
+		var pay := int(_caravan_job.get("pay", 0))
+		_adjust_coins(pay)
+		GameAudioService.play_sfx(self, "coin")
+		_spawn_floating_text("+%d coins" % pay, wagon_sprite.position, Color(0.95, 0.8, 0.4, 1.0))
+		_finish_caravan_job("The caravan reaches the waypost — %d coins for the escort." % pay, Color(0.7, 0.95, 0.7, 1.0))
+
+## The traders trail the wagon a cell or two behind, single file.
+func _update_caravan_traders(delta: float, route: Array, route_index: int) -> void:
+	for trader_variant: Variant in (_caravan_job.get("traders", []) as Array):
+		var trader := trader_variant as Dictionary
+		var sprite := trader.get("sprite") as Sprite2D
+		if sprite == null or not is_instance_valid(sprite):
+			continue
+		var trail_cell := route[maxi(route_index - int(trader.get("trail", 1)), 0)] as Vector2i
+		trader["cell"] = trail_cell
+		var target: Vector2 = _cell_center_position(trail_cell)
+		sprite.flip_h = target.x < sprite.position.x
+		sprite.position = sprite.position.move_toward(target, CARAVAN_SPRITE_SPEED * delta)
+
+## Hostiles beside the wagon or its traders land a blow every beat the
+## guard leaves them unanswered; the wagon splinters, the traders bleed.
+func _update_caravan_damage(delta: float, wagon_cell: Vector2i) -> void:
+	_caravan_job["hit_beat"] = float(_caravan_job.get("hit_beat", 0.0)) - delta
+	if float(_caravan_job.get("hit_beat", 0.0)) > 0.0:
+		return
+	_caravan_job["hit_beat"] = CARAVAN_HIT_BEAT_SECONDS
+	var wagon_sprite := _caravan_job.get("wagon_sprite") as Sprite2D
+	if _any_hostile_adjacent(wagon_cell):
+		_caravan_job["wagon_hp"] = int(_caravan_job.get("wagon_hp", CARAVAN_WAGON_HP)) - 2
+		if wagon_sprite != null:
+			_flash_sprite(wagon_sprite, Color(1.0, 0.4, 0.35, 1.0))
+			_spawn_floating_text("-2", wagon_sprite.position, Color(1.0, 0.4, 0.4, 1.0))
+	var traders := _caravan_job.get("traders", []) as Array
+	for trader_index: int in range(traders.size() - 1, -1, -1):
+		var trader := traders[trader_index] as Dictionary
+		if not _any_hostile_adjacent(trader.get("cell", wagon_cell) as Vector2i):
+			continue
+		trader["hp"] = int(trader.get("hp", 6)) - 2
+		var trader_sprite := trader.get("sprite") as Sprite2D
+		if trader_sprite != null and is_instance_valid(trader_sprite):
+			_flash_sprite(trader_sprite, Color(1.0, 0.4, 0.35, 1.0))
+			if int(trader.get("hp", 0)) <= 0:
+				trader_sprite.queue_free()
+		if int(trader.get("hp", 0)) <= 0:
+			traders.remove_at(trader_index)
+			_set_save_status("A trader falls under the ambush!", Color(0.95, 0.5, 0.4, 1.0))
+	if int(_caravan_job.get("wagon_hp", 0)) <= 0:
+		_finish_caravan_job("The wagon is wrecked — the caravan is lost, and so is your pay.")
+	elif traders.is_empty():
+		_finish_caravan_job("Both traders lie dead — there is no one left to pay you.")
+
+func _any_hostile_adjacent(cell: Vector2i) -> bool:
+	for creature: Dictionary in _surface_creatures:
+		var creature_cell := creature.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i
+		if maxi(absi(creature_cell.x - cell.x), absi(creature_cell.y - cell.y)) <= 1:
+			return true
+	return false
+
+## Two planned ambushes, sprung as the wagon crosses 1/3 and 2/3 of the
+## route: a small pack rushes it from the treeline.
+func _maybe_spring_caravan_ambush(route_index: int, wagon_cell: Vector2i) -> void:
+	var marks := _caravan_job.get("ambush_marks", []) as Array
+	for mark_index: int in range(marks.size() - 1, -1, -1):
+		if route_index < int(marks[mark_index]):
+			continue
+		marks.remove_at(mark_index)
+		var want := _rng.randi_range(2, 3)
+		var spawned := 0
+		for _attempt: int in range(want * 6):
+			if spawned >= want:
+				break
+			var cell := _walkable_cell_near(wagon_cell, 3, 6)
+			if cell.x == 2147483647:
+				continue
+			var size_before := _surface_creatures.size()
+			SurfaceLifeService.spawn_creature(
+				_surface_creatures, SURFACE_CREATURE_TEXTURE,
+				SurfaceLifeService.tier_def_index(SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells), _rng),
+				cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
+			)
+			if _surface_creatures.size() > size_before:
+				spawned += 1
+		if spawned > 0:
+			GameAudioService.play_sfx(self, "raid_horn")
+			_set_save_status("Ambush! %d shapes rush the wagon!" % spawned, Color(0.95, 0.45, 0.4, 1.0))
+
+func _walkable_cell_near(center: Vector2i, min_distance: int, max_distance: int) -> Vector2i:
+	for _attempt: int in range(10):
+		var angle := _rng.randf_range(0.0, TAU)
+		var distance := _rng.randf_range(float(min_distance), float(max_distance))
+		var cell := center + Vector2i(roundi(cos(angle) * distance), roundi(sin(angle) * distance))
+		if _is_walkable_cell(cell):
+			return cell
+	return Vector2i(2147483647, 2147483647)
+
+## Success or failure, the run ends the same way: the ticker speaks, the
+## wagon lingers a beat then fades, and the master needs a day before the
+## next load is ready. The waypost camp stays as scenery.
+func _finish_caravan_job(ticker_text: String, ticker_color: Color = Color(0.95, 0.5, 0.4, 1.0)) -> void:
+	if not ticker_text.is_empty():
+		_set_save_status(ticker_text, ticker_color)
+	var wagon_sprite := _caravan_job.get("wagon_sprite") as Sprite2D
+	if wagon_sprite != null and is_instance_valid(wagon_sprite):
+		var tween := create_tween()
+		tween.tween_interval(1.2)
+		tween.tween_property(wagon_sprite, "modulate:a", 0.0, 0.6)
+		tween.tween_callback(wagon_sprite.queue_free)
+	for trader_variant: Variant in (_caravan_job.get("traders", []) as Array):
+		var trader_sprite := (trader_variant as Dictionary).get("sprite") as Sprite2D
+		if trader_sprite != null and is_instance_valid(trader_sprite):
+			trader_sprite.queue_free()
+	_caravan_next_offer_stamp = float(_game_day) * 24.0 + _game_hour + CARAVAN_OFFER_COOLDOWN_HOURS
+	_caravan_job = {}
+
+## Regeneration rebuilds the world under the wagon; drop the job silently.
+func _clear_caravan_job() -> void:
+	if _caravan_job.is_empty():
+		return
+	for node_variant: Variant in (_caravan_job.get("waypost_nodes", []) as Array):
+		var node := node_variant as Node
+		if node != null and is_instance_valid(node):
+			node.queue_free()
+	_finish_caravan_job("")
+	# A rebuilt world owes no cooldown; the master offers fresh.
+	_caravan_next_offer_stamp = 0.0
 
 ## --- raids on the homestead --------------------------------------------------
 

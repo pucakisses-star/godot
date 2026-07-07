@@ -16,6 +16,8 @@ uniform float view_zoom = 1.0;
 uniform vec4 water_tint: source_color = vec4(0.2, 0.38, 0.6, 1.0);
 uniform float reflection_alpha: hint_range(0.0, 1.0) = 0.34;
 uniform float fade_cells = 3.2;
+// Rain agitation (0 = calm): faster, wider sway and a duller mirror.
+uniform float rain_ripple: hint_range(0.0, 1.0) = 0.0;
 uniform sampler2D screen_texture: hint_screen_texture, filter_nearest, repeat_disable;
 
 void fragment() {
@@ -32,12 +34,14 @@ void fragment() {
 	}
 	// Ripple: whole-pixel horizontal sway, rolling slowly down the water.
 	float band = floor(cellf.y * tile_px * 0.5);
-	float sway = floor(sin(TIME * 1.7 + band * 0.7 + cellf.x * 2.1) * 1.5) * 2.0;
+	float sway_speed = 1.7 + rain_ripple * 2.6;
+	float sway_amp = 1.5 + rain_ripple * 1.8;
+	float sway = floor(sin(TIME * sway_speed + band * 0.7 + cellf.x * 2.1) * sway_amp) * 2.0;
 	vec2 offset = vec2(sway, -2.0 * below * tile_px) * view_zoom * SCREEN_PIXEL_SIZE;
 	vec2 sample_uv = SCREEN_UV + offset;
 	if (sample_uv.y < 0.0 || sample_uv.y > 1.0) {
 		discard;
 	}
 	vec3 reflected = texture(screen_texture, sample_uv).rgb;
-	COLOR = vec4(mix(reflected, water_tint.rgb, 0.32), reflection_alpha * fade);
+	COLOR = vec4(mix(reflected, water_tint.rgb, 0.32), reflection_alpha * (1.0 - 0.3 * rain_ripple) * fade);
 }
