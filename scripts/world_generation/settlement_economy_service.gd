@@ -402,7 +402,9 @@ static func is_shop_building_type(building_type: String) -> bool:
 static func generate_shop_stock(shop_type: String, rng: RandomNumberGenerator) -> Array[Dictionary]:
 	var pool := (SHOP_STOCK_POOLS.get(shop_type, SHOP_STOCK_POOLS["general_store"]) as Array).duplicate()
 	var stock: Array[Dictionary] = []
-	var want := rng.randi_range(4, mini(6, pool.size()))
+	# Clamp the low bound too: a 3-item pool (the brewery) must not ask
+	# for randi_range(4, 3) with the bounds inverted.
+	var want := rng.randi_range(mini(4, pool.size()), mini(6, pool.size()))
 	for _pick_index in range(want):
 		if pool.is_empty():
 			break

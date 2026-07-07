@@ -158,6 +158,10 @@ static func place_volcano_tiles(
 				else:
 					tile_info["overlay_flags"] = int(tile_info.get("overlay_flags", 0)) | TILE_OVERLAY_VOLCANO
 				tile_info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
+				# Keep the label strings in step with the id, or downstream
+				# consumers (culture rolls, land test) read stale biomes.
+				tile_info["base_biome"] = BIOME_BADLANDS
+				tile_info["biome_type"] = BIOME_BADLANDS
 				tile_info["volcano_proximity"] = 1.0
 				# Browser main.js:23790-23793: volcano ruggedness 0.65 +/- 0.175.
 				tile_info["mountain_ruggedness"] = clampf(0.65 + (rng.randf() - 0.5) * 0.35, 0.0, 1.0)
@@ -223,6 +227,8 @@ static func _apply_volcano_proximity(
 					# classification stays badlands (no stone biome id).
 					map_layer.set_cell(coord, atlas_source_id, STONE_TILE)
 					info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
+					info["base_biome"] = BIOME_BADLANDS
+					info["biome_type"] = BIOME_BADLANDS
 					tile_data[coord] = info
 
 
@@ -294,6 +300,10 @@ static func apply_oases_and_lava(
 					var info := tile_data.get(neighbor, {}) as Dictionary
 					info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
 					info["biome_id"] = _biome_to_id(BIOME_BADLANDS)
+					# A boiled lake is no longer water: match the label strings
+					# so the culture pipeline stops treating it as sea.
+					info["base_biome"] = BIOME_BADLANDS
+					info["biome_type"] = BIOME_BADLANDS
 					info["volcano_proximity"] = 1.0
 					tile_data[neighbor] = info
 

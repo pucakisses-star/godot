@@ -119,9 +119,18 @@ static func advance(npc_states: Array[Dictionary], delta_hours: float, rng: Rand
 					if float(affliction.get("sun_hours", 0.0)) >= SUN_DEATH_HOURS:
 						state["affliction_dead"] = true
 						events.append("Only a drift of ash remains where %s stood in the sun." % npc_name)
+				else:
+					# Sunlight death is continuous exposure, not a lifetime
+					# tally: back home or after dusk, the clock resets.
+					affliction["sun_hours"] = 0.0
 	# Contagion: the visibly sick pass their disease to whoever lingers
-	# beside them.
+	# beside them. Infections are gathered during the sweep and applied
+	# afterward so a case caught this tick cannot chain to a third NPC in
+	# the same tick, and the spread stays independent of array order.
+	var new_infections: Array[Dictionary] = []
 	for state: Dictionary in npc_states:
+		if bool(state.get("affliction_dead", false)):
+			continue
 		var affliction := state.get("affliction", {}) as Dictionary
 		if String(affliction.get("kind", "")) != KIND_DISEASE:
 			continue
@@ -136,12 +145,22 @@ static func advance(npc_states: Array[Dictionary], delta_hours: float, rng: Rand
 			if maxi(absi(other_cell.x - carrier_cell.x), absi(other_cell.y - carrier_cell.y)) > CONTAGION_RADIUS:
 				continue
 			if rng.randf() < CONTAGION_PER_HOUR * delta_hours:
-				other["affliction"] = {
+				new_infections.append({
+					"target": other,
 					"id": String(affliction.get("id", "")),
 					"name": String(affliction.get("name", "")),
-					"kind": KIND_DISEASE,
 					"hours_left": float(disease.get("duration_hours", 48.0))
-				}
+				})
+	for infection: Dictionary in new_infections:
+		var target := infection.get("target", {}) as Dictionary
+		if target.has("affliction") or bool(target.get("affliction_dead", false)):
+			continue
+		target["affliction"] = {
+			"id": String(infection.get("id", "")),
+			"name": String(infection.get("name", "")),
+			"kind": KIND_DISEASE,
+			"hours_left": float(infection.get("hours_left", 48.0))
+		}
 	return events
 
 static func _disease_by_id(disease_id: String) -> Dictionary:

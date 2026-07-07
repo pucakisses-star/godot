@@ -742,9 +742,11 @@ const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
 const TOWN_SCENE_THEME_KEY := "town_scene_theme"
 const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
 const TOWN_SCENE_BIOME_PATCH_KEY := "town_scene_biome_patch"
-## The surface wilds reach ~SURFACE_SITE_REACH_TILES tiles; an 8-tile
-## radius (17x17 window) covers the streamable country around a settlement.
-const TOWN_SCENE_BIOME_PATCH_RADIUS := 8
+## The surface wilds stream out to (and place gates at) ~20 tiles, so the
+## patch must cover that whole reach - a smaller window would clamp the
+## outer band to the patch edge and, at a coast, wall it with ocean.
+## A 20-tile radius is a 41x41 window (1681 labels), still compact.
+const TOWN_SCENE_BIOME_PATCH_RADIUS := 20
 const DUNGEON_INTERIOR_SCENE_PATH := "res://scenes/dungeon_interior.tscn"
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
@@ -913,14 +915,18 @@ func _build_map_snapshot() -> void:
 		for x in range(map_size.x):
 			var coord := Vector2i(x, y)
 			var info := _tile_data.get(coord, {}) as Dictionary
-			var base_biome := _biome_id_to_string(int(info.get("base_biome_id", 0)))
+			# Default to grassland (not id 0 = water) so a tile missing its
+			# biome id never renders as a phantom ocean, matching the rest
+			# of the pipeline's fallback.
+			var grassland_id := _biome_to_id(BIOME_GRASSLAND)
+			var base_biome := _biome_id_to_string(int(info.get("base_biome_id", grassland_id)))
 			var color := biome_colors.get(base_biome, Color(0.36, 0.55, 0.28)) as Color
 			var flags := int(info.get("overlay_flags", 0))
 			if flags & TILE_OVERLAY_RIVER:
 				color = Color(0.24, 0.42, 0.62)
 			elif flags & (TILE_OVERLAY_TREE | TILE_OVERLAY_FOREST):
 				color = color.darkened(0.18)
-			var hill_biome := _biome_id_to_string(int(info.get("hill_biome_id", 0)))
+			var hill_biome := _biome_id_to_string(int(info.get("hill_biome_id", grassland_id)))
 			if hill_biome == BIOME_MOUNTAIN:
 				color = biome_colors[BIOME_MOUNTAIN]
 			elif hill_biome == BIOME_HILLS:

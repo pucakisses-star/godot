@@ -74,8 +74,11 @@ static func _biome_for_tile(biome_ctx: Dictionary, tile: Vector2i) -> String:
 	var span := int(biome_ctx.get("span", 1))
 	var biomes := biome_ctx.get("biomes") as PackedStringArray
 	var local := tile - origin_tile
-	local.x = clampi(local.x, 0, span - 1)
-	local.y = clampi(local.y, 0, span - 1)
+	# Outside the stored window, fall back to neutral grassland - never
+	# clamp to the edge biome, or a coastal town's water edge would wall
+	# the whole outer band with ocean past the patch.
+	if local.x < 0 or local.y < 0 or local.x >= span or local.y >= span:
+		return TILE_ATLAS_DEFS.BIOME_GRASSLAND
 	var index := local.y * span + local.x
 	if index < 0 or index >= biomes.size():
 		return TILE_ATLAS_DEFS.BIOME_GRASSLAND

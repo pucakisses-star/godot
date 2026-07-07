@@ -949,7 +949,9 @@ func _advance_game_clock(delta: float) -> void:
 	while _game_hour >= 24.0:
 		_game_hour -= 24.0
 		_game_day += 1
-	if int(_game_hour) != hour_before:
+	# A frame spanning ~24h can land on the same integer hour a day on;
+	# catch the day rollover so the hooks never skip a day.
+	if int(_game_hour) != hour_before or _game_day != day_before:
 		# Buffs and other clock-keyed state read the shared settings
 		# clock; keep it honest while the scene runs.
 		var clock_settings: Dictionary = _world_settings_snapshot()

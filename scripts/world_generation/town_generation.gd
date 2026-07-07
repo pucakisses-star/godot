@@ -157,6 +157,9 @@ var _mount_sprite: Sprite2D
 var _build_selection := -1
 var _player_built_cells: Dictionary = {}
 var _farm_plots: Dictionary = {}
+# Absolute game-hours at the last growth re-rate, so a frame that crosses
+# several hours slides the planting stamp by all of them, not just one.
+var _farm_last_growth_hours := -1.0
 var _raid_active := false
 var _raid_end_stamp := 0.0
 var _next_raid_day := 0
@@ -589,7 +592,9 @@ func _advance_game_clock(delta: float) -> void:
 	while _game_hour >= 24.0:
 		_game_hour -= 24.0
 		_game_day += 1
-	if int(_game_hour) != hour_before:
+	# A frame that spans ~24h can land on the same integer hour a day
+	# later; catch the day rollover too so the hooks never skip a day.
+	if int(_game_hour) != hour_before or _game_day != day_before:
 		var clock_settings: Dictionary = _world_settings_snapshot()
 		clock_settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
 		_store_world_settings(clock_settings)
@@ -4368,8 +4373,12 @@ func _try_farm_action(cell: Vector2i) -> bool:
 func _advance_farm_growth() -> void:
 	var now_hours := float(_game_day) * 24.0 + _game_hour
 	# Stages read elapsed hours since planted_h, so season and rain re-rate
-	# growth by sliding the planting stamp on each hourly tick.
-	var stamp_shift := 1.0 - _farm_growth_multiplier()
+	# growth by sliding the planting stamp. Scale the slide by the hours
+	# actually elapsed since the last re-rate (usually 1) so a stall or a
+	# fast clock that jumps several hours in a frame is rated in full.
+	var elapsed := 1.0 if _farm_last_growth_hours < 0.0 else clampf(now_hours - _farm_last_growth_hours, 0.0, 48.0)
+	_farm_last_growth_hours = now_hours
+	var stamp_shift := (1.0 - _farm_growth_multiplier()) * elapsed
 	var changed := false
 	for cell_variant: Variant in _farm_plots.keys():
 		var plot := _farm_plots[cell_variant] as Dictionary
@@ -4845,8 +4854,8 @@ func _walkable_cell_near(center: Vector2i, min_distance: int, max_distance: int)
 	return Vector2i(2147483647, 2147483647)
 
 ## Success or failure, the run ends the same way: the ticker speaks, the
-## wagon lingers a beat then fades, and the master needs a day before the
-## next load is ready. The waypost camp stays as scenery.
+## wagon lingers a beat then fades, the waypost camp fades with it, and
+## the master needs a day before the next load is ready.
 func _finish_caravan_job(ticker_text: String, ticker_color: Color = Color(0.95, 0.5, 0.4, 1.0)) -> void:
 	if not ticker_text.is_empty():
 		_set_save_status(ticker_text, ticker_color)
@@ -4860,6 +4869,13 @@ func _finish_caravan_job(ticker_text: String, ticker_color: Color = Color(0.95, 
 		var trader_sprite := (trader_variant as Dictionary).get("sprite") as Sprite2D
 		if trader_sprite != null and is_instance_valid(trader_sprite):
 			trader_sprite.queue_free()
+	# The waypost sprite and label were untracked after the job cleared -
+	# free them here so completed/failed runs don't orphan a camp (which
+	# then survived regeneration, hovering over unrelated terrain).
+	for node_variant: Variant in (_caravan_job.get("waypost_nodes", []) as Array):
+		var node := node_variant as Node
+		if node != null and is_instance_valid(node):
+			node.queue_free()
 	_caravan_next_offer_stamp = float(_game_day) * 24.0 + _game_hour + CARAVAN_OFFER_COOLDOWN_HOURS
 	_caravan_job = {}
 
@@ -4867,10 +4883,6 @@ func _finish_caravan_job(ticker_text: String, ticker_color: Color = Color(0.95, 
 func _clear_caravan_job() -> void:
 	if _caravan_job.is_empty():
 		return
-	for node_variant: Variant in (_caravan_job.get("waypost_nodes", []) as Array):
-		var node := node_variant as Node
-		if node != null and is_instance_valid(node):
-			node.queue_free()
 	_finish_caravan_job("")
 	# A rebuilt world owes no cooldown; the master offers fresh.
 	_caravan_next_offer_stamp = 0.0
