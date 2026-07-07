@@ -557,12 +557,10 @@ var _available_hairs: Array[CompressedTexture2D]
 var _gender_button_hover_shadow: StyleBoxFlat
 var _gender_button_pressed_shadow: StyleBoxFlat
 var _gender_button_normal_shadow: StyleBoxFlat
-var _gender_button_base_positions: Dictionary = {}
 
 const GENDER_BUTTON_BRIGHTNESS_NORMAL := 0.85
 const GENDER_BUTTON_BRIGHTNESS_HOVER := 1.08
 const GENDER_BUTTON_BRIGHTNESS_PRESSED := 1.18
-const GENDER_BUTTON_SELECTED_OFFSET := Vector2(0, 3)
 const GENDER_BUTTON_TWEEN_DURATION := 0.12
 const BACKGROUND_ZOOM_SPEED := 0.0034
 const BACKGROUND_ZOOM_AMOUNT := 0.08
@@ -846,7 +844,6 @@ func _setup_gender_button(button: Button) -> void:
 
 	button.self_modulate = Color(GENDER_BUTTON_BRIGHTNESS_NORMAL, GENDER_BUTTON_BRIGHTNESS_NORMAL, GENDER_BUTTON_BRIGHTNESS_NORMAL, 1.0)
 	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	_gender_button_base_positions[button] = button.position
 
 	button.mouse_entered.connect(_on_gender_button_hover.bind(button))
 	button.mouse_exited.connect(_on_gender_button_unhover.bind(button))
@@ -914,9 +911,9 @@ func _update_gender_button_visual_state(button: Button, is_selected: bool) -> vo
 	if button == null:
 		return
 
-	var base_position: Vector2 = _gender_button_base_positions.get(button, button.position)
-	button.position = base_position + GENDER_BUTTON_SELECTED_OFFSET if is_selected else base_position
-
+	# The buttons live in an HBoxContainer, which owns their positions -
+	# nudging position here collapsed both onto one spot (a vanishing
+	# button). Selection reads through brightness and the pressed shadow.
 	if is_selected:
 		_animate_gender_button(button, GENDER_BUTTON_BRIGHTNESS_PRESSED)
 	elif button.is_hovered() or button.has_focus():
