@@ -116,6 +116,10 @@ z_index = 2
 [node name="LabelsOverlay" type="Node2D" parent="MapOverlays"]
 z_index = 10
 
+[node name="PoliticalLabelsOverlay" type="Node2D" parent="MapOverlays"]
+visible = false
+z_index = 11
+
 [node name="TerrainShadingOverlay" type="Sprite2D" parent="MapOverlays"]
 z_index = 1
 centered = false
