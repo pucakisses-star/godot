@@ -522,6 +522,7 @@ const WORLD_ROSTER_SETTLEMENT_CAP := 40
 @onready var routes_overlay: Node2D = get_node_or_null("MapOverlays/RoutesOverlay")
 @onready var rivers_overlay: Node2D = get_node_or_null("MapOverlays/RiversOverlay")
 @onready var labels_overlay: Node2D = get_node_or_null("MapOverlays/LabelsOverlay")
+@onready var political_labels_overlay: Node2D = get_node_or_null("MapOverlays/PoliticalLabelsOverlay")
 @onready var overworld_camera: OverworldCamera = get_node_or_null("OverworldCamera")
 
 ## Far-zoom LOD: past this zoom the dense tile layers swap for one baked
@@ -854,6 +855,7 @@ func _ready() -> void:
 func _on_overworld_camera_zoom_changed(_zoom_level: float) -> void:
 	_refresh_scale_bar()
 	_update_labels_overlay_zoom_behavior()
+	_update_political_labels_zoom_behavior()
 
 func _refresh_scale_bar() -> void:
 	if scale_bar_container == null or scale_bar_visual == null or scale_bar_label == null:
@@ -8468,12 +8470,91 @@ func _update_political_boundaries_overlay() -> void:
 	political_boundaries_overlay.centered = false
 	political_boundaries_overlay.scale = Vector2(tile_size, tile_size)
 	political_boundaries_overlay.position = Vector2.ZERO
+	_rebuild_political_labels()
 	_update_political_boundaries_overlay_visibility()
 
 func _update_political_boundaries_overlay_visibility() -> void:
-	if political_boundaries_overlay == null:
+	var overlay_visible := _political_boundaries_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
+	if political_boundaries_overlay != null:
+		political_boundaries_overlay.visible = overlay_visible
+	if political_labels_overlay != null:
+		political_labels_overlay.visible = overlay_visible
+		if overlay_visible:
+			_update_political_labels_zoom_behavior()
+
+## State-name labels: one per realm at its snapped centroid, reusing the
+## settlement label service for identical font/outline styling and zoom
+## rescale. Realms below POLITICAL_LABEL_MIN_TILES stay unlabeled.
+const POLITICAL_LABEL_MIN_TILES := 12
+const POLITICAL_LABEL_IMPORTANCE := 5
+
+func _rebuild_political_labels() -> void:
+	if political_labels_overlay == null:
 		return
-	political_boundaries_overlay.visible = _political_boundaries_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
+	var state_sums: Dictionary = {}
+	var state_tiles: Dictionary = {}
+	for coord_variant: Variant in _tile_data.keys():
+		var coord := coord_variant as Vector2i
+		var tile_info := _tile_data.get(coord, {}) as Dictionary
+		var state_name := String(tile_info.get("political_state", "")).strip_edges()
+		if state_name.is_empty():
+			continue
+		if not state_sums.has(state_name):
+			state_sums[state_name] = Vector2.ZERO
+			state_tiles[state_name] = ([] as Array[Vector2i])
+		state_sums[state_name] = (state_sums[state_name] as Vector2) + _map_cell_center(coord)
+		(state_tiles[state_name] as Array[Vector2i]).append(coord)
+
+	var entries: Array[Dictionary] = []
+	for state_variant: Variant in state_sums.keys():
+		var state_name := String(state_variant)
+		var coords := state_tiles[state_name] as Array[Vector2i]
+		var tile_count := coords.size()
+		if tile_count < POLITICAL_LABEL_MIN_TILES:
+			continue
+		var centroid := (state_sums[state_name] as Vector2) / float(tile_count)
+		# Snap onto the realm's nearest tile so a concave shape never labels
+		# over water or a neighbouring state.
+		var anchor := _nearest_state_tile_center(coords, centroid)
+		entries.append({
+			"center": anchor,
+			"name": state_name,
+			"category": "capital",
+			"importance": POLITICAL_LABEL_IMPORTANCE,
+			"population": tile_count
+		})
+
+	OverworldLabelsService.rebuild(political_labels_overlay, entries, {
+		"tile_size": tile_size,
+		"map_pixel_size": Vector2(float(map_size.x * tile_size), float(map_size.y * tile_size)),
+		"primary_color": labels_overlay_primary_color,
+		"secondary_color": labels_overlay_secondary_color,
+		"outline_color": labels_overlay_outline_color,
+		"outline_size": labels_overlay_outline_size
+	})
+	_update_political_labels_zoom_behavior()
+
+func _nearest_state_tile_center(coords: Array[Vector2i], centroid: Vector2) -> Vector2:
+	var best_center := centroid
+	var best_distance := INF
+	for coord: Vector2i in coords:
+		var center := _map_cell_center(coord)
+		var distance := center.distance_squared_to(centroid)
+		if distance < best_distance:
+			best_distance = distance
+			best_center = center
+	return best_center
+
+func _update_political_labels_zoom_behavior() -> void:
+	if political_labels_overlay == null or overworld_camera == null:
+		return
+	OverworldLabelsService.update_zoom_behavior(political_labels_overlay, overworld_camera.zoom.x, {
+		"tile_size": tile_size,
+		"rescale_on_zoom": labels_overlay_rescale_on_zoom,
+		"auto_visibility": labels_overlay_auto_visibility,
+		"min_screen_size": labels_overlay_min_screen_size,
+		"max_screen_size": labels_overlay_max_screen_size
+	})
 
 ## --- Caravans -------------------------------------------------------------
 ## Merchant wagons ride the trade routes between settlements, ping-ponging

@@ -266,36 +266,92 @@ func build_culture_overlay_image(
 
 	return image
 
+## Renders realms as translucent culture-coloured fills with a single-cell
+## darkened border on every edge against a different owner (including
+## unclaimed/water), so states read as closed shapes. The legacy
+## _border_color argument is retained for signature compatibility; borders
+## are now derived per realm from the fill colour.
 func build_political_boundaries_overlay_image(
 	width: int,
 	height: int,
 	tiles: Dictionary,
-	border_color: Color = Color(0.05, 0.03, 0.02, 0.95)
+	_border_color: Color = Color(0.05, 0.03, 0.02, 0.95),
+	fill_alpha: float = 0.23,
+	border_alpha: float = 0.8
 ) -> Image:
 	var image := Image.create(width, height, false, Image.FORMAT_RGBA8)
-	for y in range(height):
-		for x in range(width):
-			image.set_pixel(x, y, Color(0, 0, 0, 0))
+	image.fill(Color(0, 0, 0, 0))
 
+	# One fill/border colour per realm, computed once and reused per pixel.
+	var realm_colors: Dictionary = {}
+
+	# Fill pass: every claimed tile takes its realm's translucent colour.
 	for y in range(height):
 		for x in range(width):
 			var coord := Vector2i(x, y)
-			var current_key := String((tiles.get(coord, {}) as Dictionary).get("political_owner", "")).strip_edges().to_lower()
-			if current_key.is_empty():
+			var owner_key := _political_owner_key(tiles, coord)
+			if owner_key.is_empty():
 				continue
-			if x + 1 < width:
-				var right_coord := Vector2i(x + 1, y)
-				var right_key := String((tiles.get(right_coord, {}) as Dictionary).get("political_owner", "")).strip_edges().to_lower()
-				if not right_key.is_empty() and right_key != current_key:
-					image.set_pixel(x, y, border_color)
-					image.set_pixel(x + 1, y, border_color)
-			if y + 1 < height:
-				var down_coord := Vector2i(x, y + 1)
-				var down_key := String((tiles.get(down_coord, {}) as Dictionary).get("political_owner", "")).strip_edges().to_lower()
-				if not down_key.is_empty() and down_key != current_key:
-					image.set_pixel(x, y, border_color)
-					image.set_pixel(x, y + 1, border_color)
+			var state_name := String((tiles.get(coord, {}) as Dictionary).get("political_state", ""))
+			var colors := _resolve_realm_colors(realm_colors, owner_key, state_name, fill_alpha, border_alpha)
+			image.set_pixel(x, y, colors["fill"] as Color)
+
+	# Border pass: overwrite the fill on any claimed cell whose 4-neighbour
+	# has a different owner with that cell's own darkened realm colour.
+	for y in range(height):
+		for x in range(width):
+			var coord := Vector2i(x, y)
+			var owner_key := _political_owner_key(tiles, coord)
+			if owner_key.is_empty():
+				continue
+			if not _political_cell_is_border(tiles, coord, owner_key, width, height):
+				continue
+			var state_name := String((tiles.get(coord, {}) as Dictionary).get("political_state", ""))
+			var colors := _resolve_realm_colors(realm_colors, owner_key, state_name, fill_alpha, border_alpha)
+			image.set_pixel(x, y, colors["border"] as Color)
 	return image
+
+func _political_owner_key(tiles: Dictionary, coord: Vector2i) -> String:
+	return String((tiles.get(coord, {}) as Dictionary).get("political_owner", "")).strip_edges().to_lower()
+
+## A claimed cell is a border when any orthogonal neighbour lies off the map
+## or has a different owner (unclaimed/water included).
+func _political_cell_is_border(tiles: Dictionary, coord: Vector2i, owner_key: String, width: int, height: int) -> bool:
+	var neighbors: Array[Vector2i] = [
+		Vector2i(coord.x + 1, coord.y),
+		Vector2i(coord.x - 1, coord.y),
+		Vector2i(coord.x, coord.y + 1),
+		Vector2i(coord.x, coord.y - 1)
+	]
+	for neighbor: Vector2i in neighbors:
+		if neighbor.x < 0 or neighbor.y < 0 or neighbor.x >= width or neighbor.y >= height:
+			return true
+		if _political_owner_key(tiles, neighbor) != owner_key:
+			return true
+	return false
+
+## Caches {"fill", "border"} per (owner|state). The state name drives a
+## deterministic +-0.04 hue and +-0.08 value shift so neighbouring realms of
+## the same culture stay distinct; the border is that colour darkened ~40%.
+func _resolve_realm_colors(cache: Dictionary, owner_key: String, state_name: String, fill_alpha: float, border_alpha: float) -> Dictionary:
+	var cache_key := "%s|%s" % [owner_key, state_name]
+	if cache.has(cache_key):
+		return cache[cache_key] as Dictionary
+	var base := resolve_culture_color(null, owner_key)
+	var state_hash := absi(state_name.hash())
+	var hue_shift := (float(state_hash % 1000) / 1000.0 - 0.5) * 0.08
+	var value_shift := (float((state_hash / 1000) % 1000) / 1000.0 - 0.5) * 0.16
+	var shifted := Color.from_hsv(
+		fposmod(base.h + hue_shift, 1.0),
+		base.s,
+		clampf(base.v + value_shift, 0.0, 1.0)
+	)
+	var fill := shifted
+	fill.a = fill_alpha
+	var border := Color(shifted.r * 0.6, shifted.g * 0.6, shifted.b * 0.6, border_alpha)
+	var result := {"fill": fill, "border": border}
+	cache[cache_key] = result
+	return result
 
 func _clear_existing_influence(tiles: Dictionary) -> void:
 	for coord: Vector2i in tiles.keys():
