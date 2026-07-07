@@ -136,8 +136,12 @@ static func _build_role_list(npc_count: int, role_quotas: Array, filler_roles: A
 		else:
 			roles.append(int(filler_roles[filler_index % filler_roles.size()]))
 		filler_index += 1
-	roles.resize(npc_count)
+	# Shuffle before truncating: when the quota counts oversubscribe a
+	# small settlement, resize would otherwise always drop the same
+	# last-listed roles (the elder vanishes every time). Shuffling first
+	# spreads the loss across the roster.
 	_shuffle_ints(roles, rng)
+	roles.resize(npc_count)
 	return roles
 
 static func _pick_workplace(role: int, role_workplaces: Dictionary, buildings: Dictionary, is_walkable: Callable, rng: RandomNumberGenerator, street_cells: Array[Vector2i], fallback: Vector2i) -> Vector2i:
@@ -384,6 +388,11 @@ static func _travel_path_step(state: Dictionary, from_cell: Vector2i, anchor: Ve
 		state["travel_bfs_backoff"] = 24
 		return Vector2i.ZERO
 	var first := fresh_path[0] as Vector2i
+	# BFS admits the goal cell even when it's blocked; don't step onto it
+	# if that first cell isn't walkable (the cached-path branch guards the
+	# same way).
+	if not bool(is_npc_walkable.call(first)):
+		return Vector2i.ZERO
 	fresh_path.remove_at(0)
 	return first - from_cell
 

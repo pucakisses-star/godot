@@ -741,6 +741,12 @@ const TOWN_SCENE_NAME_KEY := "town_scene_name"
 const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
 const TOWN_SCENE_THEME_KEY := "town_scene_theme"
 const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
+const TOWN_SCENE_BIOME_PATCH_KEY := "town_scene_biome_patch"
+## The surface wilds stream out to (and place gates at) ~20 tiles, so the
+## patch must cover that whole reach - a smaller window would clamp the
+## outer band to the patch edge and, at a coast, wall it with ocean.
+## A 20-tile radius is a 41x41 window (1681 labels), still compact.
+const TOWN_SCENE_BIOME_PATCH_RADIUS := 20
 const DUNGEON_INTERIOR_SCENE_PATH := "res://scenes/dungeon_interior.tscn"
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
@@ -909,14 +915,18 @@ func _build_map_snapshot() -> void:
 		for x in range(map_size.x):
 			var coord := Vector2i(x, y)
 			var info := _tile_data.get(coord, {}) as Dictionary
-			var base_biome := _biome_id_to_string(int(info.get("base_biome_id", 0)))
+			# Default to grassland (not id 0 = water) so a tile missing its
+			# biome id never renders as a phantom ocean, matching the rest
+			# of the pipeline's fallback.
+			var grassland_id := _biome_to_id(BIOME_GRASSLAND)
+			var base_biome := _biome_id_to_string(int(info.get("base_biome_id", grassland_id)))
 			var color := biome_colors.get(base_biome, Color(0.36, 0.55, 0.28)) as Color
 			var flags := int(info.get("overlay_flags", 0))
 			if flags & TILE_OVERLAY_RIVER:
 				color = Color(0.24, 0.42, 0.62)
 			elif flags & (TILE_OVERLAY_TREE | TILE_OVERLAY_FOREST):
 				color = color.darkened(0.18)
-			var hill_biome := _biome_id_to_string(int(info.get("hill_biome_id", 0)))
+			var hill_biome := _biome_id_to_string(int(info.get("hill_biome_id", grassland_id)))
 			if hill_biome == BIOME_MOUNTAIN:
 				color = biome_colors[BIOME_MOUNTAIN]
 			elif hill_biome == BIOME_HILLS:
@@ -1335,7 +1345,37 @@ func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i,
 	settings[TOWN_SCENE_POPULATION_KEY] = maxi(0, int(details.get("population", 0)))
 	settings[TOWN_SCENE_THEME_KEY] = theme
 	settings[TOWN_SCENE_VILLAGE_KEY] = bool(details.get("is_hamlet", false)) or bool(details.get("is_snow_village", false))
+	settings[TOWN_SCENE_BIOME_PATCH_KEY] = _build_town_scene_biome_patch(tile_coord)
 	game_session.call("set_world_settings", settings)
+
+## A compact biome window around the launched settlement, so the town's
+## wilds can derive their climate from the real overworld. Base biome wins
+## for water (so coasts read as sea); biome_type carries forest, mountain,
+## and the rest. Off-map tiles fall back to grassland.
+func _build_town_scene_biome_patch(tile_coord: Vector2i) -> Dictionary:
+	if _tile_data.is_empty():
+		return {}
+	var radius := TOWN_SCENE_BIOME_PATCH_RADIUS
+	var biomes := PackedStringArray()
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			biomes.append(_patch_biome_label_for_tile(tile_coord + Vector2i(dx, dy)))
+	return {
+		"origin": {"x": tile_coord.x - radius, "y": tile_coord.y - radius},
+		"radius": radius,
+		"biomes": biomes
+	}
+
+func _patch_biome_label_for_tile(tile: Vector2i) -> String:
+	if tile.x < 0 or tile.y < 0 or tile.x >= map_size.x or tile.y >= map_size.y:
+		return BIOME_GRASSLAND
+	var info := _tile_data.get(tile, {}) as Dictionary
+	if info.is_empty():
+		return BIOME_GRASSLAND
+	if _tile_base_biome_from_data(info) == BIOME_WATER:
+		return BIOME_WATER
+	var overlay_biome := String(info.get("biome_type", ""))
+	return overlay_biome if not overlay_biome.is_empty() else _tile_base_biome_from_data(info)
 
 func _town_scene_seed_for_tile(tile_coord: Vector2i, details: Dictionary) -> String:
 	var existing_seed := String(details.get(TOWN_SCENE_SEED_KEY, "")).strip_edges()
