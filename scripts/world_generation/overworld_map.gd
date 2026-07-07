@@ -501,6 +501,10 @@ const CIVILIZATION_LABELS := {
 	"desert_folk": "Desert Folk"
 }
 
+## World-event flavor only needs a sampling of named places, not the
+## whole gazetteer.
+const WORLD_ROSTER_SETTLEMENT_CAP := 40
+
 @onready var map_layer: TileMapLayer = $MapLayer
 @onready var tree_layer: TileMapLayer = get_node_or_null("TreeLayer")
 @onready var river_layer: TileMapLayer = get_node_or_null("RiverLayer")
@@ -2067,9 +2071,19 @@ func _persist_world_sites() -> void:
 	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return
 	var sites: Array = []
+	# Named settlements also feed the world-events roster so ongoing
+	# history (raids, caravans, festivals) talks about real places.
+	var roster_settlements: Array = []
 	for coord_variant: Variant in _tile_data.keys():
 		var details := _tile_data[coord_variant] as Dictionary
 		var coord := coord_variant as Vector2i
+		if details.has("settlement_type") and roster_settlements.size() < WORLD_ROSTER_SETTLEMENT_CAP:
+			var roster_name := _tile_region_name(coord, details)
+			if not roster_name.is_empty():
+				roster_settlements.append({
+					"name": roster_name,
+					"type": String(details.get("settlement_type", "town"))
+				})
 		var site_class := ""
 		var seed_text := ""
 		if _is_dwarfhold_structure(details):
@@ -2091,9 +2105,18 @@ func _persist_world_sites() -> void:
 			"population": maxi(0, int(details.get("population", 0))),
 			"theme": _town_theme_for_details(details)
 		})
+	var faction_names: Array = []
+	for faction_source: Dictionary in _collect_faction_sources():
+		var faction_label := String(faction_source.get("label", ""))
+		if not faction_label.is_empty() and not faction_names.has(faction_label):
+			faction_names.append(faction_label)
 	var settings: Dictionary = game_session.call("get_world_settings")
 	settings[WorldSitesService.SETTINGS_KEY] = sites
 	settings["last_scene"] = "res://scenes/overworld.tscn"
+	settings[WorldEventsService.ROSTER_KEY] = {
+		"settlements": roster_settlements,
+		"factions": faction_names
+	}
 	game_session.call("set_world_settings", settings)
 
 func _apply_base_tiles(base_biome_map: Dictionary) -> void:

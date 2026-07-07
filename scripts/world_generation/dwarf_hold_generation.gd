@@ -942,6 +942,7 @@ func _advance_game_clock(delta: float) -> void:
 		return
 	var delta_hours := delta * 24.0 / (minutes_per_game_day * 60.0)
 	var hour_before := int(_game_hour)
+	var day_before := _game_day
 	_game_hour += delta_hours
 	while _game_hour >= 24.0:
 		_game_hour -= 24.0
@@ -953,10 +954,24 @@ func _advance_game_clock(delta: float) -> void:
 		clock_settings["game_clock"] = {"hour": _game_hour, "day": _game_day}
 		_store_world_settings(clock_settings)
 		_refresh_player_stats_from_session()
+		if _game_day != day_before:
+			_advance_world_events()
 	_advance_hunger(delta_hours)
 	_advance_afflictions(delta_hours)
 	_update_faction_events()
 	_update_clock_label()
+
+## A new day means new history: roll the shared world-event log forward
+## and surface the freshest news on the status ticker.
+func _advance_world_events() -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	if settings.is_empty():
+		return
+	var world_seed_text := str(settings.get("world_seed", seed_input.text.strip_edges()))
+	var fresh_events: Array[Dictionary] = WorldEventsService.advance(settings, world_seed_text, _game_day)
+	_store_world_settings(settings)
+	for event: Dictionary in fresh_events:
+		_set_save_status("News: " + String(event.get("text", "")), Color(0.75, 0.8, 0.95))
 
 func _update_clock_label() -> void:
 	if clock_label == null:
@@ -2959,9 +2974,15 @@ func _show_npc_dialogue(state: Dictionary) -> void:
 	elif _rng.randf() < 0.4:
 		line = SettlementEconomyService.dialogue_line(role_title, NpcIdentityService.personal_line(identity, _rng), _rng)
 	else:
-		var rumor: String = SettlementEconomyService.rumor_from_labels(
-			_latest_district_labels, _latest_district_cell_map, _player_cell, _rng
-		)
+		# World news travels even underground: sometimes the gossip is
+		# about far-off wars and caravans instead of the local deeps.
+		var rumor := ""
+		if _rng.randf() < 0.4:
+			rumor = WorldEventsService.rumor_from_events(_world_settings_snapshot(), _game_day, _rng)
+		if rumor.is_empty():
+			rumor = SettlementEconomyService.rumor_from_labels(
+				_latest_district_labels, _latest_district_cell_map, _player_cell, _rng
+			)
 		line = SettlementEconomyService.dialogue_line(role_title, rumor, _rng)
 	var sprite := state.get("sprite") as Sprite2D
 	var anchor_position: Vector2 = sprite.position if sprite != null else _player_sprite.position
