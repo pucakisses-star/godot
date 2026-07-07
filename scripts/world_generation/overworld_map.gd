@@ -590,6 +590,7 @@ const REGION_ENTER_BUDGET := 48
 const REGION_KEEP_TILES := 1400
 var _region_mode := false
 var _region_layer: Node2D
+var _region_icon_layer: Node2D
 var _region_sprites := {}
 var _region_render_queue: Array[Vector2i] = []
 var _region_queued := {}
@@ -1634,6 +1635,16 @@ func _tile_base_biome_from_data(tile_data: Dictionary) -> String:
 
 func _tile_hill_biome_from_data(tile_data: Dictionary) -> String:
 	return _biome_id_to_string(int(tile_data.get("hill_biome_id", _biome_to_id(BIOME_GRASSLAND))))
+
+## A mountain-overlay tile: never a site for non-alpine structures/settlements
+## (towns, hamlets, ports, castles, monasteries, shrines, wizard towers).
+func _is_mountain_tile(coord: Vector2i) -> bool:
+	var tile_data := _tile_data.get(coord, {}) as Dictionary
+	if tile_data.is_empty():
+		return false
+	if String(tile_data.get("hill_overlay", "")) == BIOME_MOUNTAIN:
+		return true
+	return _tile_hill_biome_from_data(tile_data) == BIOME_MOUNTAIN
 
 func _tile_has_overlay_flag(tile_data: Dictionary, flag: int) -> bool:
 	return (int(tile_data.get("overlay_flags", 0)) & flag) != 0
@@ -5009,6 +5020,8 @@ func _place_towns_browser_style(rng: RandomNumberGenerator) -> int:
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
 		if _nearest_distance_sq_points(coord, placed) < min_distance_sq:
 			continue
+		if _is_mountain_tile(coord):
+			continue
 		var idx := coord.y * w + coord.x
 		if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
 			continue
@@ -5184,6 +5197,8 @@ func _place_hamlet_expansion(seeded_grass_hamlets: int, rng: RandomNumberGenerat
 		if _nearest_distance_sq_points(coord, _hamlet_points) < 25.0:
 			continue
 		if _nearest_distance_sq_points(coord, _town_points) < 20.0:
+			continue
+		if _is_mountain_tile(coord):
 			continue
 		var idx := coord.y * w + coord.x
 		if blocked[idx] == 1 or (int(flags[idx]) & TILE_OVERLAY_RIVER) != 0:
@@ -5671,6 +5686,8 @@ func _place_wizard_tower_settlements(
 			continue
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
 		if _is_too_close(coord, occupied, min_distance):
+			continue
+		if _is_mountain_tile(coord):
 			continue
 		var is_evil := settlements_created % 2 == 0
 		var settlement_type := "evilWizardTower" if is_evil else "wizardTower"
@@ -6482,6 +6499,8 @@ func _place_monasteries(
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
 		if _nearest_distance_sq_points(coord, monastery_points) < min_distance_sq:
 			continue
+		if _is_mountain_tile(coord):
+			continue
 		var idx := coord.y * w + coord.x
 		if blocked[idx] == 1:
 			continue
@@ -6568,6 +6587,8 @@ func _place_castles(
 			continue
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
 		if _nearest_distance_sq_points(coord, placed) < min_distance_sq:
+			continue
+		if _is_mountain_tile(coord):
 			continue
 		var idx := coord.y * w + coord.x
 		if blocked[idx] == 1:
@@ -6662,6 +6683,8 @@ func _place_saint_shrines(
 			continue
 		var coord := candidate.get("coord", Vector2i(-1, -1)) as Vector2i
 		if _nearest_distance_sq_points(coord, placed) < min_distance_sq:
+			continue
+		if _is_mountain_tile(coord):
 			continue
 		var idx := coord.y * w + coord.x
 		if blocked[idx] == 1:
@@ -9295,6 +9318,65 @@ func _ensure_region_layer() -> void:
 		_region_layer.transform = map_layer.transform
 		move_child(_region_layer, map_layer.get_index() + 1)
 
+## Small settlement/structure icons for region mode. Parented to the detail
+## layer so they share the map transform; z_index keeps them above the detail
+## tiles that stream in as siblings of the parent afterwards.
+func _ensure_region_icon_layer() -> void:
+	if _region_icon_layer != null:
+		return
+	_ensure_region_layer()
+	if _region_layer == null:
+		return
+	_region_icon_layer = Node2D.new()
+	_region_icon_layer.name = "RegionIconLayer"
+	_region_icon_layer.z_index = 50
+	_region_layer.add_child(_region_icon_layer)
+
+func _clear_region_icons() -> void:
+	if _region_icon_layer == null:
+		return
+	for child: Node in _region_icon_layer.get_children():
+		child.queue_free()
+
+## Draws each painted settlement_layer cell as a small sprite (~2.5 detail
+## cells wide) centered on its tile and bottom-anchored to the lower edge, so
+## a site "sits" on the ground instead of tiling the whole 8x8 footprint.
+func _build_region_icons() -> void:
+	_ensure_region_icon_layer()
+	if _region_icon_layer == null or settlement_layer == null:
+		return
+	_clear_region_icons()
+	var tile_set := settlement_layer.tile_set
+	if tile_set == null or _atlas_source_id < 0:
+		return
+	var src := tile_set.get_source(_atlas_source_id) as TileSetAtlasSource
+	if src == null or src.texture == null:
+		return
+	var atlas_texture := src.texture
+	var native_px := src.texture_region_size
+	if native_px.x <= 0 or native_px.y <= 0:
+		return
+	# Roughly a quarter of the overworld tile (2-2.5 detail cells of 8).
+	var icon_scale := (float(tile_size) * 0.3) / float(native_px.x)
+	var on_screen := Vector2(native_px) * icon_scale
+	for cell: Vector2i in settlement_layer.get_used_cells():
+		var atlas_coords := settlement_layer.get_cell_atlas_coords(cell)
+		if atlas_coords.x < 0:
+			continue
+		var sprite := Sprite2D.new()
+		sprite.texture = atlas_texture
+		sprite.region_enabled = true
+		sprite.region_rect = Rect2(Vector2(atlas_coords * native_px), Vector2(native_px))
+		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sprite.centered = false
+		sprite.scale = Vector2.ONE * icon_scale
+		var origin := Vector2(cell * tile_size)
+		sprite.position = Vector2(
+			origin.x + (float(tile_size) - on_screen.x) * 0.5,
+			origin.y + float(tile_size) - on_screen.y
+		)
+		_region_icon_layer.add_child(sprite)
+
 func _ensure_region_hint() -> void:
 	if _region_hint_panel != null:
 		return
@@ -9338,6 +9420,11 @@ func _enter_region_mode() -> void:
 		_region_noise = SurfaceWorldService.make_noise_set(hash("surface|%s" % _region_world_seed_text()))
 	_refresh_region_site_anchors()
 	_set_base_map_layers_visible(false)
+	# The settlement layer paints one full overworld-tile icon per site, which
+	# swamps an 8x8 detail footprint; small anchored sprites stand in instead.
+	if settlement_layer != null:
+		settlement_layer.visible = false
+	_build_region_icons()
 	_region_layer.visible = true
 	_region_hint_panel.visible = true
 	# A synchronous first ring lands the switch on detail instantly;
@@ -9357,6 +9444,9 @@ func _exit_region_mode() -> void:
 	_region_queued.clear()
 	if _region_layer != null:
 		_region_layer.visible = false
+	_clear_region_icons()
+	if settlement_layer != null:
+		settlement_layer.visible = true
 	if _region_hint_panel != null:
 		_region_hint_panel.visible = false
 	_set_base_map_layers_visible(true)
