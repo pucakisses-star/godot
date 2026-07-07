@@ -3068,6 +3068,12 @@ func _evaluate_desert_cell(x: int, y: int, height: float) -> bool:
 	var equatorial := clampf(1.0 - absf(ny - 0.5) * 2.0, 0.0, 1.0)
 	if _desert_band_noise != null:
 		equatorial = clampf(equatorial + _desert_band_noise.get_noise_2d(float(x), float(y)) * 0.22, 0.0, 1.0)
+	# Deserts belong to the warm belt: reject anything too far toward the
+	# cold poles, so no dunes ever form up north near the snow.
+	if equatorial < 0.34:
+		if idx >= 0 and idx < _desert_suitability_buffer.size():
+			_desert_suitability_buffer[idx] = 0.0
+		return false
 	# Deviation: the rainfall belt (latitudeInfluence, main.js:21503) keeps
 	# the map's equator wet enough that the browser constants alone never
 	# dry it here, pushing every desert poleward. Discounting that belt
@@ -3298,7 +3304,9 @@ func _build_highland_overlays(
 	if not is_zero_approx(bias_linear):
 		mountain_bias = signf(bias_linear) * pow(absf(bias_linear), 0.8)
 	var mountain_scarcity := 1.0 - _mountain_ratio
-	var mountain_growth_factor := 0.42 + _mountain_ratio * 0.7
+	# Lower growth factor: the two spread passes were thickening seeded
+	# ridges into half the continent. This keeps ranges to their chains.
+	var mountain_growth_factor := 0.18 + _mountain_ratio * 0.5
 
 	# Height window (main.js:22268-22284). Deviation: the browser's eroded
 	# heightfield keeps high ground rare, while Godot's carries broad high
@@ -3312,7 +3320,9 @@ func _build_highland_overlays(
 	var plateau_floor := 0.0
 	if not land_heights.is_empty():
 		land_heights.sort()
-		plateau_floor = float(land_heights[int(float(land_heights.size() - 1) * 0.8)])
+		# 88th percentile (was 80th): only the genuinely high ground seeds
+		# ranges, so mountains stay chains instead of blanketing the land.
+		plateau_floor = float(land_heights[int(float(land_heights.size() - 1) * 0.88)])
 	var base_threshold := minf(maxf(maxf(water_level + 0.1, 0.58), plateau_floor), 0.9)
 	var full_threshold := minf(0.98, base_threshold + 0.35)
 	var threshold_shift := mountain_bias * 0.18
@@ -3321,9 +3331,12 @@ func _build_highland_overlays(
 	full_threshold = clampf(full_threshold - threshold_shift * 1.3, base_threshold + 0.12, 0.99)
 	var height_range := maxf(full_threshold - base_threshold, 0.0001)
 
-	# Seed/candidate/prune thresholds (main.js:23160-23177).
-	var seed_threshold := clampf(0.8 - mountain_bias * 0.32, 0.52, 0.97)
-	var candidate_threshold := clampf(0.52 - mountain_bias * 0.28, 0.2, 0.78)
+	# Seed/candidate/prune thresholds (main.js:23160-23177). Raised the
+	# neutral seed and candidate floors so a 50% Mountain slider yields
+	# real ranges, not half the continent - the slider still biases from
+	# these baselines.
+	var seed_threshold := clampf(0.93 - mountain_bias * 0.32, 0.52, 0.985)
+	var candidate_threshold := clampf(0.74 - mountain_bias * 0.28, 0.2, 0.9)
 	var prune_threshold := clampf(0.9 - mountain_bias * 0.2, 0.62, 0.97)
 
 	var ridge_detail_noise := FastNoiseLite.new()
@@ -3542,25 +3555,29 @@ func _build_highland_overlays(
 	seed_indices.sort_custom(func(a: int, b: int) -> bool:
 		return float(scores[a]) > float(scores[b])
 	)
-	var candidate_floor := candidate_threshold * 0.85
+	# Stop tracing at the candidate threshold (was 0.85x below it) so
+	# ranges don't crawl far out along weak ridges.
+	var candidate_floor := candidate_threshold
 	for seed_idx: int in seed_indices:
 		var base_dir := int(dir_index[seed_idx])
 		var reliability := float(dir_strength[seed_idx])
 		if base_dir < 0 or reliability < 0.05:
 			continue
 		var range_scale := (float(scores[seed_idx]) * 4.0 + float(ridge_field[seed_idx]) * 3.0) * (0.5 + reliability * 0.4)
-		var base_length := 2 + int(floor(range_scale))
-		var forward_steps := mini(18, base_length + rng.randi_range(0, 2))
+		# Shorter chains (cap 9, was 18): ranges read as ridgelines, not
+		# continent-spanning masses.
+		var base_length := 1 + int(floor(range_scale * 0.55))
+		var forward_steps := mini(9, base_length + rng.randi_range(0, 2))
 		var backward_steps := maxi(1, int(floor(float(forward_steps) * 0.45)))
 		var sx := seed_idx % width
 		var sy := int(seed_idx / float(width))
 		_trace_ridge_direction(sx, sy, base_dir, forward_steps, reliability, candidate_floor, water_mask, scores, dir_index, dir_strength, mountain_mask)
 		_trace_ridge_direction(sx, sy, NEIGHBOR_OPPOSITES_8[base_dir], backward_steps, reliability * 0.85, candidate_floor, water_mask, scores, dir_index, dir_strength, mountain_mask)
 
-	# Stochastic growth, 2 passes (main.js:23523-23592): probability
-	# (0.12 + score*0.6 + orientation*0.25) * (0.42 + ratio*0.7).
-	var high_score_threshold := 0.75 + mountain_scarcity * 0.12
-	for _growth_pass in range(2):
+	# Stochastic growth, 1 pass (was 2): a second spread pass doubled the
+	# ranges' footprint, blanketing the land. One pass keeps chains.
+	var high_score_threshold := 0.86 + mountain_scarcity * 0.1
+	for _growth_pass in range(1):
 		for y in range(rows):
 			var row := y * width
 			for x in range(width):
@@ -4125,16 +4142,24 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 			var base_suitability := float(_desert_suitability_buffer[idx])
 			var neighbor_desert := 0
 			var neighbor_count := 0
+			var neighbor_snow := 0
 			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
 				var nx := x + offset.x
 				var ny := y + offset.y
 				if nx < 0 or ny < 0 or nx >= width or ny >= rows:
 					continue
 				var n_idx := ny * width + nx
+				if snow_mask[n_idx] == 1:
+					neighbor_snow += 1
 				if water_mask[n_idx] == 1 or snow_mask[n_idx] == 1:
 					continue
 				neighbor_desert += desert_mask[n_idx]
 				neighbor_count += 1
+			# Never let sand sit against snow: a desert touching tundra reads
+			# as a jarring seam, so clear it and let grassland buffer between.
+			if neighbor_snow > 0:
+				updated_mask[idx] = 0
+				continue
 			var local_density := (float(neighbor_desert) / float(neighbor_count)) if neighbor_count > 0 else float(desert_mask[idx])
 			# Lower local-density weight and stricter acceptance stop the
 			# refine pass from bleeding deserts across their neighbours.
