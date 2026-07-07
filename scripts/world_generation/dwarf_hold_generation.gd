@@ -82,6 +82,7 @@ var _last_clock_stamp := -1
 var _restoring_hold_diffs := false
 var _last_player_chunk := Vector2i(2147483647, 2147483647)
 var _world_seed_hash := 0
+var _hold_market: Dictionary = {}
 var _underdeep_sites: Array = []
 var _sites_by_chunk: Dictionary = {}
 var _player_inventory: Dictionary = {}
@@ -1319,6 +1320,9 @@ func _generate_city() -> void:
 
 	_rng.seed = hash(seed_text)
 	_world_seed_hash = hash(seed_text)
+	# Holds carry no generated details dict; the market derives from a
+	# seeded stub of mountain exports (ore, ingots, gems, stone).
+	_hold_market = SettlementEconomyService.settlement_market(SettlementEconomyService.hold_details_stub(_world_seed_hash), _world_seed_hash)
 	_hold_state.generated_levels.clear()
 
 	var minimum_levels := mini(underground_level_count_range.x, underground_level_count_range.y)
@@ -2035,7 +2039,7 @@ func _populate_backpack_slots() -> void:
 		_backpack_slot_items.append(item_name)
 		_fill_inventory_slot(i, _backpack_slot_panels, _backpack_slot_labels, _backpack_slot_icons, item_name, int(_player_inventory[item_name]))
 		if _is_trade_mode():
-			_backpack_slot_panels[i].tooltip_text += "\nSell for %d coins" % SettlementEconomyService.sell_price(item_name)
+			_backpack_slot_panels[i].tooltip_text += "\nSell for %d coins" % SettlementEconomyService.local_sell_price(item_name, _hold_market)
 
 ## Clicking a backpack slot that holds something edible eats one of it.
 func _on_backpack_slot_gui_input(event: InputEvent, slot_index: int) -> void:
@@ -2817,7 +2821,8 @@ func _open_trade_popup(cell: Vector2i, shop_type: String) -> void:
 	chest_popup_take_all_button.disabled = true
 	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
 	if section_label != null:
-		section_label.text = "Wares for sale"
+		var hint := SettlementEconomyService.market_hint_line(_hold_market)
+		section_label.text = "Wares for sale" if hint.is_empty() else "Wares for sale — %s" % hint
 	_refresh_trade_panel()
 
 func _refresh_trade_panel() -> void:
@@ -2830,7 +2835,7 @@ func _refresh_trade_panel() -> void:
 		var item_name := String(entry.get("name", "Supplies"))
 		var quantity := int(entry.get("quantity", 1))
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, item_name, quantity)
-		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.buy_price(item_name, _price_scale())
+		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.local_buy_price(item_name, _price_scale(), _hold_market)
 	_populate_backpack_slots()
 	chest_popup_status_label.text = "🪙 %d coins — click wares to buy, click your pack to sell" % _player_coins
 	if stock.is_empty():
@@ -2842,7 +2847,7 @@ func _buy_trade_item(slot_index: int) -> void:
 		return
 	var entry := stock[slot_index] as Dictionary
 	var item_name := String(entry.get("name", "Supplies"))
-	var price := SettlementEconomyService.buy_price(item_name, _price_scale())
+	var price := SettlementEconomyService.local_buy_price(item_name, _price_scale(), _hold_market)
 	if _player_coins < price:
 		chest_popup_status_label.text = "Not enough coins for %s (%d needed)" % [item_name, price]
 		return
@@ -2857,7 +2862,7 @@ func _buy_trade_item(slot_index: int) -> void:
 func _sell_item(item_name: String) -> void:
 	if int(_player_inventory.get(item_name, 0)) < 1:
 		return
-	var price := SettlementEconomyService.sell_price(item_name)
+	var price := SettlementEconomyService.local_sell_price(item_name, _hold_market)
 	_add_to_inventory(item_name, -1)
 	_adjust_coins(price)
 	_refresh_trade_panel()
@@ -2994,7 +2999,10 @@ func _show_npc_dialogue(state: Dictionary) -> void:
 	# guilds, and everyone still has personal news and map rumors.
 	var line: String
 	var faction_roll := _rng.randf()
-	if state.has("faction_name") and faction_roll < 0.35:
+	if int(state.get("role", 0)) == ROLE_GOLDSMITH and _rng.randf() < 0.4:
+		# The hold's traders talk shop: what goes cheap here, what pays.
+		line = SettlementEconomyService.dialogue_line(role_title, SettlementEconomyService.merchant_market_line(_hold_market, _rng), _rng)
+	elif state.has("faction_name") and faction_roll < 0.35:
 		line = SettlementEconomyService.dialogue_line(role_title, SettlementFactionService.member_line(state, _rng), _rng)
 	elif faction_roll < 0.5 and not _settlement_factions.is_empty():
 		line = SettlementEconomyService.dialogue_line(role_title, SettlementFactionService.faction_rumor(_settlement_factions, _rng), _rng)
