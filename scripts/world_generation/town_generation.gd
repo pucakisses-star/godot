@@ -130,6 +130,7 @@ var _surface_chunks: Dictionary = {}
 var _surface_last_player_chunk := Vector2i(2147483647, 2147483647)
 var _surface_protect_rect := Rect2i()
 var _surface_world_origin := Vector2i.ZERO
+var _surface_biome_ctx: Dictionary = {}
 var _surface_road_cells: Dictionary = {}
 var _surface_gates: Array[Dictionary] = []
 var _surface_gate_labels: Array[Label] = []
@@ -263,6 +264,7 @@ const TOWN_SCENE_NAME_KEY := "town_scene_name"
 const TOWN_SCENE_TILE_KEY := "town_scene_tile"
 const TOWN_SCENE_THEME_KEY := "town_scene_theme"
 const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
+const TOWN_SCENE_BIOME_PATCH_KEY := "town_scene_biome_patch"
 
 ## Farmstead art from the web game's Farm tileset (16px art; town cells are
 ## 32px, so a 128px sprite spans four cells).
@@ -3264,6 +3266,9 @@ func _setup_surface_world(grid: Dictionary) -> void:
 		own_tile = Vector2i(int((own_tile_variant as Dictionary).get("x", 0)), int((own_tile_variant as Dictionary).get("y", 0)))
 	var bbox_center := min_cell + (max_cell - min_cell) / 2
 	_surface_world_origin = own_tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2) - bbox_center
+	# The wilds derive their climate from the overworld biomes around this
+	# settlement, so coasts read as sea, deserts as sand, forests as woods.
+	_surface_biome_ctx = SurfaceWorldService.make_biome_context(settings.get(TOWN_SCENE_BIOME_PATCH_KEY, {}) as Dictionary, _surface_world_origin, WORLD_CELLS_PER_OVERWORLD_TILE)
 	_plan_surface_sites(own_tile, bbox_center, settings)
 	_restore_homestead(settings)
 
@@ -3387,7 +3392,7 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			if _latest_grid.has(cell) or city_layer.get_cell_source_id(cell) >= 0:
 				continue
 			var danger := SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells)
-			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell + _surface_world_origin, _surface_noise, danger)
+			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell + _surface_world_origin, _surface_noise, danger, _surface_biome_ctx)
 			var base_key := String(terrain.get("base", "grass"))
 			var decor_key := String(terrain.get("decor", ""))
 			# Flowers are transparent overlays: grass beneath, bloom above.
