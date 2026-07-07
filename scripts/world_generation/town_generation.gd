@@ -132,6 +132,7 @@ var _surface_protect_rect := Rect2i()
 var _surface_world_origin := Vector2i.ZERO
 var _surface_biome_ctx: Dictionary = {}
 var _surface_road_cells: Dictionary = {}
+var _surface_blocked_cells: Dictionary = {}
 var _surface_gates: Array[Dictionary] = []
 var _surface_gate_labels: Array[Label] = []
 var _surface_arrival_lock := false
@@ -268,6 +269,7 @@ const TOWN_SCENE_TILE_KEY := "town_scene_tile"
 const TOWN_SCENE_THEME_KEY := "town_scene_theme"
 const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
 const TOWN_SCENE_WORLD_BIOMES_KEY := "town_scene_world_biomes"
+const TOWN_SCENE_WORLD_RIVERS_KEY := "town_scene_world_rivers"
 
 ## Farmstead art from the web game's Farm tileset (16px art; town cells are
 ## 32px, so a 128px sprite spans four cells).
@@ -1258,6 +1260,10 @@ func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
 	return passable
 
 func _compute_passable_cell_for_actor(cell: Vector2i) -> bool:
+	# Mountain crags in the streamed wilds keep their rocky tile but block
+	# movement; roads never enter this set, so passes stay open.
+	if _surface_blocked_cells.has(cell):
+		return false
 	if _farm_blocked_cells.has(cell) or _furnishing_blocked_cells.has(cell):
 		return false
 	if city_layer.get_cell_source_id(cell) < 0:
@@ -3226,6 +3232,7 @@ func _setup_surface_world(grid: Dictionary) -> void:
 			gate_label.queue_free()
 	_surface_gate_labels.clear()
 	_surface_road_cells.clear()
+	_surface_blocked_cells.clear()
 	_surface_road_paths.clear()
 	_surface_gates.clear()
 	_surface_anchor_cells.clear()
@@ -3273,7 +3280,7 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	_surface_world_origin = own_tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2) - bbox_center
 	# The wilds derive their climate from the overworld biomes around this
 	# settlement, so coasts read as sea, deserts as sand, forests as woods.
-	_surface_biome_ctx = SurfaceWorldService.make_biome_context(settings.get(TOWN_SCENE_WORLD_BIOMES_KEY, {}) as Dictionary, WORLD_CELLS_PER_OVERWORLD_TILE)
+	_surface_biome_ctx = SurfaceWorldService.make_biome_context(settings.get(TOWN_SCENE_WORLD_BIOMES_KEY, {}) as Dictionary, WORLD_CELLS_PER_OVERWORLD_TILE, settings.get(TOWN_SCENE_WORLD_RIVERS_KEY, {}) as Dictionary)
 	_plan_surface_sites(own_tile, bbox_center, settings)
 	_restore_homestead(settings)
 
@@ -3400,14 +3407,22 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell + _surface_world_origin, _surface_noise, danger, _surface_biome_ctx)
 			var base_key := String(terrain.get("base", "grass"))
 			var decor_key := String(terrain.get("decor", ""))
+			var blocked := bool(terrain.get("blocked", false))
 			# Flowers are transparent overlays: grass beneath, bloom above.
 			if base_key.begins_with("flowers_"):
 				decor_key = base_key
 				base_key = "grass"
-			# Roads cut through everything and stay clear of trees.
+			# Roads cut through everything and stay clear of trees; a road cell
+			# is never a barrier, so a trail carves a pass through crags.
 			if _surface_road_cells.has(cell):
 				base_key = "road" if (cell.x + cell.y) % 3 != 0 else "road_twig"
 				decor_key = ""
+				blocked = false
+			# Crag cells keep their rocky tile but stop movement, so a range
+			# reads as a real obstacle with walkable valley passes between.
+			if blocked:
+				_surface_blocked_cells[cell] = true
+				_actor_passable_cache.erase(cell)
 			_place_surface_tile(city_layer, cell, base_key, danger)
 			if not decor_key.is_empty():
 				_place_surface_tile(decor_layer, cell, decor_key, danger)

@@ -745,6 +745,7 @@ const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
 ## map however far a walker strays from a settlement - no window edge to
 ## wall the terrain back to grassland.
 const TOWN_SCENE_WORLD_BIOMES_KEY := "town_scene_world_biomes"
+const TOWN_SCENE_WORLD_RIVERS_KEY := "town_scene_world_rivers"
 const DUNGEON_INTERIOR_SCENE_PATH := "res://scenes/dungeon_interior.tscn"
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
@@ -1344,6 +1345,7 @@ func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i,
 	settings[TOWN_SCENE_THEME_KEY] = theme
 	settings[TOWN_SCENE_VILLAGE_KEY] = bool(details.get("is_hamlet", false)) or bool(details.get("is_snow_village", false))
 	settings[TOWN_SCENE_WORLD_BIOMES_KEY] = _build_town_scene_world_biomes()
+	settings[TOWN_SCENE_WORLD_RIVERS_KEY] = _build_town_scene_world_rivers()
 	game_session.call("set_world_settings", settings)
 
 ## The whole overworld's per-tile biome, packed row-major as one byte per
@@ -1362,6 +1364,24 @@ func _build_town_scene_world_biomes() -> Dictionary:
 		for x in range(width):
 			codes[y * width + x] = TILE_ATLAS_DEFS.biome_code(_patch_biome_label_for_tile(Vector2i(x, y)))
 	return {"w": width, "h": height, "codes": codes}
+
+## The overworld's river tiles packed row-major as one bit per tile, so the
+## town's wilds reproduce the world map's watercourses however far the
+## walker strays. A byte is 1 where the tile carries TILE_OVERLAY_RIVER,
+## 0 otherwise; the surface service traces a meandering course through
+## every flagged tile that joins its river and sea neighbors.
+func _build_town_scene_world_rivers() -> Dictionary:
+	if _tile_data.is_empty():
+		return {}
+	var width := map_size.x
+	var height := map_size.y
+	var bits := PackedByteArray()
+	bits.resize(width * height)
+	for y in range(height):
+		for x in range(width):
+			var info := _tile_data.get(Vector2i(x, y), {}) as Dictionary
+			bits[y * width + x] = 1 if (int(info.get("overlay_flags", 0)) & TILE_OVERLAY_RIVER) != 0 else 0
+	return {"w": width, "h": height, "bits": bits}
 
 func _patch_biome_label_for_tile(tile: Vector2i) -> String:
 	if tile.x < 0 or tile.y < 0 or tile.x >= map_size.x or tile.y >= map_size.y:

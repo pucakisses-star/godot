@@ -38,7 +38,12 @@ static func make_noise_set(world_seed: int) -> Dictionary:
 ## PackedByteArray} row-major h*w, each byte a TILE_ATLAS_DEFS biome code.
 ## world_cells_per_tile is the local cells per overworld tile. Returns {}
 ## for an empty or malformed buffer (standalone tests).
-static func make_biome_context(world_biomes: Dictionary, world_cells_per_tile: int) -> Dictionary:
+## world_rivers, when given, is {"w","h","bits":PackedByteArray} row-major
+## h*w with a 1 where the overworld tile carries a river; it must match the
+## biome buffer's dimensions or it is ignored. river_cache is a mutable
+## per-tile course cache: the town streams on the main thread, so carrying
+## it on the ctx is safe (the pure RegionMapService port stays stateless).
+static func make_biome_context(world_biomes: Dictionary, world_cells_per_tile: int, world_rivers: Dictionary = {}) -> Dictionary:
 	if world_biomes.is_empty():
 		return {}
 	var width := int(world_biomes.get("w", 0))
@@ -46,11 +51,20 @@ static func make_biome_context(world_biomes: Dictionary, world_cells_per_tile: i
 	var codes := world_biomes.get("codes", PackedByteArray()) as PackedByteArray
 	if width <= 0 or height <= 0 or codes.size() != width * height:
 		return {}
+	var river_bits := PackedByteArray()
+	if not world_rivers.is_empty():
+		var river_width := int(world_rivers.get("w", 0))
+		var river_height := int(world_rivers.get("h", 0))
+		var bits := world_rivers.get("bits", PackedByteArray()) as PackedByteArray
+		if river_width == width and river_height == height and bits.size() == width * height:
+			river_bits = bits
 	return {
 		"w": width,
 		"h": height,
 		"codes": codes,
-		"cells_per_tile": maxi(1, world_cells_per_tile)
+		"cells_per_tile": maxi(1, world_cells_per_tile),
+		"river_bits": river_bits,
+		"river_cache": {}
 	}
 
 ## The biome label at a WORLD cell: floor into overworld-tile space, then
@@ -76,6 +90,22 @@ static func _biome_for_tile(biome_ctx: Dictionary, tile: Vector2i) -> String:
 	if index < 0 or index >= codes.size():
 		return TILE_ATLAS_DEFS.BIOME_GRASSLAND
 	return TILE_ATLAS_DEFS.biome_label(codes[index])
+
+## Whether the overworld tile carries a river, read from the packed bits
+## clamped to the world's own edge (a false when the ctx has no rivers).
+static func _tile_has_river(biome_ctx: Dictionary, tile: Vector2i) -> bool:
+	var bits := biome_ctx.get("river_bits", PackedByteArray()) as PackedByteArray
+	if bits.is_empty():
+		return false
+	var width := int(biome_ctx.get("w", 0))
+	var height := int(biome_ctx.get("h", 0))
+	if width <= 0 or height <= 0:
+		return false
+	var clamped := Vector2i(clampi(tile.x, 0, width - 1), clampi(tile.y, 0, height - 1))
+	var index := clamped.y * width + clamped.x
+	if index < 0 or index >= bits.size():
+		return false
+	return bits[index] != 0
 
 ## The ground and its dressing for one cell:
 ## {"base": tile key, "decor": tile key or ""}. danger (0..1) is the
@@ -160,6 +190,14 @@ static func _biome_terrain(cell: Vector2i, noise_set: Dictionary, elevation: flo
 	if coast > 0.4:
 		# A sandy shoreline just above the waterline.
 		return {"base": "sand" if detail > -0.2 else "sand_pebbles", "decor": ""}
+	# The overworld's rivers reproduced on the ground: the tile's meandering
+	# course is built once (cached on the ctx) and carved into whatever land
+	# it crosses. Coast and beach are already handled above, so this only
+	# touches dry cells; the course reads as ordinary water (block/boatable).
+	if _tile_has_river(biome_ctx, tile):
+		var river_mask := _river_mask_for_tile(biome_ctx, tile, water3x3, noise_set, cells_per_tile)
+		if not river_mask.is_empty() and river_mask[local_y * cells_per_tile + local_x] != 0:
+			return {"base": "water" if detail > -0.15 else "water_calm", "decor": ""}
 	var land_biome := _blend_land_biome(biomes3x3, land_own, cell, noise_set, fx, fy)
 	return _terrain_for_biome(land_biome, cell, elevation, forest, detail, danger)
 
@@ -220,7 +258,9 @@ static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, 
 			return {"base": "sand_pebbles" if detail > -0.2 else "sand", "decor": ""}
 		TILE_ATLAS_DEFS.BIOME_MOUNTAIN:
 			# Rocky fringes: pebble crags with sparse dark conifers and drier
-			# grass in the folds.
+			# grass in the folds. Crags are impassable rock; the low valley
+			# folds and lower slopes stay walkable so a range is a real
+			# barrier with passes threaded through it, not a solid wall.
 			var base := "sand_pebbles"
 			if detail < -0.35:
 				base = "grass_dark"
@@ -229,7 +269,15 @@ static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, 
 			var decor := ""
 			if forest > 0.35 and detail > 0.55:
 				decor = "tree_dark"
-			return {"base": base, "decor": decor}
+			# Crags block; folds and lower slopes below the threshold stay
+			# open. The detail noise is high-frequency, so the threshold is
+			# tuned to -0.1: above it the range is a clear majority of rock,
+			# below it the open cells still percolate into continuous valley
+			# passes a walker can thread from one side to the other.
+			var mountain_terrain := {"base": base, "decor": decor}
+			if detail > -0.1:
+				mountain_terrain["blocked"] = true
+			return mountain_terrain
 		TILE_ATLAS_DEFS.BIOME_HILLS:
 			# Greener than the peaks, still stony on the ridgelines.
 			var base := "grass_dark"
@@ -294,6 +342,69 @@ static func _field_from_neighbors(values: PackedFloat32Array, fx: float, fy: flo
 	var vertical := values[4 + 3 * sy]
 	var diagonal := values[4 + 3 * sy + sx]
 	return lerpf(lerpf(own, horizontal, wx), lerpf(vertical, diagonal, wx), wy)
+
+## The tile's river course, built once and cached on the ctx. The 3x3
+## river-bit neighborhood joins the shared water3x3 field, so a flagged
+## tile knows which of its edges to reach toward.
+static func _river_mask_for_tile(biome_ctx: Dictionary, tile: Vector2i, water3x3: PackedFloat32Array, noise_set: Dictionary, cells_per_tile: int) -> PackedByteArray:
+	var cache := biome_ctx.get("river_cache", {}) as Dictionary
+	if cache.has(tile):
+		return cache[tile] as PackedByteArray
+	var river3x3 := PackedFloat32Array()
+	river3x3.resize(9)
+	for ny in 3:
+		for nx in 3:
+			var neighbor := tile + Vector2i(nx - 1, ny - 1)
+			river3x3[ny * 3 + nx] = 1.0 if _tile_has_river(biome_ctx, neighbor) else 0.0
+	var mask := _build_river_mask(tile, river3x3, water3x3, noise_set, cells_per_tile)
+	cache[tile] = mask
+	return mask
+
+## Ported from RegionMapService: rivers run tile center to edge midpoints,
+## one meandering segment per river or sea neighbor, wobble faded to zero at
+## both endpoints so a tile's course meets its neighbors' exactly at the
+## shared edge. A lone river tile still shows its stream, north to south.
+static func _build_river_mask(tile: Vector2i, river3x3: PackedFloat32Array, water3x3: PackedFloat32Array, noise_set: Dictionary, grid: int) -> PackedByteArray:
+	var mask := PackedByteArray()
+	mask.resize(grid * grid)
+	var center := Vector2(grid * 0.5, grid * 0.5)
+	var noise := noise_set.get("detail") as FastNoiseLite
+	var connections := 0
+	var directions := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	for direction: Vector2i in directions:
+		var index := 4 + direction.x + 3 * direction.y
+		if river3x3[index] < 0.5 and water3x3[index] < 0.5:
+			continue
+		var edge_mid := center + Vector2(direction) * (grid * 0.5)
+		_stamp_river_segment(mask, center, edge_mid, tile, noise, grid)
+		connections += 1
+	if connections == 0:
+		_stamp_river_segment(mask, Vector2(center.x, 0.0), center, tile, noise, grid)
+		_stamp_river_segment(mask, center, Vector2(center.x, float(grid)), tile, noise, grid)
+	return mask
+
+static func _stamp_river_segment(mask: PackedByteArray, from_point: Vector2, to_point: Vector2, tile: Vector2i, noise: FastNoiseLite, grid: int) -> void:
+	var axis := (to_point - from_point).normalized()
+	var perpendicular := Vector2(-axis.y, axis.x)
+	var brush := 1
+	var steps := 56
+	for step in steps + 1:
+		var t := float(step) / float(steps)
+		var straight := from_point.lerp(to_point, t)
+		# Wobble is sampled in world-cell units - the same "surface|seed"
+		# detail noise the map render uses - so the ground reproduces the
+		# world map's exact course; it fades to zero at both endpoints.
+		var world := Vector2(tile * grid) + straight
+		var wobble := noise.get_noise_2d(world.x * 0.12, world.y * 0.12) * 11.0 * sin(PI * t)
+		var pos := straight + perpendicular * wobble
+		var px := int(round(pos.x))
+		var py := int(round(pos.y))
+		for oy in range(-brush, brush + 1):
+			for ox in range(-brush, brush + 1):
+				var mx := px + ox
+				var my := py + oy
+				if mx >= 0 and my >= 0 and mx < grid and my < grid:
+					mask[my * grid + mx] = 1
 
 static func chunk_for_cell(cell: Vector2i) -> Vector2i:
 	return Vector2i(int(floor(float(cell.x) / CHUNK_SIZE)), int(floor(float(cell.y) / CHUNK_SIZE)))
