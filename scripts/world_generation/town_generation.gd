@@ -267,7 +267,7 @@ const TOWN_SCENE_NAME_KEY := "town_scene_name"
 const TOWN_SCENE_TILE_KEY := "town_scene_tile"
 const TOWN_SCENE_THEME_KEY := "town_scene_theme"
 const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
-const TOWN_SCENE_BIOME_PATCH_KEY := "town_scene_biome_patch"
+const TOWN_SCENE_WORLD_BIOMES_KEY := "town_scene_world_biomes"
 
 ## Farmstead art from the web game's Farm tileset (16px art; town cells are
 ## 32px, so a 128px sprite spans four cells).
@@ -3273,7 +3273,7 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	_surface_world_origin = own_tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2) - bbox_center
 	# The wilds derive their climate from the overworld biomes around this
 	# settlement, so coasts read as sea, deserts as sand, forests as woods.
-	_surface_biome_ctx = SurfaceWorldService.make_biome_context(settings.get(TOWN_SCENE_BIOME_PATCH_KEY, {}) as Dictionary, _surface_world_origin, WORLD_CELLS_PER_OVERWORLD_TILE)
+	_surface_biome_ctx = SurfaceWorldService.make_biome_context(settings.get(TOWN_SCENE_WORLD_BIOMES_KEY, {}) as Dictionary, WORLD_CELLS_PER_OVERWORLD_TILE)
 	_plan_surface_sites(own_tile, bbox_center, settings)
 	_restore_homestead(settings)
 

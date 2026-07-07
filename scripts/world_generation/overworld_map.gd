@@ -741,12 +741,10 @@ const TOWN_SCENE_NAME_KEY := "town_scene_name"
 const TOWN_SCENE_POPULATION_KEY := "town_scene_population"
 const TOWN_SCENE_THEME_KEY := "town_scene_theme"
 const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
-const TOWN_SCENE_BIOME_PATCH_KEY := "town_scene_biome_patch"
-## The surface wilds stream out to (and place gates at) ~20 tiles, so the
-## patch must cover that whole reach - a smaller window would clamp the
-## outer band to the patch edge and, at a coast, wall it with ocean.
-## A 20-tile radius is a 41x41 window (1681 labels), still compact.
-const TOWN_SCENE_BIOME_PATCH_RADIUS := 20
+## The full overworld biome buffer, so the wilds keep matching the world
+## map however far a walker strays from a settlement - no window edge to
+## wall the terrain back to grassland.
+const TOWN_SCENE_WORLD_BIOMES_KEY := "town_scene_world_biomes"
 const DUNGEON_INTERIOR_SCENE_PATH := "res://scenes/dungeon_interior.tscn"
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
@@ -1345,26 +1343,25 @@ func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i,
 	settings[TOWN_SCENE_POPULATION_KEY] = maxi(0, int(details.get("population", 0)))
 	settings[TOWN_SCENE_THEME_KEY] = theme
 	settings[TOWN_SCENE_VILLAGE_KEY] = bool(details.get("is_hamlet", false)) or bool(details.get("is_snow_village", false))
-	settings[TOWN_SCENE_BIOME_PATCH_KEY] = _build_town_scene_biome_patch(tile_coord)
+	settings[TOWN_SCENE_WORLD_BIOMES_KEY] = _build_town_scene_world_biomes()
 	game_session.call("set_world_settings", settings)
 
-## A compact biome window around the launched settlement, so the town's
-## wilds can derive their climate from the real overworld. Base biome wins
-## for water (so coasts read as sea); biome_type carries forest, mountain,
-## and the rest. Off-map tiles fall back to grassland.
-func _build_town_scene_biome_patch(tile_coord: Vector2i) -> Dictionary:
+## The whole overworld's per-tile biome, packed row-major as one byte per
+## tile, so the town's wilds match the world map however far the walker
+## strays. Base biome wins for water (so coasts read as sea); biome_type
+## carries forest, mountain, and the rest. Byte codes go through the shared
+## TILE_ATLAS_DEFS codec so the surface service decodes them the same way.
+func _build_town_scene_world_biomes() -> Dictionary:
 	if _tile_data.is_empty():
 		return {}
-	var radius := TOWN_SCENE_BIOME_PATCH_RADIUS
-	var biomes := PackedStringArray()
-	for dy in range(-radius, radius + 1):
-		for dx in range(-radius, radius + 1):
-			biomes.append(_patch_biome_label_for_tile(tile_coord + Vector2i(dx, dy)))
-	return {
-		"origin": {"x": tile_coord.x - radius, "y": tile_coord.y - radius},
-		"radius": radius,
-		"biomes": biomes
-	}
+	var width := map_size.x
+	var height := map_size.y
+	var codes := PackedByteArray()
+	codes.resize(width * height)
+	for y in range(height):
+		for x in range(width):
+			codes[y * width + x] = TILE_ATLAS_DEFS.biome_code(_patch_biome_label_for_tile(Vector2i(x, y)))
+	return {"w": width, "h": height, "codes": codes}
 
 func _patch_biome_label_for_tile(tile: Vector2i) -> String:
 	if tile.x < 0 or tile.y < 0 or tile.x >= map_size.x or tile.y >= map_size.y:

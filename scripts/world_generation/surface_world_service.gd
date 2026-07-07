@@ -31,37 +31,31 @@ static func make_noise_set(world_seed: int) -> Dictionary:
 	detail.frequency = 0.6
 	return {"elevation": elevation, "forest": forest, "detail": detail}
 
-## The overworld climate around a settlement, packed for the wilds
-## renderer: given a WORLD cell, which overworld tile it sits on and thus
-## which biome. patch is {"origin": {"x","y"}, "radius": R, "biomes":
-## PackedStringArray} (row-major (2R+1)x(2R+1) window). world_origin is
-## the town's shared-space offset; world_cells_per_tile is the local cells
-## per overworld tile. Returns {} for an empty patch (standalone tests).
-static func make_biome_context(patch: Dictionary, world_origin: Vector2i, world_cells_per_tile: int) -> Dictionary:
-	if patch.is_empty():
+## The whole overworld's climate, packed for the wilds renderer: given a
+## WORLD cell, which overworld tile it sits on and thus which biome. World
+## cells are absolute (the town bakes its shared-space offset into them), so
+## the full buffer needs no origin. world_biomes is {"w","h","codes":
+## PackedByteArray} row-major h*w, each byte a TILE_ATLAS_DEFS biome code.
+## world_cells_per_tile is the local cells per overworld tile. Returns {}
+## for an empty or malformed buffer (standalone tests).
+static func make_biome_context(world_biomes: Dictionary, world_cells_per_tile: int) -> Dictionary:
+	if world_biomes.is_empty():
 		return {}
-	var biomes := patch.get("biomes", PackedStringArray()) as PackedStringArray
-	if biomes == null or biomes.is_empty():
+	var width := int(world_biomes.get("w", 0))
+	var height := int(world_biomes.get("h", 0))
+	var codes := world_biomes.get("codes", PackedByteArray()) as PackedByteArray
+	if width <= 0 or height <= 0 or codes.size() != width * height:
 		return {}
-	var radius := int(patch.get("radius", 0))
-	var span := 2 * radius + 1
-	if biomes.size() != span * span:
-		return {}
-	var origin_variant: Variant = patch.get("origin", {})
-	var origin_tile := Vector2i.ZERO
-	if origin_variant is Dictionary:
-		origin_tile = Vector2i(int((origin_variant as Dictionary).get("x", 0)), int((origin_variant as Dictionary).get("y", 0)))
 	return {
-		"origin_tile": origin_tile,
-		"span": span,
-		"biomes": biomes,
-		"cells_per_tile": maxi(1, world_cells_per_tile),
-		"world_origin": world_origin
+		"w": width,
+		"h": height,
+		"codes": codes,
+		"cells_per_tile": maxi(1, world_cells_per_tile)
 	}
 
-## The biome label at a WORLD cell: floor into overworld-tile space, clamp
-## into the stored window, read the row-major label. Grassland when the
-## context is empty or the cell falls outside the window.
+## The biome label at a WORLD cell: floor into overworld-tile space, then
+## read the full buffer (clamped to the true map edge). Grassland when the
+## context is empty.
 static func biome_for_world_cell(biome_ctx: Dictionary, world_cell: Vector2i) -> String:
 	if biome_ctx.is_empty():
 		return TILE_ATLAS_DEFS.BIOME_GRASSLAND
@@ -69,21 +63,19 @@ static func biome_for_world_cell(biome_ctx: Dictionary, world_cell: Vector2i) ->
 	var tile := Vector2i(int(floor(float(world_cell.x) / float(cells_per_tile))), int(floor(float(world_cell.y) / float(cells_per_tile))))
 	return _biome_for_tile(biome_ctx, tile)
 
+## Clamping to [0,w-1]x[0,h-1] here is correct: it is the world's own edge,
+## not an interior window, so tiles past the map read as its border biome.
 static func _biome_for_tile(biome_ctx: Dictionary, tile: Vector2i) -> String:
-	var origin_tile := biome_ctx.get("origin_tile", Vector2i.ZERO) as Vector2i
-	var span := int(biome_ctx.get("span", 1))
-	var biomes := biome_ctx.get("biomes") as PackedStringArray
-	var local := tile - origin_tile
-	# Outside the stored window, fall back to neutral grassland - never
-	# clamp to the edge biome, or a coastal town's water edge would wall
-	# the whole outer band with ocean past the patch.
-	if local.x < 0 or local.y < 0 or local.x >= span or local.y >= span:
+	var width := int(biome_ctx.get("w", 0))
+	var height := int(biome_ctx.get("h", 0))
+	if width <= 0 or height <= 0:
 		return TILE_ATLAS_DEFS.BIOME_GRASSLAND
-	var index := local.y * span + local.x
-	if index < 0 or index >= biomes.size():
+	var codes := biome_ctx.get("codes") as PackedByteArray
+	var clamped := Vector2i(clampi(tile.x, 0, width - 1), clampi(tile.y, 0, height - 1))
+	var index := clamped.y * width + clamped.x
+	if index < 0 or index >= codes.size():
 		return TILE_ATLAS_DEFS.BIOME_GRASSLAND
-	var label := biomes[index]
-	return label if not label.is_empty() else TILE_ATLAS_DEFS.BIOME_GRASSLAND
+	return TILE_ATLAS_DEFS.biome_label(codes[index])
 
 ## The ground and its dressing for one cell:
 ## {"base": tile key, "decor": tile key or ""}. danger (0..1) is the
