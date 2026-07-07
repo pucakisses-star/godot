@@ -3082,9 +3082,11 @@ func _evaluate_desert_cell(x: int, y: int, height: float) -> bool:
 	if idx >= 0 and idx < _desert_suitability_buffer.size():
 		_desert_suitability_buffer[idx] = suitability
 		_desert_heat_buffer[idx] = heat
-	if suitability <= 0.52:
+	# Raised acceptance floors keep deserts to genuine arid pockets rather
+	# than sheeting across every warm lowland.
+	if suitability <= 0.58:
 		return false
-	if suitability <= lerpf(0.58, 0.52, equatorial):
+	if suitability <= lerpf(0.66, 0.58, equatorial):
 		return false
 	var desert_noise := 0.5
 	if _desert_detail_noise != null:
@@ -4134,8 +4136,10 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 				neighbor_desert += desert_mask[n_idx]
 				neighbor_count += 1
 			var local_density := (float(neighbor_desert) / float(neighbor_count)) if neighbor_count > 0 else float(desert_mask[idx])
-			var combined := base_suitability * 0.55 + float(blur_current[idx]) * 0.45 + local_density * 0.15
-			if combined > 0.62 and base_suitability > 0.48:
+			# Lower local-density weight and stricter acceptance stop the
+			# refine pass from bleeding deserts across their neighbours.
+			var combined := base_suitability * 0.55 + float(blur_current[idx]) * 0.45 + local_density * 0.08
+			if combined > 0.7 and base_suitability > 0.55:
 				updated_mask[idx] = 1
 			elif combined < 0.5 or base_suitability < 0.45:
 				updated_mask[idx] = 0
