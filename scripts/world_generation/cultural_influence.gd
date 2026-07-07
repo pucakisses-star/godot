@@ -210,6 +210,7 @@ func spawn_ambient_structures(
 			if tile.is_empty():
 				continue
 			tile["ambient_structure"] = null
+			tile["detail_ambient_structure"] = null
 			if not _can_spawn_ambient_on_tile(coord, tile, is_land_base_tile_fn):
 				tiles[coord] = tile
 				continue
@@ -230,14 +231,23 @@ func spawn_ambient_structures(
 				tiles[coord] = tile
 				continue
 			var chance := clampf(0.015 + strength * 0.10, 0.0, 0.65)
-			if _hash_roll(seed_number, x, y, 433) > chance:
+			# The detailed view rewards a denser, lived-in world: a wider net
+			# catches extra sites that only surface when the map is zoomed in,
+			# leaving the world map itself uncluttered. detail_chance is a
+			# superset of chance, so every world-map site also shows up close.
+			var detail_chance := clampf(chance * 2.6 + 0.03, 0.0, 0.9)
+			var roll := _hash_roll(seed_number, x, y, 433)
+			if roll > detail_chance:
 				tiles[coord] = tile
 				continue
 			var option := options[int(_hash_u32(seed_number, x, y, 811) % options.size())] as Dictionary
 			if not _ambient_option_matches(option, coord, tiles):
 				tiles[coord] = tile
 				continue
-			tile["ambient_structure"] = option
+			if roll <= chance:
+				tile["ambient_structure"] = option
+			else:
+				tile["detail_ambient_structure"] = option
 			tiles[coord] = tile
 
 func build_culture_overlay_image(
@@ -917,15 +927,21 @@ func _can_spawn_ambient_on_tile(coord: Vector2i, tile: Dictionary, is_land_base_
 	return true
 
 func _ambient_option_matches(option: Dictionary, coord: Vector2i, tiles: Dictionary) -> bool:
-	if bool(option.get("requires_tree_overlay", false)) and not _has_overlay(coord, tiles, "tree"):
+	# "Tree overlay" means any woodland. Regular woods are labelled "forest"
+	# and only jungle carries the literal "tree" tag, so a bare "tree" test
+	# silently excluded every temperate forest - which is why lumber mills
+	# and hunting lodges (human, tree-gated) never appeared. Match both.
+	if bool(option.get("requires_tree_overlay", false)) and not _has_woodland_overlay(coord, tiles):
 		return false
-	if bool(option.get("requires_tree_neighbor", false)) and not _has_neighbor_overlay(coord, tiles, "tree"):
+	if bool(option.get("requires_tree_neighbor", false)) and not _has_woodland_neighbor(coord, tiles):
 		return false
 	if bool(option.get("disallow_forest_overlay", false)) and _has_overlay(coord, tiles, "forest"):
 		return false
 	if bool(option.get("requires_cave_neighbor", false)) and not _has_neighbor_structure(coord, tiles, "cave"):
 		return false
 	if bool(option.get("requires_mountain_overlay", false)) and not _has_overlay(coord, tiles, "mountain"):
+		return false
+	if bool(option.get("requires_mountain", false)) and not _tile_is_mountain(coord, tiles):
 		return false
 	var tile := tiles.get(coord, {}) as Dictionary
 	var tile_biome := String(tile.get("biome_type", tile.get("base_biome", tile.get("base", "")))).to_lower()
@@ -940,6 +956,28 @@ func _ambient_option_matches(option: Dictionary, coord: Vector2i, tiles: Diction
 		if not String(tile.get("hill_overlay", "")).strip_edges().is_empty():
 			return false
 	return true
+
+## True when the tile itself is mountain: either its biome resolves to
+## mountain or it carries a mountain overlay. Broader than the overlay-only
+## dragon gate, so a bare mountain-biome peak still counts.
+func _tile_is_mountain(coord: Vector2i, tiles: Dictionary) -> bool:
+	var tile := tiles.get(coord, {}) as Dictionary
+	var biome := String(tile.get("biome_type", tile.get("base_biome", tile.get("base", "")))).to_lower()
+	if biome == "mountain":
+		return true
+	return _has_overlay(coord, tiles, "mountain")
+
+## Any woodland on this tile: temperate forest ("forest"), jungle ("tree"),
+## or an explicit tree tag. The label split is a worldgen quirk; woodland
+## gates should not care which flavour of trees stand here.
+func _has_woodland_overlay(coord: Vector2i, tiles: Dictionary) -> bool:
+	return _has_overlay(coord, tiles, "tree") or _has_overlay(coord, tiles, "forest")
+
+func _has_woodland_neighbor(coord: Vector2i, tiles: Dictionary) -> bool:
+	for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN, Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:
+		if _has_woodland_overlay(coord + offset, tiles):
+			return true
+	return false
 
 func _has_overlay(coord: Vector2i, tiles: Dictionary, overlay_key: String) -> bool:
 	var tile := tiles.get(coord, {}) as Dictionary

@@ -1194,6 +1194,11 @@ func _on_structure_context_menu_id_pressed(action_id: int) -> void:
 ## Wild tiles just get the zoom - the closer look is its own reward.
 const DIVE_ZOOM := 3.2
 const DIVE_SECONDS := 0.85
+## Detailed view is real tile art, so it rewards a much closer look than the
+## world map: while in region mode the camera cap lifts to this, restored on
+## exit. Remembers the world-map cap so the two never leak into each other.
+const REGION_MAX_ZOOM := 12.0
+var _world_map_max_zoom := -1.0
 var _dive_pending := false
 
 func _handle_double_click_dive(event: InputEvent) -> bool:
@@ -6954,7 +6959,81 @@ func _assign_cultural_groups(
 				tile_info["overlay_flags"] = int(tile_info.get("overlay_flags", 0)) & ~TILE_OVERLAY_TREE & ~TILE_OVERLAY_FOREST
 			if settlement_layer != null and not tile_info.has("settlement_type") and ambient_dict.has("tile"):
 				settlement_layer.set_cell(coord, _atlas_source_id, ambient_dict.get("tile", TOWN_TILE) as Vector2i)
+				var ambient_id := String(ambient_dict.get("id", ""))
+				if ambient_id == "farm":
+					_scatter_farm_crops(coord)
+				elif ambient_id == "lumber_mill":
+					_scatter_lumber_clearing(coord)
 		_tile_data[coord] = tile_info
+
+## A farm is more than its barn: sow crop tiles across the plain-grass cells
+## around it so tilled fields read on the map instead of a lone building.
+func _scatter_farm_crops(farm_coord: Vector2i) -> void:
+	if settlement_layer == null:
+		return
+	var sown := 0
+	for i in range(NEIGHBOR_OFFSETS_8.size()):
+		if sown >= 5:
+			break
+		var neighbor := farm_coord + NEIGHBOR_OFFSETS_8[i]
+		if settlement_layer.get_cell_source_id(neighbor) >= 0:
+			continue
+		var n_info := _tile_data.get(neighbor, {}) as Dictionary
+		if n_info.is_empty() or String(n_info.get("structure", "")).strip_edges() != "":
+			continue
+		if not _is_plain_grass_tile(n_info):
+			continue
+		# A dirt track or river cutting the plot would clash with the rows.
+		if _roads_layer != null and _roads_layer.get_cell_source_id(neighbor) >= 0:
+			continue
+		if river_layer != null and river_layer.get_cell_source_id(neighbor) >= 0:
+			continue
+		var crop_tile := AMBIENT_FARM_VARIANT_TILE if (i % 3 == 0) else FARM_CROPS_TILE
+		settlement_layer.set_cell(neighbor, _atlas_source_id, crop_tile)
+		n_info["structure"] = "farmField"
+		n_info["settlement_classification"] = "Farmland"
+		_tile_data[neighbor] = n_info
+		sown += 1
+
+## A working lumber mill leaves a felled clearing: neighbouring wooded tiles
+## lose their trees and show cut-woods stumps (CUT_TREES_TILE, atlas (1,6)),
+## so a mill reads as an active logging site rather than a lone shed.
+func _scatter_lumber_clearing(mill_coord: Vector2i) -> void:
+	if settlement_layer == null or tree_layer == null:
+		return
+	var cleared := 0
+	for i in range(NEIGHBOR_OFFSETS_8.size()):
+		if cleared >= 5:
+			break
+		var neighbor := mill_coord + NEIGHBOR_OFFSETS_8[i]
+		if settlement_layer.get_cell_source_id(neighbor) >= 0:
+			continue
+		# Only fell where woods actually stand.
+		if tree_layer.get_cell_source_id(neighbor) < 0:
+			continue
+		var n_info := _tile_data.get(neighbor, {}) as Dictionary
+		if n_info.is_empty() or String(n_info.get("structure", "")).strip_edges() != "":
+			continue
+		if _roads_layer != null and _roads_layer.get_cell_source_id(neighbor) >= 0:
+			continue
+		tree_layer.erase_cell(neighbor)
+		n_info["overlay_flags"] = int(n_info.get("overlay_flags", 0)) & ~TILE_OVERLAY_TREE & ~TILE_OVERLAY_FOREST
+		settlement_layer.set_cell(neighbor, _atlas_source_id, TILE_ATLAS_DEFS.CUT_TREES_TILE)
+		n_info["structure"] = "cutWoods"
+		n_info["settlement_classification"] = "Logged Woods"
+		_tile_data[neighbor] = n_info
+		cleared += 1
+
+## Plain grass: grassland base with nothing overlaid - the only ground a
+## culture will till or build a homestead on.
+func _is_plain_grass_tile(info: Dictionary) -> bool:
+	var biome := String(info.get("biome_type", info.get("base_biome", info.get("base", "")))).to_lower()
+	var base := String(info.get("base_biome", info.get("base", ""))).to_lower()
+	if biome != "grassland" or base != "grassland":
+		return false
+	if not String(info.get("overlay", "")).strip_edges().is_empty():
+		return false
+	return String(info.get("hill_overlay", "")).strip_edges().is_empty()
 
 func _collect_settlement_sources() -> Array[Dictionary]:
 	var settlements: Array[Dictionary] = []
@@ -9373,7 +9452,9 @@ func _build_region_icons() -> void:
 	# (2-2.5 detail cells of 8); ambient structures are one detail tile.
 	var major_scale := (float(tile_size) * 0.3) / float(native_px.x)
 	var ambient_scale := (float(tile_size) / float(RegionMapService.SUB_TILES)) / float(native_px.x)
+	var occupied_cells: Dictionary = {}
 	for cell: Vector2i in settlement_layer.get_used_cells():
+		occupied_cells[cell] = true
 		var atlas_coords := settlement_layer.get_cell_atlas_coords(cell)
 		if atlas_coords.x < 0:
 			continue
@@ -9381,20 +9462,43 @@ func _build_region_icons() -> void:
 		var settlement_type := String(details.get("settlement_type", "")).strip_edges()
 		var is_major := REGION_MAJOR_SETTLEMENT_TYPES.has(settlement_type)
 		var icon_scale := major_scale if is_major else ambient_scale
-		var on_screen := Vector2(native_px) * icon_scale
-		var sprite := Sprite2D.new()
-		sprite.texture = atlas_texture
-		sprite.region_enabled = true
-		sprite.region_rect = Rect2(Vector2(atlas_coords * native_px), Vector2(native_px))
-		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-		sprite.centered = false
-		sprite.scale = Vector2.ONE * icon_scale
-		var origin := Vector2(cell * tile_size)
-		sprite.position = Vector2(
-			origin.x + (float(tile_size) - on_screen.x) * 0.5,
-			origin.y + float(tile_size) - on_screen.y
-		)
-		_region_icon_layer.add_child(sprite)
+		_add_region_icon(atlas_texture, native_px, atlas_coords, cell, icon_scale)
+	# Detail-only ambient sites: extra culturally-placed marks that never reach
+	# the world map, surfacing only in this zoomed-in view for a denser world.
+	for coord_variant: Variant in _tile_data.keys():
+		var cell := coord_variant as Vector2i
+		if occupied_cells.has(cell):
+			continue
+		var details := _tile_data.get(coord_variant, {}) as Dictionary
+		var detail_ambient: Variant = details.get("detail_ambient_structure", null)
+		if not (detail_ambient is Dictionary):
+			continue
+		var ambient_dict := detail_ambient as Dictionary
+		if not ambient_dict.has("tile"):
+			continue
+		# Roads carry their own art in the detail render; keep sites off them.
+		if _roads_layer != null and _roads_layer.get_cell_source_id(cell) >= 0:
+			continue
+		_add_region_icon(atlas_texture, native_px, ambient_dict.get("tile", Vector2i.ZERO) as Vector2i, cell, ambient_scale)
+
+## Places one bottom-anchored region-view sprite for a site on its tile.
+func _add_region_icon(atlas_texture: Texture2D, native_px: Vector2i, atlas_coords: Vector2i, cell: Vector2i, icon_scale: float) -> void:
+	if atlas_coords.x < 0 or atlas_coords.y < 0:
+		return
+	var on_screen := Vector2(native_px) * icon_scale
+	var sprite := Sprite2D.new()
+	sprite.texture = atlas_texture
+	sprite.region_enabled = true
+	sprite.region_rect = Rect2(Vector2(atlas_coords * native_px), Vector2(native_px))
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.centered = false
+	sprite.scale = Vector2.ONE * icon_scale
+	var origin := Vector2(cell * tile_size)
+	sprite.position = Vector2(
+		origin.x + (float(tile_size) - on_screen.x) * 0.5,
+		origin.y + float(tile_size) - on_screen.y
+	)
+	_region_icon_layer.add_child(sprite)
 
 func _ensure_region_hint() -> void:
 	if _region_hint_panel != null:
@@ -9433,6 +9537,12 @@ func _enter_region_mode() -> void:
 	if _region_mode:
 		return
 	_region_mode = true
+	# Lift the zoom cap so the tile art can be inspected up close, keeping
+	# the world-map cap to restore when the detailed view closes.
+	if overworld_camera != null:
+		if _world_map_max_zoom < 0.0:
+			_world_map_max_zoom = overworld_camera.max_zoom
+		overworld_camera.max_zoom = REGION_MAX_ZOOM
 	_ensure_region_layer()
 	_ensure_region_hint()
 	if _region_noise.is_empty():
@@ -9459,6 +9569,12 @@ func _exit_region_mode() -> void:
 	if not _region_mode:
 		return
 	_region_mode = false
+	# Restore the world-map zoom cap and pull the camera back under it, so a
+	# close detail zoom doesn't strand the world map over-magnified.
+	if overworld_camera != null and _world_map_max_zoom > 0.0:
+		overworld_camera.max_zoom = _world_map_max_zoom
+		if overworld_camera.zoom.x > _world_map_max_zoom:
+			overworld_camera.adjust_zoom(_world_map_max_zoom - overworld_camera.zoom.x)
 	_region_render_queue.clear()
 	_region_queued.clear()
 	if _region_layer != null:
