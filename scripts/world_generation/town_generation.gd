@@ -3554,7 +3554,8 @@ func _setup_inventory_screen() -> void:
 		Callable(self, "_world_settings_snapshot"),
 		Callable(self, "_store_world_settings"),
 		func() -> Dictionary: return _player_inventory,
-		Callable(self, "_on_equipment_changed")
+		Callable(self, "_on_equipment_changed"),
+		Callable(self, "_inventory_screen_context")
 	)
 	chest_popup.get_parent().add_child(_inventory_screen)
 	# UI must outdraw the world: furnishing sprites carry z 8-14 and
@@ -3564,6 +3565,22 @@ func _setup_inventory_screen() -> void:
 	chest_popup.z_index = 50
 	if tile_hover_tooltip != null:
 		tile_hover_tooltip.z_index = 50
+
+## Live scene state for the character-sheet columns; the panel reads
+## everything else from the session stores.
+func _inventory_screen_context() -> Dictionary:
+	return {
+		"hp": _player_hp,
+		"max_hp": _player_max_hp,
+		"satiety": _player_satiety,
+		"coins": _player_coins,
+		"game_day": _game_day,
+		"game_hour": _game_hour,
+		"calendar_start_year": _calendar_start_year,
+		"place_name": _town_name if not _town_name.is_empty() else "Unnamed Town",
+		"factions": _settlement_factions,
+		"companion_attack": int(_companion.get("attack", 0))
+	}
 
 func _on_equipment_changed() -> void:
 	_refresh_player_stats_town()
