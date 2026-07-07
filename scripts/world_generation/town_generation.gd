@@ -204,6 +204,9 @@ var _light_overlay_sprite: Sprite2D
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
+# Art-free flowing-water animation, color-keyed to blue water pixels, applied
+# to the whole terrain layer so only water animates (land passes through).
+const WATER_FLOW_SHADER := preload("res://shaders/water_flow.gdshader")
 var _reflection_sprite: Sprite2D
 var _reflection_mask_texture: ImageTexture
 var _reflection_rect_cells := Rect2i()
@@ -1241,6 +1244,20 @@ func _configure_tile_layer() -> void:
 
 	city_layer.tile_set = tile_set
 	decor_layer.tile_set = tile_set
+	_apply_water_flow_material()
+
+## Gives the terrain layer an animated flowing-water shader. It is
+## color-keyed to blue water pixels, so grass/paths/roofs/stone render
+## unchanged while the walkable water (town interior + streamed surface)
+## shimmers as one continuous body. The reflection quad still draws on top.
+func _apply_water_flow_material() -> void:
+	if city_layer.material is ShaderMaterial and (city_layer.material as ShaderMaterial).shader == WATER_FLOW_SHADER:
+		return
+	var flow_material := ShaderMaterial.new()
+	flow_material.shader = WATER_FLOW_SHADER
+	flow_material.set_shader_parameter("flow_speed", 0.6)
+	flow_material.set_shader_parameter("flow_strength", 1.0)
+	city_layer.material = flow_material
 
 func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 	if _passable_atlas_set.is_empty():

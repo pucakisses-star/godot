@@ -133,9 +133,14 @@ static func build_river_map_buffers(
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return float(a.get("weight", 0.0)) > float(b.get("weight", 0.0))
 	)
-	var base_sources := maxi(8, int(floor(float(map_size.x * map_size.y) / 3200.0)))
-	var source_density_multiplier := lerpf(1.8, 3.1, frequency_normalized)
-	var max_sources := maxi(4, int(round(float(base_sources) * frequency_multiplier * source_density_multiplier)))
+	var base_sources := maxi(6, int(floor(float(map_size.x * map_size.y) / 4800.0)))
+	var source_density_multiplier := lerpf(0.9, 1.6, frequency_normalized)
+	var max_sources := maxi(3, int(round(float(base_sources) * frequency_multiplier * source_density_multiplier)))
+	# Keep headwaters apart so parallel rivers can't braid into a lattice: a
+	# fresh source must sit at least this far from every source already taken.
+	var min_source_spacing := maxf(6.0, sqrt(float(map_size.x * map_size.y)) * lerpf(0.14, 0.09, frequency_normalized))
+	var min_source_spacing_sq := min_source_spacing * min_source_spacing
+	var chosen_sources: Array[Vector2i] = []
 	var biome_dictionary := _biome_buffer_to_dictionary(base_biome_buffer, map_size)
 	var ocean_distance := build_ocean_distance_map(biome_dictionary, map_size)
 	var ocean_influence := lerpf(0.008, 0.02, frequency_normalized)
@@ -144,10 +149,20 @@ static func build_river_map_buffers(
 	# the current forward, and a slow side-to-side meander per river. The
 	# straight-line channels of the old 4-way steepest-descent are gone.
 	var far_distance := float(map_size.x + map_size.y)
-	for i in range(mini(candidates.size(), max_sources)):
+	for i in range(candidates.size()):
+		if chosen_sources.size() >= max_sources:
+			break
 		var candidate := candidates[i] as Dictionary
 		var idx := int(candidate.get("idx", 0))
 		var coord := _index_to_coord(idx, map_size)
+		var too_close := false
+		for source: Vector2i in chosen_sources:
+			if Vector2(source - coord).length_squared() < min_source_spacing_sq:
+				too_close = true
+				break
+		if too_close:
+			continue
+		chosen_sources.append(coord)
 		var steps := 0
 		var strength := 2 if float(candidate.get("weight", 0.0)) > major_river_threshold else 1
 		var meander_phase := rng.randf() * TAU

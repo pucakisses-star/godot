@@ -123,6 +123,15 @@ static func render_job(job: Dictionary) -> void:
 ## so palettes can blend across tile borders the way water already does.
 ## Water neighbors vote for the tile's own biome: the coast field owns
 ## that transition. Returns [] when the whole neighborhood matches.
+## Desert and badlands share a sandy palette; blending them produces stray
+## sand tiles inside badlands. This flags that specific pair so the field
+## builder can keep them apart while still blending arid land into grass etc.
+static func _is_arid_conflict(a: String, b: String) -> bool:
+	if a == b:
+		return false
+	var arid := {TILE_ATLAS_DEFS.BIOME_DESERT: true, TILE_ATLAS_DEFS.BIOME_BADLANDS: true}
+	return arid.has(a) and arid.has(b)
+
 static func _build_biome_fields(biomes3x3: PackedStringArray, own_biome: String) -> Array:
 	if biomes3x3 == null or biomes3x3.size() != 9:
 		return []
@@ -131,6 +140,11 @@ static func _build_biome_fields(biomes3x3: PackedStringArray, own_biome: String)
 	for index in 9:
 		var label := biomes3x3[index]
 		if label.is_empty() or label == TILE_ATLAS_DEFS.BIOME_WATER:
+			label = own_biome
+		# Desert and badlands are both arid tans; letting one bleed into the
+		# other's tiles paints stray sand cells inside a badlands (and vice
+		# versa). Treat the pair as non-blending so each renders solid.
+		elif _is_arid_conflict(own_biome, label):
 			label = own_biome
 		resolved.append(label)
 		if label != own_biome:
