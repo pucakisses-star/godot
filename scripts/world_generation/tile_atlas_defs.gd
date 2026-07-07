@@ -163,6 +163,25 @@ const BIOME_FOREST := "forest"
 const BIOME_JUNGLE := "jungle"
 const BIOME_GRASSLAND := "grassland"
 
+## The wire format for the town-scene world biome buffer: one byte per
+## overworld tile, indexing this order. Grassland sits at 0 so an unknown
+## or zero byte decodes to a safe land default. Both the overworld (writer)
+## and the surface service (reader) go through biome_code/biome_label so
+## the two sides agree without sharing the map's internal id tables.
+const BIOME_ORDER: Array[String] = [
+	BIOME_GRASSLAND, BIOME_WATER, BIOME_MOUNTAIN, BIOME_HILLS, BIOME_MARSH,
+	BIOME_TUNDRA, BIOME_DESERT, BIOME_BADLANDS, BIOME_FOREST, BIOME_JUNGLE
+]
+
+static func biome_code(label: String) -> int:
+	var code := BIOME_ORDER.find(label)
+	return code if code >= 0 else 0
+
+static func biome_label(code: int) -> String:
+	if code < 0 or code >= BIOME_ORDER.size():
+		return BIOME_GRASSLAND
+	return BIOME_ORDER[code]
+
 const TREE_BIOMES: Array[String] = [BIOME_FOREST, BIOME_JUNGLE, BIOME_TUNDRA]
 const TREE_BASE_BIOMES: Array[String] = [BIOME_GRASSLAND, BIOME_TUNDRA]
 const TREE_VARIANT_FOREST_LONE := "forest_lone"

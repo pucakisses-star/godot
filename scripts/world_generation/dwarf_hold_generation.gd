@@ -15,7 +15,8 @@ const CELL_WATER := 5
 @export var enable_fog_of_war := true
 @export var underground_level_count_range := Vector2i(3, 7)
 ## Real minutes for one full in-game day (the hold's shift cycle).
-@export var minutes_per_game_day := 6.0
+# 24 real minutes per game day = one game-minute per real second.
+@export var minutes_per_game_day := 24.0
 @export var clock_start_hour := 9.0
 
 # Residence variety: footprints are half-extents (rooms span 2*radius+1
