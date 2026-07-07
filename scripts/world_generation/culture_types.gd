@@ -147,7 +147,10 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{
 			"id": "lumber_mill",
 			"label": "Lumber Mill",
-			"tile": Vector2i(0, 5),
+			# (0,5) is sparse filler in the overworld atlas; the actual mill
+			# art lives at (0,6) (AMBIENT_LUMBER_MILL_TILE), so a spawned mill
+			# was drawing near-nothing. Point it at the real building.
+			"tile": Vector2i(0, 6),
 			"requires_tree_overlay": true,
 			"replace_tree_overlay": true
 		},
@@ -198,9 +201,11 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	],
 	# The wider folk of the world (browser AMBIENT_STRUCTURE_OPTIONS):
 	# every land culture leaves its mark on its own territory.
+	# Dwarves are folk of the deep stone: their ambient marks only rise on
+	# mountains (peaks or mountain overlays), never out on the open lowlands.
 	"dwarves": [
-		{"id": "prospect_camp", "label": "Prospector's Camp", "tile": Vector2i(7, 1)},
-		{"id": "homestead", "label": "Hill Homestead", "tile": Vector2i(13, 1), "requires_plain_grass": true}
+		{"id": "prospect_camp", "label": "Prospector's Camp", "tile": Vector2i(7, 1), "requires_mountain": true},
+		{"id": "homestead", "label": "Mountain Homestead", "tile": Vector2i(13, 1), "requires_mountain": true}
 	],
 	"half_orcs": [
 		{"id": "hunting_lodge", "label": "Hunting Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true},
