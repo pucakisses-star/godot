@@ -142,6 +142,38 @@ const TRAVELER_STOCK_TYPES := {
 	"Pilgrim": "pilgrim_satchel"
 }
 
+## What each profession keeps in their pockets when inspected. "tools"
+## always yields one pick (the trade's instrument); "wares" is either a
+## SHOP_STOCK_POOLS key (crafts-folk carry what they sell) or an inline
+## item list. "coin_max" caps the purse - merchants jingle, farmers don't.
+## Keys cover both settlement vocabularies plus the road professions.
+const NPC_KIT_TABLE := {
+	"Blacksmith": {"tools": ["Smith's Hammer", "Smith's Tongs"], "wares": "smithy", "coin_max": 16},
+	"Smith": {"tools": ["Smith's Hammer", "Smith's Tongs"], "wares": "forge", "coin_max": 16},
+	"Merchant": {"tools": [], "wares": "market_stall", "coin_max": 30},
+	"Goldsmith": {"tools": ["Mason's Chisel"], "wares": "gemcutters_studio", "coin_max": 30},
+	"Brewer": {"tools": [], "wares": "brewery", "coin_max": 14},
+	"Town Guard": {"tools": ["Whetstone"], "wares": ["Arrows", "Jerky Strip", "Mushroom Ration", "Loaf of Bread", "Dried Fish"], "coin_max": 12},
+	"Warrior of the Watch": {"tools": ["Whetstone"], "wares": ["Arrows", "Mushroom Ration", "Jerky Strip", "Dried Fish"], "coin_max": 12},
+	"Farmer": {"tools": ["Spade"], "wares": ["Carrot Seeds", "Beetroot Seeds", "Tomato Seeds", "Carrot", "Beetroot", "Tomato", "Egg"], "coin_max": 8},
+	"Homesteader": {"tools": [], "wares": ["Egg", "Milk Pail", "Loaf of Bread", "Wheel of Cheese", "Skein of Wool", "Truffle"], "coin_max": 8},
+	"Cleric": {"tools": ["Wax Candles"], "wares": ["Old Tome", "Healing Potion", "Rowanberries", "Jar of Honey"], "coin_max": 10},
+	"Elder": {"tools": ["Wax Candles"], "wares": ["Old Tome", "Healing Potion", "Carved Curio", "Jar of Honey"], "coin_max": 14},
+	"Hold Elder": {"tools": ["Wax Candles"], "wares": ["Old Tome", "Runestone", "Healing Potion", "Carved Curio"], "coin_max": 14},
+	"Miner": {"tools": ["Rusty Pickaxe", "Worn Pickaxe", "Copper Pick"], "wares": ["Stone", "Iron Ore", "Copper Ore", "Mushrooms", "Miner's Lantern"], "coin_max": 8},
+	"Runescribe": {"tools": ["Mason's Chisel"], "wares": ["Runed Tablet", "Old Tome", "Gem Shard", "Wax Candles"], "coin_max": 12},
+	"Peddler": {"tools": [], "wares": "peddler_pack", "coin_max": 24},
+	"Tinker": {"tools": [], "wares": "tinker_cart", "coin_max": 20},
+	"Drover": {"tools": [], "wares": "drover_stock", "coin_max": 16},
+	"Pilgrim": {"tools": [], "wares": "pilgrim_satchel", "coin_max": 8}
+}
+## Villagers and anyone without a listed trade: bread, cloth, trinkets.
+const NPC_KIT_GENERIC := {
+	"tools": [],
+	"wares": ["Loaf of Bread", "Bolt of Cloth", "Wax Candles", "Carved Curio", "Wheel of Cheese", "Skein of Wool"],
+	"coin_max": 6
+}
+
 const DWARF_FIRST_NAMES: Array[String] = [
 	"Borin", "Dagna", "Thrain", "Vigdis", "Kelda", "Rurik", "Brokk",
 	"Eydis", "Snorri", "Hilda", "Orin", "Magna", "Durgan", "Sigrun",
@@ -195,6 +227,33 @@ static func generate_shop_stock(shop_type: String, rng: RandomNumberGenerator) -
 		var quantity := rng.randi_range(2, 5) if item_value(item_name) <= 6 else rng.randi_range(1, 2)
 		stock.append({"name": item_name, "quantity": quantity})
 	return stock
+
+## Rolls what a citizen carries: 2-5 role-appropriate items and a small
+## purse. Seeded from name+profession (plus the caller's scene salt), so
+## a second look at the same NPC always shows the same pockets - callers
+## store the result on the NPC state so trade systems can mutate it later.
+static func npc_belongings(identity: Dictionary, role: int, seed_value: int) -> Dictionary:
+	var profession := String(identity.get("profession", ""))
+	var kit := NPC_KIT_TABLE.get(profession, NPC_KIT_GENERIC) as Dictionary
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s|%s|%d|%d" % [String(identity.get("name", "")), profession, role, seed_value])
+	var items: Array[Dictionary] = []
+	var tools := kit.get("tools", []) as Array
+	if not tools.is_empty():
+		items.append({"name": String(tools[rng.randi_range(0, tools.size() - 1)]), "quantity": 1})
+	var wares_variant: Variant = kit.get("wares", [])
+	var pool: Array = (SHOP_STOCK_POOLS.get(wares_variant, []) as Array).duplicate() if wares_variant is String else (wares_variant as Array).duplicate()
+	var want := rng.randi_range(2, 5) - items.size()
+	for _pick_index in range(want):
+		if pool.is_empty():
+			break
+		var pick_index := rng.randi_range(0, pool.size() - 1)
+		var item_name := String(pool[pick_index])
+		pool.remove_at(pick_index)
+		# Staples stack a little; anything dear is carried singly.
+		var quantity := rng.randi_range(1, 3) if item_value(item_name) <= 6 else 1
+		items.append({"name": item_name, "quantity": quantity})
+	return {"items": items, "coins": rng.randi_range(0, int(kit.get("coin_max", 6)))}
 
 static func dwarf_npc_name(rng: RandomNumberGenerator) -> String:
 	return "%s %s" % [

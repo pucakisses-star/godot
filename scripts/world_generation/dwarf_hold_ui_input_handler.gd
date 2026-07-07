@@ -34,12 +34,21 @@ static func handle_city_panel_event(
 	set_is_panning: Callable,
 	is_panning: bool,
 	pan_by: Callable,
-	update_city_layer_transform: Callable
+	update_city_layer_transform: Callable,
+	handle_right_click_action: Callable = Callable()
 ) -> bool:
 	var currently_panning := is_panning
 	if event is InputEventMouseButton:
 		var mouse_button := event as InputEventMouseButton
-		if mouse_button.button_index == MOUSE_BUTTON_MIDDLE or mouse_button.button_index == MOUSE_BUTTON_RIGHT:
+		# A right-press the scene claims (e.g. inspecting a citizen) must
+		# not also grab the map; unclaimed right-presses still pan.
+		var right_click_claimed := (
+			mouse_button.pressed
+			and mouse_button.button_index == MOUSE_BUTTON_RIGHT
+			and handle_right_click_action.is_valid()
+			and bool(handle_right_click_action.call(mouse_button.position))
+		)
+		if mouse_button.button_index == MOUSE_BUTTON_MIDDLE or (mouse_button.button_index == MOUSE_BUTTON_RIGHT and not right_click_claimed):
 			currently_panning = mouse_button.pressed
 			set_is_panning.call(currently_panning)
 		if mouse_button.pressed:

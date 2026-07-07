@@ -92,6 +92,7 @@ var _companion: Dictionary = {}
 var _staff_cooldown := 0.0
 var _gear_label: Label
 var _inventory_screen: PlayerInventoryPanel
+var _npc_inspection_card: NpcInspectionCard
 var _player_hotbar: PlayerHotbar
 var _creature_repop_timer := 0.0
 var _player_hp := 20.0
@@ -2066,7 +2067,8 @@ func _on_city_panel_gui_input(event: InputEvent) -> void:
 		Callable(self, "_set_is_panning"),
 		_is_panning,
 		Callable(self, "_pan_city_view"),
-		Callable(self, "_update_city_layer_transform")
+		Callable(self, "_update_city_layer_transform"),
+		Callable(self, "_handle_player_right_click")
 	)
 
 func _set_is_panning(value: bool) -> void:
@@ -2560,10 +2562,13 @@ func _setup_inventory_screen() -> void:
 		Callable(self, "_inventory_screen_context")
 	)
 	chest_popup.get_parent().add_child(_inventory_screen)
+	_npc_inspection_card = NpcInspectionCard.new()
+	chest_popup.get_parent().add_child(_npc_inspection_card)
 	# UI must outdraw the world: furnishing sprites carry z 8-14 and
 	# speech bubbles z 40 in the same canvas, and z_index beats tree
 	# order - without this, pots and stoves render over open menus.
 	_inventory_screen.z_index = 50
+	_npc_inspection_card.z_index = 50
 	chest_popup.z_index = 50
 	if tile_hover_tooltip != null:
 		tile_hover_tooltip.z_index = 50
@@ -4081,7 +4086,33 @@ func _create_player_character_sprite() -> Sprite2D:
 func _create_placeholder_actor_texture() -> Texture2D:
 	return DwarfHoldTavernService.create_placeholder_actor_texture()
 
+## Right-click on a living citizen opens their inspection card - a look,
+## not a touch, so it works at any distance. Returns whether the click
+## was claimed; unclaimed right-presses fall through to map panning.
+func _handle_player_right_click(mouse_position: Vector2) -> bool:
+	var clicked_cell := _cell_from_mouse_position(mouse_position)
+	var npc_state := _npc_state_at_cell(clicked_cell)
+	# The risen dead have no pockets worth rifling.
+	if npc_state.is_empty() or SettlementAfflictionService.is_active_zombie(npc_state):
+		if _npc_inspection_card != null:
+			_npc_inspection_card.close()
+		return false
+	_open_npc_inspection(npc_state)
+	return true
+
+func _open_npc_inspection(npc_state: Dictionary) -> void:
+	if _npc_inspection_card == null:
+		return
+	var role_title := String(ROLE_TITLES.get(int(npc_state.get("role", 0)), "Dwarf"))
+	if not npc_state.has("identity"):
+		npc_state["identity"] = NpcIdentityService.generate(_rng, role_title, "dwarf")
+		npc_state["npc_name"] = String((npc_state["identity"] as Dictionary).get("name", "A dwarf"))
+	_npc_inspection_card.open(npc_state, role_title, hash(seed_input.text.strip_edges()))
+
 func _handle_player_click_action(mouse_position: Vector2) -> void:
+	# Any left-click on the map is a click-away for an open inspection.
+	if _npc_inspection_card != null and _npc_inspection_card.visible:
+		_npc_inspection_card.close()
 	if _player_sprite == null or not _player_control_enabled:
 		return
 	var clicked_cell := _cell_from_mouse_position(mouse_position)
