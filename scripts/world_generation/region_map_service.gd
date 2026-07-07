@@ -266,14 +266,23 @@ static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_bio
 	var has_tree_decor := decor_key.begins_with("tree")
 	match cell_biome:
 		TILE_ATLAS_DEFS.BIOME_MOUNTAIN:
-			# Rugged ranges render rockier up close: the crag threshold
-			# eases from 0.6 (gentle) down to 0.25 (savage ridge).
-			var crag_threshold := lerpf(0.6, 0.25, ruggedness)
-			if detail > crag_threshold + 0.3:
+			# A range reads as mountains: most cells carry the mountain
+			# glyph, peaks crown the heights, and only the low draws open
+			# into bare-rock benches or the odd green valley floor.
+			# Ruggedness raises the peaks and narrows the valleys.
+			var peak_threshold := lerpf(0.62, 0.45, ruggedness)
+			var valley_threshold := lerpf(-0.35, -0.55, ruggedness)
+			if detail > peak_threshold:
 				return {"base": TILE_ATLAS_DEFS.STONE_TILE, "overlay": TILE_ATLAS_DEFS.MOUNTAIN_PEAK_TILE}
-			if detail > crag_threshold or not decor_key.is_empty():
-				return {"base": TILE_ATLAS_DEFS.STONE_TILE, "overlay": TILE_ATLAS_DEFS.MOUNTAIN_TILE}
-			return {"base": TILE_ATLAS_DEFS.STONE_TILE}
+			if detail < valley_threshold - 0.3:
+				# A sheltered green valley floor deep in the low ground.
+				if has_tree_decor:
+					return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.TREE_TILE}
+				return {"base": TILE_ATLAS_DEFS.GRASS_TILE}
+			if detail < valley_threshold:
+				# A bare rock bench between the ridges.
+				return {"base": TILE_ATLAS_DEFS.STONE_TILE}
+			return {"base": TILE_ATLAS_DEFS.STONE_TILE, "overlay": TILE_ATLAS_DEFS.MOUNTAIN_TILE}
 		TILE_ATLAS_DEFS.BIOME_HILLS:
 			if detail > 0.2 or has_tree_decor:
 				return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.HILLS_TILE}
