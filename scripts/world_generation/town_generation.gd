@@ -203,6 +203,16 @@ var _actor_passable_cache: Dictionary = {}
 var _last_clock_stamp := -1
 var _applied_day_night_tint := Color(-1.0, -1.0, -1.0, -1.0)
 var _player_satiety := PlayerStatsService.SATIETY_MAX
+# Daily weather: a pure function of (world seed, absolute day), refreshed
+# on entry and at each midnight rollover, never saved.
+var _current_weather: Dictionary = {}
+var _weather_overlay: Node2D
+var _rain_particles: CPUParticles2D
+var _snow_particles: CPUParticles2D
+var _lightning_rect: ColorRect
+var _lightning_countdown := 0.0
+var _weather_overlay_active := true
+var _weather_refill_frame := -1
 
 const PLAYER_MOVE_SPEED := 260.0
 const SPD_NEIGHBOR_OFFSETS := [
@@ -540,6 +550,7 @@ func _ready() -> void:
 	_setup_inventory_screen()
 	_setup_hotbar()
 	GameAudioService.play_music(self, "town")
+	_refresh_weather(false)
 	_update_day_night_tint()
 	_update_clock_label()
 	_generate_city()
@@ -559,6 +570,7 @@ func _process(delta: float) -> void:
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
+	_update_weather_frame(delta)
 
 func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
@@ -579,6 +591,7 @@ func _advance_game_clock(delta: float) -> void:
 		_maybe_start_raid()
 		if _game_day != day_before:
 			_advance_world_events()
+			_refresh_weather(true)
 	# Strolling the market works up an appetite too.
 	_player_satiety = clampf(_player_satiety - delta_hours * PlayerStatsService.SATIETY_DRAIN_PER_GAME_HOUR, 0.0, PlayerStatsService.SATIETY_MAX)
 	_advance_afflictions(delta_hours)
@@ -608,12 +621,13 @@ func _update_clock_label() -> void:
 		return
 	_last_clock_stamp = clock_stamp
 	var is_night := _game_hour >= 20.0 or _game_hour < 6.0
-	clock_label.text = "%s %02d:%02d — %s (%s)" % [
+	clock_label.text = "%s %02d:%02d — %s (%s) · %s" % [
 		"🌙" if is_night else "☀",
 		hour,
 		minute,
 		GameCalendar.date_text(_game_day - 1, _calendar_start_year),
-		GameCalendar.season_for_day(_game_day - 1)
+		GameCalendar.season_for_day(_game_day - 1),
+		String(_current_weather.get("kind", "clear")).capitalize()
 	]
 
 ## Sky tint over the whole scene: white at noon, deep blue at night, warm
@@ -636,7 +650,7 @@ func _day_night_tint(hour: float) -> Color:
 
 func _update_day_night_tint() -> void:
 	# Tint only the map layers so the side panel stays readable at night.
-	var tint := _day_night_tint(_game_hour)
+	var tint := _day_night_tint(_game_hour) * WeatherService.tint_multiplier(_current_weather)
 	if tint.is_equal_approx(_applied_day_night_tint):
 		return
 	_applied_day_night_tint = tint
@@ -646,6 +660,197 @@ func _update_day_night_tint() -> void:
 		decor_layer.modulate = tint
 	if actor_layer != null:
 		actor_layer.modulate = tint
+
+## --- Weather -----------------------------------------------------------------
+## The sky is WeatherService.weather_for_day(world seed, absolute day):
+## the same day always looks the same, so nothing weather-shaped persists.
+## Precipitation is a screen-space veil in panel coordinates (parented
+## beside the zoomed map layers, not inside them), so it covers the
+## visible panel at any pan or zoom.
+
+const WEATHER_TICKER_LINES := {
+	"clear": "The clouds break; sunlight returns to the streets.",
+	"overcast": "Grey clouds roll in over the rooftops.",
+	"rain": "Rain sets in over the fields.",
+	"storm": "A storm breaks over the town — folk hurry indoors.",
+	"snow": "Snow begins to fall, hushing the streets."
+}
+const WEATHER_TICKER_COLOR := Color(0.7, 0.82, 0.95, 1.0)
+const WEATHER_EMIT_MARGIN := 48.0
+const RAIN_FALL_SPEED := 620.0
+const SNOW_FALL_SPEED := 55.0
+const LIGHTNING_INTERVAL_RANGE := Vector2(6.0, 14.0)
+
+func _refresh_weather(announce: bool) -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var world_seed_text := str(settings.get("world_seed", seed_input.text.strip_edges()))
+	var previous_kind := String(_current_weather.get("kind", ""))
+	_current_weather = WeatherService.weather_for_day(world_seed_text, _game_day - 1)
+	var kind := String(_current_weather.get("kind", "clear"))
+	if announce and kind != previous_kind and WEATHER_TICKER_LINES.has(kind):
+		_set_save_status(String(WEATHER_TICKER_LINES[kind]), WEATHER_TICKER_COLOR)
+	# The weather multiplies into the cached tint and the clock suffix.
+	_applied_day_night_tint = Color(-1.0, -1.0, -1.0, -1.0)
+	_last_clock_stamp = -1
+	_update_day_night_tint()
+	_update_clock_label()
+	_update_weather_visuals()
+
+func _update_weather_visuals() -> void:
+	_ensure_weather_overlay()
+	var kind := String(_current_weather.get("kind", "clear"))
+	var intensity := clampf(float(_current_weather.get("intensity", 0.5)), 0.0, 1.0)
+	# Rain and snow fall on the surface level only; cellars stay dry.
+	var active := _weather_overlay_active and _hold_state.current_level_index == 0
+	_weather_overlay.visible = active
+	var rain_amount := maxi(1, int(140.0 * intensity * (1.6 if kind == "storm" else 1.0)))
+	_configure_precipitation(_rain_particles, rain_amount, active and (kind == "rain" or kind == "storm"))
+	_configure_precipitation(_snow_particles, maxi(1, int(110.0 * intensity)), active and kind == "snow")
+	if not (active and kind == "storm"):
+		_lightning_rect.modulate.a = 0.0
+	_apply_weather_to_reflection()
+
+## Touching CPUParticles2D.amount clears the live pool without re-running
+## preprocess, leaving a bare sky for a full fall cycle — so only apply
+## changes, then queue a restart (which re-runs preprocess) for a later
+## frame: a restart on the scene's add/_ready frame never takes.
+func _configure_precipitation(particles: CPUParticles2D, target_amount: int, emit: bool) -> void:
+	if particles.amount == target_amount and particles.emitting == emit:
+		return
+	particles.amount = target_amount
+	particles.emitting = emit
+	if emit:
+		_weather_refill_frame = int(Engine.get_process_frames())
+
+## Per-frame: pause the veil while the panel is hidden and roll the
+## lightning clock during storms (the tree's pause stops _process itself).
+func _update_weather_frame(delta: float) -> void:
+	if _weather_overlay == null or not is_instance_valid(_weather_overlay):
+		return
+	var active := city_panel.is_visible_in_tree()
+	if active != _weather_overlay_active:
+		_weather_overlay_active = active
+		_update_weather_visuals()
+	if not active or _hold_state.current_level_index != 0:
+		return
+	# A stalled frame (city generation, window drags) fast-forwards the
+	# particle pool past its lifetime and empties the sky; refill on a
+	# later calm frame, when preprocess can re-fill the whole drop.
+	if delta > 0.5:
+		_weather_refill_frame = int(Engine.get_process_frames())
+	elif _weather_refill_frame >= 0 and int(Engine.get_process_frames()) > _weather_refill_frame:
+		_weather_refill_frame = -1
+		if _rain_particles.emitting:
+			_rain_particles.restart()
+		if _snow_particles.emitting:
+			_snow_particles.restart()
+	if String(_current_weather.get("kind", "")) != "storm":
+		return
+	_lightning_countdown -= delta
+	if _lightning_countdown > 0.0:
+		return
+	_lightning_countdown = _rng.randf_range(LIGHTNING_INTERVAL_RANGE.x, LIGHTNING_INTERVAL_RANGE.y)
+	_flash_lightning()
+
+func _flash_lightning() -> void:
+	_lightning_rect.size = city_panel.size
+	var tween := create_tween()
+	tween.tween_property(_lightning_rect, "modulate:a", 0.25, 0.06)
+	tween.tween_property(_lightning_rect, "modulate:a", 0.0, 0.3)
+
+func _ensure_weather_overlay() -> void:
+	if _weather_overlay != null and is_instance_valid(_weather_overlay):
+		return
+	_weather_overlay = Node2D.new()
+	_weather_overlay.name = "WeatherOverlay"
+	# Above the light overlay (14), below floating text (30); clipped by
+	# the panel like every other map layer.
+	_weather_overlay.z_index = 15
+	city_panel.add_child(_weather_overlay)
+	_rain_particles = CPUParticles2D.new()
+	_rain_particles.name = "RainParticles"
+	_rain_particles.texture = _make_weather_texture(Vector2i(2, 6), Color(0.72, 0.82, 1.0, 0.85), false)
+	_rain_particles.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_rain_particles.emitting = false
+	_rain_particles.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	_rain_particles.direction = Vector2(0.12, 1.0)
+	_rain_particles.spread = 2.0
+	_rain_particles.gravity = Vector2.ZERO
+	_rain_particles.initial_velocity_min = RAIN_FALL_SPEED * 0.9
+	_rain_particles.initial_velocity_max = RAIN_FALL_SPEED * 1.1
+	# Streaks lean into their down-right fall (canvas rotation is y-down).
+	_rain_particles.angle_min = -7.0
+	_rain_particles.angle_max = -7.0
+	_weather_overlay.add_child(_rain_particles)
+	_snow_particles = CPUParticles2D.new()
+	_snow_particles.name = "SnowParticles"
+	_snow_particles.texture = _make_weather_texture(Vector2i(3, 3), Color(1.0, 1.0, 1.0, 0.9), true)
+	_snow_particles.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_snow_particles.emitting = false
+	_snow_particles.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	_snow_particles.direction = Vector2(0.0, 1.0)
+	_snow_particles.spread = 25.0
+	_snow_particles.gravity = Vector2(0.0, 8.0)
+	_snow_particles.initial_velocity_min = SNOW_FALL_SPEED * 0.7
+	_snow_particles.initial_velocity_max = SNOW_FALL_SPEED * 1.3
+	# Flakes wander sideways instead of falling plumb.
+	_snow_particles.tangential_accel_min = -14.0
+	_snow_particles.tangential_accel_max = 14.0
+	_weather_overlay.add_child(_snow_particles)
+	_lightning_rect = ColorRect.new()
+	_lightning_rect.name = "LightningFlash"
+	_lightning_rect.color = Color(1.0, 1.0, 1.0, 1.0)
+	_lightning_rect.modulate.a = 0.0
+	_lightning_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_weather_overlay.add_child(_lightning_rect)
+	if not city_panel.resized.is_connected(_layout_weather_overlay):
+		city_panel.resized.connect(_layout_weather_overlay)
+	_layout_weather_overlay()
+
+## Emission spans the panel plus a margin; lifetimes cover the full drop
+## so drift fills the view (preprocess hides the empty first seconds).
+func _layout_weather_overlay() -> void:
+	if _weather_overlay == null or not is_instance_valid(_weather_overlay):
+		return
+	var panel_size := city_panel.size
+	var drop_height := panel_size.y + WEATHER_EMIT_MARGIN * 2.0
+	var emit_center := Vector2(panel_size.x * 0.5, -WEATHER_EMIT_MARGIN)
+	var emit_extents := Vector2(panel_size.x * 0.5 + WEATHER_EMIT_MARGIN, 8.0)
+	_rain_particles.position = emit_center
+	_rain_particles.emission_rect_extents = emit_extents
+	_rain_particles.lifetime = maxf(0.4, drop_height / RAIN_FALL_SPEED)
+	_rain_particles.preprocess = _rain_particles.lifetime
+	_snow_particles.position = emit_center
+	_snow_particles.emission_rect_extents = emit_extents
+	_snow_particles.lifetime = maxf(2.0, drop_height / SNOW_FALL_SPEED)
+	_snow_particles.preprocess = _snow_particles.lifetime
+	_lightning_rect.position = Vector2.ZERO
+	_lightning_rect.size = panel_size
+	# New lifetimes only take hold on a fresh cycle; refill active veils.
+	if _rain_particles.emitting or _snow_particles.emitting:
+		_weather_refill_frame = int(Engine.get_process_frames())
+
+func _make_weather_texture(texture_size: Vector2i, color: Color, round_corners: bool) -> ImageTexture:
+	var image := Image.create(texture_size.x, texture_size.y, false, Image.FORMAT_RGBA8)
+	image.fill(color)
+	if round_corners:
+		var clear := Color(0.0, 0.0, 0.0, 0.0)
+		image.set_pixel(0, 0, clear)
+		image.set_pixel(texture_size.x - 1, 0, clear)
+		image.set_pixel(0, texture_size.y - 1, clear)
+		image.set_pixel(texture_size.x - 1, texture_size.y - 1, clear)
+	return ImageTexture.create_from_image(image)
+
+func _apply_weather_to_reflection() -> void:
+	if _reflection_sprite == null or not is_instance_valid(_reflection_sprite):
+		return
+	(_reflection_sprite.material as ShaderMaterial).set_shader_parameter("rain_ripple", _weather_rain_ripple())
+
+func _weather_rain_ripple() -> float:
+	var kind := String(_current_weather.get("kind", "clear"))
+	if kind != "rain" and kind != "storm":
+		return 0.0
+	return clampf(float(_current_weather.get("intensity", 0.5)), 0.3, 1.0)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and not _is_text_input_focused():
@@ -726,6 +931,7 @@ func _on_scene_resumed() -> void:
 	_load_persistent_clock()
 	_last_clock_stamp = -1
 	_applied_day_night_tint = Color(-1.0, -1.0, -1.0, -1.0)
+	_refresh_weather(false)
 	_update_day_night_tint()
 	_update_clock_label()
 
@@ -1327,6 +1533,7 @@ func _show_level(target_level_index: int) -> void:
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
 	_update_depth_controls()
+	_update_weather_visuals()
 
 func _update_depth_controls() -> void:
 	var level_count := _hold_state.generated_levels.size()
@@ -2583,7 +2790,7 @@ func _assign_npc_daily_lives(grid: Dictionary) -> void:
 		var sprite := state.get("sprite") as Sprite2D
 		if sprite == null:
 			continue
-		var mode: String = SettlementNpcScheduler.mode_for_hour(state, _game_hour)
+		var mode: String = SettlementNpcScheduler.mode_for_hour(state, _game_hour, WeatherService.is_storm(_current_weather))
 		var anchor: Vector2i = SettlementNpcScheduler.anchor_for_mode(state, mode)
 		if anchor.x != 2147483647 and _is_walkable_cell(anchor):
 			sprite.position = _cell_center_position(anchor)
@@ -2922,7 +3129,8 @@ func _update_npc_movement(delta: float) -> void:
 		delta, _scheduled_states(), city_layer, _rng,
 		tile_size, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),
-		Callable(self, "_cell_center_position")
+		Callable(self, "_cell_center_position"),
+		WeatherService.is_storm(_current_weather)
 	)
 
 ## The dead answer to their hunger, not the clock.
@@ -3524,6 +3732,9 @@ const CROP_DEFS := {
 	"tomato": {"seed": "Tomato Seeds", "yield": "Tomato", "tiles": ["crop_tomato_0", "crop_tomato_1", "crop_tomato_2"]}
 }
 const FARM_STAGE_HOURS := 8.0
+## Season re-rates the growing hour; rain (or a storm) waters for free.
+const FARM_SEASON_GROWTH := {"Spring": 1.15, "Summer": 1.0, "Autumn": 0.85, "Winter": 0.2}
+const FARM_RAIN_GROWTH_BONUS := 1.25
 const ANIMAL_CRATES := {"Chicken Crate": "chicken", "Piglet Crate": "pig", "Calf Crate": "cow"}
 const ANIMAL_PRODUCE := {"chicken": "Egg", "pig": "Truffle", "cow": "Milk Pail"}
 
@@ -3880,6 +4091,7 @@ func _ensure_reflection_sprite() -> void:
 	_reflection_sprite.z_index = 13
 	var reflection_material := ShaderMaterial.new()
 	reflection_material.shader = WATER_REFLECTION_SHADER
+	reflection_material.set_shader_parameter("rain_ripple", _weather_rain_ripple())
 	_reflection_sprite.material = reflection_material
 	actor_layer.add_child(_reflection_sprite)
 
@@ -4134,11 +4346,17 @@ func _try_farm_action(cell: Vector2i) -> bool:
 
 func _advance_farm_growth() -> void:
 	var now_hours := float(_game_day) * 24.0 + _game_hour
+	# Stages read elapsed hours since planted_h, so season and rain re-rate
+	# growth by sliding the planting stamp on each hourly tick.
+	var stamp_shift := 1.0 - _farm_growth_multiplier()
 	var changed := false
 	for cell_variant: Variant in _farm_plots.keys():
 		var plot := _farm_plots[cell_variant] as Dictionary
 		if String(plot.get("crop", "")).is_empty():
 			continue
+		if absf(stamp_shift) > 0.001:
+			plot["planted_h"] = float(plot.get("planted_h", now_hours)) + stamp_shift
+			changed = true
 		var stage := clampi(int((now_hours - float(plot.get("planted_h", now_hours))) / FARM_STAGE_HOURS), 0, 2)
 		if stage != int(plot.get("stage", 0)):
 			plot["stage"] = stage
@@ -4146,6 +4364,13 @@ func _advance_farm_growth() -> void:
 			changed = true
 	if changed:
 		_persist_farm()
+
+func _farm_growth_multiplier() -> float:
+	var multiplier := float(FARM_SEASON_GROWTH.get(GameCalendar.season_for_day(_game_day - 1), 1.0))
+	var kind := String(_current_weather.get("kind", "clear"))
+	if kind == WeatherService.KIND_RAIN or kind == WeatherService.KIND_STORM:
+		multiplier *= FARM_RAIN_GROWTH_BONUS
+	return multiplier
 
 func _persist_farm() -> void:
 	var settings: Dictionary = _world_settings_snapshot()

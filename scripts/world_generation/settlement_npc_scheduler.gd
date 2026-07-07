@@ -21,6 +21,7 @@ const MODE_WORK := "work"
 const MODE_LEISURE := "leisure"
 const MODE_PATROL := "patrol"
 const MODE_MEETING := "meeting"
+const MODE_SHELTER := "shelter"
 
 const SLEEP_START_HOUR := 22.0
 const SLEEP_END_HOUR := 6.0
@@ -159,8 +160,10 @@ static func _pick_patrol_points(street_cells: Array[Vector2i], rng: RandomNumber
 		points.append(street_cells[rng.randi_range(0, street_cells.size() - 1)])
 	return points
 
-## The mode an NPC should be in at the given hour.
-static func mode_for_hour(state: Dictionary, hour: float) -> String:
+## The mode an NPC should be in at the given hour. shelter (a storm rages
+## outside) sends only the off-duty home: workers keep working, guards
+## keep patrolling, meetings still gather.
+static func mode_for_hour(state: Dictionary, hour: float, shelter := false) -> String:
 	# Sworn faction members answer the meeting bell before anything else -
 	# including sleep, which is how the midnight cults get their crowds.
 	var meeting_hour := float(state.get("faction_meeting_hour", -1.0))
@@ -181,11 +184,15 @@ static func mode_for_hour(state: Dictionary, hour: float) -> String:
 		return MODE_SLEEP
 	if personal_hour >= WORK_START_HOUR and personal_hour < WORK_END_HOUR:
 		return MODE_WORK
+	if shelter:
+		return MODE_SHELTER
 	return MODE_LEISURE
 
 static func anchor_for_mode(state: Dictionary, mode: String) -> Vector2i:
 	match mode:
 		MODE_SLEEP:
+			return state.get("home_anchor", Vector2i.ZERO) as Vector2i
+		MODE_SHELTER:
 			return state.get("home_anchor", Vector2i.ZERO) as Vector2i
 		MODE_WORK:
 			return state.get("work_anchor", Vector2i.ZERO) as Vector2i
@@ -205,6 +212,8 @@ static func _radius_for_mode(mode: String) -> int:
 	match mode:
 		MODE_SLEEP:
 			return 0
+		MODE_SHELTER:
+			return 1
 		MODE_WORK:
 			return 2
 		MODE_PATROL:
@@ -224,7 +233,8 @@ static func update_scheduled_npcs(
 	tile_size: Vector2i,
 	hour: float,
 	is_npc_walkable: Callable,
-	cell_center_position: Callable
+	cell_center_position: Callable,
+	shelter := false
 ) -> void:
 	_path_budget = MAX_PATHS_PER_UPDATE
 	for state: Dictionary in npc_states:
@@ -232,7 +242,7 @@ static func update_scheduled_npcs(
 		if sprite == null:
 			continue
 
-		var mode := mode_for_hour(state, hour)
+		var mode := mode_for_hour(state, hour, shelter)
 		if String(state.get("mode", "")) != mode:
 			state["mode"] = mode
 			# A short random dawdle before setting out staggers departures
