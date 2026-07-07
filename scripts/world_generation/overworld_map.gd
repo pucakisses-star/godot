@@ -3103,9 +3103,9 @@ func _evaluate_desert_cell(x: int, y: int, height: float) -> bool:
 		_desert_heat_buffer[idx] = heat
 	# Raised acceptance floors keep deserts to genuine arid pockets rather
 	# than sheeting across every warm lowland.
-	if suitability <= 0.58:
+	if suitability <= 0.62:
 		return false
-	if suitability <= lerpf(0.66, 0.58, equatorial):
+	if suitability <= lerpf(0.70, 0.62, equatorial):
 		return false
 	var desert_noise := 0.5
 	if _desert_detail_noise != null:
@@ -4177,9 +4177,9 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 			# Lower local-density weight and stricter acceptance stop the
 			# refine pass from bleeding deserts across their neighbours.
 			var combined := base_suitability * 0.55 + float(blur_current[idx]) * 0.45 + local_density * 0.08
-			if combined > 0.7 and base_suitability > 0.55:
+			if combined > 0.73 and base_suitability > 0.6:
 				updated_mask[idx] = 1
-			elif combined < 0.5 or base_suitability < 0.45:
+			elif combined < 0.55 or base_suitability < 0.5:
 				updated_mask[idx] = 0
 			else:
 				updated_mask[idx] = desert_mask[idx]
@@ -4227,9 +4227,9 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 				continue
 			var heat := float(_desert_heat_buffer[idx])
 			var dryness := float(_desert_suitability_buffer[idx])
-			if heat <= 0.58 or dryness <= 0.5:
+			if heat <= 0.62 or dryness <= 0.55:
 				continue
-			var likelihood := clampf((heat - 0.58) * 1.25 + (dryness - 0.5) * 0.85, 0.0, 1.0)
+			var likelihood := clampf((heat - 0.62) * 1.15 + (dryness - 0.55) * 0.75, 0.0, 1.0)
 			if _value_noise(float(x) * 0.11, float(y) * 0.11, badlands_seed) >= likelihood:
 				continue
 			if _mask_has_neighbor(water_mask, x, y):
@@ -4238,8 +4238,9 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 				continue
 			badlands_mask[idx] = 1
 
-	# Bridge-fill, radius 2, 2 iterations (main.js:22576-22656).
-	for _fill_iteration in range(2):
+	# Bridge-fill, radius 2. Trimmed to a single pass so badlands cores stay
+	# compact instead of ballooning across the whole desert interior.
+	for _fill_iteration in range(1):
 		var additions: Array[int] = []
 		for y in range(rows):
 			var row := y * width
@@ -9338,9 +9339,21 @@ func _clear_region_icons() -> void:
 	for child: Node in _region_icon_layer.get_children():
 		child.queue_free()
 
-## Draws each painted settlement_layer cell as a small sprite (~2.5 detail
-## cells wide) centered on its tile and bottom-anchored to the lower edge, so
-## a site "sits" on the ground instead of tiling the whole 8x8 footprint.
+## Population centers a walker can actually enter; everything else painted
+## on the settlement layer (camps, towers, shrines, caves, mines...) is an
+## ambient structure and reads as a single detail tile in the region view.
+const REGION_MAJOR_SETTLEMENT_TYPES := {
+	"town": true,
+	"dwarfhold": true,
+	"desertCity": true,
+	"woodElfGrove": true,
+	"lizardmenCity": true
+}
+
+## Draws each painted settlement_layer cell as a small sprite centered on its
+## tile and bottom-anchored to the lower edge, so a site "sits" on the ground
+## instead of tiling the whole 8x8 footprint. Major settlements keep a chunky
+## quarter-tile mark; ambient structures shrink to exactly one detail tile.
 func _build_region_icons() -> void:
 	_ensure_region_icon_layer()
 	if _region_icon_layer == null or settlement_layer == null:
@@ -9356,13 +9369,19 @@ func _build_region_icons() -> void:
 	var native_px := src.texture_region_size
 	if native_px.x <= 0 or native_px.y <= 0:
 		return
-	# Roughly a quarter of the overworld tile (2-2.5 detail cells of 8).
-	var icon_scale := (float(tile_size) * 0.3) / float(native_px.x)
-	var on_screen := Vector2(native_px) * icon_scale
+	# Major settlements read as roughly a quarter of the overworld tile
+	# (2-2.5 detail cells of 8); ambient structures are one detail tile.
+	var major_scale := (float(tile_size) * 0.3) / float(native_px.x)
+	var ambient_scale := (float(tile_size) / float(RegionMapService.SUB_TILES)) / float(native_px.x)
 	for cell: Vector2i in settlement_layer.get_used_cells():
 		var atlas_coords := settlement_layer.get_cell_atlas_coords(cell)
 		if atlas_coords.x < 0:
 			continue
+		var details := _tile_data.get(cell, {}) as Dictionary
+		var settlement_type := String(details.get("settlement_type", "")).strip_edges()
+		var is_major := REGION_MAJOR_SETTLEMENT_TYPES.has(settlement_type)
+		var icon_scale := major_scale if is_major else ambient_scale
+		var on_screen := Vector2(native_px) * icon_scale
 		var sprite := Sprite2D.new()
 		sprite.texture = atlas_texture
 		sprite.region_enabled = true
