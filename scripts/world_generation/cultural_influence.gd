@@ -2,6 +2,9 @@ class_name CulturalInfluence
 extends RefCounted
 
 const CULTURE_TYPES := preload("res://scripts/world_generation/culture_types.gd")
+## Canopy depth (0 edge, 1 core) a tile must reach to count as "deep forest"
+## for options gated with requires_deep_forest (e.g. moonwells).
+const DEEP_FOREST_CANOPY := 0.6
 const MIN_RADIUS := 2
 const MIN_SCORE := 0.0001
 const STATE_FORMS: Array[String] = [
@@ -242,6 +245,12 @@ func spawn_ambient_structures(
 				continue
 			var option := options[int(_hash_u32(seed_number, x, y, 811) % options.size())] as Dictionary
 			if not _ambient_option_matches(option, coord, tiles):
+				tiles[coord] = tile
+				continue
+			# Per-option rarity thins out single-option monster cultures (e.g.
+			# harpy roosts) that would otherwise carpet their whole range.
+			var rarity := clampf(float(option.get("rarity", 1.0)), 0.0, 1.0)
+			if rarity < 1.0 and _hash_roll(seed_number, x, y, 977) > rarity:
 				tiles[coord] = tile
 				continue
 			if roll <= chance:
@@ -941,6 +950,10 @@ func _ambient_option_matches(option: Dictionary, coord: Vector2i, tiles: Diction
 		return false
 	if bool(option.get("requires_mountain_overlay", false)) and not _has_overlay(coord, tiles, "mountain"):
 		return false
+	if bool(option.get("requires_deep_forest", false)):
+		var forest_tile := tiles.get(coord, {}) as Dictionary
+		if float(forest_tile.get("forest_canopy_density", 0.0)) < DEEP_FOREST_CANOPY:
+			return false
 	if bool(option.get("requires_mountain", false)) and not _tile_is_mountain(coord, tiles):
 		return false
 	var tile := tiles.get(coord, {}) as Dictionary
