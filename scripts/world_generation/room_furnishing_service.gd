@@ -315,87 +315,157 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 				small_count -= 1
 		return placements
 
-	# The dining set holds the middle of any room wide enough for it,
-	# with a rug beneath and candles beside.
-	if box.size.x >= 5 and box.size.y >= 4:
-		var set_cell := Vector2i(box.position.x + (box.size.x - 4) / 2, box.position.y + (box.size.y - 2) / 2)
-		if try_place.call("dining_set", set_cell):
-			var rug_pool: Array[String] = ["round_rug", "int_rug_red_square", "int_rug_green_square", "int_rug_red_long"]
-			placements.insert(0, {"piece": rug_pool[rng.randi_range(0, rug_pool.size() - 1)], "cell": set_cell + Vector2i(0, -1)})
-			for candle_offset: Vector2i in [Vector2i(-1, 0), Vector2i(4, 0), Vector2i(-1, 1), Vector2i(4, 1)]:
-				if try_place.call("candles", set_cell + candle_offset):
-					break
-	elif box.size.x >= 3 and box.size.y >= 3:
-		var table_cell := Vector2i(box.position.x + (box.size.x - 3) / 2, box.position.y + (box.size.y - 2) / 2)
-		if not try_place.call("round_table", table_cell):
-			try_place.call("long_table", table_cell)
+	# --- Themed room ------------------------------------------------------
+	# Each house (one zone component) is dressed as a single themed room so
+	# a settlement reads as a mix of bedrooms, kitchens, studies, living
+	# rooms and washrooms rather than the same scatter everywhere. The theme
+	# is chosen from the room's map position, so it is stable per seed and
+	# spread across the town. Every house already owns a bed tile, which the
+	# occupancy check keeps furniture off of.
+	var theme_pool: Array[String] = ["bedroom", "living", "kitchen", "study", "bedroom", "living", "bath"]
+	var theme_hash := absi(int(box.position.x) * 73 + int(box.position.y) * 131 + interior.size())
+	var theme := theme_pool[theme_hash % theme_pool.size()]
+	# A washroom only reads on a snug footprint; a big hall becomes a kitchen.
+	if theme == "bath" and interior.size() > 14:
+		theme = "kitchen"
+	var near_square := absi(box.size.x - box.size.y) <= 1
 
-	# North wall: pantry and cabinet lean against it, tops overhanging.
-	var north_row := box.position.y
-	var north_candidates: Array[Vector2i] = []
+	# A big rug anchors the middle of the room. Rugs are walk-through decor,
+	# so they are inserted at the FRONT of the list (drawn under everything)
+	# and never claim their cells, letting furniture stand on top.
+	var place_center_rug := func(long_ok: bool) -> void:
+		var rug_name := ""
+		var rug_w := 2
+		if box.size.x >= 6 and box.size.y >= 5:
+			rug_name = "round_rug"
+			rug_w = 4
+		elif near_square and box.size.x >= 4 and box.size.y >= 4:
+			rug_name = "int_rug_red_square" if rng.randf() < 0.5 else "int_rug_green_square"
+		elif long_ok and box.size.x >= 3 and box.size.y >= 3:
+			rug_name = "int_rug_red_long" if rng.randf() < 0.5 else "int_rug_green_long"
+		if rug_name == "":
+			return
+		var rug_cell := Vector2i(
+			box.position.x + maxi((box.size.x - rug_w) / 2, 0),
+			box.position.y + maxi(box.size.y / 2, 1)
+		)
+		if not interior_set.has(rug_cell):
+			return
+		placements.insert(0, {"piece": rug_name, "cell": rug_cell})
+
+	# Line a wall with a cycling run of themed pieces; wider pieces claim
+	# their span so the next one lands past them.
+	var place_run := func(line_cells: Array[Vector2i], pool: Array) -> void:
+		if pool.is_empty():
+			return
+		var pool_index := 0
+		for line_cell: Vector2i in line_cells:
+			if try_place.call(String(pool[pool_index % pool.size()]), line_cell):
+				pool_index += 1
+
+	var north_line: Array[Vector2i] = []
+	var south_line: Array[Vector2i] = []
 	for x in range(box.position.x, box.end.x):
-		north_candidates.append(Vector2i(x, north_row))
-	if not north_candidates.is_empty():
-		var start_index := rng.randi_range(0, north_candidates.size() - 1)
-		for offset in range(north_candidates.size()):
-			if try_place.call("pantry", north_candidates[(start_index + offset) % north_candidates.size()]):
-				break
-		if box.size.x >= 5:
-			for offset in range(north_candidates.size()):
-				if try_place.call("cabinet", north_candidates[(start_index + offset * 3) % north_candidates.size()]):
+		north_line.append(Vector2i(x, box.position.y))
+		south_line.append(Vector2i(x, box.end.y - 1))
+	var west_line: Array[Vector2i] = []
+	var east_line: Array[Vector2i] = []
+	for y in range(box.position.y + 1, box.end.y - 1):
+		west_line.append(Vector2i(box.position.x, y))
+		east_line.append(Vector2i(box.end.x - 1, y))
+	var center_top := Vector2i(
+		box.position.x + maxi((box.size.x - 4) / 2, 0),
+		box.position.y + maxi((box.size.y - 2) / 2, 0)
+	)
+
+	match theme:
+		"bedroom":
+			place_center_rug.call(true)
+			# Wardrobes and dressers along the north wall, plants between.
+			place_run.call(north_line, ["int_cabinet_tall", "int_dresser_drawers", "int_plant_potted", "int_cupboard_doors", "int_dresser_drawers"])
+			place_run.call(west_line, ["int_plant_potted", "int_table_flower_blue"])
+			place_run.call(east_line, ["int_plant_tree", "int_table_flower_white"])
+		"kitchen":
+			place_center_rug.call(false)
+			# Counters, a cupboard and a stove run the north wall; a roast
+			# hangs over the work, a second counter run lines the south.
+			place_run.call(north_line, ["int_counter_crockery", "int_kiln_beehive", "int_counter_jugs", "int_cupboard_doors", "int_counter_crockery"])
+			try_place.call("int_roast_bird", center_top)
+			place_run.call(south_line, ["counter_veg", "int_counter_jugs"])
+			for x in range(box.position.x, box.end.x - 1):
+				if try_place.call("int_hearth_arch", Vector2i(x, box.position.y)):
 					break
+		"study":
+			place_center_rug.call(true)
+			# A wall of books, then a desk with a cushioned chair on the rug.
+			place_run.call(north_line, ["int_bookshelf_wide", "int_bookshelf_red", "int_cabinet_tall", "int_bookshelf_wide"])
+			place_run.call(east_line, ["int_bookshelf_red", "int_cabinet_tall"])
+			if try_place.call("desk", center_top):
+				for chair_offset: Vector2i in [Vector2i(0, 1), Vector2i(1, 1), Vector2i(-1, 0)]:
+					if try_place.call("int_chair_cushion" if rng.randf() < 0.5 else "int_chair_cushion_red", center_top + chair_offset):
+						break
+			else:
+				try_place.call("int_chair_cushion", center_top)
+		"bath":
+			place_center_rug.call(true)
+			# A washroom: basins and jugs stand in for tub and stand, with
+			# clay pots, urns and greenery around them.
+			place_run.call(north_line, ["int_counter_crockery", "int_counter_jugs", "int_cupboard_doors"])
+			place_run.call(south_line, ["int_urn_basket", "int_pot_clay", "int_table_flower_pot"])
+			place_run.call(west_line, ["int_plant_potted"])
+			place_run.call(east_line, ["int_plant_tree"])
+		_:
+			# Living / dining room: a table set on a big rug, candelabra
+			# beside it, a sideboard and bench along the walls.
+			place_center_rug.call(false)
+			var seated := false
+			if box.size.x >= 5 and box.size.y >= 4:
+				var set_cell := Vector2i(box.position.x + (box.size.x - 4) / 2, box.position.y + (box.size.y - 2) / 2)
+				if try_place.call("dining_set", set_cell):
+					seated = true
+					for candle_offset: Vector2i in [Vector2i(-1, 0), Vector2i(4, 0), Vector2i(-1, 1), Vector2i(4, 1)]:
+						if try_place.call("int_candle_stand", set_cell + candle_offset):
+							break
+			if not seated and box.size.x >= 3 and box.size.y >= 3:
+				if not try_place.call("round_table", center_top):
+					try_place.call("long_table", center_top)
+			place_run.call(north_line, ["int_cupboard_doors", "int_candle_stand", "cabinet", "int_candle_stand"])
+			place_run.call(south_line, ["bench_long"])
 
-	# A hearth fire warms the bigger homes from the north wall.
-	if interior.size() >= 14:
-		for x in range(box.position.x, box.end.x - 1):
-			if try_place.call("int_fireplace_dark" if rng.randf() < 0.6 else "int_hearth_arch", Vector2i(x, box.position.y)):
-				break
-
-	# A kitchen counter for the bigger homes, greenery for everyone.
-	if box.size.x >= 6 and rng.randf() < 0.7:
-		try_place.call("counter_veg", Vector2i(box.position.x, box.end.y - 1))
+	# --- Corners and clutter ---------------------------------------------
+	# A plant or candle stand tucked into most corners, then a scatter of
+	# small props on the walls and open floor to fill the room out. Every
+	# placement still passes the fit + openness guards, so door paths stay
+	# clear and the room stays walkable.
 	var corners: Array[Vector2i] = [
 		box.position, Vector2i(box.end.x - 1, box.position.y),
 		Vector2i(box.position.x, box.end.y - 1), Vector2i(box.end.x - 1, box.end.y - 1)
 	]
+	var corner_pool: Array[String] = ["int_plant_tree", "plant_palm", "int_plant_potted", "int_candle_stand", "int_pot_clay"]
 	for corner: Vector2i in corners:
-		if rng.randf() < 0.5 and try_place.call("plant_palm", corner):
-			break
+		try_place.call(corner_pool[rng.randi_range(0, corner_pool.size() - 1)], corner)
 
-	# DF clutter: every home owns things - a chest at the foot of the
-	# bed, a cabinet, books, a jug, a child's toy...
-	var clutter_pool: Array[String] = [
-		"df_box_1_0", "df_box_1_1", "df_box_2_0", "df_box_2_1", "df_box_3_0", "df_box_3_1",
-		"df_cabinet_0_0", "df_cabinet_1_0", "df_cabinet_2_0", "df_cabinet_3_0",
-		"df_bookcase_0_0", "df_bookcase_1_0",
-		"df_tool_20_0", "df_tool_20_1", "df_tool_20_2", "df_tool_20_3",
-		"df_tool_11_0", "df_tool_11_1", "df_tool_11_2",
-		"df_tool_12_0", "df_tool_12_1",
-		"df_toy_0_0", "df_toy_0_1", "df_toy_1_0", "df_toy_1_1",
-		"df_chair_0_0", "df_chair_1_0", "df_chair_2_0",
-		"df_food_0_0", "df_food_1_0", "df_food_2_0",
-		"int_stool_cushion", "int_chair_cushion", "int_chair_cushion_red", "int_candle_stand",
-		"int_dresser_drawers", "int_cupboard_doors", "int_shelf_flowerpot", "int_shelf_small",
-		"int_bookshelf_red", "int_plant_potted", "int_plant_tree", "int_pot_clay",
-		"int_table_flower_blue", "int_table_flower_white", "int_table_plant_fern",
-		"int_stump_table", "int_urn_basket"
+	var prop_pool: Array[String] = [
+		"int_pot_clay", "int_urn_basket", "int_table_flower_blue", "int_table_flower_white",
+		"int_table_flower_pot", "int_stump_table", "int_plant_potted", "int_shelf_small",
+		"int_stool_cushion", "df_box_1_0", "df_box_2_0", "df_tool_20_0", "df_toy_0_0", "df_food_0_0"
 	]
-	var clutter_count := rng.randi_range(3, mini(7, 3 + interior.size() / 6))
 	var edge_cells: Array[Vector2i] = []
 	for cell: Vector2i in interior:
 		if cell.y == box.position.y or cell.x == box.position.x or cell.x == box.end.x - 1 or cell.y == box.end.y - 1:
 			edge_cells.append(cell)
-	for _clutter in range(clutter_count * 6):
-		if clutter_count <= 0:
+	var prop_count := rng.randi_range(3, mini(8, 4 + interior.size() / 5))
+	for _prop in range(prop_count * 6):
+		if prop_count <= 0:
 			break
-		var piece: String = clutter_pool[rng.randi_range(0, clutter_pool.size() - 1)]
+		var piece_name: String = prop_pool[rng.randi_range(0, prop_pool.size() - 1)]
 		var candidate: Vector2i
-		if not edge_cells.is_empty() and rng.randf() < 0.7:
+		if not edge_cells.is_empty() and rng.randf() < 0.65:
 			candidate = edge_cells[rng.randi_range(0, edge_cells.size() - 1)]
 		else:
 			candidate = interior[rng.randi_range(0, interior.size() - 1)]
-		if try_place.call(piece, candidate):
-			clutter_count -= 1
+		if try_place.call(piece_name, candidate):
+			prop_count -= 1
 	return placements
 
 ## Dressing for shopfront interiors: stocked shelves along the north
