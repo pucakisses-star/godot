@@ -505,6 +505,11 @@ const CIVILIZATION_LABELS := {
 ## whole gazetteer.
 const WORLD_ROSTER_SETTLEMENT_CAP := 40
 
+## Ambient structures (camps, watchtowers, shrines, dens, cairns...) are
+## written to the gazetteer as non-enterable landmarks so nearby wilds can
+## stand them up on foot. Cap the list so the settings blob stays bounded.
+const WORLD_AMBIENT_SITE_CAP := 2500
+
 @onready var map_layer: TileMapLayer = $MapLayer
 @onready var tree_layer: TileMapLayer = get_node_or_null("TreeLayer")
 @onready var river_layer: TileMapLayer = get_node_or_null("RiverLayer")
@@ -2169,6 +2174,10 @@ func _persist_world_sites() -> void:
 	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return
 	var sites: Array = []
+	# Ambient structures ride along as non-enterable scenery; collected
+	# separately so the enterable gazetteer keeps its leading order.
+	var ambient_sites: Array = []
+	var ambient_candidate_count := 0
 	# Named settlements also feed the world-events roster so ongoing
 	# history (raids, caravans, festivals) talks about real places.
 	var roster_settlements: Array = []
@@ -2194,6 +2203,13 @@ func _persist_world_sites() -> void:
 			site_class = "dungeon"
 			seed_text = _dungeon_scene_seed_for_tile(coord, details)
 		else:
+			# Not enterable: fold in ambient structures as pure scenery so
+			# the visited wilds can raise them at their true walking distance.
+			var ambient_site := _ambient_site_for_tile(coord, details)
+			if not ambient_site.is_empty():
+				ambient_candidate_count += 1
+				if ambient_sites.size() < WORLD_AMBIENT_SITE_CAP:
+					ambient_sites.append(ambient_site)
 			continue
 		sites.append({
 			"x": coord.x, "y": coord.y,
@@ -2203,6 +2219,9 @@ func _persist_world_sites() -> void:
 			"population": maxi(0, int(details.get("population", 0))),
 			"theme": _town_theme_for_details(details)
 		})
+	if ambient_candidate_count > ambient_sites.size():
+		print("[OverworldMap] ambient landmark sites truncated: kept %d of %d" % [ambient_sites.size(), ambient_candidate_count])
+	sites.append_array(ambient_sites)
 	var faction_names: Array = []
 	for faction_source: Dictionary in _collect_faction_sources():
 		var faction_label := String(faction_source.get("label", ""))
@@ -2216,6 +2235,41 @@ func _persist_world_sites() -> void:
 		"factions": faction_names
 	}
 	game_session.call("set_world_settings", settings)
+
+## Resolves a non-enterable ambient structure tile into a gazetteer site
+## (overworld-atlas art + name) or returns {} when the tile carries no
+## standalone landmark art. Structures painted on the settlement layer read
+## their atlas coords from the layer; detail-only ambient marks read the
+## "tile" of their option Dictionary.
+func _ambient_site_for_tile(coord: Vector2i, details: Dictionary) -> Dictionary:
+	# Enterable settlements are emitted elsewhere; never double as scenery.
+	if details.has("settlement_type"):
+		return {}
+	var structure_id := String(details.get("structure", "")).strip_edges()
+	# Only the structures that actually stand on the overworld map become
+	# wilds landmarks - i.e. the ones painted on the settlement layer. The
+	# detail-only ambient (extra flavour that surfaces solely in the zoomed
+	# map view) is deliberately not projected into the walkable world, which
+	# keeps the wilds matching the world map and the site list bounded.
+	if settlement_layer == null:
+		return {}
+	var atlas_coords := settlement_layer.get_cell_atlas_coords(coord)
+	if atlas_coords.x < 0:
+		return {}
+	# Felled woods and tilled fields render as ground, not standalone art;
+	# crop/stump scatter cells also paint the settlement layer with no
+	# structure of their own - both are excluded here.
+	if structure_id.is_empty() or structure_id == "cutWoods" or structure_id == "farmField":
+		return {}
+	var label := _tile_region_name(coord, details)
+	if label.is_empty():
+		label = structure_id
+	return {
+		"x": coord.x, "y": coord.y,
+		"class": "ambient",
+		"tile_atlas": [atlas_coords.x, atlas_coords.y],
+		"name": label
+	}
 
 func _apply_base_tiles(base_biome_map: Dictionary) -> void:
 	for y in range(map_size.y):

@@ -136,6 +136,12 @@ var _surface_road_cells: Dictionary = {}
 var _surface_blocked_cells: Dictionary = {}
 var _surface_gates: Array[Dictionary] = []
 var _surface_gate_labels: Array[Label] = []
+# Non-enterable ambient structures (camps, watchtowers, shrines...) that sit
+# near the visited settlement, raised in the wilds as pure scenery using the
+# overworld atlas art. Each entry: {anchor, tile_atlas: Vector2i, name}.
+var _surface_landmarks: Array[Dictionary] = []
+var _surface_landmark_layer: Node2D = null
+var _surface_landmark_atlas_texture: Texture2D = null
 var _surface_arrival_lock := false
 var _surface_road_paths: Array[Array] = []
 var _surface_anchor_cells: Array[Vector2i] = []
@@ -1561,6 +1567,7 @@ func _show_level(target_level_index: int) -> void:
 	_chest_inventories.clear()
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
+	_spawn_surface_landmarks()
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
 	_furnish_interiors(grid)
@@ -2742,6 +2749,7 @@ func _update_city_layer_transform() -> void:
 	decor_layer.position = city_layer.position
 	actor_layer.scale = city_layer.scale
 	actor_layer.position = city_layer.position
+	_sync_surface_landmark_transform()
 	if tile_hover_tooltip.visible:
 		_place_hover_tooltip(tile_hover_tooltip.position - city_panel.global_position)
 	lighting_layer.scale = city_layer.scale
@@ -3253,6 +3261,10 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	_surface_blocked_cells.clear()
 	_surface_road_paths.clear()
 	_surface_gates.clear()
+	_surface_landmarks.clear()
+	if _surface_landmark_layer != null and is_instance_valid(_surface_landmark_layer):
+		for child: Node in _surface_landmark_layer.get_children():
+			child.queue_free()
 	_surface_anchor_cells.clear()
 	_surface_arrival_lock = false
 	_clear_caravan_job()
@@ -3311,12 +3323,17 @@ func _plan_surface_sites(own_tile: Vector2i, town_center: Vector2i, settings: Di
 		var tile: Vector2i = WorldSitesService.site_tile(site)
 		if tile == own_tile:
 			continue
-		if WorldSitesService.scene_path_for(site).is_empty():
-			continue
 		var tile_distance := maxi(absi(tile.x - own_tile.x), absi(tile.y - own_tile.y))
 		if tile_distance > SURFACE_SITE_REACH_TILES:
 			continue
 		var anchor: Vector2i = tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2) - _surface_world_origin
+		# Ambient structures are non-enterable scenery: raise them as landmarks
+		# rather than gates, at their true walking distance from town.
+		if String(site.get("class", "")) == "ambient":
+			_register_surface_landmark(site, anchor)
+			continue
+		if WorldSitesService.scene_path_for(site).is_empty():
+			continue
 		reachable.append({"site": site, "anchor": anchor, "distance": tile_distance})
 	reachable.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return int(a.get("distance", 0)) < int(b.get("distance", 0)))
@@ -3341,6 +3358,80 @@ func _plan_surface_sites(own_tile: Vector2i, town_center: Vector2i, settings: Di
 		_surface_anchor_cells.append(anchor)
 		if entry_index < SURFACE_ROAD_COUNT:
 			_trace_surface_road(town_center, anchor)
+
+## Records an ambient structure as a wilds landmark. Landmarks off the town
+## footprint keep their overworld-atlas art; those on it are dropped so the
+## streets stay clean. Sprites are raised later (see _spawn_surface_landmarks)
+## once the city layers - and their tileset - exist.
+func _register_surface_landmark(site: Dictionary, anchor: Vector2i) -> void:
+	if _surface_protect_rect.has_area() and _surface_protect_rect.has_point(anchor):
+		return
+	var atlas_variant: Variant = site.get("tile_atlas", [])
+	var atlas_coords := Vector2i(-1, -1)
+	if atlas_variant is Array and (atlas_variant as Array).size() >= 2:
+		var atlas_array := atlas_variant as Array
+		atlas_coords = Vector2i(int(atlas_array[0]), int(atlas_array[1]))
+	if atlas_coords.x < 0 or atlas_coords.y < 0:
+		return
+	_surface_landmarks.append({
+		"anchor": anchor,
+		"tile_atlas": atlas_coords,
+		"name": String(site.get("name", ""))
+	})
+
+## Keeps the landmark layer locked to the city layer's pan/zoom, exactly as
+## the actor and lighting layers are, so landmark sprites share the town's
+## cell-to-pixel space.
+func _sync_surface_landmark_transform() -> void:
+	if _surface_landmark_layer == null or not is_instance_valid(_surface_landmark_layer):
+		return
+	_surface_landmark_layer.scale = city_layer.scale
+	_surface_landmark_layer.position = city_layer.position
+
+func _ensure_surface_landmark_layer() -> void:
+	if _surface_landmark_layer != null and is_instance_valid(_surface_landmark_layer):
+		return
+	_surface_landmark_layer = Node2D.new()
+	_surface_landmark_layer.name = "SurfaceLandmarkLayer"
+	# Above ground tiles and decor, below the actor sprites (z 9-11) so the
+	# player and creatures pass in front of the scenery.
+	_surface_landmark_layer.z_index = 3
+	var landmark_parent: Node = decor_layer.get_parent() if decor_layer != null and decor_layer.get_parent() != null else self
+	landmark_parent.add_child(_surface_landmark_layer)
+	_sync_surface_landmark_transform()
+
+## One-shot spawn of every planned landmark's sprite at its true world cell,
+## using the shared overworld atlas art. Non-blocking scenery: no cell is
+## added to _surface_blocked_cells.
+func _spawn_surface_landmarks() -> void:
+	if _surface_landmarks.is_empty():
+		return
+	_ensure_surface_landmark_layer()
+	if _surface_landmark_layer == null:
+		return
+	if _surface_landmark_atlas_texture == null:
+		_surface_landmark_atlas_texture = load(TILE_ATLAS_DEFS.ATLAS_TEXTURE) as Texture2D
+	if _surface_landmark_atlas_texture == null:
+		return
+	for child: Node in _surface_landmark_layer.get_children():
+		child.queue_free()
+	var landmark_scale := float(tile_size.x) * 1.5 / 32.0
+	var span := 32.0 * landmark_scale
+	for landmark: Dictionary in _surface_landmarks:
+		var atlas_coords := landmark.get("tile_atlas", Vector2i.ZERO) as Vector2i
+		var anchor := landmark.get("anchor", Vector2i.ZERO) as Vector2i
+		var sprite := Sprite2D.new()
+		sprite.texture = _surface_landmark_atlas_texture
+		sprite.region_enabled = true
+		sprite.region_rect = Rect2(Vector2(atlas_coords) * 32.0, Vector2(32.0, 32.0))
+		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sprite.centered = false
+		sprite.scale = Vector2.ONE * landmark_scale
+		# Bottom-anchor on the anchor cell: centered across it, base on the
+		# cell's lower edge, so the structure "sits" on the ground.
+		var center := _cell_center_position(anchor)
+		sprite.position = Vector2(center.x - span * 0.5, center.y + float(tile_size.y) * 0.5 - span)
+		_surface_landmark_layer.add_child(sprite)
 
 ## A two-cell-wide dirt road, cell by cell, into the shared road map -
 ## and an ordered polyline travelers can walk.
