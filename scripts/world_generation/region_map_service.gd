@@ -269,10 +269,16 @@ static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_bio
 	var base_key := String(terrain.get("base", "grass"))
 	var decor_key := String(terrain.get("decor", ""))
 	if base_key.begins_with("water"):
-		# Ponds thin to landmarks at map scale, exactly as before.
-		var pond_keep := (noise_set.get("detail") as FastNoiseLite).get_noise_2d(float(world_cell.x) * 0.13, float(world_cell.y) * 0.13)
-		if pond_keep >= 0.3:
-			return {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
+		# The ground terrain is sampled without biome context, so its basins
+		# hold water everywhere - including deserts, which then speckle with
+		# lakes. Arid country (desert/badlands) has no standing water here;
+		# its rare oases are placed as their own landmark instead.
+		var arid := cell_biome == TILE_ATLAS_DEFS.BIOME_DESERT or cell_biome == TILE_ATLAS_DEFS.BIOME_BADLANDS
+		if not arid:
+			# Ponds thin to landmarks at map scale, exactly as before.
+			var pond_keep := (noise_set.get("detail") as FastNoiseLite).get_noise_2d(float(world_cell.x) * 0.13, float(world_cell.y) * 0.13)
+			if pond_keep >= 0.3:
+				return {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
 		decor_key = ""
 	# A sandy shoreline just above the waterline.
 	if coast > 0.4:
@@ -496,10 +502,16 @@ static func _field_cell_color(world_cell: Vector2i, noise_set: Dictionary, biome
 	var base_key := String(terrain.get("base", "grass"))
 	var decor_key := String(terrain.get("decor", ""))
 	if base_key.begins_with("water"):
+		# Arid country has no standing water; dry the basin ponds to sand so
+		# deserts and badlands don't speckle with lakes.
+		var arid := biome == TILE_ATLAS_DEFS.BIOME_DESERT or biome == TILE_ATLAS_DEFS.BIOME_BADLANDS
 		# The walkable wilds sprinkle ponds generously; at map scale keep
 		# only the strongest clusters so lakes read as landmarks.
 		var pond_keep := (noise_set.get("detail") as FastNoiseLite).get_noise_2d(float(world_cell.x) * 0.13, float(world_cell.y) * 0.13)
-		if pond_keep < 0.3:
+		if arid:
+			base_key = "sand"
+			decor_key = ""
+		elif pond_keep < 0.3:
 			base_key = "grass_dark" if pond_keep < -0.1 else "grass_tuft"
 			decor_key = ""
 	# A sandy shoreline just above the waterline.
