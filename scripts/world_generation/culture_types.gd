@@ -209,7 +209,7 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	# mountains (peaks or mountain overlays), never out on the open lowlands.
 	"dwarves": [
 		{"id": "prospect_camp", "label": "Prospector's Camp", "tile": Vector2i(7, 1), "requires_mountain": true},
-		{"id": "homestead", "label": "Mountain Homestead", "tile": Vector2i(13, 1), "requires_mountain": true}
+		{"id": "homestead", "label": "Mountain Homestead", "tile": Vector2i(2, 1), "requires_mountain": true}
 	],
 	"half_orcs": [
 		{"id": "hunting_lodge", "label": "Hunting Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true},
