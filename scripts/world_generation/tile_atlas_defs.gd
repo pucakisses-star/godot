@@ -8,9 +8,8 @@ const RIVER_ATLAS_TILE_SIZE := 16
 const SAND_TILE := Vector2i(0, 0)
 const GRASS_TILE := Vector2i(1, 0)
 const BADLANDS_TILE := Vector2i(2, 1)
-# Mines read as an exposed orange ore/rock face (shared with the dwarf
-# homestead art); the old dark arch at (3,1) now serves the cave mouth.
-const MINE_TILE := Vector2i(2, 1)
+# Mines read as the dark arch entrance, shared with the dwarf homestead art.
+const MINE_TILE := Vector2i(3, 1)
 const MARSH_TILE := Vector2i(2, 4)
 const SNOW_TILE := Vector2i(3, 2)
 const TREE_TILE := Vector2i(0, 1)
@@ -74,9 +73,9 @@ const ABANDONED_DWARFHOLD_TILE := Vector2i(8, 2)
 const GREAT_DWARFHOLD_TILE := Vector2i(6, 0)
 const DARK_DWARFHOLD_TILE := Vector2i(17, 0)
 const HILLHOLD_TILE := Vector2i(7, 4)
-# Caves read as the dark arch mouth (freed up now that mines use the ore
-# face); the old (5,1) green mound looked like a shrub, not a cave.
-const CAVE_TILE := Vector2i(3, 1)
+# Caves read as a rugged rock cave mouth (distinct from the dungeon at
+# (7,2)); the old (5,1) green mound looked like a shrub, not a cave.
+const CAVE_TILE := Vector2i(8, 2)
 const TOWER_TILE := Vector2i(6, 1)
 const EVIL_WIZARDS_TOWER_TILE := Vector2i(3, 3)
 const WOOD_ELF_GROVES_TILE := Vector2i(4, 2)
