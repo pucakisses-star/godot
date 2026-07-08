@@ -46,10 +46,38 @@ const COLOR_NPC := Color(0.85, 0.90, 1.0, 1.0)
 const COLOR_GATE := Color(0.95, 0.82, 0.20, 1.0)
 const COLOR_LANDMARK := Color(0.95, 0.55, 0.20, 1.0)
 
+const EXPANDED_FILL := 0.8
+const EXPANDED_MAX_PX := 720.0
+const EXPANDED_RADIUS_SCALE := 2
+
 var _scene: Node = null
 var _city_panel: Control = null
 var _radius := RADIUS_DEFAULT
 var _collapsed := false
+## Pressing M blows the corner map up to a large centred view; pressing it
+## again drops back to the corner. Expanded shows a wider radius.
+var _expanded := false
+
+
+## The map body's side length in pixels: the compact square by default, or a
+## large centred square (a fraction of the shorter screen side) when expanded.
+func _body_px() -> float:
+	if not _expanded:
+		return BODY_PX
+	var short_side := EXPANDED_MAX_PX
+	var viewport := get_viewport()
+	if viewport != null:
+		var view_size := viewport.get_visible_rect().size
+		short_side = minf(view_size.x, view_size.y)
+	return clampf(short_side * EXPANDED_FILL, BODY_PX, EXPANDED_MAX_PX)
+
+
+## Cells shown around the player: the expanded view widens the radius so the
+## bigger map also reveals more ground, not just larger tiles.
+func _view_radius() -> int:
+	if _expanded:
+		return mini(RADIUS_MAX, _radius * EXPANDED_RADIUS_SCALE)
+	return _radius
 
 var _hide_button: Button
 var _zoom_out_button: Button
@@ -64,6 +92,29 @@ func _ready() -> void:
 	z_index = 25
 	_build_header_buttons()
 	_apply_size()
+
+
+## M toggles the expanded view. Handled as unhandled key input so a focused
+## text field (e.g. the seed box) still types an "m" normally.
+func _unhandled_key_input(event: InputEvent) -> void:
+	var key := event as InputEventKey
+	if key == null or not key.pressed or key.echo:
+		return
+	if key.keycode == KEY_M:
+		_toggle_expanded()
+		get_viewport().set_input_as_handled()
+
+
+func _toggle_expanded() -> void:
+	_expanded = not _expanded
+	if _expanded:
+		# Expanding always reveals the map, even from the collapsed stub.
+		_collapsed = false
+		_hide_button.text = "Hide"
+		_zoom_in_button.visible = true
+		_zoom_out_button.visible = true
+	_reposition()
+	queue_redraw()
 
 
 func configure(scene: Node) -> void:
@@ -106,7 +157,7 @@ func _make_header_button(label: String) -> Button:
 func _layout_header_buttons() -> void:
 	var button_h := HEADER_H - 6.0
 	var top := 3.0
-	var cursor := (BODY_PX + 2.0 * PAD) - 4.0
+	var cursor := (_body_px() + 2.0 * PAD) - 4.0
 	var square_w := 22.0
 	var hide_w := 44.0
 	cursor -= square_w
@@ -121,10 +172,12 @@ func _layout_header_buttons() -> void:
 
 
 func _apply_size() -> void:
-	var width := BODY_PX + 2.0 * PAD
-	var height := HEADER_H if _collapsed else HEADER_H + BODY_PX + 2.0 * PAD
+	var body := _body_px()
+	var width := body + 2.0 * PAD
+	var height := HEADER_H if _collapsed else HEADER_H + body + 2.0 * PAD
 	custom_minimum_size = Vector2(width, height)
 	size = Vector2(width, height)
+	_layout_header_buttons()
 
 
 ## Pin to the top-right of the map viewport. The surrounding layout can be
@@ -137,6 +190,17 @@ func _reposition() -> void:
 	anchor_right = 0.0
 	anchor_top = 0.0
 	anchor_bottom = 0.0
+	if _expanded:
+		# Centre the big map on the map viewport.
+		var viewport := get_viewport()
+		var view_size := viewport.get_visible_rect().size if viewport != null else size
+		var center_x := _screen_right_edge() - RIGHT_MARGIN * 0.5
+		if _city_panel != null and is_instance_valid(_city_panel):
+			var rect := _city_panel.get_global_rect()
+			if rect.size.x > 1.0:
+				center_x = rect.position.x + rect.size.x * 0.5
+		position = Vector2(center_x - size.x * 0.5, maxf(TOP_MARGIN, (view_size.y - size.y) * 0.5))
+		return
 	var right_edge := _screen_right_edge()
 	position = Vector2(right_edge - size.x - RIGHT_INSET, TOP_MARGIN)
 
@@ -177,7 +241,8 @@ func _draw() -> void:
 	draw_rect(Rect2(0.0, 0.0, size.x, HEADER_H), HEADER_BG, true)
 	var font := get_theme_default_font()
 	if font != null:
-		draw_string(font, Vector2(8.0, HEADER_H - 8.0), "Map", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, TITLE_COLOR)
+		var title := "Map — M to close" if _expanded else "Map"
+		draw_string(font, Vector2(8.0, HEADER_H - 8.0), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, TITLE_COLOR)
 	draw_rect(Rect2(Vector2.ZERO, size), BORDER, false, 2.0)
 	if _collapsed:
 		return
@@ -185,8 +250,10 @@ func _draw() -> void:
 
 
 func _draw_body() -> void:
+	var body := _body_px()
+	var radius := _view_radius()
 	var origin := Vector2(PAD, HEADER_H + PAD)
-	var body_rect := Rect2(origin, Vector2(BODY_PX, BODY_PX))
+	var body_rect := Rect2(origin, Vector2(body, body))
 	draw_rect(body_rect, BODY_BG, true)
 	if _scene == null or not is_instance_valid(_scene):
 		draw_rect(body_rect, BORDER, false, 1.0)
@@ -201,25 +268,34 @@ func _draw_body() -> void:
 	var player_cell := _read_vector2i("_player_cell")
 	var roads := _read_dictionary("_surface_road_cells")
 	var blocked := _read_dictionary("_surface_blocked_cells")
+	# Cells the wilds have not streamed in yet are coloured straight from the
+	# overworld biome field, so the whole map reads as land/sea instead of a
+	# black void beyond the small live chunk around the player.
+	var biome_ctx := _read_dictionary("_surface_biome_ctx")
+	var world_origin := _read_vector2i("_surface_world_origin")
 
-	var span := 2 * _radius + 1
-	var cell_px := BODY_PX / float(span)
+	var span := 2 * radius + 1
+	var cell_px := body / float(span)
 	# One extra pixel on each rect closes the seams between neighbours.
 	var rect_size := Vector2(cell_px + 1.0, cell_px + 1.0)
-	for dy: int in range(-_radius, _radius + 1):
-		for dx: int in range(-_radius, _radius + 1):
+	for dy: int in range(-radius, radius + 1):
+		for dx: int in range(-radius, radius + 1):
 			var cell := player_cell + Vector2i(dx, dy)
-			var cell_color := _color_for_cell(cell, city, decor, roads, blocked)
-			var top_left := origin + Vector2(float(dx + _radius) * cell_px, float(dy + _radius) * cell_px)
+			var cell_color := _color_for_cell(cell, city, decor, roads, blocked, biome_ctx, world_origin)
+			var top_left := origin + Vector2(float(dx + radius) * cell_px, float(dy + radius) * cell_px)
 			draw_rect(Rect2(top_left, rect_size), cell_color, true)
 
-	_draw_markers(origin, player_cell, cell_px)
+	_draw_markers(origin, player_cell, cell_px, radius, body)
 	draw_rect(body_rect, BORDER, false, 1.0)
 
 
-func _color_for_cell(cell: Vector2i, city: TileMapLayer, decor: TileMapLayer, roads: Dictionary, blocked: Dictionary) -> Color:
+func _color_for_cell(cell: Vector2i, city: TileMapLayer, decor: TileMapLayer, roads: Dictionary, blocked: Dictionary, biome_ctx: Dictionary, world_origin: Vector2i) -> Color:
 	if city.get_cell_source_id(cell) < 0:
-		return COLOR_UNGENERATED
+		# Not streamed: paint from the overworld biome field so the map shows
+		# the surrounding land and sea instead of black.
+		if biome_ctx.is_empty():
+			return COLOR_UNGENERATED
+		return _biome_color(SurfaceWorldService.biome_for_world_cell(biome_ctx, cell + world_origin))
 	if bool(_scene.call("_is_water_cell", cell)):
 		return COLOR_WATER
 	if roads.has(cell):
@@ -233,28 +309,54 @@ func _color_for_cell(cell: Vector2i, city: TileMapLayer, decor: TileMapLayer, ro
 	return COLOR_GROUND
 
 
-func _draw_markers(origin: Vector2, player_cell: Vector2i, cell_px: float) -> void:
-	var pip := maxf(2.0, cell_px * 0.55)
+## Overworld-biome colour for cells the wilds have not streamed in, so the
+## expanded map reads as a real map of the surrounding land.
+func _biome_color(biome: String) -> Color:
+	match biome:
+		"water":
+			return COLOR_WATER
+		"forest":
+			return COLOR_DECOR
+		"jungle":
+			return Color(0.12, 0.30, 0.14, 1.0)
+		"desert":
+			return Color(0.80, 0.72, 0.45, 1.0)
+		"badlands":
+			return Color(0.55, 0.40, 0.28, 1.0)
+		"mountain":
+			return COLOR_WALL
+		"hills":
+			return Color(0.40, 0.50, 0.30, 1.0)
+		"tundra":
+			return Color(0.72, 0.76, 0.74, 1.0)
+		"marsh":
+			return Color(0.24, 0.38, 0.32, 1.0)
+		_:
+			return COLOR_GROUND
+
+
+func _draw_markers(origin: Vector2, player_cell: Vector2i, cell_px: float, radius: int, body: float) -> void:
+	var pip := clampf(cell_px * 0.55, 2.0, 6.0)
 	for gate: Dictionary in _read_dict_array("_surface_gates"):
-		_draw_pip(origin, player_cell, gate.get("anchor", Vector2i.ZERO) as Vector2i, cell_px, pip, COLOR_GATE)
+		_draw_pip(origin, player_cell, gate.get("anchor", Vector2i.ZERO) as Vector2i, cell_px, pip, radius, COLOR_GATE)
 	for landmark: Dictionary in _read_dict_array("_surface_landmarks"):
-		_draw_pip(origin, player_cell, landmark.get("anchor", Vector2i.ZERO) as Vector2i, cell_px, pip, COLOR_LANDMARK)
+		_draw_pip(origin, player_cell, landmark.get("anchor", Vector2i.ZERO) as Vector2i, cell_px, pip, radius, COLOR_LANDMARK)
 	for npc: Dictionary in _read_dict_array("_npc_states"):
-		_draw_pip(origin, player_cell, npc.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i, cell_px, pip, COLOR_NPC)
+		_draw_pip(origin, player_cell, npc.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i, cell_px, pip, radius, COLOR_NPC)
 	# Player last, dead centre, brighter and larger with a dark rim.
-	var center := origin + Vector2(BODY_PX * 0.5, BODY_PX * 0.5)
-	var player_r := maxf(3.5, cell_px * 0.9)
+	var center := origin + Vector2(body * 0.5, body * 0.5)
+	var player_r := clampf(cell_px * 0.9, 3.5, 7.0)
 	draw_circle(center, player_r + 1.5, COLOR_PLAYER_EDGE)
 	draw_circle(center, player_r, COLOR_PLAYER)
 
 
-func _draw_pip(origin: Vector2, player_cell: Vector2i, cell: Vector2i, cell_px: float, pip: float, color: Color) -> void:
+func _draw_pip(origin: Vector2, player_cell: Vector2i, cell: Vector2i, cell_px: float, pip: float, radius: int, color: Color) -> void:
 	var rel := cell - player_cell
-	if absi(rel.x) > _radius or absi(rel.y) > _radius:
+	if absi(rel.x) > radius or absi(rel.y) > radius:
 		return
 	var point := origin + Vector2(
-		(float(rel.x + _radius) + 0.5) * cell_px,
-		(float(rel.y + _radius) + 0.5) * cell_px
+		(float(rel.x + radius) + 0.5) * cell_px,
+		(float(rel.y + radius) + 0.5) * cell_px
 	)
 	draw_circle(point, pip, color)
 
