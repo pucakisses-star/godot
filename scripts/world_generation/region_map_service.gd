@@ -81,6 +81,7 @@ static func make_render_job(
 		"iceberg_tile": iceberg_tile,
 		"canopy3x3": canopy3x3,
 		"is_clearing": is_clearing,
+		"is_farm_field": is_farm_field,
 		"image": null
 	}
 
@@ -279,7 +280,19 @@ static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_bio
 	# farm's plots cluster beside it in the detail view instead of scattering
 	# as lone icons across the wilds (the same idea as the lumber clearing).
 	if is_farm_field:
-		return {"base": TILE_ATLAS_DEFS.FARM_CROPS_TILE}
+		# The crop-field art is over half transparent (rows of plants over bare
+		# earth), so it must ride on a ground base or the gaps fall through to
+		# black. Keep the biome's own ground, the way the overworld shows crops
+		# painted over grass.
+		var field_base := TILE_ATLAS_DEFS.GRASS_TILE
+		match cell_biome:
+			TILE_ATLAS_DEFS.BIOME_TUNDRA:
+				field_base = TILE_ATLAS_DEFS.SNOW_TILE
+			TILE_ATLAS_DEFS.BIOME_DESERT:
+				field_base = TILE_ATLAS_DEFS.SAND_TILE
+			TILE_ATLAS_DEFS.BIOME_BADLANDS:
+				field_base = TILE_ATLAS_DEFS.BADLANDS_TILE
+		return {"base": field_base, "overlay": TILE_ATLAS_DEFS.FARM_CROPS_TILE}
 	# A lumber mill's tile (and the felled tiles around it) reads as a logged
 	# clearing: open ground strewn with cut-tree stumps, so the mill sits in
 	# an obvious cleared patch instead of being buried in standing forest.

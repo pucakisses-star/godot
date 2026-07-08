@@ -202,6 +202,13 @@ var _town_theme := ""
 ## Hamlets/snow villages keep the Village classification regardless of
 ## population (browser generateHamletDetails).
 var _town_is_village := false
+## True for an open-wild embark: no settlement is generated, just a walkable
+## biome clearing the player spawns onto (see TOWN_SCENE_WILD_KEY).
+var _wild_mode := false
+## The clearing is tiny, so the spawn framing must land on the player; the
+## city panel may still be unsized when _show_level runs on the first frame,
+## so we re-center once its layout settles.
+var _wild_needs_recenter := false
 var _farm_sprites: Array[Node2D] = []
 var _farm_pens: Array = []
 var _farm_blocked_cells: Dictionary = {}
@@ -285,6 +292,9 @@ const TOWN_SCENE_THEME_KEY := "town_scene_theme"
 const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
 const TOWN_SCENE_WORLD_BIOMES_KEY := "town_scene_world_biomes"
 const TOWN_SCENE_WORLD_RIVERS_KEY := "town_scene_world_rivers"
+## When set, the walker embarked onto an open wild tile: raise a bare biome
+## clearing (no city, no residents) so the player spawns in the wilds.
+const TOWN_SCENE_WILD_KEY := "town_scene_is_wild"
 
 ## Farmstead art from the web game's Farm tileset (16px art; town cells are
 ## 32px, so a 128px sprite spans four cells).
@@ -586,6 +596,10 @@ func _process(delta: float) -> void:
 	_advance_game_clock(delta)
 	_player_attack_timer = maxf(_player_attack_timer - delta, 0.0)
 	_staff_cooldown = maxf(_staff_cooldown - delta, 0.0)
+	# Frame the wild spawn on the player once the panel has a real size.
+	if _wild_needs_recenter and _player_sprite != null and city_panel.size.x > 0.0 and city_panel.size.y > 0.0:
+		_center_view_on_cell(_player_cell)
+		_wild_needs_recenter = false
 	_stream_surface_chunks()
 	_check_surface_arrival()
 	_update_surface_life(delta)
@@ -1340,7 +1354,16 @@ func _apply_cached_town_scene_seed() -> void:
 	_town_name = String(settings.get(TOWN_SCENE_NAME_KEY, "")).strip_edges()
 	_town_theme = String(settings.get(TOWN_SCENE_THEME_KEY, "")).strip_edges().to_lower()
 	_town_is_village = bool(settings.get(TOWN_SCENE_VILLAGE_KEY, false))
-	if _town_theme == "desert":
+	_wild_mode = bool(settings.get(TOWN_SCENE_WILD_KEY, false))
+	if _wild_mode:
+		# Name the header for the wilderness, not "Unnamed Town".
+		var wild_title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
+		if wild_title_label != null:
+			wild_title_label.text = _town_name if not _town_name.is_empty() else "The Wilds"
+		var wild_desc_label := get_node_or_null("Margin/Layout/Controls/Description") as Label
+		if wild_desc_label != null:
+			wild_desc_label.text = "Open wilderness - no settlement here. Click to walk; hover tiles for details."
+	elif _town_theme == "desert":
 		var title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
 		if title_label != null:
 			title_label.text = "Desert City"
@@ -1369,6 +1392,15 @@ func _generate_city() -> void:
 	_rng.seed = hash(seed_text)
 	_hold_state.generated_levels.clear()
 
+	# Wild embark: skip the whole settlement pipeline and raise a single
+	# walkable clearing. The surface streamer then fills biome wilds around it.
+	if _wild_mode:
+		_town_details = {}
+		_town_market = {}
+		_hold_state.generated_levels.append(_generate_wild_clearing_level())
+		_show_level(0)
+		return
+
 	var details_rng := RandomNumberGenerator.new()
 	details_rng.seed = hash("%s::town_details" % seed_text)
 	var display_name := _town_name if not _town_name.is_empty() else "Unnamed Town"
@@ -1385,6 +1417,28 @@ func _generate_city() -> void:
 		_hold_state.generated_levels.append(_generate_single_level(level_seed, level_index, level_count))
 
 	_show_level(0)
+
+## A bare walkable clearing for a wild embark: an odd-sized square of open
+## ground (CELL_ROCK renders as grass in the town tileset) centered on the
+## origin, with no buildings, halls, plazas, stairs, or civic zones. It is
+## non-empty so _setup_surface_world anchors the biome wilds around it, and
+## its cells count as walkable in wild mode (see _collect_walkable_cells).
+func _generate_wild_clearing_level() -> Dictionary:
+	var grid: Dictionary = {}
+	var clearing_radius := 5
+	for offset_y in range(-clearing_radius, clearing_radius + 1):
+		for offset_x in range(-clearing_radius, clearing_radius + 1):
+			grid[Vector2i(offset_x, offset_y)] = CELL_ROCK
+	return {
+		"grid": grid,
+		"door_cells": {},
+		"zone_counts": {},
+		"requested_zone_counts": {},
+		"civic_buildings_by_id": {},
+		"civic_building_type_map": {},
+		"residence_type_map": {},
+		"stair_cells": {}
+	}
 
 func _generate_single_level(level_seed: String, level_index: int, level_count: int) -> Dictionary:
 	_rng.seed = hash(level_seed)
@@ -1611,6 +1665,8 @@ func _show_level(target_level_index: int) -> void:
 	_update_zone_overlay()
 	_update_depth_controls()
 	_update_weather_visuals()
+	if _wild_mode and _player_sprite != null:
+		_wild_needs_recenter = true
 
 func _update_depth_controls() -> void:
 	var level_count := _hold_state.generated_levels.size()
@@ -1931,7 +1987,8 @@ func _furnish_interiors(grid: Dictionary) -> void:
 	_glow_sprites.clear()
 	_pending_glows.clear()
 	_actor_passable_cache.clear()
-	if actor_layer == null:
+	# The wilds have no interiors to dress; the clearing stays open ground.
+	if actor_layer == null or _wild_mode:
 		return
 	var is_occupied := func(cell: Vector2i) -> bool:
 		return decor_layer.get_cell_source_id(cell) >= 0
@@ -2072,7 +2129,8 @@ func _build_farmsteads() -> void:
 	_farm_blocked_cells.clear()
 	_windmill_sails.clear()
 	_actor_passable_cache.clear()
-	if actor_layer == null or _town_theme == "desert" or _green_cells.is_empty():
+	# No farms in the untamed wilds - the clearing has no settlement to feed.
+	if actor_layer == null or _wild_mode or _town_theme == "desert" or _green_cells.is_empty():
 		return
 	var farm_target := clampi(_green_cells.size() / 260, 1, 3)
 	var origins: Array[Vector2i] = []
@@ -2253,7 +2311,7 @@ func _spawn_farm_animals() -> void:
 		if old_sprite != null:
 			old_sprite.queue_free()
 	_farm_animals.clear()
-	if actor_layer == null or _town_theme == "desert":
+	if actor_layer == null or _wild_mode or _town_theme == "desert":
 		return
 	# Penned animals first: every farmstead pen gets its own little herd.
 	for pen_index in range(_farm_pens.size()):
@@ -2808,7 +2866,8 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 		_hold_state.current_level_index,
 		maxi(_hold_state.generated_levels.size(), 1)
 	)
-	var npc_spawn_count := maxi(tavern_npc_count, mini(level_npc_target, 250))
+	# The wilds hold no residents: the player (and companion) spawn, nobody else.
+	var npc_spawn_count := 0 if _wild_mode else maxi(tavern_npc_count, mini(level_npc_target, 250))
 	var result := DwarfHoldTavernService.spawn_tavern_characters(
 		actor_layer, city_layer, _npc_states, _rng, _walkable_cells,
 		_tavern_character_texture, _pending_player_spawn_cell,
@@ -2886,6 +2945,14 @@ func _assign_npc_daily_lives(grid: Dictionary) -> void:
 		DwarfHoldTavernService.update_character_frame(sprite, int(state.get("slot", 0)), 1, 0)
 
 func _collect_walkable_cells(grid: Dictionary) -> Array[Vector2i]:
+	# The wild clearing has no zones - every grassy cell is open ground, so the
+	# whole grid is a candidate for the player spawn (passability is filtered
+	# by the caller against the rendered tiles).
+	if _wild_mode:
+		var cells: Array[Vector2i] = []
+		for cell_variant: Variant in grid.keys():
+			cells.append(cell_variant as Vector2i)
+		return cells
 	return DwarfHoldLayoutService.collect_walkable_cells(grid, [CELL_HALL, CELL_HOUSE, CELL_BUILDING, CELL_PLAZA])
 
 func _seeded_shuffle(arr: Array) -> void:
@@ -5260,6 +5327,13 @@ func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: St
 
 func _update_summary(grid: Dictionary, seed_text: String) -> void:
 	var bounds := _find_bounds(grid)
+	# The wilds carry no civic tallies - just name the place and note it is open.
+	if _wild_mode:
+		var wild_place := _town_name if not _town_name.is_empty() else "The Wilds"
+		city_summary.text = "%s\nSeed %s\nOpen wilderness - no settlement.\nClearing: %dx%d" % [
+			wild_place, seed_text, bounds.size.x, bounds.size.y
+		]
+		return
 	var hall_zones := int(_latest_zone_counts.get("halls", 0))
 	var house_zones := int(_latest_zone_counts.get("houses", 0))
 	var building_zones := int(_latest_zone_counts.get("buildings", 0))
