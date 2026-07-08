@@ -1274,12 +1274,10 @@ func _dive_into_tile(tile_coord: Vector2i) -> void:
 func _tile_supports_journey(details: Dictionary) -> bool:
 	if details.is_empty():
 		return false
-	if _is_dwarfhold_structure(details) or _is_town_settlement(details) or _is_dungeon_structure(details):
-		return true
-	# Any dry-land wild tile is now enterable too: a second dive walks the
-	# player straight into the open biome wilds. Water has no walkable
-	# surface, so oceans and lakes stay non-enterable.
-	return _tile_base_biome_from_data(details) != BIOME_WATER
+	# Every tile is now enterable: settlements open their scene, and any other
+	# tile - land or open water - embarks into the wilds (a bare clearing on
+	# land, a tiny isle ringed by ocean on water).
+	return true
 
 func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 	var details := _tile_data.get(tile_coord, {}) as Dictionary
@@ -1307,18 +1305,14 @@ func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 		SceneCacheService.request_change(self, DUNGEON_INTERIOR_SCENE_PATH)
 		return
 
-	# Wild (non-settlement) land tiles: embark into the open biome wilds.
-	# The town scene is reused - it already streams biome-appropriate
-	# terrain around a grid center - but flagged to raise a bare clearing
-	# with no settlement. Water tiles have no walkable surface, so they
-	# still fall through to the informational print below.
-	if _patch_biome_label_for_tile(tile_coord) != BIOME_WATER:
-		var wild_seed := _wild_scene_seed_for_tile(tile_coord, details)
-		_store_selected_wild_scene_context(wild_seed, tile_coord, details)
-		SceneCacheService.request_change(self, TOWN_GENERATION_SCENE_PATH)
-		return
-
-	print("Begin journey is not yet available for this tile: %s" % tile_coord)
+	# Wild (non-settlement) tiles: embark into the open biome wilds. The town
+	# scene is reused - it already streams biome-appropriate terrain around a
+	# grid center - but flagged to raise a bare clearing with no settlement.
+	# Water tiles embark too: the clearing becomes a small isle and the
+	# streamer surrounds it with open ocean.
+	var wild_seed := _wild_scene_seed_for_tile(tile_coord, details)
+	_store_selected_wild_scene_context(wild_seed, tile_coord, details)
+	SceneCacheService.request_change(self, TOWN_GENERATION_SCENE_PATH)
 
 func _is_town_settlement(details: Dictionary) -> bool:
 	var settlement_type := String(details.get("settlement_type", "")).strip_edges().to_lower()
@@ -1435,6 +1429,9 @@ func _wild_place_name_for_tile(tile_coord: Vector2i, details: Dictionary) -> Str
 	var region_name := _tile_region_name(tile_coord, details)
 	if not region_name.is_empty():
 		return region_name
+	# Open water gets a sea name rather than "The Water".
+	if _patch_biome_label_for_tile(tile_coord) == BIOME_WATER:
+		return "The Open Sea"
 	var biome := _patch_biome_label_for_tile(tile_coord)
 	var biome_label := _resolved_biome_label(tile_coord, biome)
 	if biome_label.is_empty():
