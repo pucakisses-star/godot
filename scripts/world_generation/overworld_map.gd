@@ -9668,8 +9668,11 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 	roads.resize(9)
 	var biomes := PackedStringArray()
 	biomes.resize(9)
+	var canopy := PackedFloat32Array()
+	canopy.resize(9)
 	var own_biome := _region_biome_for_tile(tile)
 	var own_water := 1.0 if own_biome == TILE_ATLAS_DEFS.BIOME_WATER else 0.0
+	var own_canopy := float((_tile_data.get(tile, {}) as Dictionary).get("forest_canopy_density", 0.0))
 	for ny in 3:
 		for nx in 3:
 			var neighbor := tile + Vector2i(nx - 1, ny - 1)
@@ -9679,11 +9682,13 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 				rivers[index] = 0.0
 				roads[index] = 0.0
 				biomes[index] = own_biome
+				canopy[index] = own_canopy
 				continue
 			water[index] = 1.0 if _region_biome_for_tile(neighbor) == TILE_ATLAS_DEFS.BIOME_WATER else 0.0
 			rivers[index] = 1.0 if _region_river_for_tile(neighbor) else 0.0
 			roads[index] = 1.0 if _region_road_for_tile(neighbor) else 0.0
 			biomes[index] = _region_biome_for_tile(neighbor)
+			canopy[index] = float((_tile_data.get(neighbor, {}) as Dictionary).get("forest_canopy_density", 0.0))
 	var corners := PackedFloat32Array()
 	corners.resize(4)
 	var origin := tile * RegionMapService.CELLS_PER_TILE
@@ -9704,7 +9709,7 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 		own_biome, _region_river_for_tile(tile),
 		has_iceberg, water, rivers, corners, tile_ruggedness,
 		biomes, roads,
-		_region_tileset_image(), tile_size, iceberg_art
+		_region_tileset_image(), tile_size, iceberg_art, canopy
 	)
 
 ## The worldmap atlas as a plain RGBA image the render workers can read:

@@ -59,7 +59,8 @@ static func make_render_job(
 	road3x3: PackedFloat32Array = PackedFloat32Array(),
 	tileset: Image = null,
 	atlas_px: int = 32,
-	iceberg_tile: Vector2i = Vector2i(-1, -1)
+	iceberg_tile: Vector2i = Vector2i(-1, -1),
+	canopy3x3: PackedFloat32Array = PackedFloat32Array()
 ) -> Dictionary:
 	return {
 		"seed": world_seed_text,
@@ -76,6 +77,7 @@ static func make_render_job(
 		"tileset": tileset,
 		"atlas_px": atlas_px,
 		"iceberg_tile": iceberg_tile,
+		"canopy3x3": canopy3x3,
 		"image": null
 	}
 
@@ -213,6 +215,8 @@ static func _render_job_as_tiles(job: Dictionary) -> void:
 	if has_roads:
 		road_mask = _build_road_mask(tile, road3x3, noise_set, SUB_TILES)
 	var biome_fields := _build_biome_fields(job.get("biomes3x3") as PackedStringArray, biome)
+	var canopy3x3 := job.get("canopy3x3") as PackedFloat32Array
+	var has_canopy := canopy3x3 != null and canopy3x3.size() == 9
 	var noise := noise_set.get("detail") as FastNoiseLite
 	var cells_per_sub := CELLS_PER_TILE / SUB_TILES
 	var image := Image.create(SUB_TILES * atlas_px, SUB_TILES * atlas_px, false, Image.FORMAT_RGBA8)
@@ -234,7 +238,8 @@ static func _render_job_as_tiles(job: Dictionary) -> void:
 			var on_river := not river_mask.is_empty() and river_mask[sy * SUB_TILES + sx] != 0
 			var on_road := not road_mask.is_empty() and road_mask[sy * SUB_TILES + sx] != 0
 			var cell_biome := _blended_biome(biome_fields, biome, world_cell, noise_set, fx, fy)
-			var pick := _pick_cell_art(world_cell, noise_set, cell_biome, coast, detail, on_river, has_iceberg, iceberg_tile, danger, ruggedness)
+			var canopy := _field_from_neighbors(canopy3x3, fx, fy) if has_canopy else 0.0
+			var pick := _pick_cell_art(world_cell, noise_set, cell_biome, coast, detail, on_river, has_iceberg, iceberg_tile, danger, ruggedness, canopy)
 			var base_art := pick.get("base", TILE_ATLAS_DEFS.GRASS_TILE) as Vector2i
 			var overlay_art := pick.get("overlay", Vector2i(-1, -1)) as Vector2i
 			if on_road and not bool(pick.get("is_water", false)):
@@ -255,7 +260,7 @@ static func _render_job_as_tiles(job: Dictionary) -> void:
 
 ## Ground art plus optional feature art for one detail cell, decided by
 ## the same fields the painted renderer used.
-static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_biome: String, coast: float, detail: float, on_river: bool, has_iceberg: bool, iceberg_tile: Vector2i, danger: float, ruggedness: float) -> Dictionary:
+static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_biome: String, coast: float, detail: float, on_river: bool, has_iceberg: bool, iceberg_tile: Vector2i, danger: float, ruggedness: float, canopy: float = 0.0) -> Dictionary:
 	if coast > 0.5:
 		var result := {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
 		if has_iceberg and iceberg_tile.x >= 0:
@@ -322,11 +327,18 @@ static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_bio
 				return {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
 			return {"base": TILE_ATLAS_DEFS.MARSH_TILE}
 		TILE_ATLAS_DEFS.BIOME_FOREST:
-			if has_tree_decor or detail > 0.15:
+			# Canopy depth (distance into the forest, 0 at the edge, 1 in the
+			# core) lowers the tree threshold, so a wood thins to scattered
+			# stands at its fringe and closes to near-solid trees deep inside.
+			# Small forests never reach a deep core, so they stay sparse.
+			var forest_threshold := lerpf(0.55, -0.7, clampf(canopy, 0.0, 1.0))
+			if detail > forest_threshold:
 				return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.TREE_TILE}
 			return {"base": TILE_ATLAS_DEFS.GRASS_TILE}
 		TILE_ATLAS_DEFS.BIOME_JUNGLE:
-			if has_tree_decor or detail > 0.0:
+			# Jungle is dense even at the margins and turns near-solid at heart.
+			var jungle_threshold := lerpf(0.15, -0.8, clampf(canopy, 0.0, 1.0))
+			if has_tree_decor or detail > jungle_threshold:
 				return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.JUNGLE_TREE_TILE}
 			return {"base": TILE_ATLAS_DEFS.GRASS_TILE}
 	if has_tree_decor:
