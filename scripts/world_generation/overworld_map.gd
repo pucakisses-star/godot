@@ -9463,6 +9463,10 @@ func _build_region_icons() -> void:
 		if atlas_coords.x < 0:
 			continue
 		var details := _tile_data.get(cell, {}) as Dictionary
+		# Felled tiles render their stumps as ground in the detail view, so
+		# they need no separate icon on top.
+		if String(details.get("structure", "")) == "cutWoods":
+			continue
 		var settlement_type := String(details.get("settlement_type", "")).strip_edges()
 		var is_major := REGION_MAJOR_SETTLEMENT_TYPES.has(settlement_type)
 		var icon_scale := major_scale if is_major else ambient_scale
@@ -9704,12 +9708,15 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 	var tile_ruggedness := float((_tile_data.get(tile, {}) as Dictionary).get("mountain_ruggedness", 0.45))
 	if tile_ruggedness <= 0.0:
 		tile_ruggedness = 0.45
+	# A lumber mill and the tiles it felled render as a logged clearing.
+	var tile_structure := String((_tile_data.get(tile, {}) as Dictionary).get("structure", ""))
+	var is_clearing := tile_structure == "lumber_mill" or tile_structure == "cutWoods"
 	return RegionMapService.make_render_job(
 		_region_world_seed_text(), tile,
 		own_biome, _region_river_for_tile(tile),
 		has_iceberg, water, rivers, corners, tile_ruggedness,
 		biomes, roads,
-		_region_tileset_image(), tile_size, iceberg_art, canopy
+		_region_tileset_image(), tile_size, iceberg_art, canopy, is_clearing
 	)
 
 ## The worldmap atlas as a plain RGBA image the render workers can read:

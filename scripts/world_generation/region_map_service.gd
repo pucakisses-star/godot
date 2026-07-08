@@ -60,7 +60,8 @@ static func make_render_job(
 	tileset: Image = null,
 	atlas_px: int = 32,
 	iceberg_tile: Vector2i = Vector2i(-1, -1),
-	canopy3x3: PackedFloat32Array = PackedFloat32Array()
+	canopy3x3: PackedFloat32Array = PackedFloat32Array(),
+	is_clearing: bool = false
 ) -> Dictionary:
 	return {
 		"seed": world_seed_text,
@@ -78,6 +79,7 @@ static func make_render_job(
 		"atlas_px": atlas_px,
 		"iceberg_tile": iceberg_tile,
 		"canopy3x3": canopy3x3,
+		"is_clearing": is_clearing,
 		"image": null
 	}
 
@@ -217,6 +219,7 @@ static func _render_job_as_tiles(job: Dictionary) -> void:
 	var biome_fields := _build_biome_fields(job.get("biomes3x3") as PackedStringArray, biome)
 	var canopy3x3 := job.get("canopy3x3") as PackedFloat32Array
 	var has_canopy := canopy3x3 != null and canopy3x3.size() == 9
+	var is_clearing := bool(job.get("is_clearing", false))
 	var noise := noise_set.get("detail") as FastNoiseLite
 	var cells_per_sub := CELLS_PER_TILE / SUB_TILES
 	var image := Image.create(SUB_TILES * atlas_px, SUB_TILES * atlas_px, false, Image.FORMAT_RGBA8)
@@ -239,7 +242,7 @@ static func _render_job_as_tiles(job: Dictionary) -> void:
 			var on_road := not road_mask.is_empty() and road_mask[sy * SUB_TILES + sx] != 0
 			var cell_biome := _blended_biome(biome_fields, biome, world_cell, noise_set, fx, fy)
 			var canopy := _field_from_neighbors(canopy3x3, fx, fy) if has_canopy else 0.0
-			var pick := _pick_cell_art(world_cell, noise_set, cell_biome, coast, detail, on_river, has_iceberg, iceberg_tile, danger, ruggedness, canopy)
+			var pick := _pick_cell_art(world_cell, noise_set, cell_biome, coast, detail, on_river, has_iceberg, iceberg_tile, danger, ruggedness, canopy, is_clearing)
 			var base_art := pick.get("base", TILE_ATLAS_DEFS.GRASS_TILE) as Vector2i
 			var overlay_art := pick.get("overlay", Vector2i(-1, -1)) as Vector2i
 			if on_road and not bool(pick.get("is_water", false)):
@@ -260,7 +263,7 @@ static func _render_job_as_tiles(job: Dictionary) -> void:
 
 ## Ground art plus optional feature art for one detail cell, decided by
 ## the same fields the painted renderer used.
-static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_biome: String, coast: float, detail: float, on_river: bool, has_iceberg: bool, iceberg_tile: Vector2i, danger: float, ruggedness: float, canopy: float = 0.0) -> Dictionary:
+static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_biome: String, coast: float, detail: float, on_river: bool, has_iceberg: bool, iceberg_tile: Vector2i, danger: float, ruggedness: float, canopy: float = 0.0, is_clearing: bool = false) -> Dictionary:
 	if coast > 0.5:
 		var result := {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
 		if has_iceberg and iceberg_tile.x >= 0:
@@ -270,6 +273,13 @@ static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_bio
 		return result
 	if on_river:
 		return {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
+	# A lumber mill's tile (and the felled tiles around it) reads as a logged
+	# clearing: open grass strewn with cut-tree stumps, so the mill sits in an
+	# obvious cleared patch instead of being buried in standing forest.
+	if is_clearing:
+		if detail > 0.15:
+			return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.CUT_TREES_TILE}
+		return {"base": TILE_ATLAS_DEFS.GRASS_TILE}
 	var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(world_cell, noise_set, danger)
 	var base_key := String(terrain.get("base", "grass"))
 	var decor_key := String(terrain.get("decor", ""))
