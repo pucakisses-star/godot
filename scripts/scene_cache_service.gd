@@ -25,7 +25,50 @@ const CACHEABLE_SEED_KEYS := {
 var _parked: Dictionary = {}
 var _order: Array[String] = []
 
+## A short fade-to-black wraps every scene change, so entering a settlement
+## (or stepping back out) reads as a seamless doorway rather than a hard cut
+## and a loading-screen flash: the outgoing view fades out, the incoming
+## scene is built behind the black, and the ready scene fades back in.
+## Settlement generation runs synchronously inside the swap, so it finishes
+## while the screen is fully black and the reveal lands on a ready scene.
+const FADE_OUT_SECONDS := 0.22
+const FADE_IN_SECONDS := 0.32
+var _fade_layer: CanvasLayer = null
+var _fade_rect: ColorRect = null
+
 func change_scene(target_path: String) -> void:
+	_ensure_fade()
+	await _tween_fade_alpha(1.0, FADE_OUT_SECONDS)
+	_perform_swap(target_path)
+	# Let the freshly built scene lay out and paint before the reveal, so the
+	# fade-in never flashes an unrendered frame.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	await _tween_fade_alpha(0.0, FADE_IN_SECONDS)
+	if _fade_layer != null and is_instance_valid(_fade_layer):
+		_fade_layer.visible = false
+
+func _ensure_fade() -> void:
+	if _fade_layer != null and is_instance_valid(_fade_layer):
+		_fade_layer.visible = true
+		return
+	_fade_layer = CanvasLayer.new()
+	_fade_layer.layer = 128
+	add_child(_fade_layer)
+	_fade_rect = ColorRect.new()
+	_fade_rect.color = Color(0.0, 0.0, 0.0, 0.0)
+	_fade_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_fade_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_fade_layer.add_child(_fade_rect)
+
+func _tween_fade_alpha(target_alpha: float, duration: float) -> void:
+	if _fade_rect == null or not is_instance_valid(_fade_rect):
+		return
+	var tween := create_tween()
+	tween.tween_property(_fade_rect, "color:a", target_alpha, duration)
+	await tween.finished
+
+func _perform_swap(target_path: String) -> void:
 	var tree := get_tree()
 	var current := tree.current_scene
 	var target_key := _cache_key(target_path)
