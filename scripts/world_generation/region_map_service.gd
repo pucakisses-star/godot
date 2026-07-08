@@ -274,12 +274,22 @@ static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_bio
 	if on_river:
 		return {"base": TILE_ATLAS_DEFS.WATER_TILE, "is_water": true}
 	# A lumber mill's tile (and the felled tiles around it) reads as a logged
-	# clearing: open grass strewn with cut-tree stumps, so the mill sits in an
-	# obvious cleared patch instead of being buried in standing forest.
+	# clearing: open ground strewn with cut-tree stumps, so the mill sits in
+	# an obvious cleared patch instead of being buried in standing forest.
+	# The bare ground keeps the biome's own surface (snow in tundra, sand in
+	# arid country) - felling trees does not thaw the ground to grass.
 	if is_clearing:
+		var clearing_base := TILE_ATLAS_DEFS.GRASS_TILE
+		match cell_biome:
+			TILE_ATLAS_DEFS.BIOME_TUNDRA:
+				clearing_base = TILE_ATLAS_DEFS.SNOW_TILE
+			TILE_ATLAS_DEFS.BIOME_DESERT:
+				clearing_base = TILE_ATLAS_DEFS.SAND_TILE
+			TILE_ATLAS_DEFS.BIOME_BADLANDS:
+				clearing_base = TILE_ATLAS_DEFS.BADLANDS_TILE
 		if detail > 0.15:
-			return {"base": TILE_ATLAS_DEFS.GRASS_TILE, "overlay": TILE_ATLAS_DEFS.CUT_TREES_TILE}
-		return {"base": TILE_ATLAS_DEFS.GRASS_TILE}
+			return {"base": clearing_base, "overlay": TILE_ATLAS_DEFS.CUT_TREES_TILE}
+		return {"base": clearing_base}
 	var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(world_cell, noise_set, danger)
 	var base_key := String(terrain.get("base", "grass"))
 	var decor_key := String(terrain.get("decor", ""))
