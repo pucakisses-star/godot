@@ -247,6 +247,12 @@ func spawn_ambient_structures(
 			if not _ambient_option_matches(option, coord, tiles):
 				tiles[coord] = tile
 				continue
+			# Per-option rarity thins out single-option monster cultures (e.g.
+			# harpy roosts) that would otherwise carpet their whole range.
+			var rarity := clampf(float(option.get("rarity", 1.0)), 0.0, 1.0)
+			if rarity < 1.0 and _hash_roll(seed_number, x, y, 977) > rarity:
+				tiles[coord] = tile
+				continue
 			if roll <= chance:
 				tile["ambient_structure"] = option
 			else:

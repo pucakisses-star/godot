@@ -183,7 +183,7 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "hermit_hut", "label": "Hermit's Hut", "tile": Vector2i(0, 4)}
 	],
 	"wood_elves": [
-		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 5), "requires_tree_neighbor": true, "requires_deep_forest": true},
+		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 6), "requires_tree_neighbor": true, "requires_deep_forest": true},
 		{"id": "great_tree", "label": "Great Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true},
 		{"id": "old_growth", "label": "Old Growth", "tile": Vector2i(0, 2), "requires_tree_overlay": true, "replace_tree_overlay": true}
 	],
@@ -233,35 +233,35 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	],
 	"gnomes": [
 		{"id": "homestead", "label": "Gnomish Burrow", "tile": Vector2i(13, 1), "requires_plain_grass": true},
-		{"id": "farm", "label": "Tinker's Plot", "tile": Vector2i(16, 2), "requires_plain_grass": true}
+		{"id": "farm", "label": "Tinker's Plot", "tile": Vector2i(15, 1), "requires_plain_grass": true}
 	],
 	"aarakocra": [
-		{"id": "cliff_aerie", "label": "Cliff Aerie", "tile": Vector2i(2, 2)}
+		{"id": "cliff_aerie", "label": "Cliff Aerie", "tile": Vector2i(6, 1)}
 	],
 	"ogres": [
-		{"id": "ogre_den", "label": "Ogre Den", "tile": Vector2i(9, 1)}
+		{"id": "ogre_den", "label": "Ogre Den", "tile": Vector2i(5, 1)}
 	],
 	"trolls": [
-		{"id": "troll_mound", "label": "Troll Mound", "tile": Vector2i(9, 0)}
+		{"id": "troll_mound", "label": "Troll Mound", "tile": Vector2i(5, 6)}
 	],
 	"gnolls": [
-		{"id": "gnoll_den", "label": "Gnoll Den", "tile": Vector2i(11, 0)}
+		{"id": "gnoll_den", "label": "Gnoll Den", "tile": Vector2i(11, 3)}
 	],
 	"orc": [
 		{"id": "orc_camp", "label": "Orc Camp", "tile": Vector2i(11, 3)},
 		{"id": "war_pyre", "label": "War Pyre", "tile": Vector2i(13, 3)}
 	],
 	"hobgoblin": [
-		{"id": "war_banner", "label": "War Banner Camp", "tile": Vector2i(10, 1)}
+		{"id": "war_banner", "label": "War Banner Camp", "tile": Vector2i(16, 2)}
 	],
 	"quilboar": [
-		{"id": "thorn_camp", "label": "Thorn Camp", "tile": Vector2i(11, 0)}
+		{"id": "thorn_camp", "label": "Thorn Camp", "tile": Vector2i(15, 2)}
 	],
 	"blemaayae": [
-		{"id": "wanderer_camp", "label": "Wanderers' Camp", "tile": Vector2i(7, 1)}
+		{"id": "wanderer_camp", "label": "Wanderers' Camp", "tile": Vector2i(1, 5)}
 	],
 	"braxat": [
-		{"id": "raider_camp", "label": "Raider Camp", "tile": Vector2i(10, 1)}
+		{"id": "raider_camp", "label": "Raider Camp", "tile": Vector2i(11, 3)}
 	],
 	"tuskar": [
 		{"id": "hunting_lodge", "label": "Tusked Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true}
@@ -270,11 +270,11 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "bog_ruin", "label": "Bog Ruin", "tile": Vector2i(7, 2)}
 	],
 	"giants": [
-		{"id": "giant_cairn", "label": "Giant's Cairn", "tile": Vector2i(9, 0)},
+		{"id": "giant_cairn", "label": "Giant's Cairn", "tile": Vector2i(5, 6)},
 		{"id": "stone_cairn", "label": "Stone Cairn", "tile": Vector2i(5, 6)}
 	],
 	"harpies": [
-		{"id": "harpy_roost", "label": "Harpy Roost", "tile": Vector2i(7, 2)}
+		{"id": "harpy_roost", "label": "Harpy Roost", "tile": Vector2i(6, 1), "rarity": 0.5}
 	],
 	"beastmen": [
 		{"id": "hunting_lodge", "label": "Beast Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true}
@@ -282,7 +282,7 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	"demons": [
 		{"id": "profane_ruin", "label": "Profane Ruin", "tile": Vector2i(7, 2)},
 		{"id": "dark_gate", "label": "Dark Gate", "tile": Vector2i(17, 1)},
-		{"id": "dark_spire", "label": "Dark Spire", "tile": Vector2i(17, 2)}
+		{"id": "dark_spire", "label": "Dark Spire", "tile": Vector2i(3, 3)}
 	],
 	"dryad": [
 		{"id": "great_tree", "label": "Heart Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true}
