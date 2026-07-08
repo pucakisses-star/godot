@@ -292,6 +292,16 @@ static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_bio
 				field_base = TILE_ATLAS_DEFS.SAND_TILE
 			TILE_ATLAS_DEFS.BIOME_BADLANDS:
 				field_base = TILE_ATLAS_DEFS.BADLANDS_TILE
+		# Frame each field tile with a plain-ground margin (and a central furrow
+		# path) so a run of field tiles reads as tidy bordered plots divided by
+		# grassy tracks, instead of one endless wall of identical crop rows.
+		var cells_per_sub := CELLS_PER_TILE / SUB_TILES
+		var sub_x := posmod(world_cell.x, CELLS_PER_TILE) / cells_per_sub
+		var sub_y := posmod(world_cell.y, CELLS_PER_TILE) / cells_per_sub
+		var on_margin := sub_x == 0 or sub_y == 0 or sub_x == SUB_TILES - 1 or sub_y == SUB_TILES - 1
+		var on_furrow := sub_x == SUB_TILES / 2
+		if on_margin or on_furrow:
+			return {"base": field_base}
 		return {"base": field_base, "overlay": TILE_ATLAS_DEFS.FARM_CROPS_TILE}
 	# A lumber mill's tile (and the felled tiles around it) reads as a logged
 	# clearing: open ground strewn with cut-tree stumps, so the mill sits in
