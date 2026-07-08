@@ -193,7 +193,11 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		# the rest are tile-less tooltip landmarks, and diluting the pick
 		# pool keeps actual dragons a rare sight.
 		{"id": "sleeping_dragon", "label": "Sleeping Dragon", "tile": Vector2i(14, 0), "requires_mountain_overlay": true},
-		{"id": "green_dragon", "label": "Green Dragon", "tile": Vector2i(18, 0), "requires_cave_neighbor": true},
+		# The green dragon used to require a cave neighbour, which almost never
+		# coincided with dragon territory, so it never appeared. Ungated now:
+		# it lairs across dragon lands (the lowland counterpart to the
+		# mountain-bound sleeper), so both dragon types actually show up.
+		{"id": "green_dragon", "label": "Green Dragon", "tile": Vector2i(18, 0)},
 		{"id": "molten_perch", "label": "Molten Perch"},
 		{"id": "treasure_scatter", "label": "Treasure Scatter"},
 		{"id": "windworn_ledge", "label": "Windworn Ledge"},
@@ -209,7 +213,12 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	],
 	"half_orcs": [
 		{"id": "hunting_lodge", "label": "Hunting Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true},
-		{"id": "war_camp", "label": "War Camp", "tile": Vector2i(11, 3), "requires_plain_grass": true}
+		{"id": "war_camp", "label": "War Camp", "tile": Vector2i(11, 3), "requires_plain_grass": true},
+		# Orcs mark their ground: a war banner (atlas 16,2) and a rough
+		# watchtower (17,2). No terrain gate so they show across orc lands
+		# (grassland/badlands/desert), not just plain grass.
+		{"id": "war_banner", "label": "War Banner", "tile": Vector2i(16, 2)},
+		{"id": "orc_watchtower", "label": "Orc Watchtower", "tile": Vector2i(17, 2)}
 	],
 	"half_elves": [
 		{"id": "homestead", "label": "Homestead", "tile": Vector2i(13, 1), "requires_plain_grass": true},

@@ -5060,7 +5060,9 @@ func _place_towns_browser_style(rng: RandomNumberGenerator) -> int:
 		var is_hamlet := false
 		if is_small_village:
 			if is_snow:
-				if rng.randf() < 0.5:
+				# Snowy hamlets read as igloo clusters; show them most of the
+				# time so the north actually looks inhabited by igloos.
+				if rng.randf() < 0.85:
 					tile = HAMLET_SNOW_TILE
 					is_hamlet = true
 			else:
@@ -6988,8 +6990,10 @@ func _scatter_farm_crops(farm_coord: Vector2i) -> void:
 			continue
 		if river_layer != null and river_layer.get_cell_source_id(neighbor) >= 0:
 			continue
-		var crop_tile := AMBIENT_FARM_VARIANT_TILE if (i % 3 == 0) else FARM_CROPS_TILE
-		settlement_layer.set_cell(neighbor, _atlas_source_id, crop_tile)
+		# FARM_CROPS_TILE (15,0) is the only true tilled-field art; the old
+		# "farm variant" constant (16,2) actually points at a heraldic banner,
+		# so every field tile uses the crop art.
+		settlement_layer.set_cell(neighbor, _atlas_source_id, FARM_CROPS_TILE)
 		n_info["structure"] = "farmField"
 		n_info["settlement_classification"] = "Farmland"
 		_tile_data[neighbor] = n_info
