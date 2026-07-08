@@ -763,6 +763,9 @@ const TOWN_SCENE_WORLD_RIVERS_KEY := "town_scene_world_rivers"
 ## Set true when the walker embarks onto an open wild tile (no settlement):
 ## the town scene then raises a bare biome clearing instead of a city.
 const TOWN_SCENE_WILD_KEY := "town_scene_is_wild"
+## Set true when that wild tile is open water: the clearing is drawn as sea
+## and the player is dropped afloat on the ocean rather than on dry ground.
+const TOWN_SCENE_WILD_WATER_KEY := "town_scene_wild_water"
 const DUNGEON_INTERIOR_SCENE_PATH := "res://scenes/dungeon_interior.tscn"
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
@@ -1387,9 +1390,10 @@ func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i,
 	if not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return
 	var settings: Dictionary = game_session.call("get_world_settings")
-	# A real settlement is never a wild embark: clear any stale wild flag left
+	# A real settlement is never a wild embark: clear any stale wild flags left
 	# by a previous open-tile journey so the town scene builds a city.
 	settings[TOWN_SCENE_WILD_KEY] = false
+	settings[TOWN_SCENE_WILD_WATER_KEY] = false
 	settings[TOWN_SCENE_SEED_KEY] = seed_text
 	settings[TOWN_SCENE_TILE_KEY] = {"x": tile_coord.x, "y": tile_coord.y}
 	settings[TOWN_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
@@ -1412,6 +1416,7 @@ func _store_selected_wild_scene_context(seed_text: String, tile_coord: Vector2i,
 		return
 	var settings: Dictionary = game_session.call("get_world_settings")
 	settings[TOWN_SCENE_WILD_KEY] = true
+	settings[TOWN_SCENE_WILD_WATER_KEY] = _patch_biome_label_for_tile(tile_coord) == BIOME_WATER
 	settings[TOWN_SCENE_SEED_KEY] = seed_text
 	settings[TOWN_SCENE_TILE_KEY] = {"x": tile_coord.x, "y": tile_coord.y}
 	settings[TOWN_SCENE_NAME_KEY] = _wild_place_name_for_tile(tile_coord, details)
