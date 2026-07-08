@@ -14,6 +14,7 @@ const OASIS_TILE := TILE_ATLAS_DEFS.OASIS_TILE
 const SAND_TILE := TILE_ATLAS_DEFS.SAND_TILE
 const WATER_TILE := TILE_ATLAS_DEFS.WATER_TILE
 const LAVA_TILE := TILE_ATLAS_DEFS.LAVA_TILE
+const BADLANDS_TILE := TILE_ATLAS_DEFS.BADLANDS_TILE
 const GRASS_TILE := TILE_ATLAS_DEFS.GRASS_TILE
 const SNOW_TILE := TILE_ATLAS_DEFS.SNOW_TILE
 const STONE_TILE := TILE_ATLAS_DEFS.STONE_TILE
@@ -295,7 +296,10 @@ static func apply_oases_and_lava(
 					continue
 				if not lake_cells.has(neighbor):
 					continue
-				map_layer.set_cell(neighbor, atlas_source_id, LAVA_TILE)
+				# The atlas has no lava art (the old LAVA_TILE coord is a tree),
+				# so a boiled lake reads as scorched badlands ground, matching
+				# the badlands biome it is reclassified to just below.
+				map_layer.set_cell(neighbor, atlas_source_id, BADLANDS_TILE)
 				if tile_data.has(neighbor):
 					var info := tile_data.get(neighbor, {}) as Dictionary
 					info["base_biome_id"] = _biome_to_id(BIOME_BADLANDS)
