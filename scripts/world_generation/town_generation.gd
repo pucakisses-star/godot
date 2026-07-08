@@ -209,6 +209,9 @@ var _wild_mode := false
 ## city panel may still be unsized when _show_level runs on the first frame,
 ## so we re-center once its layout settles.
 var _wild_needs_recenter := false
+## True for an open-water wild embark: the clearing is drawn as sea, the ocean
+## is the walkable medium, and the player spawns afloat.
+var _wild_water := false
 var _farm_sprites: Array[Node2D] = []
 var _farm_pens: Array = []
 var _farm_blocked_cells: Dictionary = {}
@@ -295,6 +298,9 @@ const TOWN_SCENE_WORLD_RIVERS_KEY := "town_scene_world_rivers"
 ## When set, the walker embarked onto an open wild tile: raise a bare biome
 ## clearing (no city, no residents) so the player spawns in the wilds.
 const TOWN_SCENE_WILD_KEY := "town_scene_is_wild"
+## When set (wild + open water), the clearing is drawn as sea and the player
+## is dropped afloat on the ocean instead of onto dry ground.
+const TOWN_SCENE_WILD_WATER_KEY := "town_scene_wild_water"
 
 ## Farmstead art from the web game's Farm tileset (16px art; town cells are
 ## 32px, so a 128px sprite spans four cells).
@@ -1331,6 +1337,10 @@ func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
 	return passable
 
 func _compute_passable_cell_for_actor(cell: Vector2i) -> bool:
+	# Open-sea embark: the ocean itself is the walkable medium (the player is
+	# afloat), so sea cells are passable and let the walker roam the water.
+	if _wild_water and _is_water_cell(cell):
+		return true
 	# Mountain crags in the streamed wilds keep their rocky tile but block
 	# movement; roads never enter this set, so passes stay open.
 	if _surface_blocked_cells.has(cell):
@@ -1355,14 +1365,18 @@ func _apply_cached_town_scene_seed() -> void:
 	_town_theme = String(settings.get(TOWN_SCENE_THEME_KEY, "")).strip_edges().to_lower()
 	_town_is_village = bool(settings.get(TOWN_SCENE_VILLAGE_KEY, false))
 	_wild_mode = bool(settings.get(TOWN_SCENE_WILD_KEY, false))
+	_wild_water = _wild_mode and bool(settings.get(TOWN_SCENE_WILD_WATER_KEY, false))
 	if _wild_mode:
 		# Name the header for the wilderness, not "Unnamed Town".
 		var wild_title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
 		if wild_title_label != null:
-			wild_title_label.text = _town_name if not _town_name.is_empty() else "The Wilds"
+			wild_title_label.text = _town_name if not _town_name.is_empty() else ("The Open Sea" if _wild_water else "The Wilds")
 		var wild_desc_label := get_node_or_null("Margin/Layout/Controls/Description") as Label
 		if wild_desc_label != null:
-			wild_desc_label.text = "Open wilderness - no settlement here. Click to walk; hover tiles for details."
+			if _wild_water:
+				wild_desc_label.text = "Open ocean - no land in sight. You drift afloat; click to row across the water."
+			else:
+				wild_desc_label.text = "Open wilderness - no settlement here. Click to walk; hover tiles for details."
 	elif _town_theme == "desert":
 		var title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
 		if title_label != null:
@@ -1667,6 +1681,10 @@ func _show_level(target_level_index: int) -> void:
 	_update_weather_visuals()
 	if _wild_mode and _player_sprite != null:
 		_wild_needs_recenter = true
+		# An open-sea embark starts the player afloat so the boat sprite shows
+		# and the water reads as their medium from the first frame.
+		if _wild_water:
+			_set_boating(true)
 
 func _update_depth_controls() -> void:
 	var level_count := _hold_state.generated_levels.size()
@@ -5309,6 +5327,10 @@ func _place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -
 	_actor_passable_cache.erase(cell)
 
 func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
+	# An open-sea embark draws its clearing as water, not grass, so the player
+	# is dropped straight onto the ocean.
+	if _wild_water and cell == CELL_ROCK:
+		return "water"
 	var tile_key := TownTileService.pick_base_tile(grid, x, y, cell, _door_cells)
 	if _town_theme == "desert" and DESERT_BASE_SWAP.has(tile_key):
 		return String(DESERT_BASE_SWAP[tile_key])
@@ -5318,6 +5340,9 @@ func _building_type_for_cell(cell: Vector2i) -> String:
 	return String(_latest_civic_building_type_map.get(cell, "workshop"))
 
 func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: String, house_decor_overrides: Dictionary) -> String:
+	# No shrubs or grass tufts sprout on the open sea.
+	if _wild_water and (base_tile == "water" or base_tile == "water_calm"):
+		return ""
 	var decor_key := TownTileService.pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, _latest_civic_building_type_map, CIVIC_BUILDING_TYPES, _rng, _door_cells)
 	# The desert has no greenery: cacti and bones are scattered as sprites instead.
 	if _town_theme == "desert" and DESERT_SKIPPED_DECOR.has(decor_key):
