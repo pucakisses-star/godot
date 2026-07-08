@@ -153,6 +153,11 @@ var _player_max_hp := PlayerStatsService.BASE_MAX_HP
 var _player_home_cell := Vector2i.ZERO
 var _hp_label: Label
 var _gear_label: Label
+const WorldMinimapScript := preload("res://scripts/ui/world_minimap.gd")
+var _minimap: WorldMinimapScript
+var _minimap_refresh_timer := 0.0
+var _minimap_last_player_cell := Vector2i(2147483647, 2147483647)
+const MINIMAP_REFRESH_SECONDS := 0.2
 const SURFACE_CREATURE_TEXTURE := preload("res://resources/images/npc/creature_characters.png")
 const BOAT_SPRITE_TEXTURE := preload("res://resources/images/npc/boat_sprite.png")
 var _player_attack_timer := 0.0
@@ -570,6 +575,7 @@ func _ready() -> void:
 	_setup_hp_label()
 	_setup_inventory_screen()
 	_setup_hotbar()
+	_setup_minimap()
 	GameAudioService.play_music(self, "town")
 	_refresh_weather(false)
 	_update_day_night_tint()
@@ -593,6 +599,7 @@ func _process(delta: float) -> void:
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
 	_update_weather_frame(delta)
+	_update_minimap(delta)
 
 func _advance_game_clock(delta: float) -> void:
 	if minutes_per_game_day <= 0.0:
@@ -1011,6 +1018,32 @@ func _setup_hp_label() -> void:
 		controls.move_child(_gear_label, clock.get_index() + 2)
 	_update_hp_label()
 	_update_gear_label()
+
+## The corner minimap lives inside the map viewport (top_level, so the
+## PanelContainer does not stretch it) and reads the live scene each redraw.
+func _setup_minimap() -> void:
+	if city_panel == null:
+		return
+	_minimap = WorldMinimapScript.new()
+	_minimap.name = "WorldMinimap"
+	# The root TownGeneration Control is not a layout container, so a direct
+	# child keeps the fixed corner size we set instead of being stretched.
+	add_child(_minimap)
+	_minimap.configure(self)
+
+## Recenter and repaint on a throttle, or immediately when the player steps
+## to a new cell, so the map tracks movement without rebuilding every frame.
+func _update_minimap(delta: float) -> void:
+	if _minimap == null or not is_instance_valid(_minimap):
+		return
+	_minimap_refresh_timer -= delta
+	if _player_cell != _minimap_last_player_cell:
+		_minimap_last_player_cell = _player_cell
+		_minimap_refresh_timer = 0.0
+	if _minimap_refresh_timer > 0.0:
+		return
+	_minimap_refresh_timer = MINIMAP_REFRESH_SECONDS
+	_minimap.refresh()
 
 func _update_hp_label() -> void:
 	if _hp_label == null:
