@@ -9463,6 +9463,10 @@ func _build_region_icons() -> void:
 		if atlas_coords.x < 0:
 			continue
 		var details := _tile_data.get(cell, {}) as Dictionary
+		# Felled tiles render their stumps as ground in the detail view, so
+		# they need no separate icon on top.
+		if String(details.get("structure", "")) == "cutWoods":
+			continue
 		var settlement_type := String(details.get("settlement_type", "")).strip_edges()
 		var is_major := REGION_MAJOR_SETTLEMENT_TYPES.has(settlement_type)
 		var icon_scale := major_scale if is_major else ambient_scale
@@ -9668,8 +9672,11 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 	roads.resize(9)
 	var biomes := PackedStringArray()
 	biomes.resize(9)
+	var canopy := PackedFloat32Array()
+	canopy.resize(9)
 	var own_biome := _region_biome_for_tile(tile)
 	var own_water := 1.0 if own_biome == TILE_ATLAS_DEFS.BIOME_WATER else 0.0
+	var own_canopy := float((_tile_data.get(tile, {}) as Dictionary).get("forest_canopy_density", 0.0))
 	for ny in 3:
 		for nx in 3:
 			var neighbor := tile + Vector2i(nx - 1, ny - 1)
@@ -9679,11 +9686,13 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 				rivers[index] = 0.0
 				roads[index] = 0.0
 				biomes[index] = own_biome
+				canopy[index] = own_canopy
 				continue
 			water[index] = 1.0 if _region_biome_for_tile(neighbor) == TILE_ATLAS_DEFS.BIOME_WATER else 0.0
 			rivers[index] = 1.0 if _region_river_for_tile(neighbor) else 0.0
 			roads[index] = 1.0 if _region_road_for_tile(neighbor) else 0.0
 			biomes[index] = _region_biome_for_tile(neighbor)
+			canopy[index] = float((_tile_data.get(neighbor, {}) as Dictionary).get("forest_canopy_density", 0.0))
 	var corners := PackedFloat32Array()
 	corners.resize(4)
 	var origin := tile * RegionMapService.CELLS_PER_TILE
@@ -9699,12 +9708,15 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 	var tile_ruggedness := float((_tile_data.get(tile, {}) as Dictionary).get("mountain_ruggedness", 0.45))
 	if tile_ruggedness <= 0.0:
 		tile_ruggedness = 0.45
+	# A lumber mill and the tiles it felled render as a logged clearing.
+	var tile_structure := String((_tile_data.get(tile, {}) as Dictionary).get("structure", ""))
+	var is_clearing := tile_structure == "lumber_mill" or tile_structure == "cutWoods"
 	return RegionMapService.make_render_job(
 		_region_world_seed_text(), tile,
 		own_biome, _region_river_for_tile(tile),
 		has_iceberg, water, rivers, corners, tile_ruggedness,
 		biomes, roads,
-		_region_tileset_image(), tile_size, iceberg_art
+		_region_tileset_image(), tile_size, iceberg_art, canopy, is_clearing
 	)
 
 ## The worldmap atlas as a plain RGBA image the render workers can read:

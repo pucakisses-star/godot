@@ -106,12 +106,16 @@ const AMBIENT_GREAT_TREE_ALT_TILE := Vector2i(15, 2)
 const LIZARDMEN_CITY_TILE := Vector2i(11, 2)
 const SAINT_SHRINE_TILE := Vector2i(11, 1)
 const MONASTERY_TILE := Vector2i(2, 2)
+# Camp tiles point at the atlas's actual tent art. The old coords (9,0),
+# (11,0), (9,1), (10,1), (7,1) hold mountains and settlement buildings, so
+# camps were rendering as peaks/cathedrals/keeps. Real tent art lives at
+# (11,3) war-camp tents, (15,2) raider teepee, (1,5) nomad tents.
 const ORC_CAMP_TILE := Vector2i(11, 3)
-const GNOLL_CAMP_TILE := Vector2i(11, 0)
-const TROLL_CAMP_TILE := Vector2i(9, 0)
-const OGRE_CAMP_TILE := Vector2i(9, 1)
-const BANDIT_CAMP_TILE := Vector2i(10, 1)
-const TRAVELERS_CAMP_TILE := Vector2i(7, 1)
+const GNOLL_CAMP_TILE := Vector2i(15, 2)
+const TROLL_CAMP_TILE := Vector2i(11, 3)
+const OGRE_CAMP_TILE := Vector2i(11, 3)
+const BANDIT_CAMP_TILE := Vector2i(15, 2)
+const TRAVELERS_CAMP_TILE := Vector2i(1, 5)
 const DUNGEON_TILE := Vector2i(7, 2)
 const CENTAUR_ENCAMPMENT_TILE := Vector2i(10, 2)
 
