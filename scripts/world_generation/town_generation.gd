@@ -212,6 +212,9 @@ var _wild_needs_recenter := false
 ## True for an open-water wild embark: the clearing is drawn as sea, the ocean
 ## is the walkable medium, and the player spawns afloat.
 var _wild_water := false
+## Active fishing: cast with F beside water, wait for the bite, reel on the "!".
+var _fishing_state: Dictionary = {}
+var _bobber_texture: Texture2D
 var _farm_sprites: Array[Node2D] = []
 var _farm_pens: Array = []
 var _farm_blocked_cells: Dictionary = {}
@@ -612,6 +615,7 @@ func _process(delta: float) -> void:
 	_update_companion(delta)
 	_update_raid(delta)
 	_update_caravan_job(delta)
+	_update_fishing(delta)
 	_update_music(delta)
 	_update_player_turn_movement(delta)
 	_update_npc_movement(delta)
@@ -920,6 +924,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				_handle_quick_drink_action()
 				get_viewport().set_input_as_handled()
 				return
+			KEY_F:
+				_handle_fish_action()
+				get_viewport().set_input_as_handled()
+				return
 			KEY_M:
 				_toggle_mount()
 				get_viewport().set_input_as_handled()
@@ -1125,6 +1133,148 @@ func _spawn_floating_text(text: String, world_position: Vector2, color: Color) -
 	tween.tween_property(label, "position:y", label.position.y - 22.0, 0.7)
 	tween.tween_property(label, "modulate:a", 0.0, 0.55).set_delay(0.15)
 	tween.chain().tween_callback(label.queue_free)
+
+# --- Active fishing ---------------------------------------------------------
+# Cast with F beside water (an Old Fishing Rod required); the bobber drifts,
+# dips on a bite ("!"), and pressing F inside the bite window reels in the
+# catch. Moving snaps the line; reeling early scares the fish off. Works on
+# lake shores, river banks, coasts, and from the boat out on the open sea.
+const FISHING_ROD_ITEM := "Old Fishing Rod"
+const TOWN_FISH_CATCH_TABLE := [
+	{"name": "Striped Bass", "weight": 16},
+	{"name": "Silver Darter", "weight": 14},
+	{"name": "Emerald Trout", "weight": 14},
+	{"name": "Copperback Trout", "weight": 12},
+	{"name": "Cobalt Chub", "weight": 12},
+	{"name": "Marigold Carp", "weight": 10},
+	{"name": "Sapphire Perch", "weight": 10},
+	{"name": "Ruby Snapper", "weight": 9},
+	{"name": "Jade Carp", "weight": 8},
+	{"name": "Crimson Carp", "weight": 7},
+	{"name": "Speckled Prawn", "weight": 6},
+	{"name": "Golden Koi", "weight": 5},
+	{"name": "Blossom Koi", "weight": 4},
+]
+
+func _handle_fish_action() -> void:
+	if not _fishing_state.is_empty():
+		if String(_fishing_state.get("phase", "")) == "bite":
+			_catch_fish()
+		else:
+			_end_fishing("You reel in too early - nothing on the hook")
+		return
+	if _player_sprite == null or not _player_control_enabled:
+		return
+	var water_cell := _find_nearby_water_cell()
+	if water_cell.x == 2147483647:
+		_set_save_status("No water within casting reach", Color(0.8, 0.85, 0.95, 1.0))
+		return
+	if int(_player_inventory.get(FISHING_ROD_ITEM, 0)) < 1:
+		_set_save_status("You need an Old Fishing Rod - search chests and camps", Color(0.95, 0.75, 0.45, 1.0))
+		return
+	var bobber := Sprite2D.new()
+	if _bobber_texture == null:
+		_bobber_texture = _create_bobber_texture()
+	bobber.texture = _bobber_texture
+	bobber.position = _cell_center_position(water_cell)
+	bobber.z_index = 13
+	actor_layer.add_child(bobber)
+	_fishing_state = {
+		"cell": water_cell,
+		"phase": "waiting",
+		"timer": _rng.randf_range(2.5, 6.0),
+		"bobber": bobber,
+		"anchor": _player_cell,
+		"bob_time": 0.0
+	}
+	_set_save_status("You cast your line into the water...", Color(0.75, 0.85, 0.95, 1.0))
+
+## The nearest water cell within two tiles of the walker (own cell excluded),
+## using the rendered-tile test so lakes, coasts, and open sea all qualify.
+func _find_nearby_water_cell() -> Vector2i:
+	var best := Vector2i(2147483647, 2147483647)
+	var best_distance := 999
+	for offset_y in range(-2, 3):
+		for offset_x in range(-2, 3):
+			if offset_x == 0 and offset_y == 0:
+				continue
+			var candidate := _player_cell + Vector2i(offset_x, offset_y)
+			if not _is_water_cell(candidate):
+				continue
+			var distance := maxi(absi(offset_x), absi(offset_y))
+			if distance < best_distance:
+				best_distance = distance
+				best = candidate
+	return best
+
+func _update_fishing(delta: float) -> void:
+	if _fishing_state.is_empty():
+		return
+	if _player_cell != (_fishing_state.get("anchor", _player_cell) as Vector2i):
+		_end_fishing("The line snaps as you move")
+		return
+	var bobber := _fishing_state.get("bobber") as Sprite2D
+	if bobber == null:
+		_fishing_state = {}
+		return
+	_fishing_state["bob_time"] = float(_fishing_state.get("bob_time", 0.0)) + delta
+	_fishing_state["timer"] = float(_fishing_state.get("timer", 0.0)) - delta
+	var rest_position: Vector2 = _cell_center_position(_fishing_state.get("cell", _player_cell) as Vector2i)
+	var phase := String(_fishing_state.get("phase", "waiting"))
+	if phase == "waiting":
+		bobber.position = rest_position + Vector2(0.0, sin(float(_fishing_state.get("bob_time", 0.0)) * 3.0) * 1.5)
+		if float(_fishing_state.get("timer", 0.0)) <= 0.0:
+			_fishing_state["phase"] = "bite"
+			_fishing_state["timer"] = 1.4
+			_spawn_floating_text("!", bobber.position + Vector2(0, -10), Color(1.0, 0.9, 0.4, 1.0))
+	else:
+		bobber.position = rest_position + Vector2(0.0, 4.0 + sin(float(_fishing_state.get("bob_time", 0.0)) * 18.0) * 3.0)
+		if float(_fishing_state.get("timer", 0.0)) <= 0.0:
+			_fishing_state["phase"] = "waiting"
+			_fishing_state["timer"] = _rng.randf_range(2.0, 5.0)
+			_set_save_status("The bite slips away...", Color(0.8, 0.85, 0.95, 1.0))
+
+func _catch_fish() -> void:
+	var bobber := _fishing_state.get("bobber") as Sprite2D
+	var catch_position: Vector2 = bobber.position if bobber != null else _player_sprite.position
+	var caught := _roll_weighted_drop(TOWN_FISH_CATCH_TABLE)
+	var item_name := String(caught.get("name", "Striped Bass"))
+	_add_to_inventory(item_name, 1)
+	_spawn_floating_text("Caught %s!" % item_name, catch_position, Color(0.6, 0.95, 1.0, 1.0))
+	var flavor: String = ItemDefsService.flavor_text(item_name)
+	_end_fishing("Caught %s!%s" % [item_name, (" " + flavor) if not flavor.is_empty() else ""])
+
+func _end_fishing(message: String) -> void:
+	var bobber := _fishing_state.get("bobber") as Sprite2D
+	if bobber != null:
+		bobber.queue_free()
+	_fishing_state = {}
+	if not message.is_empty():
+		_set_save_status(message, Color(0.75, 0.85, 0.95, 1.0))
+
+func _roll_weighted_drop(drop_table: Array) -> Dictionary:
+	var total_weight := 0
+	for entry_variant: Variant in drop_table:
+		total_weight += int((entry_variant as Dictionary).get("weight", 1))
+	var roll := _rng.randi_range(1, maxi(total_weight, 1))
+	for entry_variant: Variant in drop_table:
+		roll -= int((entry_variant as Dictionary).get("weight", 1))
+		if roll <= 0:
+			return entry_variant as Dictionary
+	return drop_table[0] as Dictionary
+
+func _create_bobber_texture() -> Texture2D:
+	var image := Image.create(10, 10, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	for y in range(10):
+		for x in range(10):
+			var distance := Vector2(x - 4.5, y - 4.5).length()
+			if distance <= 4.0:
+				image.set_pixel(x, y, Color(0.85, 0.2, 0.15, 1.0) if y < 5 else Color(0.95, 0.93, 0.88, 1.0))
+			elif distance <= 4.8:
+				image.set_pixel(x, y, Color(0.15, 0.1, 0.1, 1.0))
+	image.resize(20, 20, Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(image)
 
 func _update_player_character_label() -> void:
 	if player_character_label == null:
@@ -1374,7 +1524,7 @@ func _apply_cached_town_scene_seed() -> void:
 		var wild_desc_label := get_node_or_null("Margin/Layout/Controls/Description") as Label
 		if wild_desc_label != null:
 			if _wild_water:
-				wild_desc_label.text = "Open ocean - no land in sight. You drift afloat; click to row across the water."
+				wild_desc_label.text = "Open ocean - no land in sight. You drift afloat; click to row, press F to fish."
 			else:
 				wild_desc_label.text = "Open wilderness - no settlement here. Click to walk; hover tiles for details."
 	elif _town_theme == "desert":
