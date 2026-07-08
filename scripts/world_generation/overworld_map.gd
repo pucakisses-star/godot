@@ -8647,12 +8647,24 @@ func _update_political_boundaries_overlay() -> void:
 		political_boundaries_overlay.texture = null
 		_overlay_dirty["political_boundaries"] = false
 		return
-	var image := _culture_pipeline.build_political_boundaries_overlay_image(map_size.x, map_size.y, _tile_data)
+	var image: Image
+	var overlay_scale := float(tile_size)
+	if _region_mode:
+		# Detail view: render the boundary at sub-tile resolution so it reads as
+		# a thin line hugging the realm edge instead of a full 8-tile-wide band.
+		var sub := RegionMapService.SUB_TILES
+		image = _culture_pipeline.build_region_political_boundaries_overlay_image(
+			map_size.x, map_size.y, _tile_data, sub
+		)
+		overlay_scale = float(tile_size) / float(sub)
+	else:
+		image = _culture_pipeline.build_political_boundaries_overlay_image(map_size.x, map_size.y, _tile_data)
 	var texture := ImageTexture.create_from_image(image)
 	political_boundaries_overlay.texture = texture
+	political_boundaries_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	_overlay_dirty["political_boundaries"] = false
 	political_boundaries_overlay.centered = false
-	political_boundaries_overlay.scale = Vector2(tile_size, tile_size)
+	political_boundaries_overlay.scale = Vector2(overlay_scale, overlay_scale)
 	political_boundaries_overlay.position = Vector2.ZERO
 	_rebuild_political_labels()
 	_update_political_boundaries_overlay_visibility()
@@ -9666,6 +9678,11 @@ func _enter_region_mode() -> void:
 		_render_region_tile(_region_render_queue.pop_front() as Vector2i)
 		budget -= 1
 	_dispatch_region_jobs()
+	# The overlay resolution differs between world and detail view, so rebuild
+	# it against the mode we just entered when it is on screen.
+	if _political_boundaries_overlay_enabled:
+		_overlay_dirty["political_boundaries"] = true
+		_ensure_overlay_texture("political_boundaries")
 
 func _exit_region_mode() -> void:
 	if not _region_mode:
@@ -9692,6 +9709,10 @@ func _exit_region_mode() -> void:
 	if _map_snapshot_sprite != null:
 		_map_snapshot_sprite.visible = false
 	_update_map_lod()
+	# Restore the coarse world-map boundary overlay when leaving detail view.
+	if _political_boundaries_overlay_enabled:
+		_overlay_dirty["political_boundaries"] = true
+		_ensure_overlay_texture("political_boundaries")
 
 func _set_base_map_layers_visible(layers_visible: bool) -> void:
 	for layer: TileMapLayer in [map_layer, tree_layer, river_layer, highland_layer, iceberg_layer, _coast_layer]:

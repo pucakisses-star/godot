@@ -330,6 +330,64 @@ func build_political_boundaries_overlay_image(
 			image.set_pixel(x, y, colors["border"] as Color)
 	return image
 
+## Region/detail view wants a thin boundary line, not a full overworld-tile
+## band: the coarse overlay paints one pixel per overworld tile, so a 1-tile
+## border balloons to a whole SUB×SUB detail footprint (~8 tiles wide) once
+## the map is magnified. This renders the overlay at `sub` sub-cells per tile
+## and hugs the border only `border_sub` sub-cells deep along the realm edge,
+## keeping a light realm fill for territory tint.
+func build_region_political_boundaries_overlay_image(
+	width: int,
+	height: int,
+	tiles: Dictionary,
+	sub: int,
+	border_sub: int = 1,
+	fill_alpha: float = 0.16,
+	border_alpha: float = 0.85
+) -> Image:
+	sub = maxi(sub, 1)
+	border_sub = clampi(border_sub, 1, sub)
+	var image := Image.create(width * sub, height * sub, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var realm_colors: Dictionary = {}
+	for y in range(height):
+		for x in range(width):
+			var coord := Vector2i(x, y)
+			var owner_key := _political_owner_key(tiles, coord)
+			if owner_key.is_empty():
+				continue
+			var state_name := String((tiles.get(coord, {}) as Dictionary).get("political_state", ""))
+			var colors := _resolve_realm_colors(realm_colors, owner_key, state_name, fill_alpha, border_alpha)
+			var fill := colors["fill"] as Color
+			var border := colors["border"] as Color
+			var edge_left := _region_edge_is_border(tiles, coord, owner_key, width, height, Vector2i(-1, 0))
+			var edge_right := _region_edge_is_border(tiles, coord, owner_key, width, height, Vector2i(1, 0))
+			var edge_up := _region_edge_is_border(tiles, coord, owner_key, width, height, Vector2i(0, -1))
+			var edge_down := _region_edge_is_border(tiles, coord, owner_key, width, height, Vector2i(0, 1))
+			var base_x := x * sub
+			var base_y := y * sub
+			for sy in range(sub):
+				for sx in range(sub):
+					var on_border := false
+					if edge_left and sx < border_sub:
+						on_border = true
+					elif edge_right and sx >= sub - border_sub:
+						on_border = true
+					elif edge_up and sy < border_sub:
+						on_border = true
+					elif edge_down and sy >= sub - border_sub:
+						on_border = true
+					image.set_pixel(base_x + sx, base_y + sy, border if on_border else fill)
+	return image
+
+## True when the orthogonal neighbour in `dir` lies off the map or belongs to a
+## different realm (unclaimed/water included) — i.e. that tile edge is a border.
+func _region_edge_is_border(tiles: Dictionary, coord: Vector2i, owner_key: String, width: int, height: int, dir: Vector2i) -> bool:
+	var neighbor := coord + dir
+	if neighbor.x < 0 or neighbor.y < 0 or neighbor.x >= width or neighbor.y >= height:
+		return true
+	return _political_owner_key(tiles, neighbor) != owner_key
+
 func _political_owner_key(tiles: Dictionary, coord: Vector2i) -> String:
 	return String((tiles.get(coord, {}) as Dictionary).get("political_owner", "")).strip_edges().to_lower()
 
