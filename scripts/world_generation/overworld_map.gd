@@ -760,6 +760,9 @@ const TOWN_SCENE_VILLAGE_KEY := "town_scene_is_village"
 ## wall the terrain back to grassland.
 const TOWN_SCENE_WORLD_BIOMES_KEY := "town_scene_world_biomes"
 const TOWN_SCENE_WORLD_RIVERS_KEY := "town_scene_world_rivers"
+## Set true when the walker embarks onto an open wild tile (no settlement):
+## the town scene then raises a bare biome clearing instead of a city.
+const TOWN_SCENE_WILD_KEY := "town_scene_is_wild"
 const DUNGEON_INTERIOR_SCENE_PATH := "res://scenes/dungeon_interior.tscn"
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
@@ -1271,7 +1274,12 @@ func _dive_into_tile(tile_coord: Vector2i) -> void:
 func _tile_supports_journey(details: Dictionary) -> bool:
 	if details.is_empty():
 		return false
-	return _is_dwarfhold_structure(details) or _is_town_settlement(details) or _is_dungeon_structure(details)
+	if _is_dwarfhold_structure(details) or _is_town_settlement(details) or _is_dungeon_structure(details):
+		return true
+	# Any dry-land wild tile is now enterable too: a second dive walks the
+	# player straight into the open biome wilds. Water has no walkable
+	# surface, so oceans and lakes stay non-enterable.
+	return _tile_base_biome_from_data(details) != BIOME_WATER
 
 func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 	var details := _tile_data.get(tile_coord, {}) as Dictionary
@@ -1299,7 +1307,18 @@ func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 		SceneCacheService.request_change(self, DUNGEON_INTERIOR_SCENE_PATH)
 		return
 
-	print("Begin journey is not yet available for this settlement type: %s" % tile_coord)
+	# Wild (non-settlement) land tiles: embark into the open biome wilds.
+	# The town scene is reused - it already streams biome-appropriate
+	# terrain around a grid center - but flagged to raise a bare clearing
+	# with no settlement. Water tiles have no walkable surface, so they
+	# still fall through to the informational print below.
+	if _patch_biome_label_for_tile(tile_coord) != BIOME_WATER:
+		var wild_seed := _wild_scene_seed_for_tile(tile_coord, details)
+		_store_selected_wild_scene_context(wild_seed, tile_coord, details)
+		SceneCacheService.request_change(self, TOWN_GENERATION_SCENE_PATH)
+		return
+
+	print("Begin journey is not yet available for this tile: %s" % tile_coord)
 
 func _is_town_settlement(details: Dictionary) -> bool:
 	var settlement_type := String(details.get("settlement_type", "")).strip_edges().to_lower()
@@ -1374,6 +1393,9 @@ func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i,
 	if not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return
 	var settings: Dictionary = game_session.call("get_world_settings")
+	# A real settlement is never a wild embark: clear any stale wild flag left
+	# by a previous open-tile journey so the town scene builds a city.
+	settings[TOWN_SCENE_WILD_KEY] = false
 	settings[TOWN_SCENE_SEED_KEY] = seed_text
 	settings[TOWN_SCENE_TILE_KEY] = {"x": tile_coord.x, "y": tile_coord.y}
 	settings[TOWN_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
@@ -1383,6 +1405,48 @@ func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i,
 	settings[TOWN_SCENE_WORLD_BIOMES_KEY] = _build_town_scene_world_biomes()
 	settings[TOWN_SCENE_WORLD_RIVERS_KEY] = _build_town_scene_world_rivers()
 	game_session.call("set_world_settings", settings)
+
+## Embark context for an open wild tile. Reuses the town scene's world biome
+## and river buffers so the streamed wilds match the overworld, but flags the
+## scene wild (TOWN_SCENE_WILD_KEY) and zeroes every settlement field so it
+## raises a bare biome clearing with no city, population, or theme.
+func _store_selected_wild_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary) -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null:
+		return
+	if not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	settings[TOWN_SCENE_WILD_KEY] = true
+	settings[TOWN_SCENE_SEED_KEY] = seed_text
+	settings[TOWN_SCENE_TILE_KEY] = {"x": tile_coord.x, "y": tile_coord.y}
+	settings[TOWN_SCENE_NAME_KEY] = _wild_place_name_for_tile(tile_coord, details)
+	settings[TOWN_SCENE_POPULATION_KEY] = 0
+	settings[TOWN_SCENE_THEME_KEY] = ""
+	settings[TOWN_SCENE_VILLAGE_KEY] = false
+	settings[TOWN_SCENE_WORLD_BIOMES_KEY] = _build_town_scene_world_biomes()
+	settings[TOWN_SCENE_WORLD_RIVERS_KEY] = _build_town_scene_world_rivers()
+	game_session.call("set_world_settings", settings)
+
+## A wild tile's on-screen name: the region name the map tooltip shows (e.g.
+## "The Open Plains"), falling back to a biome label ("The Deep Woods") when a
+## tile carries no stored region name.
+func _wild_place_name_for_tile(tile_coord: Vector2i, details: Dictionary) -> String:
+	var region_name := _tile_region_name(tile_coord, details)
+	if not region_name.is_empty():
+		return region_name
+	var biome := _patch_biome_label_for_tile(tile_coord)
+	var biome_label := _resolved_biome_label(tile_coord, biome)
+	if biome_label.is_empty():
+		return "The Wilds"
+	return "The %s" % biome_label
+
+## Deterministic per-tile seed for a wild embark, distinct from the town seed
+## namespace so the same tile never collides with a settlement scene.
+func _wild_scene_seed_for_tile(tile_coord: Vector2i, details: Dictionary) -> String:
+	var place_name := _wild_place_name_for_tile(tile_coord, details)
+	var seed_basis := "wild|%s|%d|%d|%d" % [place_name, tile_coord.x, tile_coord.y, map_seed]
+	return str(seed_basis.hash())
 
 ## The whole overworld's per-tile biome, packed row-major as one byte per
 ## tile, so the town's wilds match the world map however far the walker
