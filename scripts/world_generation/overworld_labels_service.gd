@@ -226,6 +226,12 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 	var auto_visibility := bool(config.get("auto_visibility", true))
 	var min_screen_size := float(config.get("min_screen_size", 7.0))
 	var max_screen_size := float(config.get("max_screen_size", 50.0))
+	# Constant-screen mode (political/nation labels): the font grows as the
+	# camera zooms out so the name holds a roughly fixed on-screen size and
+	# stays readable on the world-overview political map, and it is never
+	# auto-hidden while the overlay is up.
+	var constant_screen := bool(config.get("constant_screen_size", false))
+	var target_screen_px := float(config.get("target_screen_px", 15.0))
 	for group in labels_overlay.get_children():
 		for child in group.get_children():
 			var label := child as Label
@@ -233,7 +239,9 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 				continue
 			var base_font_size := float(label.get_meta("base_font_size", 12.0))
 			var scaled_font_size := base_font_size
-			if rescale_on_zoom:
+			if constant_screen:
+				scaled_font_size = clampf(target_screen_px / safe_zoom, base_font_size, base_font_size * 60.0)
+			elif rescale_on_zoom:
 				scaled_font_size = maxf(8.0, (base_font_size + (base_font_size * safe_zoom)) * 0.5)
 			label.add_theme_font_size_override("font_size", int(round(scaled_font_size)))
 
@@ -246,7 +254,9 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 			label.position = anchor - Vector2(scaled_width * 0.5, scaled_height * 0.5)
 			label.size = Vector2(scaled_width, scaled_height)
 
-			if auto_visibility:
+			if constant_screen:
+				label.visible = true
+			elif auto_visibility:
 				var screen_size := scaled_font_size / safe_zoom
 				label.visible = screen_size >= min_screen_size and screen_size <= max_screen_size
 			else:

@@ -558,6 +558,13 @@ var _map_lod_active := false
 @onready var loading_screen: Control = get_node_or_null("MapUi/LoadingScreen")
 @onready var loading_bar: ProgressBar = get_node_or_null("MapUi/LoadingScreen/LoadingContainer/LoadingPanel/LoadingMargin/LoadingVBox/LoadingBar")
 @onready var loading_subtitle: Label = get_node_or_null("MapUi/LoadingScreen/LoadingContainer/LoadingPanel/LoadingMargin/LoadingVBox/LoadingSubtitle")
+@onready var loading_footer: Label = get_node_or_null("MapUi/LoadingScreen/LoadingContainer/LoadingPanel/LoadingMargin/LoadingVBox/LoadingFooter")
+
+## The bar eases toward the latest stage percent instead of snapping, so it
+## glides across the coarse generation stages; the footer shows the number.
+const LOADING_EASE_RATE := 58.0
+var _loading_progress_display := 0.0
+var _loading_progress_target := 0.0
 @onready var structure_context_menu: PopupMenu = get_node_or_null("MapUi/StructureContextMenu")
 @onready var structure_details_dialog: AcceptDialog = get_node_or_null("MapUi/StructureDetailsDialog")
 @onready var structure_details_tabs: TabContainer = get_node_or_null(
@@ -883,6 +890,7 @@ func _refresh_scale_bar() -> void:
 func _show_loading_screen() -> void:
 	if loading_screen != null:
 		loading_screen.visible = true
+	_loading_progress_display = 0.0
 	_set_loading_progress(3.0, "Surveying continental plates...")
 
 func _hide_loading_screen() -> void:
@@ -890,12 +898,25 @@ func _hide_loading_screen() -> void:
 		loading_screen.visible = false
 
 ## The bar tracks real generation stages; the subtitle narrates them.
-## Redraws ride the generation waves that already yield to the frame.
+## The value is a target the bar eases toward in _process (redraws ride the
+## generation waves that already yield to the frame), so it glides across the
+## coarse stages instead of jumping. The footer shows the live percentage.
 func _set_loading_progress(percent: float, subtitle: String = "") -> void:
-	if loading_bar != null:
-		loading_bar.value = clampf(percent, 0.0, 100.0)
+	_loading_progress_target = clampf(percent, 0.0, 100.0)
 	if loading_subtitle != null and not subtitle.is_empty():
 		loading_subtitle.text = subtitle
+
+## Eases the bar toward its target and mirrors it in the footer percentage.
+## Called every rendered frame the loading screen is up.
+func _update_loading_bar(delta: float) -> void:
+	_loading_progress_display = move_toward(_loading_progress_display, _loading_progress_target, delta * LOADING_EASE_RATE)
+	if _loading_progress_target >= 99.9:
+		# The final stage snaps home so the reveal never lands mid-glide.
+		_loading_progress_display = _loading_progress_target
+	if loading_bar != null:
+		loading_bar.value = _loading_progress_display
+	if loading_footer != null:
+		loading_footer.text = "%d%% · Please wait while the realm is generated." % int(round(_loading_progress_display))
 
 func _build_map_snapshot() -> void:
 	if _tile_data.is_empty():
@@ -962,6 +983,8 @@ func _update_map_lod() -> void:
 			layer.visible = true
 
 func _process(delta: float) -> void:
+	if loading_screen != null and loading_screen.visible:
+		_update_loading_bar(delta)
 	_update_map_tooltip()
 	_update_caravans(delta)
 	_update_pirate_ships(delta)
@@ -8594,6 +8617,9 @@ func _update_political_boundaries_overlay_visibility() -> void:
 ## rescale. Realms below POLITICAL_LABEL_MIN_TILES stay unlabeled.
 const POLITICAL_LABEL_MIN_TILES := 12
 const POLITICAL_LABEL_IMPORTANCE := 5
+## Constant-size nation labels stay readable on the overview only if the map
+## isn't papered with them, so only the largest realms by area are labeled.
+const POLITICAL_LABEL_MAX_COUNT := 22
 
 func _rebuild_political_labels() -> void:
 	if political_labels_overlay == null:
@@ -8631,6 +8657,14 @@ func _rebuild_political_labels() -> void:
 			"population": tile_count
 		})
 
+	# Constant-size nation labels must not crowd the overview, so keep the
+	# largest realms (by area) and drop the long tail of tiny statelets.
+	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("population", 0)) > int(b.get("population", 0))
+	)
+	if entries.size() > POLITICAL_LABEL_MAX_COUNT:
+		entries.resize(POLITICAL_LABEL_MAX_COUNT)
+
 	OverworldLabelsService.rebuild(political_labels_overlay, entries, {
 		"tile_size": tile_size,
 		"map_pixel_size": Vector2(float(map_size.x * tile_size), float(map_size.y * tile_size)),
@@ -8655,10 +8689,15 @@ func _nearest_state_tile_center(coords: Array[Vector2i], centroid: Vector2) -> V
 func _update_political_labels_zoom_behavior() -> void:
 	if political_labels_overlay == null or overworld_camera == null:
 		return
+	# Nation names hold a constant on-screen size and stay visible at every
+	# zoom, so they read on the world-overview political map (unlike the
+	# settlement labels, which fade in only as you zoom toward the ground).
 	OverworldLabelsService.update_zoom_behavior(political_labels_overlay, overworld_camera.zoom.x, {
 		"tile_size": tile_size,
 		"rescale_on_zoom": labels_overlay_rescale_on_zoom,
-		"auto_visibility": labels_overlay_auto_visibility,
+		"auto_visibility": false,
+		"constant_screen_size": true,
+		"target_screen_px": 16.0,
 		"min_screen_size": labels_overlay_min_screen_size,
 		"max_screen_size": labels_overlay_max_screen_size
 	})
@@ -9463,9 +9502,10 @@ func _build_region_icons() -> void:
 		if atlas_coords.x < 0:
 			continue
 		var details := _tile_data.get(cell, {}) as Dictionary
-		# Felled tiles render their stumps as ground in the detail view, so
-		# they need no separate icon on top.
-		if String(details.get("structure", "")) == "cutWoods":
+		# Felled/tilled tiles render their stumps or crop rows as ground in the
+		# detail view, so they need no separate icon on top.
+		var ground_structure := String(details.get("structure", ""))
+		if ground_structure == "cutWoods" or ground_structure == "farmField":
 			continue
 		var settlement_type := String(details.get("settlement_type", "")).strip_edges()
 		var is_major := REGION_MAJOR_SETTLEMENT_TYPES.has(settlement_type)
@@ -9708,15 +9748,17 @@ func _make_region_job(tile: Vector2i) -> Dictionary:
 	var tile_ruggedness := float((_tile_data.get(tile, {}) as Dictionary).get("mountain_ruggedness", 0.45))
 	if tile_ruggedness <= 0.0:
 		tile_ruggedness = 0.45
-	# A lumber mill and the tiles it felled render as a logged clearing.
+	# A lumber mill and the tiles it felled render as a logged clearing; a
+	# farm's felled-out plots render as a contiguous crop field beside it.
 	var tile_structure := String((_tile_data.get(tile, {}) as Dictionary).get("structure", ""))
 	var is_clearing := tile_structure == "lumber_mill" or tile_structure == "cutWoods"
+	var is_farm_field := tile_structure == "farmField"
 	return RegionMapService.make_render_job(
 		_region_world_seed_text(), tile,
 		own_biome, _region_river_for_tile(tile),
 		has_iceberg, water, rivers, corners, tile_ruggedness,
 		biomes, roads,
-		_region_tileset_image(), tile_size, iceberg_art, canopy, is_clearing
+		_region_tileset_image(), tile_size, iceberg_art, canopy, is_clearing, is_farm_field
 	)
 
 ## The worldmap atlas as a plain RGBA image the render workers can read:

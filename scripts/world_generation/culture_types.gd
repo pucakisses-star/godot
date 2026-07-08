@@ -183,7 +183,7 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "hermit_hut", "label": "Hermit's Hut", "tile": Vector2i(0, 4)}
 	],
 	"wood_elves": [
-		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 5), "requires_tree_neighbor": true},
+		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 5), "requires_tree_neighbor": true, "requires_deep_forest": true},
 		{"id": "great_tree", "label": "Great Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true},
 		{"id": "old_growth", "label": "Old Growth", "tile": Vector2i(0, 2), "requires_tree_overlay": true, "replace_tree_overlay": true}
 	],
@@ -222,7 +222,7 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	],
 	"half_elves": [
 		{"id": "homestead", "label": "Homestead", "tile": Vector2i(13, 1), "requires_plain_grass": true},
-		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 6), "requires_tree_neighbor": true}
+		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 6), "requires_tree_neighbor": true, "requires_deep_forest": true}
 	],
 	"centaurs": [
 		{"id": "centaur_camp", "label": "Centaur Camp", "tile": Vector2i(10, 2), "requires_plain_grass": true},
@@ -288,13 +288,13 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "great_tree", "label": "Heart Tree", "tile": Vector2i(14, 1), "requires_tree_overlay": true}
 	],
 	"leshy": [
-		{"id": "moonwell", "label": "Forest Shrine", "tile": Vector2i(2, 6), "requires_tree_neighbor": true}
+		{"id": "moonwell", "label": "Forest Shrine", "tile": Vector2i(2, 6), "requires_tree_neighbor": true, "requires_deep_forest": true}
 	],
 	"satyr": [
 		{"id": "revel_camp", "label": "Revel Glade", "tile": Vector2i(7, 1), "requires_tree_neighbor": true}
 	],
 	"fae": [
-		{"id": "moonwell", "label": "Fae Circle", "tile": Vector2i(2, 6), "requires_tree_neighbor": true}
+		{"id": "moonwell", "label": "Fae Circle", "tile": Vector2i(2, 6), "requires_tree_neighbor": true, "requires_deep_forest": true}
 	],
 	"pygmy": [
 		{"id": "hunting_lodge", "label": "Canopy Camp", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true}
