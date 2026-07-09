@@ -4051,6 +4051,9 @@ func _update_inventory_label() -> void:
 	_populate_backpack_slots()
 
 func _dig_cell(cell: Vector2i) -> void:
+	# Grab the wall art before it is re-rendered as open floor, so the break
+	# FX can crumble a ghost of the rock away.
+	var art := TileBreakFxService.tile_art(city_layer, cell)
 	_latest_grid[cell] = CELL_HALL
 	_dug_cells[cell] = true
 	_record_hold_edit("dug", cell)
@@ -4061,6 +4064,11 @@ func _dig_cell(cell: Vector2i) -> void:
 		if _player_sprite != null:
 			_spawn_floating_text("Found %s!" % fossil, _player_sprite.position, Color(0.95, 0.9, 0.6, 1.0))
 	_render_world_rect(Rect2i(cell - Vector2i(1, 1), Vector2i(3, 3)))
+	var dig_position := _cell_center_position(cell)
+	var dig_lean := 1.0 if _player_sprite == null or dig_position.x >= _player_sprite.position.x else -1.0
+	if not art.is_empty():
+		TileBreakFxService.topple_ghost(city_layer, dig_position, art["texture"] as Texture2D, art["region"] as Rect2, dig_lean)
+	TileBreakFxService.chip_burst(city_layer, dig_position, Color(0.55, 0.53, 0.5, 1.0), 12)
 	if _lighting_enabled:
 		_update_shattered_visibility(_latest_grid)
 		_refresh_lighting(_latest_grid)
