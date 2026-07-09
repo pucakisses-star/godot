@@ -2652,7 +2652,10 @@ func _spawn_farm_animal_at(cell: Vector2i, pen_index: int) -> void:
 	sprite.region_enabled = true
 	sprite.centered = true
 	sprite.region_rect = Rect2(0, 0, frame_px, frame_px)
-	sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px))
+	# The farm sheets are drawn at 32px-per-tile density: the cow's 64px
+	# frame means it IS a two-tile beast. Scale by pixel density, not
+	# frame-fit, or the cow shrinks down to chicken size.
+	sprite.scale = Vector2.ONE * (float(tile_size.y) / 32.0)
 	sprite.position = _cell_center_position(cell)
 	sprite.z_index = 11
 	actor_layer.add_child(sprite)
@@ -2708,15 +2711,17 @@ func _update_farm_animals(delta: float) -> void:
 func _animate_farm_animal(state: Dictionary, sprite: Sprite2D, def: Dictionary) -> void:
 	var frame_px := int(def.get("frame", 32))
 	var facing := state.get("facing", Vector2i(0, 1)) as Vector2i
+	# The farm sheets carry native side facings: column 2 walks LEFT and
+	# column 3 walks RIGHT. Reusing column 2 for both (with a flip) made
+	# every animal amble backwards half the time.
 	var column := 0
 	sprite.flip_h = false
 	if facing == Vector2i.UP:
 		column = 1
 	elif facing == Vector2i.RIGHT:
-		column = 2
+		column = 3
 	elif facing == Vector2i.LEFT:
 		column = 2
-		sprite.flip_h = true
 	var row_count := int(def.get("rows", 6))
 	var row := 0
 	if bool(state.get("moving", false)):
@@ -5156,7 +5161,10 @@ func _spawn_owned_animal(kind: String, cell: Vector2i, last_produce_h: float) ->
 	sprite.region_enabled = true
 	sprite.centered = true
 	sprite.region_rect = Rect2(0, 0, frame_px, frame_px)
-	sprite.scale = Vector2.ONE * (float(tile_size.y) / float(frame_px))
+	# The farm sheets are drawn at 32px-per-tile density: the cow's 64px
+	# frame means it IS a two-tile beast. Scale by pixel density, not
+	# frame-fit, or the cow shrinks down to chicken size.
+	sprite.scale = Vector2.ONE * (float(tile_size.y) / 32.0)
 	sprite.position = _cell_center_position(cell)
 	sprite.z_index = 11
 	actor_layer.add_child(sprite)
