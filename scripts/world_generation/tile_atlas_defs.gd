@@ -257,6 +257,11 @@ const TOWN_TILE_ATLAS := {
 	"grass_tuft": Vector2i(2, 3),
 	"flowers_white": Vector2i(4, 17),
 	"flowers_yellow": Vector2i(5, 18),
+	# Snow ground lives on an extra row (26) appended to the sheet at load
+	# time by town_generation._configure_tile_layer; the shipped PNG is
+	# 44x26 (rows 0-25), so these coords address the painted-in snow cells.
+	"snow": Vector2i(0, 26),
+	"snow_alt": Vector2i(1, 26),
 	"road": Vector2i(14, 4),
 	"road_twig": Vector2i(13, 4),
 	"sand": Vector2i(11, 4),
@@ -344,6 +349,7 @@ const TOWN_TILE_ATLAS := {
 ## stay passable — the blocking cell is the furniture base itself.
 const TOWN_PASSABLE_TILE_KEYS := [
 	"grass", "grass_dark", "grass_tuft", "flowers_white", "flowers_yellow",
+	"snow", "snow_alt",
 	"road", "road_twig", "sand", "sand_alt", "sand_pebbles",
 	"plaza", "plaza_alt", "floor", "door", "rug",
 	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",

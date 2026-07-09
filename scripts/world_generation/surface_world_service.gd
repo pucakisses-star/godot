@@ -242,9 +242,10 @@ static func _blend_land_biome(biomes3x3: PackedStringArray, land_own: String, ce
 	return best_biome
 
 ## The ground/decor for one land biome, using the noise fields for
-## within-biome detail. The tileset has no snow/stone/marsh surface art, so
+## within-biome detail. The tileset has no stone/marsh surface art, so those
 ## climates render through the closest available keys: rock as pebble/sand,
-## tundra as pale muted grass, marsh as dark grass pocked with calm water.
+## marsh as dark grass pocked with calm water. Tundra uses the painted-in
+## snow ground tile.
 static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, forest: float, detail: float, danger: float) -> Dictionary:
 	match biome:
 		TILE_ATLAS_DEFS.BIOME_DESERT:
@@ -290,9 +291,9 @@ static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, 
 				decor = "tree_dark" if danger > 0.55 else "tree"
 			return {"base": base, "decor": decor}
 		TILE_ATLAS_DEFS.BIOME_TUNDRA:
-			# No white snow tile: keep the ground pale and muted, no blooms,
-			# only the odd wind-bent conifer.
-			var base := "grass_tuft" if detail > 0.0 else "grass"
+			# Real snow ground (painted into the town/surface tileset), with
+			# an occasional drift variant and the odd wind-bent conifer.
+			var base := "snow_alt" if detail > 0.35 else "snow"
 			var decor := ""
 			if forest > 0.32 and detail > 0.6:
 				decor = "tree_dark"
