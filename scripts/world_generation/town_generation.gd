@@ -37,6 +37,14 @@ const TILE_ATLAS_DEFS := preload("res://scripts/world_generation/tile_atlas_defs
 const TILE_ATLAS := TILE_ATLAS_DEFS.TOWN_TILE_ATLAS
 const PASSABLE_TILE_KEYS := TILE_ATLAS_DEFS.TOWN_PASSABLE_TILE_KEYS
 const COLLISION_LAYER_WORLD := 1
+## The timber-framed room 9-slice. These pieces are cut out toward the
+## building exterior, so they are stamped on the decor layer over a ground
+## tile (see the paint loop) instead of directly on the terrain layer.
+const WALL_FRAME_TILE_KEYS: Array[String] = [
+	"wall_tl", "wall_top", "wall_tr",
+	"wall_left", "wall_fill", "wall_right",
+	"wall_bl", "wall_bottom", "wall_br"
+]
 
 
 
@@ -1895,7 +1903,18 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 			var cell := _cell_at(grid, x, y)
 			var base_tile := _pick_base_tile(grid, x, y, cell)
 			var render_cell := Vector2i(x, y)
-			_place_tile(city_layer, render_cell, base_tile)
+			if base_tile in WALL_FRAME_TILE_KEYS:
+				# Framed-room pieces are opaque toward the interior and cut out
+				# toward the exterior, so they sit over a ground tile: lay the
+				# surrounding ground on the terrain layer and stamp the timber
+				# frame on the decor layer above it. Cut-out edges then read as
+				# walls-on-ground rather than black gaps. The cell still blocks:
+				# the ground is walkable but the frame tile is not in the passable
+				# set, and passability requires both layers to clear.
+				_place_tile(city_layer, render_cell, _wall_ground_fill_tile())
+				_place_tile(decor_layer, render_cell, base_tile)
+			else:
+				_place_tile(city_layer, render_cell, base_tile)
 			var decor_tile := _pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides)
 			if cell == CELL_ROCK and decor_tile.is_empty():
 				_green_cells.append(render_cell)
@@ -5632,6 +5651,15 @@ func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 	if _town_theme == "desert" and DESERT_BASE_SWAP.has(tile_key):
 		return String(DESERT_BASE_SWAP[tile_key])
 	return tile_key
+
+## The opaque ground stamped under a framed-room wall cell so the frame's
+## cut-out exterior edges blend into the surroundings instead of the dark
+## panel behind the layers. Grass suits the common grassy building plot;
+## desert towns swap it for sand to match their terrain.
+func _wall_ground_fill_tile() -> String:
+	if _town_theme == "desert" and DESERT_BASE_SWAP.has("grass"):
+		return String(DESERT_BASE_SWAP["grass"])
+	return "grass"
 
 func _building_type_for_cell(cell: Vector2i) -> String:
 	return String(_latest_civic_building_type_map.get(cell, "workshop"))

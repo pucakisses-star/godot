@@ -43,22 +43,46 @@ static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cel
 				return "grass_tuft"
 			return "grass"
 
+## Autotiles a building cell into the timber-framed 9-slice. A perimeter
+## cell borders the exterior on at least one side; we read which of its four
+## orthogonal sides face outside (a different cell type) and pick the matching
+## frame piece so corners, the lit top beam, side posts and the bottom sill
+## all line up. Door cells keep their building's grid value, so a wall next to
+## a doorway stays "closed" on that side and frames the opening cleanly.
+## Cells fully enclosed by the same building are interior floor.
 static func wall_or_floor_tile(grid: Dictionary, x: int, y: int, cell: int, door_cells: Dictionary) -> String:
 	var current_cell := Vector2i(x, y)
 	if door_cells.has(current_cell):
 		return "door"
 
-	var left_cell := _cell_at(grid, x - 1, y)
-	var right_cell := _cell_at(grid, x + 1, y)
-	var top_cell := _cell_at(grid, x, y - 1)
-	var bottom_cell := _cell_at(grid, x, y + 1)
-	if left_cell != cell or right_cell != cell or top_cell != cell or bottom_cell != cell:
-		# North walls show their timber face into the room (the interior
-		# lies below them); the rest read as wall tops.
-		if bottom_cell == cell and top_cell != cell:
-			return "plank_wall"
-		return "wall"
-	return "floor"
+	var up_open := _cell_at(grid, x, y - 1) != cell
+	var down_open := _cell_at(grid, x, y + 1) != cell
+	var left_open := _cell_at(grid, x - 1, y) != cell
+	var right_open := _cell_at(grid, x + 1, y) != cell
+
+	if not (up_open or down_open or left_open or right_open):
+		return "floor"
+
+	# Convex corners (two adjacent sides face outside) first, then the four
+	# straight edges. The top edge is the old "north face": interior below,
+	# exterior above.
+	if up_open and left_open:
+		return "wall_tl"
+	if up_open and right_open:
+		return "wall_tr"
+	if down_open and left_open:
+		return "wall_bl"
+	if down_open and right_open:
+		return "wall_br"
+	if up_open:
+		return "wall_top"
+	if down_open:
+		return "wall_bottom"
+	if left_open:
+		return "wall_left"
+	if right_open:
+		return "wall_right"
+	return "wall_fill"
 
 static func is_furniture_tile(tile_key: String) -> bool:
 	return tile_key in TOWN_FURNITURE_TILES
