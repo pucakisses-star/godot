@@ -67,6 +67,12 @@ const MOUNTAIN_BOTTOM_A_TILE := Vector2i(7, 0)
 const MOUNTAIN_BOTTOM_B_TILE := Vector2i(8, 0)
 const DAM_TILE := Vector2i(8, 1)
 const MOUNTAIN_PEAK_TILE := Vector2i(10, 0)
+## A lone craggy peak, distinct from the tiled mountain-block art above.
+const MOUNTAIN_ALT_TILE := Vector2i(9, 0)
+## Faith buildings: a small chapel, a domed temple, and a grand cathedral.
+const CHAPEL_TILE := Vector2i(10, 1)
+const DOMED_TEMPLE_TILE := Vector2i(9, 1)
+const GRAND_CATHEDRAL_TILE := Vector2i(11, 0)
 const STONE_TILE := Vector2i(2, 0)
 const DWARFHOLD_TILE := Vector2i(9, 2)
 const ABANDONED_DWARFHOLD_TILE := Vector2i(8, 2)

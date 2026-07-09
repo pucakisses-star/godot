@@ -281,6 +281,13 @@ func _on_visibility_changed() -> void:
 func _add_backpack_slot() -> void:
 	var pack_button := _make_slot_button()
 	pack_button.pressed.connect(_on_backpack_slot_pressed.bind(_backpack_buttons.size()))
+	# A packed slot is a drag source: dragging it onto the open world drops
+	# the item at the player's feet. The scene's catcher does the mutation.
+	pack_button.set_drag_forwarding(
+		Callable(self, "_backpack_drag_data").bind(_backpack_buttons.size()),
+		Callable(),
+		Callable()
+	)
 	_pack_grid.add_child(pack_button)
 	_backpack_buttons.append(pack_button)
 	var count := Label.new()
@@ -310,6 +317,28 @@ func _make_slot_button() -> Button:
 	return slot_button
 
 ## --- interaction --------------------------------------------------------
+
+## Drag payload for backpack slot `index`: only a slot holding a real item
+## can be dragged, and the drag carries that item's icon as its preview.
+func _backpack_drag_data(_at_position: Vector2, index: int) -> Variant:
+	if index < 0 or index >= _backpack_buttons.size():
+		return null
+	var item_name := String(_backpack_buttons[index].get_meta("item_name", ""))
+	if item_name.is_empty():
+		return null
+	set_drag_preview(_make_drag_preview(item_name))
+	return {"kind": "item_drop", "item": item_name}
+
+func _make_drag_preview(item_name: String) -> Control:
+	var preview := TextureRect.new()
+	preview.texture = ItemDefsService.icon_texture(item_name)
+	preview.custom_minimum_size = SLOT_SIZE
+	preview.size = SLOT_SIZE
+	preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	preview.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	preview.modulate = Color(1.0, 1.0, 1.0, 0.85)
+	return preview
 
 func _on_equipment_slot_pressed(slot: String) -> void:
 	var settings: Dictionary = _get_settings.call()

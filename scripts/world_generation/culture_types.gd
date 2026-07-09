@@ -180,7 +180,12 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		},
 		{"id": "watchtower", "label": "Watchtower", "tile": Vector2i(3, 4), "requires_plain_grass": true},
 		{"id": "farmhouse", "label": "Farmhouse", "tile": Vector2i(4, 5), "requires_plain_grass": true},
-		{"id": "hermit_hut", "label": "Hermit's Hut", "tile": Vector2i(0, 4)}
+		{"id": "hermit_hut", "label": "Hermit's Hut", "tile": Vector2i(0, 4)},
+		# Faith rises across human lands: chapels are common, grand cathedrals
+		# a rare sight (rarity thins each toward its stature).
+		{"id": "chapel", "label": "Chapel", "tile": Vector2i(10, 1), "requires_plain_grass": true, "rarity": 0.7},
+		{"id": "temple", "label": "Domed Temple", "tile": Vector2i(9, 1), "requires_plain_grass": true, "rarity": 0.4},
+		{"id": "cathedral", "label": "Grand Cathedral", "tile": Vector2i(11, 0), "requires_plain_grass": true, "rarity": 0.2}
 	],
 	"wood_elves": [
 		{"id": "moonwell", "label": "Moonwell", "tile": Vector2i(2, 6), "requires_tree_neighbor": true, "requires_deep_forest": true},
@@ -209,7 +214,8 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	# mountains (peaks or mountain overlays), never out on the open lowlands.
 	"dwarves": [
 		{"id": "prospect_camp", "label": "Prospector's Camp", "tile": Vector2i(7, 1), "requires_mountain": true},
-		{"id": "homestead", "label": "Mountain Homestead", "tile": Vector2i(3, 1), "requires_mountain": true}
+		{"id": "homestead", "label": "Mountain Homestead", "tile": Vector2i(3, 1), "requires_mountain": true},
+		{"id": "craggy_tor", "label": "Craggy Tor", "tile": Vector2i(9, 0), "requires_mountain": true, "rarity": 0.12}
 	],
 	"half_orcs": [
 		{"id": "hunting_lodge", "label": "Hunting Lodge", "tile": Vector2i(16, 0), "requires_tree_overlay": true, "replace_tree_overlay": true},
