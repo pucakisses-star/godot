@@ -671,7 +671,7 @@ const CIVIC_BUILDING_TYPES := {
 		"placement_weight": 0.35,
 		"preferred_footprint_min": Vector2i(2, 2),
 		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["stool", "table", "desk", "water_bucket"],
+		"decor_tile_pool": ["stool", "desk", "water_bucket", "mug"],
 		"adjacency_preferences": {}
 	},
 	"guild_hall": {
