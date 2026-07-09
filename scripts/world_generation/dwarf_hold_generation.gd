@@ -196,6 +196,10 @@ var _player_satiety := PlayerStatsService.SATIETY_MAX
 var _hunger_label: Label
 var _current_stratum: Dictionary = DepthStrataService.SURFACE
 var _furnishing_by_cell: Dictionary = {}
+## Cells of light-throwing furnishings (hearths, forges, candles) on the
+## shown level; they carve their own reveal pools so the settlement is lit
+## by its fires rather than a blanket exemption.
+var _light_furnishing_cells: Array[Vector2i] = []
 const PLAYER_ATTACK_COOLDOWN := 0.45
 const CREATURE_CAP := 24
 const CREATURE_DESPAWN_DISTANCE := 90
@@ -239,6 +243,12 @@ const ZOOM_STEP := 0.1
 const DARK_COLOR := Color(0.03, 0.035, 0.055, 0.955)
 const PLAYER_LIGHT_TILES := 7.0
 const TORCH_LIGHT_TILES := 9.0
+## Fires and candles in the settlement light their own pools, so the city
+## glows only around its hearths instead of being blanket-lit.
+const HEARTH_LIGHT_TILES := 6.5
+const CANDLE_LIGHT_TILES := 4.0
+## Furnishing pieces that throw a big fire pool (vs a small candle pool).
+const HEARTH_LIGHT_PIECES := ["int_hearth_arch", "int_kiln_beehive", "int_fireplace_dark"]
 ## Ceiling on lights fed to the overlay shader in one frame (must match the
 ## shader's MAX_LIGHTS). The player lantern always claims one slot.
 const MAX_DYNAMIC_LIGHTS := 64
@@ -988,10 +998,11 @@ func _process(delta: float) -> void:
 ## The city and deep levels stay lit; the wild underground is dark, held
 ## back by the player's lantern glow and any placed torches.
 func _update_wild_darkness(delta: float) -> void:
-	# Dark only in the open wild: the settlement/districts stay lit, and the
-	# lighting toggle off forces full daylight everywhere.
+	# The whole hold is dark; only light sources (the player's lantern, placed
+	# torches, and the settlement's own hearths/candles) carve reveal pools.
+	# The lighting toggle off forces full daylight everywhere.
 	var target := 0.0
-	if _lighting_enabled and not _world_noise.is_empty() and _player_sprite != null and not _latest_district_cell_map.has(_player_cell):
+	if _lighting_enabled and not _world_noise.is_empty() and _player_sprite != null:
 		target = 1.0
 	_darkness_strength = lerpf(_darkness_strength, target, clampf(delta * 3.0, 0.0, 1.0))
 	if absf(_darkness_strength - target) < 0.002:
@@ -1680,6 +1691,7 @@ func _show_level(target_level_index: int) -> void:
 	# checks; _furnish_interiors rebuilds both maps right after.
 	_furnishing_blocked_cells.clear()
 	_furnishing_by_cell.clear()
+	_light_furnishing_cells.clear()
 	_render_city(grid, _hold_state.active_level_stairs)
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
@@ -1936,6 +1948,17 @@ func _update_light_uniforms() -> void:
 			continue
 		positions.append(torch_position)
 		radii.append(TORCH_LIGHT_TILES * float(tile_size.x))
+	# The settlement's own fires and candles light their pools, so districts
+	# glow around their hearths instead of being uniformly bright.
+	for light_cell: Vector2i in _light_furnishing_cells:
+		if positions.size() >= MAX_DYNAMIC_LIGHTS:
+			break
+		var light_position := _cell_center_position(light_cell)
+		if _player_sprite != null and light_position.distance_squared_to(_player_sprite.position) > cull_sq:
+			continue
+		var is_hearth := HEARTH_LIGHT_PIECES.has(String(_furnishing_by_cell.get(light_cell, "")))
+		positions.append(light_position)
+		radii.append((HEARTH_LIGHT_TILES if is_hearth else CANDLE_LIGHT_TILES) * float(tile_size.x))
 	_darkness_material.set_shader_parameter("light_count", positions.size())
 	_darkness_material.set_shader_parameter("light_pos", positions)
 	_darkness_material.set_shader_parameter("light_radius", radii)
@@ -4640,6 +4663,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 	_furnishing_sprites.clear()
 	_furnishing_blocked_cells.clear()
 	_furnishing_by_cell.clear()
+	_light_furnishing_cells.clear()
 	_actor_passable_cache.clear()
 	if actor_layer == null:
 		return
@@ -4679,6 +4703,7 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 				_furnishing_blocked_cells[cell] = true
 				_actor_passable_cache.erase(cell)
 		if RoomFurnishingService.piece_emits_light(piece_name):
+			_light_furnishing_cells.append(base_cell)
 			var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(
 				_cell_center_position(base_cell),
 				2.4 * float(tile_size.x),
