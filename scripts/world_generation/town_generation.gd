@@ -147,6 +147,9 @@ var _surface_last_player_chunk := Vector2i(2147483647, 2147483647)
 var _surface_protect_rect := Rect2i()
 var _surface_world_origin := Vector2i.ZERO
 var _surface_biome_ctx: Dictionary = {}
+## The biome of the overworld tile this town sits on, resolved from the
+## world biome buffer at setup. Drives the ground palette (snow on tundra).
+var _town_ground_biome := ""
 var _surface_road_cells: Dictionary = {}
 var _surface_blocked_cells: Dictionary = {}
 var _surface_gates: Array[Dictionary] = []
@@ -364,6 +367,18 @@ const DESERT_BASE_SWAP := {
 const DESERT_SKIPPED_DECOR: Array[String] = [
 	"tree", "tree_dark", "hedge", "hedge_alt",
 	"flowers_white", "flowers_yellow"
+]
+## Tundra towns sit on snow: the grass-family ground tiles swap to the
+## painted-in snow tiles (mirrors DESERT_BASE_SWAP), and grassland greenery
+## (bushes, hedges, blooms) is skipped so the settled area reads as winter.
+## The wind-bent conifers ("tree"/"tree_dark") are kept as evergreens.
+const SNOW_BASE_SWAP := {
+	"grass": "snow",
+	"grass_dark": "snow_alt",
+	"grass_tuft": "snow_alt"
+}
+const SNOW_SKIPPED_DECOR: Array[String] = [
+	"hedge", "hedge_alt", "flowers_white", "flowers_yellow"
 ]
 
 ## Spritesheet slots in townsfolk_characters.png block order.
@@ -1422,9 +1437,15 @@ func _configure_tile_layer() -> void:
 	if not FileAccess.file_exists(tilesheet_path):
 		push_error("Missing town tilesheet at %s" % tilesheet_path)
 		return
-	var texture := load(tilesheet_path) as Texture2D
-	if texture == null:
+	var base_texture := load(tilesheet_path) as Texture2D
+	if base_texture == null:
 		push_error("Unable to load town tilesheet texture at %s" % tilesheet_path)
+		return
+	# The shipped sheet has no snow ground art, so tundra towns render on
+	# procedurally painted snow tiles appended in an extra row at the bottom.
+	var texture := _build_town_atlas_texture(base_texture)
+	if texture == null:
+		push_error("Unable to build augmented town atlas texture from %s" % tilesheet_path)
 		return
 
 	var atlas := TileSetAtlasSource.new()
@@ -1471,6 +1492,79 @@ func _configure_tile_layer() -> void:
 	city_layer.tile_set = tile_set
 	decor_layer.tile_set = tile_set
 	_apply_water_flow_material()
+
+## Builds the town/surface atlas texture: the shipped tilesheet with one
+## extra 32px row appended at the bottom, holding procedurally painted snow
+## ground tiles (the PNG ships no snow art). Everything stays in source 0 so
+## _shaded_alternative and every other atlas consumer keeps working.
+func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
+	var base_image := base_texture.get_image()
+	if base_image == null:
+		return null
+	if base_image.is_compressed():
+		base_image.decompress()
+	base_image.convert(Image.FORMAT_RGBA8)
+	var snow_coords: Array[Vector2i] = [
+		TILE_ATLAS.get("snow", Vector2i(0, 26)) as Vector2i,
+		TILE_ATLAS.get("snow_alt", Vector2i(1, 26)) as Vector2i
+	]
+	var max_row := 0
+	for coords: Vector2i in snow_coords:
+		max_row = maxi(max_row, coords.y)
+	var needed_height := maxi(base_image.get_height(), (max_row + 1) * tile_size.y)
+	var augmented := Image.create(base_image.get_width(), needed_height, false, Image.FORMAT_RGBA8)
+	augmented.blit_rect(base_image, Rect2i(Vector2i.ZERO, base_image.get_size()), Vector2i.ZERO)
+	for variant_index: int in range(snow_coords.size()):
+		_paint_snow_tile(augmented, snow_coords[variant_index], variant_index)
+	return ImageTexture.create_from_image(augmented)
+
+## Paints a convincing 32px snow ground tile into one atlas cell: a
+## near-white base with faint cool-blue speckle grain, soft blue shadow
+## dapples (drift depressions), and a few bright sparkles, so it reads as
+## snow rather than a flat white square. Deterministic per variant.
+func _paint_snow_tile(image: Image, cell_coords: Vector2i, variant: int) -> void:
+	var origin := cell_coords * tile_size
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("town_snow_ground|%d" % variant)
+	var width := tile_size.x
+	var height := tile_size.y
+	# Base fill: bright snow with a barely-there cool tint and per-pixel grain.
+	for ty: int in range(height):
+		for tx: int in range(width):
+			var grain := rng.randf() * 0.05
+			var lum := clampf(0.93 - grain, 0.0, 1.0)
+			var col := Color(lum, minf(1.0, lum + 0.01), minf(1.0, lum + 0.04), 1.0)
+			image.set_pixel(origin.x + tx, origin.y + ty, col)
+	# Cool-blue shadow dapples: small soft depressions in the drift.
+	var dapple_count := 5 + variant * 2
+	for _dapple: int in range(dapple_count):
+		var cx := rng.randi_range(2, width - 3)
+		var cy := rng.randi_range(2, height - 3)
+		var radius := rng.randi_range(2, 4)
+		for oy: int in range(-radius, radius + 1):
+			for ox: int in range(-radius, radius + 1):
+				var px := cx + ox
+				var py := cy + oy
+				if px < 0 or py < 0 or px >= width or py >= height:
+					continue
+				var dist := sqrt(float(ox * ox + oy * oy))
+				if dist > float(radius):
+					continue
+				var falloff := 1.0 - dist / float(radius)
+				var shade := 0.12 * falloff
+				var existing := image.get_pixel(origin.x + px, origin.y + py)
+				var shaded := Color(
+					clampf(existing.r - shade, 0.0, 1.0),
+					clampf(existing.g - shade * 0.85, 0.0, 1.0),
+					clampf(existing.b - shade * 0.5, 0.0, 1.0),
+					1.0)
+				image.set_pixel(origin.x + px, origin.y + py, shaded)
+	# A sprinkle of bright sparkle highlights catching the light on top.
+	var sparkle_count := 10 + variant * 4
+	for _sparkle: int in range(sparkle_count):
+		var sx := rng.randi_range(0, width - 1)
+		var sy := rng.randi_range(0, height - 1)
+		image.set_pixel(origin.x + sx, origin.y + sy, Color(1.0, 1.0, 1.0, 1.0))
 
 ## Gives the terrain layer an animated flowing-water shader. It is
 ## color-keyed to blue water pixels, so grass/paths/roofs/stone render
@@ -3609,6 +3703,14 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	# The wilds derive their climate from the overworld biomes around this
 	# settlement, so coasts read as sea, deserts as sand, forests as woods.
 	_surface_biome_ctx = SurfaceWorldService.make_biome_context(settings.get(TOWN_SCENE_WORLD_BIOMES_KEY, {}) as Dictionary, WORLD_CELLS_PER_OVERWORLD_TILE, settings.get(TOWN_SCENE_WORLD_RIVERS_KEY, {}) as Dictionary)
+	# The town's own ground climate: the biome of the overworld tile its
+	# centre sits on. Empty when there is no world buffer (standalone tests),
+	# which leaves the default grass palette. Snow towns key off tundra here.
+	if _surface_biome_ctx.is_empty():
+		_town_ground_biome = ""
+	else:
+		var town_centre_world_cell := own_tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2)
+		_town_ground_biome = SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, town_centre_world_cell)
 	_plan_surface_sites(own_tile, bbox_center, settings)
 	_restore_homestead(settings)
 
@@ -5650,6 +5752,8 @@ func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 	var tile_key := TownTileService.pick_base_tile(grid, x, y, cell, _door_cells)
 	if _town_theme == "desert" and DESERT_BASE_SWAP.has(tile_key):
 		return String(DESERT_BASE_SWAP[tile_key])
+	if _town_ground_biome == TILE_ATLAS_DEFS.BIOME_TUNDRA and SNOW_BASE_SWAP.has(tile_key):
+		return String(SNOW_BASE_SWAP[tile_key])
 	return tile_key
 
 ## The opaque ground stamped under a framed-room wall cell so the frame's
@@ -5659,6 +5763,8 @@ func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 func _wall_ground_fill_tile() -> String:
 	if _town_theme == "desert" and DESERT_BASE_SWAP.has("grass"):
 		return String(DESERT_BASE_SWAP["grass"])
+	if _town_ground_biome == TILE_ATLAS_DEFS.BIOME_TUNDRA and SNOW_BASE_SWAP.has("grass"):
+		return String(SNOW_BASE_SWAP["grass"])
 	return "grass"
 
 func _building_type_for_cell(cell: Vector2i) -> String:
@@ -5672,6 +5778,14 @@ func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: St
 	# The desert has no greenery: cacti and bones are scattered as sprites instead.
 	if _town_theme == "desert" and DESERT_SKIPPED_DECOR.has(decor_key):
 		return ""
+	# Snow towns skip grassland blooms and bushes and turn the leafy scatter
+	# trees into the darker evergreen so the settled area reads as a winter
+	# village, not a meadow.
+	if _town_ground_biome == TILE_ATLAS_DEFS.BIOME_TUNDRA:
+		if SNOW_SKIPPED_DECOR.has(decor_key):
+			return ""
+		if decor_key == "tree":
+			return "tree_dark"
 	return decor_key
 
 
