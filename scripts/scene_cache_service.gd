@@ -36,7 +36,14 @@ const FADE_IN_SECONDS := 0.32
 var _fade_layer: CanvasLayer = null
 var _fade_rect: ColorRect = null
 
+## Guards against overlapping scene changes: a second request during the
+## fade would run two swap coroutines (double autosave, double swap).
+var _changing := false
+
 func change_scene(target_path: String) -> void:
+	if _changing:
+		return
+	_changing = true
 	_ensure_fade()
 	await _tween_fade_alpha(1.0, FADE_OUT_SECONDS)
 	_perform_swap(target_path)
@@ -47,6 +54,7 @@ func change_scene(target_path: String) -> void:
 	await _tween_fade_alpha(0.0, FADE_IN_SECONDS)
 	if _fade_layer != null and is_instance_valid(_fade_layer):
 		_fade_layer.visible = false
+	_changing = false
 
 func _ensure_fade() -> void:
 	if _fade_layer != null and is_instance_valid(_fade_layer):

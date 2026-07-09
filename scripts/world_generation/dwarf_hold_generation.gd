@@ -104,6 +104,10 @@ var _fishing_state: Dictionary = {}
 var _player_coins := 0
 var _coins_label: Label
 var _trade_shop_cell := Vector2i(2147483647, 2147483647)
+## The tile the player actually clicked to open the trade popup. The
+## anchor above is the building's flood-fill top-left, which can sit
+## many tiles from the counter — range checks must use the clicked cell.
+var _trade_click_cell := Vector2i(2147483647, 2147483647)
 var _trade_shop_type := ""
 var _shop_stocks: Dictionary = {}
 var _active_speech_bubble: PanelContainer
@@ -1286,7 +1290,12 @@ func _is_text_input_focused() -> bool:
 func _close_out_of_range_popups() -> void:
 	if chest_popup == null or not chest_popup.visible:
 		return
-	var anchor := _trade_shop_cell if _is_trade_mode() else _selected_chest_cell
+	## In trade mode, measure from the clicked tile, not the shop anchor:
+	## the anchor is the building's top-left flood-fill cell, so a large
+	## shop would slam the popup shut on the first step near its far side.
+	var anchor := _selected_chest_cell
+	if _is_trade_mode():
+		anchor = _trade_click_cell if _trade_click_cell.x != 2147483647 else _trade_shop_cell
 	if anchor.x == 2147483647:
 		return
 	var span := _player_cell - anchor
@@ -1437,6 +1446,11 @@ func _generate_city() -> void:
 	# seeded stub of mountain exports (ore, ingots, gems, stone).
 	_hold_market = SettlementEconomyService.settlement_market(SettlementEconomyService.hold_details_stub(_world_seed_hash), _world_seed_hash)
 	_hold_state.generated_levels.clear()
+	## Reseeding invalidates anything keyed by cell coordinates from the
+	## old world: stale shop stocks would sell the previous hold's wares,
+	## and stale discovery flags would block chunk eviction forever.
+	_shop_stocks.clear()
+	_discovery_chunks.clear()
 
 	var minimum_levels := mini(underground_level_count_range.x, underground_level_count_range.y)
 	var maximum_levels := maxi(underground_level_count_range.x, underground_level_count_range.y)
@@ -1714,6 +1728,22 @@ func _show_level(target_level_index: int) -> void:
 	else:
 		_city_bounds = _find_bounds(grid).grow(2)
 		level_data["city_bounds"] = _city_bounds
+	## _render_city only redraws up to _city_bounds.grow(96): chunks
+	## generated beyond that would keep their "generated" flag but never
+	## get tiles re-placed nor evicted — permanent invisible void. Drop
+	## those keys; _ensure_chunks_around regenerates them deterministically
+	## and _apply_hold_diffs_to_rect replays the player's edits.
+	if not _generated_chunks.is_empty():
+		var render_limit := _city_bounds.grow(96)
+		for chunk_key_variant: Variant in _generated_chunks.keys():
+			var parts := String(chunk_key_variant).split(",")
+			if parts.size() != 2:
+				continue
+			var chunk := Vector2i(int(parts[0]), int(parts[1]))
+			# encloses, not intersects: a chunk straddling the render edge only
+			# gets its inner half redrawn, so it must re-stream too.
+			if not render_limit.encloses(UndergroundWorldService.chunk_rect(chunk)):
+				_generated_chunks.erase(chunk_key_variant)
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
 	# Chests keep their contents per level: sharing the level_data dict
@@ -1721,6 +1751,9 @@ func _show_level(target_level_index: int) -> void:
 	if not (level_data.get("chest_inventories") is Dictionary):
 		level_data["chest_inventories"] = {}
 	_chest_inventories = level_data.get("chest_inventories") as Dictionary
+	## Shop stocks are keyed by anchor cell only: another level's shop can
+	## collide on the same anchor and serve wrong/depleted stock.
+	_shop_stocks.clear()
 	_clear_chest_selection()
 	_apply_hold_diffs_to_level(level_data, grid)
 	# The previous level's furniture must not block this level's spawn
@@ -1803,6 +1836,11 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		if String(house_decor_overrides[decor_cell_variant]) == "bed":
 			_latest_bed_count += 1
 			_bed_cells.append(decor_cell_variant as Vector2i)
+	## Decor must not ride the live shared _rng: every _show_level revisit
+	## would reroll chest/decor positions (fresh farmable loot). The rng is
+	## reseeded per cell inside _pick_decor_tile, so a grid that grew from
+	## chunk streaming can't shift the sequence for every later cell either.
+	var decor_rng := RandomNumberGenerator.new()
 	for y in range(bounds.position.y, bounds.end.y):
 		for x in range(bounds.position.x, bounds.end.x):
 			var cell := _cell_at(grid, x, y)
@@ -1811,7 +1849,7 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 			var base_tile := _pick_base_tile(grid, x, y, cell)
 			var render_cell := Vector2i(x, y)
 			_place_tile(city_layer, render_cell, base_tile)
-			var decor_tile := _pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides)
+			var decor_tile := _pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, decor_rng)
 			if not decor_tile.is_empty():
 				_place_tile(decor_layer, render_cell, decor_tile)
 				if decor_tile == "chest":
@@ -1832,6 +1870,10 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 func _rebuild_district_labels() -> void:
 	var existing := city_layer.get_node_or_null("DistrictLabels")
 	if existing != null:
+		## queue_free keeps the node (and its name) alive until frame end,
+		## so the fresh sibling would get auto-renamed and the next lookup
+		## would miss it, leaking labels. Rename first, then free.
+		existing.name = "DistrictLabelsRetired"
 		existing.queue_free()
 	if _latest_district_labels.is_empty():
 		return
@@ -2987,6 +3029,12 @@ func _roll_weighted_drop(drop_table: Array) -> Dictionary:
 func _place_torch() -> void:
 	if _player_sprite == null or _world_noise.is_empty():
 		return
+	## _spawn_torch_at silently no-ops on an occupied cell: without this
+	## guard a double-place still eats the Stone and duplicates the cell
+	## in the torches array.
+	if _torch_sprites.has(_player_cell):
+		_set_save_status("A torch already burns here", Color(0.95, 0.75, 0.45, 1.0))
+		return
 	if int(_player_inventory.get("Stone", 0)) < 1:
 		_set_save_status("Need 1 Stone to place a torch (dig a wall)", Color(0.95, 0.75, 0.45, 1.0))
 		return
@@ -3111,6 +3159,7 @@ func _open_trade_popup(cell: Vector2i, shop_type: String) -> void:
 		_shop_stocks[anchor] = SettlementEconomyService.generate_shop_stock(shop_type, stock_rng)
 	_selected_chest_cell = Vector2i(2147483647, 2147483647)
 	_trade_shop_cell = anchor
+	_trade_click_cell = cell
 	_trade_shop_type = shop_type
 	chest_popup.visible = true
 	chest_popup_title.text = "Trade — %s" % _display_name_for_building_type(shop_type)
@@ -3174,6 +3223,7 @@ func _on_chest_slot_gui_input(event: InputEvent, slot_index: int) -> void:
 
 func _end_trade_mode() -> void:
 	_trade_shop_cell = Vector2i(2147483647, 2147483647)
+	_trade_click_cell = Vector2i(2147483647, 2147483647)
 	_trade_shop_type = ""
 
 func _npc_state_at_cell(cell: Vector2i) -> Dictionary:
@@ -3418,6 +3468,9 @@ func _try_place_build(cell: Vector2i) -> bool:
 			_dug_cells.erase(cell)
 			_record_hold_edit("grid_edits", cell, CELL_ROCK)
 			_render_world_rect(Rect2i(cell - Vector2i(2, 2), Vector2i(5, 5)))
+			## The new wall must block light like dug walls admit it:
+			## refresh the occlusion texture (mirrors _dig_cell).
+			_refresh_occlusion_cell(cell)
 		"floor":
 			if zone != CELL_HALL:
 				_set_save_status("Paving needs bare cavern floor", Color(0.95, 0.75, 0.45, 1.0))
@@ -4220,10 +4273,45 @@ func _record_hold_edit(field: String, cell: Vector2i, value: Variant = null) -> 
 		if not cells.has(key):
 			cells.append(key)
 		level[field] = cells
+		## Erasing decor on a cell must retire any earlier build there:
+		## replay runs decor_edits then decor_erased, so a stale edit
+		## would otherwise rebuild furniture the player harvested.
+		if field == "decor_erased" and level.get("decor_edits") is Dictionary:
+			(level["decor_edits"] as Dictionary).erase(key)
 	else:
 		var edits: Dictionary = level.get(field, {}) as Dictionary
 		edits[key] = value
 		level[field] = edits
+		## Building decor on a previously-harvested cell must drop the
+		## erase marker, or replay deletes the new furniture right after
+		## placing it (decor_erased runs last).
+		if field == "decor_edits" and level.get("decor_erased") is Array:
+			(level["decor_erased"] as Array).erase(key)
+	hold[level_key] = level
+	diffs[hold_key] = hold
+	settings["hold_diffs"] = diffs
+	game_session.call("set_world_settings", settings)
+
+## Digging through a player-built wall must also drop its "grid_edits"
+## entry: replay order is dug first, then grid_edits, so a stale wall
+## edit would resurrect the wall over the freshly dug hall.
+func _erase_hold_grid_edit(cell: Vector2i) -> void:
+	if _restoring_hold_diffs:
+		return
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	var diffs: Dictionary = settings.get("hold_diffs", {}) as Dictionary if settings.get("hold_diffs") is Dictionary else {}
+	var hold_key := str(_world_seed_hash)
+	var hold: Dictionary = diffs.get(hold_key, {}) as Dictionary if diffs.get(hold_key) is Dictionary else {}
+	var level_key := str(_hold_state.current_level_index)
+	var level: Dictionary = hold.get(level_key, {}) as Dictionary if hold.get(level_key) is Dictionary else {}
+	var grid_edits: Dictionary = level.get("grid_edits", {}) as Dictionary
+	if not grid_edits.has(_cell_key(cell)):
+		return
+	grid_edits.erase(_cell_key(cell))
+	level["grid_edits"] = grid_edits
 	hold[level_key] = level
 	diffs[hold_key] = hold
 	settings["hold_diffs"] = diffs
@@ -4278,6 +4366,17 @@ func _apply_hold_diffs_to_rect(rect: Rect2i) -> void:
 		var cell := _parse_cell_key(String(key_variant))
 		if rect.has_point(cell):
 			_latest_grid[cell] = int(grid_edits[key_variant])
+	## Player-built furniture must survive chunk eviction + re-stream too,
+	## mirroring _apply_hold_diffs_to_level; without this, wild-chunk decor
+	## vanishes the first time its chunk is evicted and streamed back in.
+	var decor_edits := diff.get("decor_edits", {}) as Dictionary
+	for key_variant: Variant in decor_edits.keys():
+		var cell := _parse_cell_key(String(key_variant))
+		if rect.has_point(cell):
+			var tile_key := String(decor_edits[key_variant])
+			_latest_floor_decor[cell] = tile_key
+			if tile_key == "chest" and not _chest_inventories.has(cell):
+				_chest_inventories[cell] = []
 	for key_variant: Variant in (diff.get("decor_erased", []) as Array):
 		var cell := _parse_cell_key(String(key_variant))
 		if rect.has_point(cell):
@@ -4347,6 +4446,9 @@ func _dig_cell(cell: Vector2i) -> void:
 	var art := TileBreakFxService.tile_art(city_layer, cell)
 	_latest_grid[cell] = CELL_HALL
 	_dug_cells[cell] = true
+	## If this wall was player-built, retire its grid edit so replay
+	## (dug first, then grid_edits) can't bring the wall back.
+	_erase_hold_grid_edit(cell)
 	_record_hold_edit("dug", cell)
 	_add_to_inventory("Stone", 1)
 	if _rng.randi_range(1, 100) <= DIG_FOSSIL_CHANCE_PERCENT:
@@ -4825,8 +4927,13 @@ func _is_hall_border_rock_cell(grid: Dictionary, x: int, y: int) -> bool:
 func _building_type_for_cell(cell: Vector2i) -> String:
 	return String(_latest_civic_building_type_map.get(cell, "workshop"))
 
-func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: String, house_decor_overrides: Dictionary) -> String:
-	return DwarfHoldTileService.pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, _latest_civic_building_type_map, CIVIC_BUILDING_TYPES, _rng, _door_cells)
+## Takes the caller's rng (a per-level seeded one from _render_city) so
+## revisits re-deal the exact same decor instead of rerolling loot spots.
+func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: String, house_decor_overrides: Dictionary, rng: RandomNumberGenerator) -> String:
+	## Per-cell seed: the roll for a cell must never depend on how many other
+	## cells rolled before it (render bounds grow as wild chunks stream in).
+	rng.seed = _world_seed_hash ^ hash("decor|%d|%d|%d" % [_hold_state.current_level_index, x, y])
+	return DwarfHoldTileService.pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, _latest_civic_building_type_map, CIVIC_BUILDING_TYPES, rng, _door_cells)
 
 
 func _update_summary(grid: Dictionary, seed_text: String) -> void:

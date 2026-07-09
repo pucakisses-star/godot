@@ -102,6 +102,10 @@ var _coins_label: Label
 var _trade_shop_cell := Vector2i(2147483647, 2147483647)
 var _crate_armed := ""
 var _trade_shop_type := ""
+## The real-world cell the walk-away leash measures while a trade popup is
+## open; traveler stocks anchor at a synthetic far-away cell, so the leash
+## needs the trader's actual spot (sentinel = fall back to the shop anchor).
+var _trade_leash_cell := Vector2i(2147483647, 2147483647)
 var _shop_stocks: Dictionary = {}
 var _active_speech_bubble: PanelContainer
 var _escape_menu: EscapeMenu
@@ -1278,7 +1282,8 @@ func _catch_fish() -> void:
 
 func _end_fishing(message: String) -> void:
 	var bobber := _fishing_state.get("bobber") as Sprite2D
-	if bobber != null:
+	# A level rebuild may already have freed the bobber with the actor layer.
+	if bobber != null and is_instance_valid(bobber):
 		bobber.queue_free()
 	_fishing_state = {}
 	if not message.is_empty():
@@ -1411,6 +1416,10 @@ func _close_out_of_range_popups() -> void:
 	if chest_popup == null or not chest_popup.visible:
 		return
 	var anchor := _trade_shop_cell if _is_trade_mode() else _selected_chest_cell
+	# Traveler trades key their stock to a synthetic far-away anchor; leash
+	# against the recorded real-world cell instead whenever one is set.
+	if _is_trade_mode() and _trade_leash_cell.x != 2147483647:
+		anchor = _trade_leash_cell
 	if anchor.x == 2147483647:
 		return
 	var span := _player_cell - anchor
@@ -1930,6 +1939,10 @@ func _show_level(target_level_index: int) -> void:
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
 	_chest_inventories.clear()
+	# Shop stocks are keyed by anchor cell; a reseed must roll fresh shelves
+	# instead of serving the old town's (possibly depleted) stock on a
+	# colliding anchor.
+	_shop_stocks.clear()
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
 	_spawn_surface_landmarks()
@@ -2604,7 +2617,13 @@ func _spawn_farm_animals() -> void:
 		if old_sprite != null:
 			old_sprite.queue_free()
 	_farm_animals.clear()
-	if actor_layer == null or _wild_mode or _town_theme == "desert":
+	if actor_layer == null:
+		return
+	# Owned animals are the player's property, not town dressing: restore
+	# them first so wild and desert scenes (where crates still release)
+	# keep them across rebuilds instead of losing them to the next persist.
+	_restore_owned_animals()
+	if _wild_mode or _town_theme == "desert":
 		return
 	# Penned animals first: every farmstead pen gets its own little herd.
 	for pen_index in range(_farm_pens.size()):
@@ -2618,7 +2637,6 @@ func _spawn_farm_animals() -> void:
 		for _animal_index in range(animal_count):
 			var cell := _green_cells[_rng.randi_range(0, _green_cells.size() - 1)]
 			_spawn_farm_animal_at(cell, -1)
-	_restore_owned_animals()
 
 func _spawn_farm_animal_at(cell: Vector2i, pen_index: int) -> void:
 	var def := FARM_ANIMAL_DEFS[_rng.randi_range(0, FARM_ANIMAL_DEFS.size() - 1)] as Dictionary
@@ -2779,6 +2797,8 @@ func _open_trade_popup(cell: Vector2i, shop_type: String) -> void:
 		_shop_stocks[anchor] = SettlementEconomyService.generate_shop_stock(shop_type, stock_rng)
 	_selected_chest_cell = Vector2i(2147483647, 2147483647)
 	_trade_shop_cell = anchor
+	# The leash measures from the clicked counter tile, not the stock anchor.
+	_trade_leash_cell = cell
 	_trade_shop_type = shop_type
 	chest_popup.visible = true
 	chest_popup_title.text = "Trade — %s" % _display_name_for_building_type(shop_type)
@@ -2856,6 +2876,7 @@ func _on_backpack_slot_gui_input(event: InputEvent, slot_index: int) -> void:
 
 func _end_trade_mode() -> void:
 	_trade_shop_cell = Vector2i(2147483647, 2147483647)
+	_trade_leash_cell = Vector2i(2147483647, 2147483647)
 	_trade_shop_type = ""
 
 func _npc_state_at_cell(cell: Vector2i) -> Dictionary:
@@ -3144,6 +3165,13 @@ func _update_city_layer_transform() -> void:
 
 func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_player_sprite = null
+	# The respawn below frees the old player sprite and with it the boat and
+	# mount children; drop the stale refs and flags so nothing touches a
+	# freed instance and an open-sea embark can raise a fresh boat after.
+	_boat_sprite = null
+	_mount_sprite = null
+	_player_boating = false
+	_player_mounted = false
 	_player_control_enabled = true
 	_player_move_path.clear()
 	_player_is_moving = false
@@ -3662,6 +3690,9 @@ func _setup_surface_world(grid: Dictionary) -> void:
 			child.queue_free()
 	_surface_anchor_cells.clear()
 	_surface_arrival_lock = false
+	# The rebuild frees the actor layer's children, bobber included; drop
+	# the fishing state so no frame ever touches the freed sprite again.
+	_fishing_state = {}
 	_clear_caravan_job()
 	for creature: Dictionary in _surface_creatures:
 		var creature_sprite := creature.get("sprite") as Sprite2D
@@ -4793,7 +4824,8 @@ func _set_boating(boating: bool) -> void:
 	GameAudioService.play_sfx(self, "splash")
 	if boating and _player_mounted:
 		_toggle_mount()
-	if _boat_sprite == null and _player_sprite != null:
+	# A level rebuild can free the sprite under us; treat a dead ref as absent.
+	if not is_instance_valid(_boat_sprite) and _player_sprite != null:
 		_boat_sprite = Sprite2D.new()
 		_boat_sprite.texture = BOAT_SPRITE_TEXTURE
 		_boat_sprite.position = Vector2(0.0, 4.0)
@@ -4801,7 +4833,7 @@ func _set_boating(boating: bool) -> void:
 		_boat_sprite.show_behind_parent = true
 		_boat_sprite.scale = Vector2.ONE
 		_player_sprite.add_child(_boat_sprite)
-	if _boat_sprite != null:
+	if is_instance_valid(_boat_sprite):
 		_boat_sprite.visible = boating
 	if boating:
 		_set_save_status("You push the coracle out onto the water.", Color(0.7, 0.82, 0.95, 1.0))
@@ -4834,7 +4866,8 @@ func _toggle_mount() -> void:
 		return
 	_player_mounted = not _player_mounted
 	GameAudioService.play_sfx(self, "mount")
-	if _mount_sprite == null and _player_sprite != null:
+	# A level rebuild can free the sprite under us; treat a dead ref as absent.
+	if not is_instance_valid(_mount_sprite) and _player_sprite != null:
 		var pig_texture := load("res://resources/images/webgame_tiles/Farm/Tiled_files/Pig_animation.png") as Texture2D
 		if pig_texture != null:
 			_mount_sprite = Sprite2D.new()
@@ -4845,7 +4878,7 @@ func _toggle_mount() -> void:
 			_mount_sprite.show_behind_parent = true
 			_mount_sprite.scale = Vector2.ONE
 			_player_sprite.add_child(_mount_sprite)
-	if _mount_sprite != null:
+	if is_instance_valid(_mount_sprite):
 		_mount_sprite.visible = _player_mounted
 	if _player_mounted:
 		_set_save_status("You swing into the saddle — the sow trots off eagerly.", Color(0.85, 0.8, 0.7, 1.0))
@@ -4923,8 +4956,9 @@ func _try_place_town_build(cell: Vector2i) -> bool:
 	return true
 
 func _stamp_player_build(cell: Vector2i, tile_key: String) -> void:
+	# Ground under a build follows the biome swap (snow/sand), never raw grass.
 	if city_layer.get_cell_source_id(cell) < 0:
-		_place_tile(city_layer, cell, "grass")
+		_place_tile(city_layer, cell, _wall_ground_fill_tile())
 	if _build_kind_for_tile(tile_key) == "base":
 		_place_tile(city_layer, cell, tile_key)
 		decor_layer.erase_cell(cell)
@@ -4937,7 +4971,9 @@ func _remove_player_build(cell: Vector2i) -> void:
 	_player_built_cells.erase(cell)
 	_wall_damage.erase(cell)
 	if _build_kind_for_tile(tile_key) == "base":
-		_place_tile(city_layer, cell, "grass")
+		# Repaint the biome's own ground so snow and desert homesteads don't
+		# get a bright green patch where a build once stood.
+		_place_tile(city_layer, cell, _wall_ground_fill_tile())
 	else:
 		decor_layer.erase_cell(cell)
 	_actor_passable_cache.erase(cell)
@@ -5253,6 +5289,9 @@ func _try_open_traveler_trade(state: Dictionary) -> bool:
 		_shop_stocks[anchor] = SettlementEconomyService.generate_shop_stock(stock_type, stock_rng)
 	_selected_chest_cell = Vector2i(2147483647, 2147483647)
 	_trade_shop_cell = anchor
+	# The leash measures from where the traveler stands, not the synthetic
+	# far-away stock anchor, so a single step can't slam the popup shut.
+	_trade_leash_cell = state.get("cell", _player_cell) as Vector2i
 	_trade_shop_type = stock_type
 	chest_popup.visible = true
 	chest_popup_title.text = "Trade — %s" % String(state.get("npc_name", "A traveler"))

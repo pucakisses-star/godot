@@ -719,7 +719,9 @@ func _fraction_to_index(fraction: float, count: int) -> int:
 	return clampi(int(fraction * float(count)), 0, count - 1)
 
 func _current_dwarf_layers() -> Dictionary:
-	var beardless := beard_style != null and is_equal_approx(beard_style.value, beard_style.max_value)
+	## Females never carry a beard, mirroring the painted-portrait path
+	## which nulls the beard layer when female is selected.
+	var beardless := _is_female or (beard_style != null and is_equal_approx(beard_style.value, beard_style.max_value))
 	var hair_index := int(hair_style.value) if hair_style != null else 0
 	var beard_index := int(beard_style.value) if beard_style != null else 0
 	return {
@@ -894,6 +896,8 @@ func _set_gender(is_female: bool) -> void:
 	_is_female = is_female
 	_update_gender_button_selection_visuals()
 	_update_beard_style_availability()
+	## Recompose the pixel preview so the beard change shows immediately.
+	_refresh_dwarf_preview()
 	character_name.text = _generate_full_name()
 	_update_attribute_reminders()
 

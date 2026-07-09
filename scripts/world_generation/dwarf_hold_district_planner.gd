@@ -97,8 +97,12 @@ static func generate_city_level(
 		var center := district.get("center", Vector2i.ZERO) as Vector2i
 		labels.append({"name": String(district.get("name", "")), "center": center})
 		var radius := int(district.get("radius", 10))
-		for y in range(center.y - radius - 2, center.y + radius + 3):
-			for x in range(center.x - radius - 2, center.x + radius + 3):
+		## Tag out to the same inflated reach _fill_district places structures
+		## (radius * 1.35 + 2, plus the stamp's +2 slack) so the outer ring of
+		## a district is never left untagged for hostile spawns.
+		var tag_radius := roundi(float(radius) * 1.35) + 4
+		for y in range(center.y - tag_radius, center.y + tag_radius + 1):
+			for x in range(center.x - tag_radius, center.x + tag_radius + 1):
 				var cell := Vector2i(x, y)
 				if grid.has(cell) and not district_cell_map.has(cell):
 					district_cell_map[cell] = String(district.get("name", ""))

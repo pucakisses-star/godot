@@ -1,5 +1,9 @@
 extends RefCounted
 
+## Rivers live in the tile's overlay_flags bitfield, not a "river" key;
+## mirrors overworld_map.gd:212.
+const TILE_OVERLAY_RIVER := 1 << 2
+
 ## Sorts candidate dictionaries by descending score without a per-compare
 ## lambda: pack (-score, index) pairs, native-sort, rebuild in order.
 static func sort_candidates_by_score(candidates: Array[Dictionary]) -> Array[Dictionary]:
@@ -25,7 +29,7 @@ static func build_wizard_tower_candidates(tile_data: Dictionary, biome_map: Dict
 	var candidates: Array[Dictionary] = []
 	for coord: Vector2i in tile_data.keys():
 		var tile_info := tile_data.get(coord, {}) as Dictionary
-		if occupied_set.has(coord) or bool(tile_info.get("river", false)): continue
+		if occupied_set.has(coord) or (int(tile_info.get("overlay_flags", 0)) & TILE_OVERLAY_RIVER) != 0: continue
 		var base_biome := String(tile_info.get("base_biome", biome_map.get(coord, biomes.get("grassland", "grassland")))).to_lower()
 		if base_biome != String(biomes.get("grassland", "grassland")) and base_biome != String(biomes.get("tundra", "tundra")): continue
 		if not String(tile_info.get("overlay", "")).strip_edges().is_empty(): continue
@@ -44,7 +48,7 @@ static func build_camp_candidates(tile_data: Dictionary, biome_map: Dictionary, 
 	var candidates: Array[Dictionary] = []
 	for coord: Vector2i in tile_data.keys():
 		var tile_info := tile_data.get(coord, {}) as Dictionary
-		if occupied_set.has(coord) or bool(tile_info.get("river", false)): continue
+		if occupied_set.has(coord) or (int(tile_info.get("overlay_flags", 0)) & TILE_OVERLAY_RIVER) != 0: continue
 		var base_biome := String(tile_info.get("base_biome", biome_map.get(coord, biomes.get("grassland", "grassland")))).to_lower()
 		if base_biome == String(biomes.get("water", "water")) or base_biome == String(biomes.get("mountain", "mountain")): continue
 		if String(tile_info.get("overlay", "")).to_lower().contains("mountain"): continue
@@ -63,7 +67,7 @@ static func build_cave_and_dungeon_candidates(tile_data: Dictionary, biome_map: 
 	var dungeons: Array[Dictionary] = []
 	for coord: Vector2i in tile_data.keys():
 		var tile_info := tile_data.get(coord, {}) as Dictionary
-		if occupied_set.has(coord) or bool(tile_info.get("river", false)): continue
+		if occupied_set.has(coord) or (int(tile_info.get("overlay_flags", 0)) & TILE_OVERLAY_RIVER) != 0: continue
 		var base_biome := String(tile_info.get("base_biome", biome_map.get(coord, biomes.get("grassland", "grassland")))).to_lower()
 		var overlay := String(tile_info.get("overlay", "")).to_lower()
 		var height_value := float(height_map.get(coord, 0.0))

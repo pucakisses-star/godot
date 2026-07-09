@@ -35,6 +35,13 @@ static func store_journey_context(settings: Dictionary, site: Dictionary) -> voi
 	var tile := site_tile(site)
 	match String(site.get("class", "")):
 		"town":
+			# A real settlement is never a wild embark: clear any stale wild
+			# flags left by an earlier open-tile journey (the overworld's
+			# Begin Journey does the same) so the scene builds a city, and
+			# carry the village flag when the site records one.
+			settings["town_scene_is_wild"] = false
+			settings["town_scene_wild_water"] = false
+			settings["town_scene_is_village"] = bool(site.get("is_hamlet", false)) or bool(site.get("is_snow_village", false))
 			settings["town_scene_seed"] = String(site.get("seed", ""))
 			settings["town_scene_tile"] = {"x": tile.x, "y": tile.y}
 			settings["town_scene_name"] = String(site.get("name", ""))

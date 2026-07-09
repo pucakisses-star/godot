@@ -127,7 +127,10 @@ static func _coerce_map_size_key(raw_settings: Dictionary, merged_settings: Dict
 static func _normalize_chronology(chronology: Dictionary) -> Dictionary:
 	var defaults: Dictionary = DEFAULT_WORLD_SETTINGS["chronology"] as Dictionary
 	var year := int(chronology.get("year", defaults["year"]))
-	if year <= 0:
+	## Year 0 is a legitimate embark roll (dawn of history); a missing
+	## key already falls back to the default above, so only reject
+	## negative years here.
+	if year < 0:
 		year = int(defaults["year"])
 
 	var raw_age: Variant = chronology.get("age", defaults["age"])
