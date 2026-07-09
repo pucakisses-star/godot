@@ -450,7 +450,9 @@ const ITEM_DEFS := {
 	"Egg": {"icon": 34, "sheet": 4, "flavor": "Still warm from the nest."},
 	"Truffle": {"icon": 35, "sheet": 4, "flavor": "The sow found it. The sow gets a cut."},
 	"Milk Pail": {"icon": 36, "sheet": 4, "flavor": "Fresh from a very patient cow."},
-	"Garden Stew": {"icon": 39, "sheet": 4, "flavor": "Everything the field gave, simmered soft."},
+	## Sheet 1's stew pot (same art as Hearty Stew) — sheet 4's slot 39 is the
+	## Chicken Crate, which this entry wrongly pointed at.
+	"Garden Stew": {"icon": 39, "flavor": "Everything the field gave, simmered soft."},
 	"Chicken Crate": {"icon": 39, "sheet": 4, "flavor": "It clucks. Release near your homestead."},
 	"Piglet Crate": {"icon": 40, "sheet": 4, "flavor": "It squeals. Release near your homestead."},
 	"Calf Crate": {"icon": 41, "sheet": 4, "flavor": "It lows. Release near your homestead."}
