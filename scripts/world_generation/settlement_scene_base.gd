@@ -17,11 +17,18 @@ const CELL_BUILDING := 3
 
 const CELL_PLAZA := 4
 
+## Interior partition wall inside a multi-room structure. 5 is taken by
+## the dwarfhold's CELL_WATER, so partitions claim 6. Walls always render
+## as stone (impassable, light-blocking) and split a building's zone into
+## per-room components so each room is furnished as its own space.
+const CELL_WALL := 6
+
 const ZONE_OVERLAY_COLORS := {
 	CELL_HALL: Color(0.27, 0.58, 0.90, 0.35),
 	CELL_HOUSE: Color(0.84, 0.72, 0.24, 0.35),
 	CELL_BUILDING: Color(0.61, 0.35, 0.88, 0.35),
-	CELL_PLAZA: Color(0.18, 0.74, 0.66, 0.35)
+	CELL_PLAZA: Color(0.18, 0.74, 0.66, 0.35),
+	CELL_WALL: Color(0.45, 0.45, 0.5, 0.45)
 }
 
 @export var tile_size := Vector2i(32, 32)

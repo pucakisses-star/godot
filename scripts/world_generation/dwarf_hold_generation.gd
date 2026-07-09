@@ -231,7 +231,8 @@ const ZONE_LEGEND_ORDER := [
 	{"tile": CELL_HALL, "name": "Hall"},
 	{"tile": CELL_HOUSE, "name": "House"},
 	{"tile": CELL_BUILDING, "name": "Building"},
-	{"tile": CELL_PLAZA, "name": "Plaza"}
+	{"tile": CELL_PLAZA, "name": "Plaza"},
+	{"tile": CELL_WALL, "name": "Wall"}
 ]
 
 const BUILDING_SUBTYPE_FLAVOR := {
@@ -1656,9 +1657,11 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 
 
 	_ensure_walkable_connectivity(grid)
-	var level_door_cells := _compute_single_doors(grid)
-	_ensure_door_connectivity(grid, level_door_cells)
-	_ensure_walkable_connectivity(grid)
+	## Multi-room interiors replace the old one-door-per-rectangle pass:
+	## large plots get partition walls, internal doors forming a spanning
+	## tree, street-facing exterior doors, and per-room role tags. Unusable
+	## sub-2x2 nooks are demolished back into open hall.
+	var level_door_cells := _plan_building_interiors(grid)
 	var civic_buildings_by_id := _compute_civic_buildings_by_id(grid)
 	var civic_building_type_map := _build_civic_building_type_lookup(civic_buildings_by_id)
 	var zone_counts := _count_zone_components(grid)
@@ -1667,6 +1670,10 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	if is_additional_layer:
 		starmetal_cells = DepthStrataService.stamp_stratum_features(grid, floor_decor, stratum, _rng)
 	var stair_cells := _pick_level_stair_cells(grid, level_index, level_count)
+	## The non-negotiable pass: at the tile-passability level (the same
+	## rules movement uses), every walkable cell must reach every other.
+	## Runs after stratum features and stairs so nothing re-fragments it.
+	_repair_level_connectivity(grid, level_door_cells, stair_cells, level_index)
 	return {
 		"grid": grid,
 		"door_cells": level_door_cells,
@@ -1681,6 +1688,506 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 		"stair_cells": stair_cells,
 		"starmetal_cells": starmetal_cells
 	}
+
+## --- Multi-room building interiors -----------------------------------------
+## Post-pass over every stamped structure: demolish sub-2x2 nooks, BSP-split
+## larger plots into 2-5 rooms with CELL_WALL partition lines, punch internal
+## doors so the room graph is a spanning tree from the entrance, punch 1-2
+## exterior doors on walls that face a hall or plaza, and retag each room
+## with a role (taproom + kitchen + bedrooms; shopfront + workroom; ...).
+
+## Back rooms behind a shopfront, in the order they're dealt from the
+## entrance inward. "bedroom" re-zones the room to CELL_HOUSE so it gets a
+## bed tile, house furnishing, and a slot in the NPC sleep schedule.
+const ROOM_BACK_ROLES := {
+	"tavern": ["kitchen", "bedroom", "bedroom", "bedroom"],
+	"brewery": ["kitchen", "storage_warehouse", "bedroom"],
+	"bakery": ["kitchen", "storage_warehouse", "bedroom"],
+	"kitchen": ["granary", "storage_warehouse", "bedroom"],
+	"butchery": ["storage_warehouse", "kitchen"],
+	"millhouse": ["granary", "storage_warehouse"],
+	"granary": ["storage_warehouse", "granary"],
+	"forge": ["workshop", "armory", "storage_warehouse"],
+	"smeltery": ["workshop", "storage_warehouse"],
+	"armory": ["workshop", "storage_warehouse"],
+	"weapon_shop": ["workshop", "storage_warehouse"],
+	"armor_shop": ["workshop", "storage_warehouse"],
+	"engineering_workshop": ["workshop", "storage_warehouse"],
+	"engineers_foundry": ["workshop", "storage_warehouse"],
+	"workshop": ["storage_warehouse", "workshop"],
+	"cooperage": ["workshop", "storage_warehouse"],
+	"temple": ["archives", "bedroom"],
+	"archives": ["enchanting_study", "bedroom"],
+	"guild_hall": ["archives", "bedroom"],
+	"merchants_counting_house": ["storage_warehouse", "bedroom"],
+	"auction_house": ["storage_warehouse", "bedroom"],
+	"bank_vaults": ["storage_warehouse", "guild_hall"],
+	"gemcutters_studio": ["workshop", "bedroom"],
+	"tailoring_shop": ["workshop", "bedroom"],
+	"barber_shop": ["bedroom", "storage_warehouse"],
+	"enchanting_study": ["archives", "bedroom"],
+	"infirmary": ["bedroom", "bedroom", "kitchen"],
+	"general_goods_shop": ["storage_warehouse", "bedroom"],
+	"trade_supply_store": ["storage_warehouse", "storage_warehouse"],
+	"high_kings_palace": ["guild_hall", "bedroom", "bedroom", "bank_vaults"]
+}
+
+## Buildings that read as one open work floor and never subdivide.
+const OPEN_PLAN_BUILDING_TYPES := ["mushroom_farm"]
+
+func _plan_building_interiors(grid: Dictionary) -> Dictionary:
+	var door_cells: Dictionary = {}
+	for component_info: Dictionary in _collect_structure_components(grid):
+		var zone := int(component_info.get("zone", CELL_HOUSE))
+		var bbox := component_info.get("bbox", Rect2i()) as Rect2i
+		var cells := component_info.get("cells", []) as Array
+		## A gross span under 4 leaves less than a 2x2 interior inside the
+		## wall ring: unusable, so it goes back to open hall.
+		if bbox.size.x < 4 or bbox.size.y < 4:
+			_demolish_structure(grid, cells)
+			continue
+		var is_rect := bbox.size.x * bbox.size.y == cells.size()
+		var rooms: Array[Rect2i] = [Rect2i(bbox.position + Vector2i.ONE, bbox.size - Vector2i(2, 2))]
+		if is_rect and not _is_open_plan_structure(zone, cells):
+			rooms = _subdivide_structure(grid, bbox)
+		_punch_internal_doors(grid, rooms, zone, door_cells)
+		var entrances := _punch_exterior_doors(grid, bbox, zone, door_cells)
+		_assign_room_roles(grid, rooms, zone, cells, entrances)
+	return door_cells
+
+func _collect_structure_components(grid: Dictionary) -> Array[Dictionary]:
+	var visited: Dictionary = {}
+	var components: Array[Dictionary] = []
+	for key_variant: Variant in grid.keys():
+		var start_cell := key_variant as Vector2i
+		if visited.has(start_cell):
+			continue
+		var zone := int(grid.get(start_cell, CELL_ROCK))
+		if zone != CELL_HOUSE and zone != CELL_BUILDING:
+			continue
+		var queue: Array[Vector2i] = [start_cell]
+		visited[start_cell] = true
+		var component: Array[Vector2i] = []
+		var lo := start_cell
+		var hi := start_cell
+		var head := 0
+		while head < queue.size():
+			var current: Vector2i = queue[head]
+			head += 1
+			component.append(current)
+			lo = Vector2i(mini(lo.x, current.x), mini(lo.y, current.y))
+			hi = Vector2i(maxi(hi.x, current.x), maxi(hi.y, current.y))
+			for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+				var neighbor: Vector2i = current + direction
+				if visited.has(neighbor):
+					continue
+				if int(grid.get(neighbor, CELL_ROCK)) != zone:
+					continue
+				visited[neighbor] = true
+				queue.append(neighbor)
+		components.append({
+			"zone": zone,
+			"cells": component,
+			"bbox": Rect2i(lo, hi - lo + Vector2i.ONE)
+		})
+	return components
+
+func _is_open_plan_structure(zone: int, cells: Array) -> bool:
+	if zone != CELL_BUILDING or cells.is_empty():
+		return false
+	var building_type := String(_latest_civic_building_type_map.get(cells[0] as Vector2i, ""))
+	return OPEN_PLAN_BUILDING_TYPES.has(building_type)
+
+func _demolish_structure(grid: Dictionary, cells: Array) -> void:
+	for cell_variant: Variant in cells:
+		var cell := cell_variant as Vector2i
+		grid[cell] = CELL_HALL
+		_latest_civic_building_type_map.erase(cell)
+		_latest_residence_type_map.erase(cell)
+
+## BSP split of the plot's interior: each cut stamps a full CELL_WALL line
+## across the room (including the bounding wall rows, so the wall ring is
+## severed and each room becomes its own zone component). Every resulting
+## room keeps an interior of at least 2x2.
+func _subdivide_structure(grid: Dictionary, bbox: Rect2i) -> Array[Rect2i]:
+	var interior := Rect2i(bbox.position + Vector2i.ONE, bbox.size - Vector2i(2, 2))
+	var rooms: Array[Rect2i] = [interior]
+	var target_rooms := clampi(1 + (interior.size.x * interior.size.y) / 14, 1, 5)
+	var guard := 0
+	while rooms.size() < target_rooms and guard < 16:
+		guard += 1
+		var best_index := -1
+		var best_area := 0
+		for room_index in range(rooms.size()):
+			var candidate_room := rooms[room_index]
+			## Splittable when one axis fits floor(2) + wall(1) + floor(2).
+			if candidate_room.size.x < 5 and candidate_room.size.y < 5:
+				continue
+			var area := candidate_room.size.x * candidate_room.size.y
+			if area > best_area:
+				best_area = area
+				best_index = room_index
+		if best_index < 0:
+			break
+		var room := rooms[best_index]
+		var split_vertical := room.size.x >= room.size.y
+		if room.size.x < 5:
+			split_vertical = false
+		elif room.size.y < 5:
+			split_vertical = true
+		if split_vertical:
+			var cut_x := _rng.randi_range(room.position.x + 2, room.end.x - 3)
+			for wall_y in range(room.position.y - 1, room.end.y + 1):
+				grid[Vector2i(cut_x, wall_y)] = CELL_WALL
+			rooms[best_index] = Rect2i(room.position, Vector2i(cut_x - room.position.x, room.size.y))
+			rooms.append(Rect2i(Vector2i(cut_x + 1, room.position.y), Vector2i(room.end.x - cut_x - 1, room.size.y)))
+		else:
+			var cut_y := _rng.randi_range(room.position.y + 2, room.end.y - 3)
+			for wall_x in range(room.position.x - 1, room.end.x + 1):
+				grid[Vector2i(wall_x, cut_y)] = CELL_WALL
+			rooms[best_index] = Rect2i(room.position, Vector2i(room.size.x, cut_y - room.position.y))
+			rooms.append(Rect2i(Vector2i(room.position.x, cut_y + 1), Vector2i(room.size.x, room.end.y - cut_y - 1)))
+	return rooms
+
+## One door per spanning-tree edge of the room adjacency graph: every room
+## is reachable from every other without leaving the building.
+func _punch_internal_doors(grid: Dictionary, rooms: Array[Rect2i], zone: int, door_cells: Dictionary) -> void:
+	if rooms.size() <= 1:
+		return
+	var edges: Array[Dictionary] = []
+	for a_index in range(rooms.size()):
+		for b_index in range(a_index + 1, rooms.size()):
+			var candidates := _shared_wall_door_candidates(grid, rooms[a_index], rooms[b_index], zone)
+			if not candidates.is_empty():
+				edges.append({"room_a": a_index, "room_b": b_index, "candidates": candidates})
+	var connected: Dictionary = {0: true}
+	var grew := true
+	while grew:
+		grew = false
+		for edge: Dictionary in edges:
+			var room_a := int(edge.get("room_a", 0))
+			var room_b := int(edge.get("room_b", 0))
+			if connected.has(room_a) == connected.has(room_b):
+				continue
+			var candidates := edge.get("candidates", []) as Array
+			var pick := candidates[_rng.randi_range(0, candidates.size() - 1)] as Vector2i
+			door_cells[pick] = true
+			connected[room_a] = true
+			connected[room_b] = true
+			grew = true
+
+## Partition cells between two rooms that have room floor on both sides —
+## the only spots where a punched door actually joins the two interiors.
+func _shared_wall_door_candidates(grid: Dictionary, room_a: Rect2i, room_b: Rect2i, zone: int) -> Array[Vector2i]:
+	var candidates: Array[Vector2i] = []
+	var left_room := room_a if room_a.position.x < room_b.position.x else room_b
+	var right_room := room_b if left_room == room_a else room_a
+	if right_room.position.x == left_room.end.x + 1:
+		var wall_x := left_room.end.x
+		for y in range(maxi(room_a.position.y, room_b.position.y), mini(room_a.end.y, room_b.end.y)):
+			var wall_cell := Vector2i(wall_x, y)
+			if int(grid.get(wall_cell, CELL_ROCK)) != CELL_WALL:
+				continue
+			if int(grid.get(wall_cell + Vector2i.LEFT, CELL_ROCK)) != zone:
+				continue
+			if int(grid.get(wall_cell + Vector2i.RIGHT, CELL_ROCK)) != zone:
+				continue
+			candidates.append(wall_cell)
+		return candidates
+	var top_room := room_a if room_a.position.y < room_b.position.y else room_b
+	var bottom_room := room_b if top_room == room_a else room_a
+	if bottom_room.position.y == top_room.end.y + 1:
+		var wall_y := top_room.end.y
+		for x in range(maxi(room_a.position.x, room_b.position.x), mini(room_a.end.x, room_b.end.x)):
+			var wall_cell := Vector2i(x, wall_y)
+			if int(grid.get(wall_cell, CELL_ROCK)) != CELL_WALL:
+				continue
+			if int(grid.get(wall_cell + Vector2i.UP, CELL_ROCK)) != zone:
+				continue
+			if int(grid.get(wall_cell + Vector2i.DOWN, CELL_ROCK)) != zone:
+				continue
+			candidates.append(wall_cell)
+	return candidates
+
+## 1-2 exterior doors on non-corner ring cells whose outward neighbor is a
+## street (hall/plaza) and whose inward neighbor is room floor. A building
+## carved flush against rock gets a one-cell stoop dug out instead, which
+## the connectivity repair then ties into the hall network.
+func _punch_exterior_doors(grid: Dictionary, bbox: Rect2i, zone: int, door_cells: Dictionary) -> Array[Vector2i]:
+	var street_candidates: Array[Dictionary] = []
+	var rock_candidates: Array[Dictionary] = []
+	var perimeter: Array[Dictionary] = []
+	for x in range(bbox.position.x + 1, bbox.end.x - 1):
+		perimeter.append({"cell": Vector2i(x, bbox.position.y), "inward": Vector2i.DOWN})
+		perimeter.append({"cell": Vector2i(x, bbox.end.y - 1), "inward": Vector2i.UP})
+	for y in range(bbox.position.y + 1, bbox.end.y - 1):
+		perimeter.append({"cell": Vector2i(bbox.position.x, y), "inward": Vector2i.RIGHT})
+		perimeter.append({"cell": Vector2i(bbox.end.x - 1, y), "inward": Vector2i.LEFT})
+	for entry: Dictionary in perimeter:
+		var ring_cell := entry.get("cell", Vector2i.ZERO) as Vector2i
+		var inward := entry.get("inward", Vector2i.DOWN) as Vector2i
+		if int(grid.get(ring_cell, CELL_ROCK)) != zone:
+			continue
+		if int(grid.get(ring_cell + inward, CELL_ROCK)) != zone:
+			continue
+		var outward_zone := int(grid.get(ring_cell - inward, CELL_ROCK))
+		if outward_zone == CELL_HALL or outward_zone == CELL_PLAZA:
+			street_candidates.append(entry)
+		elif outward_zone == CELL_ROCK:
+			rock_candidates.append(entry)
+	var doors: Array[Vector2i] = []
+	if not street_candidates.is_empty():
+		var first := street_candidates[_rng.randi_range(0, street_candidates.size() - 1)]
+		var first_cell := first.get("cell", Vector2i.ZERO) as Vector2i
+		door_cells[first_cell] = true
+		doors.append(first_cell)
+		## Big plots earn a second entrance on a stretch of wall far from
+		## the first, so long buildings don't funnel everyone one way.
+		if bbox.size.x * bbox.size.y >= 60 and street_candidates.size() > 1:
+			var far_options: Array[Vector2i] = []
+			for candidate: Dictionary in street_candidates:
+				var candidate_cell := candidate.get("cell", Vector2i.ZERO) as Vector2i
+				if maxi(absi(candidate_cell.x - first_cell.x), absi(candidate_cell.y - first_cell.y)) >= 4:
+					far_options.append(candidate_cell)
+			if not far_options.is_empty():
+				var second_cell := far_options[_rng.randi_range(0, far_options.size() - 1)]
+				door_cells[second_cell] = true
+				doors.append(second_cell)
+	elif not rock_candidates.is_empty():
+		var pick := rock_candidates[_rng.randi_range(0, rock_candidates.size() - 1)]
+		var pick_cell := pick.get("cell", Vector2i.ZERO) as Vector2i
+		var inward := pick.get("inward", Vector2i.DOWN) as Vector2i
+		grid[pick_cell - inward] = CELL_HALL
+		door_cells[pick_cell] = true
+		doors.append(pick_cell)
+	return doors
+
+## Deals roles from the entrance inward: the entrance room keeps the
+## building's own trade, back rooms take the type's ROOM_BACK_ROLES.
+## Dormitories and barracks turn their entrance room into a common room.
+func _assign_room_roles(grid: Dictionary, rooms: Array[Rect2i], zone: int, cells: Array, entrances: Array[Vector2i]) -> void:
+	if rooms.size() <= 1 or cells.is_empty():
+		return
+	var entrance_index := 0
+	for entrance_cell: Vector2i in entrances:
+		var found := false
+		for room_index in range(rooms.size()):
+			## The entrance's inward floor cell is inside exactly one room;
+			## grow(1) folds the ring cell itself into the containing room.
+			if Rect2i(rooms[room_index].position - Vector2i.ONE, rooms[room_index].size + Vector2i(2, 2)).has_point(entrance_cell):
+				entrance_index = room_index
+				found = true
+				break
+		if found:
+			break
+	var ordered: Array[Rect2i] = [rooms[entrance_index]]
+	var remaining: Array[Rect2i] = []
+	for room_index in range(rooms.size()):
+		if room_index != entrance_index:
+			remaining.append(rooms[room_index])
+	var entrance_center := rooms[entrance_index].get_center()
+	remaining.sort_custom(func(rect_a: Rect2i, rect_b: Rect2i) -> bool:
+		var da := absi(rect_a.get_center().x - entrance_center.x) + absi(rect_a.get_center().y - entrance_center.y)
+		var db := absi(rect_b.get_center().x - entrance_center.x) + absi(rect_b.get_center().y - entrance_center.y)
+		if da == db:
+			return rect_a.position < rect_b.position
+		return da < db
+	)
+	ordered.append_array(remaining)
+	if zone == CELL_HOUSE:
+		var residence_type := String(_latest_residence_type_map.get(cells[0] as Vector2i, "house"))
+		if residence_type == "dormitory" or residence_type == "barracks":
+			## Bunk halls keep their bed rows; the entrance room becomes the
+			## shared common room (table, chest, hearth-side clutter).
+			_retag_room_cells(grid, ordered[0], _latest_residence_type_map, "house")
+		return
+	var building_type := String(_latest_civic_building_type_map.get(cells[0] as Vector2i, "workshop"))
+	var back_roles := ROOM_BACK_ROLES.get(building_type, ["storage_warehouse"]) as Array
+	for order_index in range(1, ordered.size()):
+		var role := String(back_roles[mini(order_index - 1, back_roles.size() - 1)])
+		if role == "bedroom":
+			_convert_room_to_house(grid, ordered[order_index])
+		else:
+			_retag_room_cells(grid, ordered[order_index], _latest_civic_building_type_map, role)
+
+## Tags a room's gross rect (floor plus its stretch of wall ring) in the
+## given type map. Shared partition cells may be tagged by either side —
+## they render as plain wall, so the tie doesn't matter.
+func _retag_room_cells(grid: Dictionary, room: Rect2i, type_map: Dictionary, type_name: String) -> void:
+	var gross := Rect2i(room.position - Vector2i.ONE, room.size + Vector2i(2, 2))
+	for y in range(gross.position.y, gross.end.y):
+		for x in range(gross.position.x, gross.end.x):
+			var cell := Vector2i(x, y)
+			if type_map.has(cell):
+				type_map[cell] = type_name
+
+## An inn bedroom or an infirmary ward is a house room in all but name:
+## re-zoning to CELL_HOUSE buys the bed tile, the house furnishing
+## templates, and a slot in the NPC sleep rotation for free.
+func _convert_room_to_house(grid: Dictionary, room: Rect2i) -> void:
+	var gross := Rect2i(room.position - Vector2i.ONE, room.size + Vector2i(2, 2))
+	for y in range(gross.position.y, gross.end.y):
+		for x in range(gross.position.x, gross.end.x):
+			var cell := Vector2i(x, y)
+			if int(grid.get(cell, CELL_ROCK)) == CELL_BUILDING:
+				grid[cell] = CELL_HOUSE
+			_latest_civic_building_type_map.erase(cell)
+			_latest_residence_type_map[cell] = "house"
+
+## --- Level-wide connectivity guarantee -------------------------------------
+## Flood-fills the level at TILE passability (the same wall/floor/door rules
+## rendering and movement use — zone flood fills lie, because a building's
+## wall ring shares the zone of its floor). While more than one component
+## exists, bridge each pocket to the root along the cheapest wall-crossing
+## path: walls become doors, rock becomes a short hall tunnel.
+
+func _is_generation_passable(grid: Dictionary, door_cells: Dictionary, cell: Vector2i) -> bool:
+	var zone := int(grid.get(cell, CELL_ROCK))
+	match zone:
+		CELL_HALL, CELL_PLAZA:
+			return true
+		CELL_WALL:
+			return door_cells.has(cell)
+		CELL_HOUSE, CELL_BUILDING:
+			return DwarfHoldTileService.wall_or_floor_tile(grid, cell.x, cell.y, zone, door_cells) != "stone"
+		_:
+			return false
+
+func _repair_level_connectivity(grid: Dictionary, door_cells: Dictionary, stair_cells: Dictionary, level_index: int) -> void:
+	var repairs_made := 0
+	## One bridge sweep normally connects everything; extra sweeps verify
+	## and mop up interactions between freshly punched openings.
+	for _sweep in range(4):
+		var components := _collect_passable_components(grid, door_cells)
+		if components.size() <= 1:
+			break
+		var root_index := _pick_root_component(components, stair_cells)
+		repairs_made += _bridge_components(grid, door_cells, components, root_index)
+	if repairs_made > 20:
+		print("DwarfHold connectivity: level %d needed %d repairs — layout generator produced a badly fragmented map" % [level_index, repairs_made])
+
+func _collect_passable_components(grid: Dictionary, door_cells: Dictionary) -> Array[Array]:
+	var components: Array[Array] = []
+	var visited: Dictionary = {}
+	for key_variant: Variant in grid.keys():
+		var origin := key_variant as Vector2i
+		if visited.has(origin):
+			continue
+		if not _is_generation_passable(grid, door_cells, origin):
+			continue
+		var queue: Array[Vector2i] = [origin]
+		visited[origin] = true
+		var component: Array[Vector2i] = []
+		var head := 0
+		while head < queue.size():
+			var current: Vector2i = queue[head]
+			head += 1
+			component.append(current)
+			for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+				var neighbor: Vector2i = current + direction
+				if visited.has(neighbor):
+					continue
+				if not _is_generation_passable(grid, door_cells, neighbor):
+					continue
+				visited[neighbor] = true
+				queue.append(neighbor)
+		components.append(component)
+	return components
+
+func _pick_root_component(components: Array[Array], stair_cells: Dictionary) -> int:
+	var stair_lookup: Dictionary = {}
+	for stair_variant: Variant in stair_cells.values():
+		stair_lookup[stair_variant as Vector2i] = true
+	var largest_index := 0
+	var largest_size := 0
+	for component_index in range(components.size()):
+		var component := components[component_index]
+		for cell_variant: Variant in component:
+			if stair_lookup.has(cell_variant as Vector2i):
+				## The stairs are where the player arrives: everything must
+				## be reachable from here specifically.
+				return component_index
+		if component.size() > largest_size:
+			largest_size = component.size()
+			largest_index = component_index
+	return largest_index
+
+## 0-1 BFS from the whole root component: passable steps cost 0, blocked
+## cells cost 1 (they can be opened). The first time each pocket is reached
+## its path is minimal, so we open the fewest walls/rock cells possible.
+func _bridge_components(grid: Dictionary, door_cells: Dictionary, components: Array[Array], root_index: int) -> int:
+	var component_of_cell: Dictionary = {}
+	for component_index in range(components.size()):
+		if component_index == root_index:
+			continue
+		for cell_variant: Variant in components[component_index]:
+			component_of_cell[cell_variant as Vector2i] = component_index
+	var bounds := _find_bounds(grid).grow(2)
+	var dist: Dictionary = {}
+	var prev: Dictionary = {}
+	var current_layer: Array[Vector2i] = []
+	for cell_variant: Variant in components[root_index]:
+		var root_cell := cell_variant as Vector2i
+		dist[root_cell] = 0
+		current_layer.append(root_cell)
+	var unreached := components.size() - 1
+	var bridged := 0
+	var layer_distance := 0
+	var bridge_targets: Array[Vector2i] = []
+	while not current_layer.is_empty() and unreached > 0:
+		var next_layer: Array[Vector2i] = []
+		var head := 0
+		while head < current_layer.size():
+			var current: Vector2i = current_layer[head]
+			head += 1
+			if int(dist.get(current, -1)) != layer_distance:
+				continue
+			if component_of_cell.has(current):
+				## First touch of a pocket: remember the entry cell, retire
+				## the whole pocket so we don't bridge it twice.
+				var touched := int(component_of_cell[current])
+				bridge_targets.append(current)
+				for cell_variant: Variant in components[touched]:
+					component_of_cell.erase(cell_variant as Vector2i)
+				unreached -= 1
+				if unreached <= 0:
+					break
+			for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+				var neighbor: Vector2i = current + direction
+				if not bounds.has_point(neighbor):
+					continue
+				var step_cost := 0 if _is_generation_passable(grid, door_cells, neighbor) else 1
+				var next_distance := layer_distance + step_cost
+				if dist.has(neighbor) and int(dist[neighbor]) <= next_distance:
+					continue
+				dist[neighbor] = next_distance
+				prev[neighbor] = current
+				if step_cost == 0:
+					current_layer.append(neighbor)
+				else:
+					next_layer.append(neighbor)
+		current_layer = next_layer
+		layer_distance += 1
+	for target: Vector2i in bridge_targets:
+		_open_bridge_path(grid, door_cells, prev, target)
+		bridged += 1
+	return bridged
+
+## Walks the predecessor chain back to the root, opening every blocked cell
+## on the way: structure walls and partitions become doors (they stay
+## light-blocking stone elsewhere), anything else becomes hall floor.
+func _open_bridge_path(grid: Dictionary, door_cells: Dictionary, prev: Dictionary, target: Vector2i) -> void:
+	var cursor := target
+	var guard := 0
+	while prev.has(cursor) and guard < 4096:
+		guard += 1
+		if not _is_generation_passable(grid, door_cells, cursor):
+			var zone := int(grid.get(cursor, CELL_ROCK))
+			if zone == CELL_HOUSE or zone == CELL_BUILDING or zone == CELL_WALL:
+				door_cells[cursor] = true
+			else:
+				grid[cursor] = CELL_HALL
+		cursor = prev[cursor] as Vector2i
 
 func _show_level(target_level_index: int) -> void:
 	if _hold_state.generated_levels.is_empty():
@@ -4838,7 +5345,9 @@ func _is_walkable_cell(cell: Vector2i) -> bool:
 	if _furnishing_blocked_cells.has(cell):
 		return false
 	var zone := int(_latest_grid.get(cell, CELL_ROCK))
-	if zone != CELL_HALL and zone != CELL_HOUSE and zone != CELL_BUILDING and zone != CELL_PLAZA:
+	## CELL_WALL is walkable only where a door tile was punched through the
+	## partition; the atlas check below sorts door from stone.
+	if zone != CELL_HALL and zone != CELL_HOUSE and zone != CELL_BUILDING and zone != CELL_PLAZA and zone != CELL_WALL:
 		return false
 	return _is_passable_cell_for_actor(cell)
 
@@ -4867,7 +5376,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 		var component: Array[Vector2i] = []
 		for cell_variant: Variant in (component_variant as Array):
 			component.append(cell_variant as Vector2i)
-		var placements: Array[Dictionary] = RoomFurnishingService.plan_house_furnishing(component, is_occupied, _door_cells, _rng)
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_house_furnishing(component, is_occupied, _door_cells, _rng, grid)
 		_apply_furnishing_placements(placements)
 	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_BUILDING):
 		var component: Array[Vector2i] = []
@@ -4876,7 +5385,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 		if component.is_empty():
 			continue
 		var building_type := String(_latest_civic_building_type_map.get(component[0], ""))
-		var placements: Array[Dictionary] = RoomFurnishingService.plan_shop_dressing(component, building_type, is_occupied, _door_cells, _rng)
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_shop_dressing(component, building_type, is_occupied, _door_cells, _rng, grid)
 		_apply_furnishing_placements(placements)
 
 func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:

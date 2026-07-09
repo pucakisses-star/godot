@@ -16,8 +16,11 @@ const CELL_HOUSE := 2
 const CELL_BUILDING := 3
 const CELL_PLAZA := 4
 
+## Footprints are half-extents (gross span = 2*radius+1): a (2,2) house is
+## a 5x5 plot with a 3x3 room; anything (3,2) and up is big enough for the
+## interior planner to split into multiple rooms.
 const RESIDENCE_TYPES := {
-	"house": {"weight": 0.62, "radius_min": Vector2i(2, 2), "radius_max": Vector2i(3, 3)},
+	"house": {"weight": 0.62, "radius_min": Vector2i(2, 2), "radius_max": Vector2i(4, 3)},
 	"dormitory": {"weight": 0.24, "radius_min": Vector2i(3, 3), "radius_max": Vector2i(5, 4)},
 	"barracks": {"weight": 0.14, "radius_min": Vector2i(3, 3), "radius_max": Vector2i(4, 4)}
 }
@@ -228,9 +231,11 @@ static func _plan_districts(rng: RandomNumberGenerator, total_npc_target: int, b
 
 static func _radius_for_district(kind: String, beds: int, scale: float) -> int:
 	var recipe_size := (DISTRICT_BUILDING_RECIPES.get(kind, []) as Array).size()
-	var estimated_area := float(recipe_size) * 46.0 + float(beds) * 9.5
+	## Civic plots grew to ~9x7 gross for multi-room interiors, and homes
+	## to ~7x5, so each recipe slot and each bed budgets more floor.
+	var estimated_area := float(recipe_size) * 66.0 + float(beds) * 11.0
 	var radius := roundi(sqrt(maxf(estimated_area, 60.0) / PI) * 1.55)
-	return clampi(roundi(float(radius) * clampf(scale, 0.9, 1.5)), 8, 26)
+	return clampi(roundi(float(radius) * clampf(scale, 0.9, 1.5)), 8, 28)
 
 static func _district_by_id(districts: Array[Dictionary], id: String) -> Dictionary:
 	for district: Dictionary in districts:
@@ -369,7 +374,9 @@ static func _fill_district(grid: Dictionary, district: Dictionary, building_type
 		recipe.append("workshop" if kind == "anvil_quarter" else "general_goods_shop")
 	for building_type_variant: Variant in recipe:
 		var building_type := String(building_type_variant)
-		var footprint := Vector2i(rng.randi_range(2, 3), rng.randi_range(2, 3))
+		## Civic plots run 7x5 up to 11x9 gross so the interior planner can
+		## subdivide them into a shopfront plus back rooms.
+		var footprint := Vector2i(rng.randi_range(3, 5), rng.randi_range(2, 4))
 		if building_type == "temple":
 			footprint = Vector2i(4, 3)
 		if building_type == "mushroom_farm":
@@ -407,13 +414,18 @@ static func _fill_district(grid: Dictionary, district: Dictionary, building_type
 	# blocks with narrow alleys instead of sparse caverns.
 	if kind == "common_quarter" or kind == "noble_quarter" or kind == "anvil_quarter" or kind == "great_hall":
 		var wants_building := kind == "anvil_quarter" or kind == "great_hall"
-		# Multiple passes with shrinking footprints: big homes first, then
-		# narrow row-houses and single-room nooks squeezed into the gaps,
-		# so districts pack wall-to-wall like true city blocks.
-		var densify_footprints: Array[Vector2i] = [Vector2i(2, 2), Vector2i(2, 1), Vector2i(1, 2), Vector2i(1, 1)]
+		# Two passes with shrinking footprints: two-room row houses first,
+		# then proper small homes squeezed into the gaps. Nothing smaller
+		# than a 5x5 plot (3x3 room) is ever stamped — the old 1x1/2x1
+		# nooks produced unusable single-tile interiors.
+		var densify_footprints: Array[Vector2i] = [Vector2i(3, 2), Vector2i(2, 2)]
 		for footprint in densify_footprints:
-			for scan_y in range(center.y - radius, center.y + radius + 1, 2):
-				for scan_x in range(center.x - radius, center.x + radius + 1, 2):
+			## The final 5x5-house pass walks every cell: with the tiny
+			## nook footprints gone, a coarser scan leaves conspicuous
+			## bald patches between plots.
+			var scan_step := 2 if footprint.x > 2 else 1
+			for scan_y in range(center.y - radius, center.y + radius + 1, scan_step):
+				for scan_x in range(center.x - radius, center.x + radius + 1, scan_step):
 					var candidate := Vector2i(scan_x + rng.randi_range(-1, 1), scan_y + rng.randi_range(-1, 1))
 					if wants_building and rng.randf() < 0.6:
 						if _stamp_structure(grid, candidate, footprint, CELL_BUILDING, radius, center):
@@ -422,7 +434,7 @@ static func _fill_district(grid: Dictionary, district: Dictionary, building_type
 					else:
 						if _stamp_structure(grid, candidate, footprint, CELL_HOUSE, radius, center):
 							var residence_kind := "house"
-							if footprint == Vector2i(2, 2) and rng.randf() < 0.4:
+							if footprint.x >= 3 and rng.randf() < 0.4:
 								residence_kind = "dormitory"
 							_record_footprint(residence_type_map, candidate, footprint, residence_kind)
 
