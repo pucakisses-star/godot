@@ -4950,11 +4950,19 @@ func _try_chop_tree(cell: Vector2i) -> bool:
 	var atlas_coords := decor_layer.get_cell_atlas_coords(cell)
 	if atlas_coords != (TILE_ATLAS.get("tree") as Vector2i) and atlas_coords != (TILE_ATLAS.get("tree_dark") as Vector2i):
 		return false
+	# Grab the tree's art before it is cleared so the break FX can topple a
+	# ghost of it; the tree leans away from the player as it falls.
+	var art := TileBreakFxService.tile_art(decor_layer, cell)
 	decor_layer.erase_cell(cell)
 	_actor_passable_cache.erase(cell)
 	_add_to_inventory("Timber", 2)
 	GameAudioService.play_sfx(self, "harvest")
-	_spawn_floating_text("+2 Timber", _cell_center_position(cell), Color(0.8, 0.95, 0.7, 1.0))
+	var fell_position := _cell_center_position(cell)
+	var lean_sign := 1.0 if cell.x >= _player_cell.x else -1.0
+	if not art.is_empty():
+		TileBreakFxService.topple_ghost(city_layer, fell_position, art["texture"] as Texture2D, art["region"] as Rect2, lean_sign)
+	TileBreakFxService.chip_burst(city_layer, fell_position, Color(0.36, 0.55, 0.22, 1.0), 14)
+	_spawn_floating_text("+2 Timber", fell_position, Color(0.8, 0.95, 0.7, 1.0))
 	_set_save_status("You fell the tree — the wilds grow them back in time.", Color(0.75, 0.92, 0.7, 1.0))
 	return true
 
