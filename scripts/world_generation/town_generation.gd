@@ -1917,6 +1917,9 @@ func _show_level(target_level_index: int) -> void:
 	var grid := level_data.get("grid", {}) as Dictionary
 	_door_cells = level_data.get("door_cells", {}) as Dictionary
 	_latest_grid = grid
+	# The actor layer (with any dropped-item sprites) is rebuilt below; drop
+	# the stale ground-item entries so they can't re-grant items later.
+	_clear_ground_items()
 	_setup_surface_world(grid)
 	_latest_zone_counts = level_data.get("zone_counts", {}) as Dictionary
 	_latest_requested_zone_counts = level_data.get("requested_zone_counts", {}) as Dictionary
@@ -4484,6 +4487,16 @@ func _drop_item_to_ground(item_name: String, count: int) -> bool:
 	_ground_items.append({"sprite": sprite, "cell": drop_cell, "item": item_name, "count": count, "armed": _player_cell != drop_cell})
 	_set_save_status("Dropped %s ×%d" % [item_name, count], Color(0.85, 0.85, 0.7, 1.0))
 	return true
+
+## Frees dropped-item sprites and empties the list, so a level/scene rebuild
+## can't leave stale entries that re-grant items when the player stands on a
+## matching cell afterward.
+func _clear_ground_items() -> void:
+	for entry: Dictionary in _ground_items:
+		var sprite := entry.get("sprite") as Sprite2D
+		if sprite != null and is_instance_valid(sprite):
+			sprite.queue_free()
+	_ground_items.clear()
 
 func _update_ground_items(_delta: float) -> void:
 	if _ground_items.is_empty() or _player_sprite == null:
