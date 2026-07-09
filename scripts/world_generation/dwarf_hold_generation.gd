@@ -359,6 +359,58 @@ const ROLE_TITLES := {
 	ROLE_GOLDSMITH: "Goldsmith"
 }
 
+## One human trade title per civic building type: the profession a dwarf
+## posted there by the building-first staffing pass wears on their
+## inspection card. Covers every CIVIC_BUILDING_TYPES key — including the
+## types _assign_room_roles deals to back rooms (kitchen, granary, ...),
+## which are civic types themselves. Bedrooms re-zone to CELL_HOUSE and
+## leave the civic map entirely, so they never reach staffing.
+const PROFESSION_BY_BUILDING := {
+	"high_kings_palace": "Steward of the Hall",
+	"forge": "Smith",
+	"engineering_workshop": "Engineer",
+	"leatherworking_shop": "Leatherworker",
+	"tailoring_shop": "Tailor",
+	"enchanting_study": "Enchanter",
+	"alchemy_laboratory": "Alchemist",
+	"auction_house": "Auctioneer",
+	"general_goods_shop": "Shopkeeper",
+	"weapon_shop": "Weaponsmith",
+	"armor_shop": "Armorer",
+	"trade_supply_store": "Outfitter",
+	"bank_vaults": "Vaultwarden",
+	"tavern": "Tavernkeeper",
+	"barber_shop": "Barber",
+	"guild_hall": "Guildmaster",
+	"storage_warehouse": "Warehouse Keeper",
+	"brewery": "Brewer",
+	"granary": "Granary Keeper",
+	"armory": "Quartermaster",
+	"workshop": "Artisan",
+	"kitchen": "Cook",
+	"barracks": "Drillmaster",
+	"temple": "Priest",
+	"mushroom_farm": "Mushroom Farmer",
+	"archives": "Archivist",
+	"infirmary": "Healer",
+	"miners_guild": "Mine Overseer",
+	"mason_lodge": "Mason",
+	"engineers_foundry": "Foundry Master",
+	"gemcutters_studio": "Gemcutter",
+	"runesmith_sanctum": "Runesmith",
+	"smeltery": "Smelter",
+	"cartographers_office": "Cartographer",
+	"explorers_guild": "Pathfinder",
+	"merchants_counting_house": "Merchant",
+	"butchery": "Butcher",
+	"bakery": "Baker",
+	"cooperage": "Cooper",
+	"tannery": "Tanner",
+	"millhouse": "Miller",
+	"cobblers_shop": "Cobbler",
+	"ropemakers_hall": "Ropemaker"
+}
+
 const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
 const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
 
@@ -2943,6 +2995,11 @@ func _assign_npc_daily_lives(grid: Dictionary) -> void:
 			{"role": ROLE_HOLD_ELDER, "count": maxi(1, npc_count / 12)}
 		]
 	})
+	## Role quotas cover the classic trades but leave any building type
+	## outside every role's workplace list (barber shop, tannery, ...)
+	## forever empty; the building-first pass guarantees each civic
+	## building at least one worker before anyone takes their post.
+	_staff_civic_buildings()
 	# Start every dwarf where the current shift already puts them.
 	for state: Dictionary in _npc_states:
 		var sprite := state.get("sprite") as Sprite2D
@@ -2955,6 +3012,244 @@ func _assign_npc_daily_lives(grid: Dictionary) -> void:
 			state["cell"] = anchor
 			state["target"] = sprite.position
 		DwarfHoldTavernService.update_character_frame(sprite, int(state.get("slot", 0)), 1, 0)
+
+## --- Building-first staffing ------------------------------------------------
+## assign_daily_lives staffs by role quota, so a generated building whose
+## type no role prefers never sees a worker. This pass flips the direction:
+## every civic building instance gets at least one resident whose work
+## anchor lies inside it, titled by the building's trade ("Barber" for the
+## barber shop). Rooms of a multi-room building are grouped through their
+## punched partition doors so a tavern with a kitchen and cellar counts as
+## ONE workplace staffed for its front-room type.
+
+## Room types _assign_room_roles deals to back rooms. Used to spot which
+## room of a grouped building still wears the building's own trade (the
+## entrance room is never retagged).
+const STAFFING_BACK_ROOM_TYPES := {
+	"kitchen": true, "storage_warehouse": true, "granary": true,
+	"workshop": true, "armory": true, "archives": true,
+	"enchanting_study": true, "guild_hall": true, "bank_vaults": true
+}
+
+func _staff_civic_buildings() -> void:
+	if _npc_states.is_empty() or _latest_civic_buildings_by_id.is_empty():
+		return
+	var room_ids: Array[String] = []
+	for room_id_variant: Variant in _latest_civic_buildings_by_id.keys():
+		room_ids.append(String(room_id_variant))
+	## Sorted ids everywhere: staffing must never depend on Dictionary
+	## iteration order, only on the seeded rng, so a seed replays exactly.
+	room_ids.sort()
+	var room_of_cell: Dictionary = {}
+	for room_id: String in room_ids:
+		var payload := _latest_civic_buildings_by_id[room_id] as Dictionary
+		for cell_variant: Variant in (payload.get("cells", []) as Array):
+			room_of_cell[cell_variant as Vector2i] = room_id
+	var groups := _group_rooms_into_buildings(room_ids, room_of_cell)
+	var group_keys: Array[String] = []
+	var group_of_room: Dictionary = {}
+	for group_key_variant: Variant in groups.keys():
+		var group_key := String(group_key_variant)
+		group_keys.append(group_key)
+		for member_variant: Variant in (groups[group_key] as Array):
+			group_of_room[String(member_variant)] = group_key
+	group_keys.sort()
+	## Who already works where: role-preferred anchors handed out by the
+	## scheduler count as staff, so a forge that drew a smith needs no
+	## second hire. Guards patrol; their work anchor is not a workplace.
+	var workers_by_group: Dictionary = {}
+	var group_of_npc: Array[String] = []
+	group_of_npc.resize(_npc_states.size())
+	for npc_index in _npc_states.size():
+		group_of_npc[npc_index] = ""
+		var state := _npc_states[npc_index]
+		if bool(state.get("is_guard", false)):
+			continue
+		var anchor := state.get("work_anchor", Vector2i(2147483647, 2147483647)) as Vector2i
+		var anchor_room := String(room_of_cell.get(anchor, ""))
+		if anchor_room.is_empty():
+			continue
+		var anchor_group := String(group_of_room.get(anchor_room, ""))
+		if anchor_group.is_empty():
+			continue
+		if not workers_by_group.has(anchor_group):
+			workers_by_group[anchor_group] = []
+		(workers_by_group[anchor_group] as Array).append(npc_index)
+		group_of_npc[npc_index] = anchor_group
+	var staffed_buildings := 0
+	var shortfall := 0
+	var unstaffable := 0
+	for group_key: String in group_keys:
+		var rooms := groups[group_key] as Array
+		var front_room_id := _pick_front_room(rooms)
+		var front_payload := _latest_civic_buildings_by_id[front_room_id] as Dictionary
+		var building_type := String(front_payload.get("type", "workshop"))
+		var profession := String(PROFESSION_BY_BUILDING.get(building_type, "Artisan"))
+		var existing := workers_by_group.get(group_key, []) as Array
+		if not existing.is_empty():
+			## Already staffed: the first-listed worker keeps the shop and
+			## takes the trade's title; workmates keep their role titles.
+			var keeper := _npc_states[int(existing[0])]
+			keeper["staffed_building_type"] = building_type
+			keeper["staffed_profession"] = profession
+			staffed_buildings += 1
+			continue
+		var work_cells := _walkable_building_cells(rooms, front_room_id)
+		if work_cells.is_empty():
+			## Dressing left no floor to stand on: not a workplace at all.
+			unstaffable += 1
+			continue
+		var candidate_index := _pick_staffing_candidate(building_type, workers_by_group, group_of_npc)
+		if candidate_index < 0:
+			shortfall += 1
+			continue
+		var old_group := group_of_npc[candidate_index]
+		if not old_group.is_empty():
+			(workers_by_group[old_group] as Array).erase(candidate_index)
+		var state := _npc_states[candidate_index]
+		state["work_anchor"] = work_cells[_rng.randi_range(0, work_cells.size() - 1)]
+		state["staffed_building_type"] = building_type
+		state["staffed_profession"] = profession
+		workers_by_group[group_key] = [candidate_index]
+		group_of_npc[candidate_index] = group_key
+		staffed_buildings += 1
+	print("[%s] civic staffing: %d buildings, %d staffed, %d shortfall, %d unstaffable" % [
+		name, group_keys.size(), staffed_buildings, shortfall, unstaffable])
+
+## Union-find over room components: two rooms belong to one physical
+## building when a punched internal door (a CELL_WALL partition cell with
+## room floor on both sides) joins them. Exterior doors sit on ring cells
+## inside a single component and union nothing. Doors into converted
+## bedrooms see CELL_HOUSE on one side, which is in no civic room either.
+func _group_rooms_into_buildings(room_ids: Array[String], room_of_cell: Dictionary) -> Dictionary:
+	var parent: Dictionary = {}
+	for room_id: String in room_ids:
+		parent[room_id] = room_id
+	for door_variant: Variant in _door_cells.keys():
+		var door_cell := door_variant as Vector2i
+		if int(_latest_grid.get(door_cell, CELL_ROCK)) != CELL_WALL:
+			continue
+		_union_door_sides(parent, room_of_cell, door_cell, Vector2i.LEFT, Vector2i.RIGHT)
+		_union_door_sides(parent, room_of_cell, door_cell, Vector2i.UP, Vector2i.DOWN)
+	var groups: Dictionary = {}
+	for room_id: String in room_ids:
+		var root := _find_room_root(parent, room_id)
+		if not groups.has(root):
+			groups[root] = []
+		(groups[root] as Array).append(room_id)
+	return groups
+
+func _union_door_sides(parent: Dictionary, room_of_cell: Dictionary, door_cell: Vector2i, side_a: Vector2i, side_b: Vector2i) -> void:
+	var room_a := String(room_of_cell.get(door_cell + side_a, ""))
+	var room_b := String(room_of_cell.get(door_cell + side_b, ""))
+	if room_a.is_empty() or room_b.is_empty() or room_a == room_b:
+		return
+	var root_a := _find_room_root(parent, room_a)
+	var root_b := _find_room_root(parent, room_b)
+	if root_a == root_b:
+		return
+	## The lower id becomes the root so group identity is independent of
+	## the order unions arrive in.
+	if root_b < root_a:
+		var swap := root_a
+		root_a = root_b
+		root_b = swap
+	parent[root_b] = root_a
+
+func _find_room_root(parent: Dictionary, room_id: String) -> String:
+	var current := room_id
+	var hop := String(parent.get(current, current))
+	while hop != current:
+		current = hop
+		hop = String(parent.get(current, current))
+	return current
+
+## The room that still wears the building's own trade. _assign_room_roles
+## keeps the entrance room's original type and retags the rest with back
+## roles, so prefer an exterior-door room whose type is not a dealt back
+## role; ties resolve to the first room in sorted-id order.
+func _pick_front_room(rooms: Array) -> String:
+	var best_id := String(rooms[0])
+	var best_score := 5
+	for room_variant: Variant in rooms:
+		var room_id := String(room_variant)
+		var payload := _latest_civic_buildings_by_id[room_id] as Dictionary
+		var is_back: bool = STAFFING_BACK_ROOM_TYPES.has(String(payload.get("type", "")))
+		var has_door := false
+		for cell_variant: Variant in (payload.get("cells", []) as Array):
+			if _door_cells.has(cell_variant as Vector2i):
+				has_door = true
+				break
+		var score := 3
+		if has_door and not is_back:
+			score = 0
+		elif not is_back:
+			score = 1
+		elif has_door:
+			score = 2
+		if score < best_score:
+			best_score = score
+			best_id = room_id
+	return best_id
+
+## Standable floor inside the building, front room first so the keeper
+## works the shopfront rather than the cellar. Sorted before the rng draw
+## so the seeded roll is the only source of variation.
+func _walkable_building_cells(rooms: Array, front_room_id: String) -> Array[Vector2i]:
+	var ordered_rooms: Array[String] = [front_room_id]
+	for room_variant: Variant in rooms:
+		var room_id := String(room_variant)
+		if room_id != front_room_id:
+			ordered_rooms.append(room_id)
+	for room_id: String in ordered_rooms:
+		var payload := _latest_civic_buildings_by_id[room_id] as Dictionary
+		var walkable: Array[Vector2i] = []
+		for cell_variant: Variant in (payload.get("cells", []) as Array):
+			var cell := cell_variant as Vector2i
+			if _is_walkable_cell(cell):
+				walkable.append(cell)
+		if not walkable.is_empty():
+			walkable.sort()
+			return walkable
+	return []
+
+## Best unhired dwarf for a vacant building: a role that already lists the
+## trade, then the filler roles, then anyone who isn't a guard or a Hold
+## Elder — guards must patrol and elders hold a quota, so neither is
+## conscripted into shopkeeping (elders still staff their own preferred
+## types through the role-match tiers, which leaves their role intact).
+## Within each pair of tiers the idle (street-anchored) hire first;
+## pulling a workmate is allowed only when it leaves the old workplace
+## still staffed. Dwarfs already titled as keepers are never re-hired.
+func _pick_staffing_candidate(building_type: String, workers_by_group: Dictionary, group_of_npc: Array[String]) -> int:
+	for tier in 6:
+		for npc_index in _npc_states.size():
+			var state := _npc_states[npc_index]
+			if bool(state.get("is_guard", false)):
+				continue
+			if state.has("staffed_building_type"):
+				continue
+			var role := int(state.get("role", 0))
+			var role_matches: bool = (ROLE_WORKPLACES.get(role, []) as Array).has(building_type)
+			var is_filler := role == ROLE_MINER or role == ROLE_DWARF_WOMAN
+			if tier <= 1 and not role_matches:
+				continue
+			if (tier == 2 or tier == 3) and not is_filler:
+				continue
+			if tier >= 4 and role == ROLE_HOLD_ELDER:
+				continue
+			var idle := group_of_npc[npc_index].is_empty()
+			if tier % 2 == 0:
+				if not idle:
+					continue
+			else:
+				if idle:
+					continue
+				var old_workers := workers_by_group.get(group_of_npc[npc_index], []) as Array
+				if old_workers.size() < 2:
+					continue
+			return npc_index
+	return -1
 
 func _stream_world_chunks() -> void:
 	if _world_noise.is_empty() or _player_sprite == null:
@@ -3766,10 +4061,18 @@ func _apply_identity_appearances() -> void:
 		) * float(layers.get("body_scale", 1.0))
 		state["composed"] = true
 
+## The trade on a dwarf's card: a posted keeper wears their building's
+## profession ("Barber"), everyone else their spritesheet role title.
+func _npc_role_title(state: Dictionary) -> String:
+	var staffed_title := String(state.get("staffed_profession", ""))
+	if not staffed_title.is_empty():
+		return staffed_title
+	return String(ROLE_TITLES.get(int(state.get("role", 0)), "Dwarf"))
+
 func _assign_npc_identities() -> void:
 	var used_names: Dictionary = {}
 	for state: Dictionary in _npc_states:
-		var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Dwarf"))
+		var role_title := _npc_role_title(state)
 		var identity: Dictionary = NpcIdentityService.generate(_rng, role_title, "dwarf")
 		# Nobody shares a full name: spouse/parent/faction references are
 		# by name, so collisions would tangle the whole census.
@@ -3843,7 +4146,7 @@ func _update_faction_events() -> void:
 			_set_save_status(line, Color(0.8, 0.75, 0.9, 1.0))
 
 func _show_npc_dialogue(state: Dictionary) -> void:
-	var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Dwarf"))
+	var role_title := _npc_role_title(state)
 	if not state.has("identity"):
 		state["identity"] = NpcIdentityService.generate(_rng, role_title, "dwarf")
 		state["npc_name"] = String((state["identity"] as Dictionary).get("name", "A dwarf"))
@@ -5021,7 +5324,7 @@ func _handle_player_right_click(mouse_position: Vector2) -> bool:
 func _open_npc_inspection(npc_state: Dictionary) -> void:
 	if _npc_inspection_card == null:
 		return
-	var role_title := String(ROLE_TITLES.get(int(npc_state.get("role", 0)), "Dwarf"))
+	var role_title := _npc_role_title(npc_state)
 	if not npc_state.has("identity"):
 		npc_state["identity"] = NpcIdentityService.generate(_rng, role_title, "dwarf")
 		npc_state["npc_name"] = String((npc_state["identity"] as Dictionary).get("name", "A dwarf"))
