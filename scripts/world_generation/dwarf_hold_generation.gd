@@ -78,7 +78,7 @@ var _latest_floor_decor: Dictionary = {}
 var _world_noise: Dictionary = {}
 var _generated_chunks: Dictionary = {}
 var _dug_cells: Dictionary = {}
-var _applied_light_dim := -1.0
+var _applied_darkness := -1.0
 var _last_clock_stamp := -1
 var _restoring_hold_diffs := false
 var _last_player_chunk := Vector2i(2147483647, 2147483647)
@@ -119,7 +119,9 @@ var _player_glow: Sprite2D
 var _glow_texture: Texture2D
 var _torch_texture: Texture2D
 var _bobber_texture: Texture2D
-var _light_dim := 1.0
+## 0 = fully lit (settlement / lighting off), 1 = pitch-dark cave (open
+## wild underground). Lerps as the walker crosses the city boundary.
+var _darkness_strength := 0.0
 var _latest_bed_count := 0
 var _lighting_enabled := true
 var _chest_inventories: Dictionary = {}
@@ -143,12 +145,12 @@ var _latest_requested_zone_counts := {
 	"buildings": 0,
 	"plazas": 0
 }
-var _lighting_mask_image: Image
-var _lighting_mask_texture: ImageTexture
+## Core Keeper-style light-source lighting: a single dark overlay quad on
+## the lighting layer whose shader carves soft radial pools at the player
+## lantern and every torch. No line-of-sight fog, no per-cell mask.
 var _lighting_mask_sprite: Sprite2D
+var _darkness_material: ShaderMaterial
 var _lighting_bounds := Rect2i()
-var _revealed_cells: Dictionary = {}
-var _visible_cells: Dictionary = {}
 var _tavern_character_texture: Texture2D
 var _shattered_player_texture: Texture2D
 var _placeholder_actor_texture: Texture2D
@@ -231,10 +233,46 @@ const MIN_ZOOM := 0.1
 const MAX_ZOOM := 2.5
 const ZOOM_STEP := 0.1
 
-const SHATTERED_VISION_RADIUS := 7
-const SHATTERED_UNSEEN_ALPHA := 1.0
-const SHATTERED_REVEALED_ALPHA := 0.72
-const SHATTERED_VISIBLE_ALPHA := 0.0
+## Light-source lighting. The overlay darkens the open underground to a
+## deep cool black; the player lantern and torches carve warm pools with a
+## smooth radial falloff. Radii are in tiles.
+const DARK_COLOR := Color(0.03, 0.035, 0.055, 0.955)
+const PLAYER_LIGHT_TILES := 7.0
+const TORCH_LIGHT_TILES := 9.0
+## Ceiling on lights fed to the overlay shader in one frame (must match the
+## shader's MAX_LIGHTS). The player lantern always claims one slot.
+const MAX_DYNAMIC_LIGHTS := 64
+## Torches beyond this range never touch what the player can see, so they
+## are culled before filling the light slots.
+const LIGHT_CULL_TILES := 48.0
+const DARKNESS_SHADER_CODE := "shader_type canvas_item;
+
+const int MAX_LIGHTS = 64;
+
+uniform vec2 overlay_origin = vec2(0.0);
+uniform vec2 overlay_size = vec2(1.0);
+uniform vec4 darkness_color : source_color = vec4(0.03, 0.035, 0.055, 0.955);
+uniform float darkness_strength : hint_range(0.0, 1.0) = 0.0;
+uniform int light_count = 0;
+uniform vec2 light_pos[MAX_LIGHTS];
+uniform float light_radius[MAX_LIGHTS];
+
+void fragment() {
+	vec2 world_pos = overlay_origin + UV * overlay_size;
+	float reveal = 0.0;
+	for (int i = 0; i < MAX_LIGHTS; i++) {
+		if (i >= light_count) { break; }
+		float r = light_radius[i];
+		if (r <= 0.0) { continue; }
+		float d = distance(world_pos, light_pos[i]);
+		float s = 1.0 - smoothstep(r * 0.32, r, d);
+		reveal = max(reveal, s);
+	}
+	reveal = clamp(reveal, 0.0, 1.0);
+	float a = darkness_color.a * darkness_strength * (1.0 - reveal);
+	COLOR = vec4(darkness_color.rgb, a);
+}
+"
 
 const CHEST_SLOT_COLUMNS := 8
 const CHEST_SLOT_ROWS := 4
@@ -820,9 +858,23 @@ const CIVIC_BUILDING_TYPES := {
 func _ready() -> void:
 	_apply_cached_dwarfhold_scene_seed()
 	_configure_tile_layer()
+	# The CanvasModulate would tint the whole canvas, including the side UI
+	# panel, so it is left neutral; the dark cave comes from the overlay
+	# quad below, which is clipped to the map view.
 	global_darkness.color = Color(1.0, 1.0, 1.0, 1.0)
+	_darkness_material = ShaderMaterial.new()
+	var darkness_shader := Shader.new()
+	darkness_shader.code = DARKNESS_SHADER_CODE
+	_darkness_material.shader = darkness_shader
+	_darkness_material.set_shader_parameter("darkness_color", DARK_COLOR)
+	_darkness_material.set_shader_parameter("darkness_strength", 0.0)
+	_darkness_material.set_shader_parameter("light_count", 0)
 	_lighting_mask_sprite = Sprite2D.new()
 	_lighting_mask_sprite.centered = false
+	_lighting_mask_sprite.texture = _create_white_texture()
+	_lighting_mask_sprite.material = _darkness_material
+	_lighting_mask_sprite.z_index = 1
+	_lighting_mask_sprite.visible = false
 	lighting_layer.add_child(_lighting_mask_sprite)
 	fog_of_war.visible = false
 	_tavern_character_texture = load(tavern_vehicle_sprite_path) as Texture2D
@@ -890,6 +942,13 @@ func _setup_inventory_label() -> void:
 		controls.move_child(_inventory_label, clock.get_index() + 1)
 	_update_inventory_label()
 
+## A tiny opaque-white texture stretched to cover the map bounds; the
+## darkness shader ignores its pixels and works from UV, so 8x8 is plenty.
+func _create_white_texture() -> Texture2D:
+	var white_image := Image.create(8, 8, false, Image.FORMAT_RGBA8)
+	white_image.fill(Color(1.0, 1.0, 1.0, 1.0))
+	return ImageTexture.create_from_image(white_image)
+
 func _create_glow_texture() -> Texture2D:
 	var glow_size := 128
 	var image := Image.create(glow_size, glow_size, false, Image.FORMAT_RGBA8)
@@ -899,7 +958,7 @@ func _create_glow_texture() -> Texture2D:
 			var distance := Vector2(x + 0.5, y + 0.5).distance_to(center) / (glow_size / 2.0)
 			var strength := clampf(1.0 - distance, 0.0, 1.0)
 			strength = strength * strength
-			image.set_pixel(x, y, Color(1.0, 0.85, 0.6, strength * 0.85))
+			image.set_pixel(x, y, Color(1.0, 0.82, 0.55, strength * 0.55))
 	return ImageTexture.create_from_image(image)
 
 func _create_glow_sprite(tile_span: float) -> Sprite2D:
@@ -929,23 +988,24 @@ func _process(delta: float) -> void:
 ## The city and deep levels stay lit; the wild underground is dark, held
 ## back by the player's lantern glow and any placed torches.
 func _update_wild_darkness(delta: float) -> void:
-	var target := 1.0
-	if not _world_noise.is_empty() and _player_sprite != null and not _latest_district_cell_map.has(_player_cell):
-		target = 0.4
-	_light_dim = lerpf(_light_dim, target, clampf(delta * 3.0, 0.0, 1.0))
-	if absf(_light_dim - target) < 0.002:
-		_light_dim = target
-	# Only touch the layers while the dim level is actually moving.
-	if not is_equal_approx(_light_dim, _applied_light_dim):
-		_applied_light_dim = _light_dim
-		var dim_color := Color(_light_dim, _light_dim, _light_dim, 1.0)
-		city_layer.modulate = dim_color
-		decor_layer.modulate = dim_color
-		actor_layer.modulate = dim_color
+	# Dark only in the open wild: the settlement/districts stay lit, and the
+	# lighting toggle off forces full daylight everywhere.
+	var target := 0.0
+	if _lighting_enabled and not _world_noise.is_empty() and _player_sprite != null and not _latest_district_cell_map.has(_player_cell):
+		target = 1.0
+	_darkness_strength = lerpf(_darkness_strength, target, clampf(delta * 3.0, 0.0, 1.0))
+	if absf(_darkness_strength - target) < 0.002:
+		_darkness_strength = target
+	# Only poke the shader while the darkness level is actually moving.
+	if not is_equal_approx(_darkness_strength, _applied_darkness):
+		_applied_darkness = _darkness_strength
+		if _darkness_material != null:
+			_darkness_material.set_shader_parameter("darkness_strength", _darkness_strength)
 	if _player_glow != null:
-		_player_glow.visible = _light_dim < 0.95 and _player_sprite != null
+		_player_glow.visible = _lighting_enabled and _player_sprite != null and _darkness_strength > 0.05
 		if _player_sprite != null:
 			_player_glow.position = _player_sprite.position
+	_update_light_uniforms()
 	_update_player_turn_movement(delta)
 	_update_npc_movement(delta)
 
@@ -1153,7 +1213,6 @@ func _update_player_turn_movement(delta: float) -> void:
 	# a step, a stall, and another step. Capped at one tile so a lag spike
 	# can never skip the walker across trigger cells unchecked.
 	var budget := minf(PLAYER_MOVE_SPEED * delta, float(tile_size.x))
-	var crossed_tile := false
 	while _player_is_moving and budget > 0.0:
 		var remaining := _player_sprite.position.distance_to(_player_move_target_position)
 		if remaining > budget:
@@ -1163,16 +1222,14 @@ func _update_player_turn_movement(delta: float) -> void:
 		_player_sprite.position = _player_move_target_position
 		_player_cell = _player_move_target_cell
 		_player_is_moving = false
-		crossed_tile = true
 		_close_out_of_range_popups()
 		if _try_use_stairs_at_player_cell():
 			_center_view_on_world_position(_player_sprite.position)
 			return
 		_start_next_player_step()
 	_center_view_on_world_position(_player_sprite.position)
-	if crossed_tile and not _latest_grid.is_empty():
-		_update_shattered_visibility(_latest_grid)
-		_refresh_lighting(_latest_grid)
+	# The lantern pool tracks the player every frame in _update_light_uniforms,
+	# so crossing a tile needs no lighting rebuild.
 	if not _player_is_moving:
 		_finish_idle_interactions()
 
@@ -1654,15 +1711,29 @@ func _update_depth_controls() -> void:
 func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
 	_lighting_enabled = toggled_on
 	_apply_lighting_state()
-	if not _latest_grid.is_empty():
-		_refresh_lighting(_latest_grid)
 
 func _apply_lighting_state() -> void:
-	# The layer stays visible: it carries the player lantern glow and
-	# placed torches. The toggle gates only the fog-of-war mask.
+	# The layer stays visible: it carries the player lantern glow and placed
+	# torches. The toggle gates the darkness overlay and its warm glows, so
+	# off = the whole hold fully lit.
 	lighting_layer.visible = true
 	if _lighting_mask_sprite != null:
 		_lighting_mask_sprite.visible = _lighting_enabled
+	_set_light_glows_visible(_lighting_enabled)
+
+## Warm additive glows ride on top of the revealed pools; hide them when
+## lighting is off so a fully lit hold shows no stray warm blobs.
+func _set_light_glows_visible(glows_on: bool) -> void:
+	if _player_glow != null:
+		_player_glow.visible = glows_on and _player_sprite != null and _darkness_strength > 0.05
+	for torch_variant: Variant in _torch_sprites.values():
+		var torch := torch_variant as Sprite2D
+		if torch == null:
+			continue
+		for child: Node in torch.get_children():
+			var glow := child as Sprite2D
+			if glow != null:
+				glow.visible = glows_on
 
 func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	if city_layer.tile_set == null:
@@ -1707,8 +1778,7 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		decor_layer.erase_cell(stair_cell)
 		_actor_passable_cache.erase(stair_cell)
 	_rebuild_district_labels()
-	_initialize_shattered_lighting(grid)
-	_refresh_lighting(grid)
+	_initialize_darkness_overlay(grid)
 	_reset_view(bounds)
 
 func _rebuild_district_labels() -> void:
@@ -1812,95 +1882,63 @@ func _stair_candidates_for_level(grid: Dictionary) -> Array[Vector2i]:
 	return candidates
 
 
-func _initialize_shattered_lighting(grid: Dictionary) -> void:
-	if grid.is_empty():
-		_lighting_bounds = Rect2i(Vector2i.ZERO, Vector2i.ONE)
-		_revealed_cells.clear()
-		_visible_cells.clear()
-		if _lighting_mask_sprite != null:
-			_lighting_mask_sprite.visible = false
-		return
-
-	# Streamed wilds can stretch the grid arbitrarily far; the fog image
-	# must stay city-sized or one distant discovery balloons it to
-	# gigabytes. Cells beyond the clamp simply go unmasked, exactly like
-	# freshly streamed chunks always have.
-	var lighting_full := _find_bounds(grid).grow(1)
-	if _city_bounds.has_area():
-		lighting_full = lighting_full.intersection(_city_bounds.grow(96))
-	_lighting_bounds = lighting_full
-	var image_size := Vector2i(
-		maxi(_lighting_bounds.size.x * tile_size.x, 1),
-		maxi(_lighting_bounds.size.y * tile_size.y, 1)
-	)
-	_lighting_mask_image = Image.create(image_size.x, image_size.y, false, Image.FORMAT_RGBA8)
-	_lighting_mask_image.fill(Color(0, 0, 0, SHATTERED_UNSEEN_ALPHA))
-	_lighting_mask_texture = ImageTexture.create_from_image(_lighting_mask_image)
-	if _lighting_mask_sprite != null:
-		_lighting_mask_sprite.texture = _lighting_mask_texture
-		_lighting_mask_sprite.position = Vector2(_lighting_bounds.position * tile_size)
-		_lighting_mask_sprite.visible = _lighting_enabled
-	_revealed_cells.clear()
-	_visible_cells.clear()
-	_update_shattered_visibility(grid)
-
-func _refresh_lighting(grid: Dictionary) -> void:
+## Size and place the darkness overlay to cover the map view. It is a
+## single shader quad, so unlike the old fog image it costs nothing to make
+## it large; the darkness level and light pools are driven per frame.
+func _initialize_darkness_overlay(grid: Dictionary) -> void:
 	if _lighting_mask_sprite == null:
 		return
-	if not _lighting_enabled or grid.is_empty() or _lighting_mask_image == null or _lighting_mask_texture == null:
+	if grid.is_empty():
+		_lighting_bounds = Rect2i(Vector2i.ZERO, Vector2i.ONE)
 		_lighting_mask_sprite.visible = false
 		return
-
-	_lighting_mask_sprite.visible = true
-	_lighting_mask_sprite.position = Vector2(_lighting_bounds.position * tile_size)
-	for cell_variant: Variant in grid.keys():
-		var cell := cell_variant as Vector2i
-		var alpha := SHATTERED_UNSEEN_ALPHA
-		if _visible_cells.has(cell):
-			alpha = SHATTERED_VISIBLE_ALPHA
-		elif _revealed_cells.has(cell):
-			alpha = SHATTERED_REVEALED_ALPHA
-		_draw_lighting_alpha_for_cell(cell, alpha)
-
-	_lighting_mask_texture.update(_lighting_mask_image)
-
-func _draw_lighting_alpha_for_cell(cell: Vector2i, alpha: float) -> void:
-	if _lighting_mask_image == null:
-		return
-	var local_cell := cell - _lighting_bounds.position
-	if local_cell.x < 0 or local_cell.y < 0 or local_cell.x >= _lighting_bounds.size.x or local_cell.y >= _lighting_bounds.size.y:
-		return
-	var pixel_origin := Vector2i(local_cell.x * tile_size.x, local_cell.y * tile_size.y)
-	_lighting_mask_image.fill_rect(Rect2i(pixel_origin, tile_size), Color(0, 0, 0, clampf(alpha, 0.0, 1.0)))
-
-func _update_shattered_visibility(grid: Dictionary) -> void:
-	_visible_cells.clear()
-	if grid.is_empty() or _player_sprite == null:
-		return
-
-	for dy in range(-SHATTERED_VISION_RADIUS, SHATTERED_VISION_RADIUS + 1):
-		for dx in range(-SHATTERED_VISION_RADIUS, SHATTERED_VISION_RADIUS + 1):
-			var cell := _player_cell + Vector2i(dx, dy)
-			if not grid.has(cell):
-				continue
-			if Vector2(dx, dy).length() > SHATTERED_VISION_RADIUS + 0.25:
-				continue
-			if not _has_line_of_sight_to_cell(_player_cell, cell):
-				continue
-			_visible_cells[cell] = true
-			_revealed_cells[cell] = true
-
-func _has_line_of_sight_to_cell(from_cell: Vector2i, to_cell: Vector2i) -> bool:
-	return DwarfHoldLightingService.has_line_of_sight_to_cell(
-		from_cell,
-		to_cell,
-		Callable(self, "_is_transparent_lighting_cell")
+	# Track the live grid (city plus the streamed wild around the walker) so
+	# the dark cave follows wherever the dwarf digs. Far chunks are evicted,
+	# so the grid - and this quad - stay bounded.
+	var lighting_full := _find_bounds(grid).grow(6)
+	if _city_bounds.has_area():
+		lighting_full = lighting_full.intersection(_city_bounds.grow(600))
+	_lighting_bounds = lighting_full
+	var origin := Vector2(_lighting_bounds.position * tile_size)
+	var size_px := Vector2(
+		maxf(float(_lighting_bounds.size.x * tile_size.x), 1.0),
+		maxf(float(_lighting_bounds.size.y * tile_size.y), 1.0)
 	)
+	_lighting_mask_sprite.position = origin
+	var texture := _lighting_mask_sprite.texture
+	if texture != null:
+		var tex_size := texture.get_size()
+		if tex_size.x > 0.0 and tex_size.y > 0.0:
+			_lighting_mask_sprite.scale = size_px / tex_size
+	if _darkness_material != null:
+		_darkness_material.set_shader_parameter("overlay_origin", origin)
+		_darkness_material.set_shader_parameter("overlay_size", size_px)
+	_lighting_mask_sprite.visible = _lighting_enabled
+	_update_light_uniforms()
 
-func _is_transparent_lighting_cell(cell: Vector2i) -> bool:
-	if city_layer.get_cell_source_id(cell) < 0:
-		return false
-	return _is_passable_atlas_tile(city_layer.get_cell_atlas_coords(cell))
+## Feed the overlay shader the live light sources: the player lantern first
+## (always lit), then nearby torches, capped to the shader's slot count.
+func _update_light_uniforms() -> void:
+	if _darkness_material == null:
+		return
+	var positions := PackedVector2Array()
+	var radii := PackedFloat32Array()
+	if _player_sprite != null:
+		positions.append(_player_sprite.position)
+		radii.append(PLAYER_LIGHT_TILES * float(tile_size.x))
+	var cull_sq := pow(LIGHT_CULL_TILES * float(tile_size.x), 2.0)
+	for torch_cell_variant: Variant in _torch_sprites.keys():
+		if positions.size() >= MAX_DYNAMIC_LIGHTS:
+			break
+		var torch_cell := torch_cell_variant as Vector2i
+		var torch_position := _cell_center_position(torch_cell)
+		if _player_sprite != null and torch_position.distance_squared_to(_player_sprite.position) > cull_sq:
+			continue
+		positions.append(torch_position)
+		radii.append(TORCH_LIGHT_TILES * float(tile_size.x))
+	_darkness_material.set_shader_parameter("light_count", positions.size())
+	_darkness_material.set_shader_parameter("light_pos", positions)
+	_darkness_material.set_shader_parameter("light_radius", radii)
 
 func _ensure_chest_inventory(cell: Vector2i) -> void:
 	DwarfHoldChestService.ensure_chest_inventory(_chest_inventories, cell, _rng, CHEST_LOOT_TABLE)
@@ -2166,10 +2204,9 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	if not arrived_via_stairs:
 		_relocate_player_to_city_heart(grid)
-	# Lighting was initialized before the player existed; now that the
-	# dwarf stands somewhere, punch their vision into the fog.
-	_update_shattered_visibility(grid)
-	_refresh_lighting(grid)
+	# The lantern pool spawns wherever the dwarf now stands; the per-frame
+	# uniform update carries it from here.
+	_update_light_uniforms()
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
 	_assign_npc_families()
@@ -2215,7 +2252,6 @@ func _relocate_player_to_city_heart(grid: Dictionary) -> void:
 				return
 	if _player_sprite != null:
 		_center_view_on_cell(_player_cell)
-	_refresh_lighting(grid)
 
 func _assign_npc_daily_lives(grid: Dictionary) -> void:
 	if _npc_states.is_empty():
@@ -2277,6 +2313,9 @@ func _stream_world_chunks() -> void:
 	_last_player_chunk = player_chunk
 	_ensure_chunks_around(player_chunk)
 	_evict_far_chunks(player_chunk)
+	# The wild around the walker just changed shape; resize the dark overlay
+	# quad so freshly streamed cavern stays in the dark, not lit through.
+	_initialize_darkness_overlay(_latest_grid)
 
 ## Core Keeper rule: the world only exists near the player. Wild chunks
 ## more than EVICT_CHUNK_RADIUS out are dropped entirely - tiles, grid
@@ -2858,10 +2897,13 @@ func _spawn_torch_at(cell: Vector2i) -> void:
 	torch.position = _cell_center_position(cell)
 	torch.z_index = 14
 	lighting_layer.add_child(torch)
-	var glow := _create_glow_sprite(5.0)
+	var glow := _create_glow_sprite(TORCH_LIGHT_TILES)
 	glow.position = Vector2.ZERO
+	glow.visible = _lighting_enabled
 	torch.add_child(glow)
 	_torch_sprites[cell] = torch
+	# A fresh torch is a new light pool; hand it to the shader at once.
+	_update_light_uniforms()
 
 func _clear_torch_sprites() -> void:
 	for torch_variant: Variant in _torch_sprites.values():
@@ -3263,9 +3305,6 @@ func _try_place_build(cell: Vector2i) -> bool:
 			_dug_cells.erase(cell)
 			_record_hold_edit("grid_edits", cell, CELL_ROCK)
 			_render_world_rect(Rect2i(cell - Vector2i(2, 2), Vector2i(5, 5)))
-			if _lighting_enabled:
-				_update_shattered_visibility(_latest_grid)
-				_refresh_lighting(_latest_grid)
 		"floor":
 			if zone != CELL_HALL:
 				_set_save_status("Paving needs bare cavern floor", Color(0.95, 0.75, 0.45, 1.0))
@@ -4208,9 +4247,6 @@ func _dig_cell(cell: Vector2i) -> void:
 	if not art.is_empty():
 		TileBreakFxService.topple_ghost(city_layer, dig_position, art["texture"] as Texture2D, art["region"] as Rect2, dig_lean)
 	TileBreakFxService.chip_burst(city_layer, dig_position, Color(0.55, 0.53, 0.5, 1.0), 12)
-	if _lighting_enabled:
-		_update_shattered_visibility(_latest_grid)
-		_refresh_lighting(_latest_grid)
 
 func _collect_walkable_cells(grid: Dictionary) -> Array[Vector2i]:
 	return DwarfHoldLayoutService.collect_walkable_cells(grid, [CELL_HALL, CELL_HOUSE, CELL_BUILDING, CELL_PLAZA])
