@@ -155,6 +155,13 @@ var _placeholder_actor_texture: Texture2D
 var _walkable_cells: Array[Vector2i] = []
 var _player_sprite: Sprite2D
 var _player_cell := Vector2i.ZERO
+## The hotbar slot last used (-1 = none): drives the held-item sprite.
+var _selected_hotbar_index := -1
+## Items dropped to the world, each { sprite, cell, item, count }; walking
+## onto a cell scoops it back up.
+var _ground_items: Array[Dictionary] = []
+## Invisible full-rect drop target that turns a slot drag into a world drop.
+var _drop_catcher: Control
 var _player_control_enabled := false
 var _player_move_path: Array[Vector2i] = []
 var _player_is_moving := false
@@ -855,6 +862,7 @@ func _ready() -> void:
 	_update_clock_label()
 	_setup_inventory_screen()
 	_setup_hotbar()
+	_setup_drop_catcher()
 	GameAudioService.play_music(self, "hold")
 	_setup_inventory_label()
 	_setup_hp_label()
@@ -908,6 +916,7 @@ func _create_glow_sprite(tile_span: float) -> Sprite2D:
 func _process(delta: float) -> void:
 	_advance_game_clock(delta)
 	_stream_world_chunks()
+	_update_ground_items(delta)
 	_update_wild_darkness(delta)
 	_player_attack_timer = maxf(_player_attack_timer - delta, 0.0)
 	_staff_cooldown = maxf(_staff_cooldown - delta, 0.0)
@@ -2174,6 +2183,8 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	var shown_level := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	for torch_cell_variant: Variant in (shown_level.get("torches", []) as Array):
 		_spawn_torch_at(torch_cell_variant as Vector2i)
+	# The body was just rebuilt; re-hang whatever the player is holding.
+	_refresh_held_item()
 
 ## On the district city level the player arrives at the Great Hall, the
 ## one spot guaranteed to connect to every quarter, rather than a random
@@ -2607,6 +2618,7 @@ func _on_equipment_changed() -> void:
 	_save_player_inventory()
 	if _player_hotbar != null:
 		_player_hotbar.refresh()
+	_refresh_held_item()
 
 func _setup_hotbar() -> void:
 	if chest_popup == null:
@@ -2620,7 +2632,9 @@ func _setup_hotbar() -> void:
 	chest_popup.get_parent().add_child(_player_hotbar)
 	_player_hotbar.z_index = 50
 	_player_hotbar.refresh()
+	_player_hotbar.set_selected(_selected_hotbar_index)
 	_player_hotbar.reposition.call_deferred()
+	_refresh_held_item()
 
 func _hotbar_index_for_keycode(keycode: int) -> int:
 	if keycode >= KEY_1 and keycode <= KEY_9:
@@ -2629,11 +2643,135 @@ func _hotbar_index_for_keycode(keycode: int) -> int:
 		return 9
 	return -1
 
+## --- held item ----------------------------------------------------------
+
+## Resolves the selected slot's bound item (only if at least one is packed)
+## and shows it in the player's hand; anything else clears the sprite.
+func _refresh_held_item() -> void:
+	if _player_sprite == null:
+		return
+	var held_item := ""
+	if _selected_hotbar_index >= 0:
+		var settings: Dictionary = _world_settings_snapshot()
+		var bindings: Array = GearService.hotbar_bindings(settings)
+		if _selected_hotbar_index < bindings.size():
+			var candidate := String(bindings[_selected_hotbar_index])
+			if not candidate.is_empty() and int(_player_inventory.get(candidate, 0)) >= 1:
+				held_item = candidate
+	HeldItemService.update(_player_sprite, held_item, tile_size)
+	if _player_hotbar != null:
+		_player_hotbar.set_selected(_selected_hotbar_index)
+
+## --- ground items (drag-to-drop, walk-over to reclaim) ------------------
+
+## Docks the invisible drop catcher inside the map panel. Kept a child of
+## CityPanel with MOUSE_FILTER_PASS so plain clicks/pans still reach the
+## panel's gui_input, while a slot drag released over open world falls to
+## this control (the hotbar/inventory sit above it and swallow slot-to-slot
+## drags first).
+func _setup_drop_catcher() -> void:
+	if city_panel == null:
+		return
+	_drop_catcher = Control.new()
+	_drop_catcher.name = "WorldDropCatcher"
+	_drop_catcher.mouse_filter = Control.MOUSE_FILTER_PASS
+	_drop_catcher.set_drag_forwarding(
+		Callable(),
+		Callable(self, "_catcher_can_drop"),
+		Callable(self, "_catcher_drop")
+	)
+	city_panel.add_child(_drop_catcher)
+
+func _catcher_can_drop(_at_position: Vector2, data: Variant) -> bool:
+	return data is Dictionary and String((data as Dictionary).get("kind", "")) == "item_drop"
+
+func _catcher_drop(_at_position: Vector2, data: Variant) -> void:
+	if not (data is Dictionary):
+		return
+	var payload := data as Dictionary
+	if String(payload.get("kind", "")) != "item_drop":
+		return
+	_drop_item_to_ground(String(payload.get("item", "")), 1)
+
+## Takes `count` of an item out of the pack and lays it on the ground at the
+## player's feet (or the nearest free neighbour), where walking back over it
+## picks it up again.
+func _drop_item_to_ground(item_name: String, count: int) -> bool:
+	if item_name.is_empty() or count <= 0:
+		return false
+	if int(_player_inventory.get(item_name, 0)) < count:
+		_set_save_status("No %s to drop." % item_name, Color(0.95, 0.75, 0.45, 1.0))
+		return false
+	var texture := ItemDefsService.icon_texture(item_name)
+	if texture == null:
+		return false
+	var drop_cell := _free_ground_cell(_player_cell)
+	_add_to_inventory(item_name, -count)
+	var sprite := Sprite2D.new()
+	sprite.texture = texture
+	sprite.centered = true
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.z_index = 6
+	sprite.scale = Vector2.ONE * (float(tile_size.y) * 0.6 / 32.0)
+	sprite.position = _cell_center_position(drop_cell)
+	actor_layer.add_child(sprite)
+	# "armed" only once the player steps off the drop cell, so an item laid
+	# at your own feet waits to be walked back over instead of snapping
+	# straight back into the pack the next frame.
+	_ground_items.append({"sprite": sprite, "cell": drop_cell, "item": item_name, "count": count, "armed": _player_cell != drop_cell})
+	_set_save_status("Dropped %s ×%d" % [item_name, count], Color(0.85, 0.85, 0.7, 1.0))
+	return true
+
+func _update_ground_items(_delta: float) -> void:
+	if _ground_items.is_empty() or _player_sprite == null:
+		return
+	for index in range(_ground_items.size() - 1, -1, -1):
+		var entry := _ground_items[index]
+		var entry_cell := entry.get("cell", Vector2i.ZERO) as Vector2i
+		if entry_cell != _player_cell:
+			# Stepped off: this item can now be reclaimed on return.
+			entry["armed"] = true
+			continue
+		if not bool(entry.get("armed", true)):
+			continue
+		var item_name := String(entry.get("item", ""))
+		var count := int(entry.get("count", 1))
+		var sprite := entry.get("sprite") as Sprite2D
+		if sprite != null:
+			sprite.queue_free()
+		_ground_items.remove_at(index)
+		_add_to_inventory(item_name, count)
+		_set_save_status("Picked up %s ×%d" % [item_name, count], Color(0.7, 0.95, 0.6, 1.0))
+		if _player_hotbar != null:
+			_player_hotbar.refresh()
+		_refresh_held_item()
+
+## The player's cell if it holds no loot yet, else the closest walkable,
+## unoccupied neighbour so two drops never stack on one tile.
+func _free_ground_cell(origin: Vector2i) -> Vector2i:
+	if not _ground_cell_occupied(origin):
+		return origin
+	for offset: Vector2i in [Vector2i.RIGHT, Vector2i.LEFT, Vector2i.DOWN, Vector2i.UP, Vector2i(1, 1), Vector2i(-1, 1), Vector2i(1, -1), Vector2i(-1, -1)]:
+		var candidate := origin + offset
+		if _is_walkable_cell(candidate) and not _ground_cell_occupied(candidate):
+			return candidate
+	return origin
+
+func _ground_cell_occupied(cell: Vector2i) -> bool:
+	for entry: Dictionary in _ground_items:
+		if (entry.get("cell", Vector2i.ZERO) as Vector2i) == cell:
+			return true
+	return false
+
 ## The quick keys: potions drink, food eats, tools report themselves.
 func _use_hotbar_slot(index: int) -> void:
 	var settings: Dictionary = _world_settings_snapshot()
 	var bindings: Array = GearService.hotbar_bindings(settings)
 	var item_name := String(bindings[index]) if index < bindings.size() else ""
+	# Record the pick before any early-out so the held-item sprite tracks
+	# the current selection (an empty or dry slot simply shows nothing).
+	_selected_hotbar_index = index
+	_refresh_held_item()
 	if item_name.is_empty():
 		_set_save_status("Hotbar %d is empty — bind items from the pack (I)." % [(index + 1) % 10], Color(0.8, 0.8, 0.8, 1.0))
 		return
@@ -3873,6 +4011,7 @@ func _add_to_inventory(item_name: String, amount: int) -> void:
 	_update_inventory_label()
 	if _player_hotbar != null:
 		_player_hotbar.refresh()
+	_refresh_held_item()
 	_save_player_inventory()
 
 func _save_player_inventory() -> void:

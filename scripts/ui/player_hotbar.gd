@@ -14,6 +14,11 @@ var _on_use: Callable
 var _buttons: Array[Button] = []
 var _counts: Array[Label] = []
 var _keys: Array[Label] = []
+## Per-slot resting styles plus a shared bright one for the selected slot,
+## so a persistent outline marks the current pick (distinct from flash()).
+var _slot_styles: Array[StyleBoxFlat] = []
+var _selected_style: StyleBoxFlat
+var _selected_index := -1
 
 func setup(get_settings: Callable, get_inventory: Callable, on_use: Callable) -> void:
 	_get_settings = get_settings
@@ -32,6 +37,11 @@ func _build_ui() -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 4)
 	add_child(row)
+	_selected_style = StyleBoxFlat.new()
+	_selected_style.bg_color = Color(0.32, 0.25, 0.15, 1.0)
+	_selected_style.border_color = Color(1.0, 0.86, 0.45, 1.0)
+	_selected_style.set_border_width_all(3)
+	_selected_style.set_corner_radius_all(4)
 	for index in GearService.HOTBAR_SLOTS:
 		var slot_button := Button.new()
 		slot_button.custom_minimum_size = SLOT_SIZE
@@ -49,8 +59,16 @@ func _build_ui() -> void:
 		slot_button.pressed.connect(func() -> void:
 			if _on_use.is_valid():
 				_on_use.call(index))
+		# A filled slot is a drag source: dragging it onto open world drops
+		# the item. The scene's drop-catcher reads {kind, item} and mutates.
+		slot_button.set_drag_forwarding(
+			Callable(self, "_slot_drag_data").bind(index),
+			Callable(),
+			Callable()
+		)
 		row.add_child(slot_button)
 		_buttons.append(slot_button)
+		_slot_styles.append(slot_style)
 		var key_label := Label.new()
 		key_label.text = str((index + 1) % 10)
 		key_label.add_theme_font_size_override("font_size", 10)
@@ -90,6 +108,45 @@ func refresh() -> void:
 		# A dry binding waits, dimmed, for resupply.
 		slot_button.modulate = Color.WHITE if carried > 0 else Color(1.0, 1.0, 1.0, 0.35)
 		_counts[index].text = "×%d" % carried if carried > 1 else ""
+
+## Drag payload for slot `index`: only a slot that actually carries stock
+## can be dragged, and the drag shows the item's icon as its preview.
+func _slot_drag_data(_at_position: Vector2, index: int) -> Variant:
+	if index < 0 or index >= _buttons.size():
+		return null
+	if not _get_settings.is_valid() or not _get_inventory.is_valid():
+		return null
+	var settings: Dictionary = _get_settings.call()
+	var bindings: Array = GearService.hotbar_bindings(settings)
+	var item_name := String(bindings[index]) if index < bindings.size() else ""
+	if item_name.is_empty():
+		return null
+	var inventory: Dictionary = _get_inventory.call()
+	if int(inventory.get(item_name, 0)) < 1:
+		return null
+	set_drag_preview(_make_drag_preview(item_name))
+	return {"kind": "item_drop", "item": item_name}
+
+func _make_drag_preview(item_name: String) -> Control:
+	var preview := TextureRect.new()
+	preview.texture = ItemDefsService.icon_texture(item_name)
+	preview.custom_minimum_size = SLOT_SIZE
+	preview.size = SLOT_SIZE
+	preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	preview.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	preview.modulate = Color(1.0, 1.0, 1.0, 0.85)
+	return preview
+
+## A persistent outline on the selected slot; -1 clears it.
+func set_selected(index: int) -> void:
+	_selected_index = index
+	_apply_selection_styles()
+
+func _apply_selection_styles() -> void:
+	for slot_index in _buttons.size():
+		var chosen := _selected_style if slot_index == _selected_index else _slot_styles[slot_index]
+		_buttons[slot_index].add_theme_stylebox_override("normal", chosen)
 
 func flash(index: int) -> void:
 	if index < 0 or index >= _buttons.size():
