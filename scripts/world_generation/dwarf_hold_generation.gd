@@ -1837,10 +1837,10 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 			_latest_bed_count += 1
 			_bed_cells.append(decor_cell_variant as Vector2i)
 	## Decor must not ride the live shared _rng: every _show_level revisit
-	## would reroll chest/decor positions (fresh farmable loot). A per-level
-	## seeded rng keeps decor identical on every render of this level.
+	## would reroll chest/decor positions (fresh farmable loot). The rng is
+	## reseeded per cell inside _pick_decor_tile, so a grid that grew from
+	## chunk streaming can't shift the sequence for every later cell either.
 	var decor_rng := RandomNumberGenerator.new()
-	decor_rng.seed = _world_seed_hash ^ hash("decor|%d" % _hold_state.current_level_index)
 	for y in range(bounds.position.y, bounds.end.y):
 		for x in range(bounds.position.x, bounds.end.x):
 			var cell := _cell_at(grid, x, y)
@@ -4930,6 +4930,9 @@ func _building_type_for_cell(cell: Vector2i) -> String:
 ## Takes the caller's rng (a per-level seeded one from _render_city) so
 ## revisits re-deal the exact same decor instead of rerolling loot spots.
 func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: String, house_decor_overrides: Dictionary, rng: RandomNumberGenerator) -> String:
+	## Per-cell seed: the roll for a cell must never depend on how many other
+	## cells rolled before it (render bounds grow as wild chunks stream in).
+	rng.seed = _world_seed_hash ^ hash("decor|%d|%d|%d" % [_hold_state.current_level_index, x, y])
 	return DwarfHoldTileService.pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, _latest_civic_building_type_map, CIVIC_BUILDING_TYPES, rng, _door_cells)
 
 
