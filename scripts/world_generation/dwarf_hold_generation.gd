@@ -151,6 +151,12 @@ var _latest_requested_zone_counts := {
 var _lighting_mask_sprite: Sprite2D
 var _darkness_material: ShaderMaterial
 var _lighting_bounds := Rect2i()
+## Per-cell wall/occlusion map covering _lighting_bounds: 255 where a cell
+## blocks light (solid rock or a wall tile), 0 where light passes. The
+## darkness shader raymarches this so each reveal pool is clipped by walls
+## instead of bleeding a pure radial pool through into adjacent rooms.
+var _occlusion_image: Image
+var _occlusion_texture: ImageTexture
 var _tavern_character_texture: Texture2D
 var _shattered_player_texture: Texture2D
 var _placeholder_actor_texture: Texture2D
@@ -258,6 +264,9 @@ const LIGHT_CULL_TILES := 48.0
 const DARKNESS_SHADER_CODE := "shader_type canvas_item;
 
 const int MAX_LIGHTS = 64;
+// Raymarch resolution from a fragment toward each in-range light. 24 steps
+// comfortably catches a one-cell-thick wall over a 7-9 tile light radius.
+const int OCCLUSION_STEPS = 24;
 
 uniform vec2 overlay_origin = vec2(0.0);
 uniform vec2 overlay_size = vec2(1.0);
@@ -266,6 +275,11 @@ uniform float darkness_strength : hint_range(0.0, 1.0) = 0.0;
 uniform int light_count = 0;
 uniform vec2 light_pos[MAX_LIGHTS];
 uniform float light_radius[MAX_LIGHTS];
+// One texel per CELL of the lighting bounds: >0.5 blocks light, 0 passes.
+uniform sampler2D occlusion_tex : filter_nearest, repeat_disable;
+uniform vec2 occlusion_origin = vec2(0.0);
+uniform vec2 occlusion_size = vec2(1.0);
+uniform float tile_px = 32.0;
 
 void fragment() {
 	vec2 world_pos = overlay_origin + UV * overlay_size;
@@ -274,9 +288,28 @@ void fragment() {
 		if (i >= light_count) { break; }
 		float r = light_radius[i];
 		if (r <= 0.0) { continue; }
-		float d = distance(world_pos, light_pos[i]);
-		float s = 1.0 - smoothstep(r * 0.32, r, d);
-		reveal = max(reveal, s);
+		vec2 lp = light_pos[i];
+		float d = distance(world_pos, lp);
+		// Out of range: contributes nothing, so skip the raymarch entirely
+		// and keep the per-pixel cost at ~1-3 in-range lights.
+		if (d >= r) { continue; }
+		bool blocked = false;
+		for (int s = 1; s < OCCLUSION_STEPS; s++) {
+			float t = float(s) / float(OCCLUSION_STEPS);
+			// Skip the first/last stretch so a fragment never occludes on
+			// its own cell and a light never occludes on its own cell.
+			if (t < 0.08 || t > 0.92) { continue; }
+			vec2 sample_world = mix(world_pos, lp, t);
+			vec2 sample_cell = sample_world / tile_px;
+			vec2 occ_uv = (sample_cell - occlusion_origin) / occlusion_size;
+			if (texture(occlusion_tex, occ_uv).r > 0.5) {
+				blocked = true;
+				break;
+			}
+		}
+		if (blocked) { continue; }
+		float s2 = 1.0 - smoothstep(r * 0.32, r, d);
+		reveal = max(reveal, s2);
 	}
 	reveal = clamp(reveal, 0.0, 1.0);
 	float a = darkness_color.a * darkness_strength * (1.0 - reveal);
@@ -1925,8 +1958,52 @@ func _initialize_darkness_overlay(grid: Dictionary) -> void:
 	if _darkness_material != null:
 		_darkness_material.set_shader_parameter("overlay_origin", origin)
 		_darkness_material.set_shader_parameter("overlay_size", size_px)
+	_build_occlusion_texture()
 	_lighting_mask_sprite.visible = _lighting_enabled
 	_update_light_uniforms()
+
+## Rebuild the per-cell wall map for the current _lighting_bounds and hand it
+## to the darkness shader. One L8 texel per cell keeps it tiny (1 byte/cell)
+## and NEAREST sampling means each texel maps cleanly to its cell.
+func _build_occlusion_texture() -> void:
+	if _darkness_material == null:
+		return
+	var base := _lighting_bounds.position
+	var wide := maxi(_lighting_bounds.size.x, 1)
+	var tall := maxi(_lighting_bounds.size.y, 1)
+	var data := PackedByteArray()
+	data.resize(wide * tall)
+	var index := 0
+	for y in range(tall):
+		for x in range(wide):
+			data[index] = 255 if _cell_blocks_light(Vector2i(base.x + x, base.y + y)) else 0
+			index += 1
+	_occlusion_image = Image.create_from_data(wide, tall, false, Image.FORMAT_L8, data)
+	_occlusion_texture = ImageTexture.create_from_image(_occlusion_image)
+	_darkness_material.set_shader_parameter("occlusion_tex", _occlusion_texture)
+	_darkness_material.set_shader_parameter("occlusion_origin", Vector2(base))
+	_darkness_material.set_shader_parameter("occlusion_size", Vector2(float(wide), float(tall)))
+	_darkness_material.set_shader_parameter("tile_px", float(tile_size.x))
+
+## A cell blocks light when it is unrendered solid rock or a non-passable
+## wall tile; open floor / passable tiles let light through.
+func _cell_blocks_light(cell: Vector2i) -> bool:
+	if city_layer.get_cell_source_id(cell) < 0:
+		return true
+	return not _is_passable_atlas_tile(city_layer.get_cell_atlas_coords(cell))
+
+## Flip a single cell's occlusion texel after its tile changes (e.g. digging
+## rock into open hall) so light opens through the new gap without a full
+## overlay rebuild.
+func _refresh_occlusion_cell(cell: Vector2i) -> void:
+	if _occlusion_image == null or _occlusion_texture == null:
+		return
+	if not _lighting_bounds.has_point(cell):
+		return
+	var local := cell - _lighting_bounds.position
+	var value := 1.0 if _cell_blocks_light(cell) else 0.0
+	_occlusion_image.set_pixel(local.x, local.y, Color(value, value, value))
+	_occlusion_texture.update(_occlusion_image)
 
 ## Feed the overlay shader the live light sources: the player lantern first
 ## (always lit), then nearby torches, capped to the shader's slot count.
@@ -4265,6 +4342,8 @@ func _dig_cell(cell: Vector2i) -> void:
 		if _player_sprite != null:
 			_spawn_floating_text("Found %s!" % fossil, _player_sprite.position, Color(0.95, 0.9, 0.6, 1.0))
 	_render_world_rect(Rect2i(cell - Vector2i(1, 1), Vector2i(3, 3)))
+	# The rock is now open hall; open the light through the fresh gap.
+	_refresh_occlusion_cell(cell)
 	var dig_position := _cell_center_position(cell)
 	var dig_lean := 1.0 if _player_sprite == null or dig_position.x >= _player_sprite.position.x else -1.0
 	if not art.is_empty():
