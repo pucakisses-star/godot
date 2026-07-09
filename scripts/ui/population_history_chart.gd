@@ -12,6 +12,9 @@ var _hovered_index := -1
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	## _mouse_exited is not a virtual method; connect it so the hover
+	## highlight clears when the pointer leaves the chart.
+	mouse_exited.connect(_mouse_exited)
 
 func set_points(data: Array) -> void:
 	points = data.duplicate()

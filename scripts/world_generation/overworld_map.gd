@@ -671,6 +671,10 @@ var _hillhold_points: Array[Vector2i] = []
 ## Per-layout knobs (browser worldGenerationProfiles, main.js:20044-20108).
 var _sea_level_shift := 0.02
 var _rainfall_bias := 0.0
+## The layout's baseline water_level, captured before _estimate_sea_level
+## overwrites the export - regeneration must restart from this baseline or
+## the same seed yields a different world on regen vs fresh boot.
+var _layout_water_level := -1.0
 ## Slider biases (browser main.js:21300-21331).
 var _mountain_ratio := 0.5
 var _forest_bias := 0.0
@@ -1491,10 +1495,15 @@ func _patch_biome_label_for_tile(tile: Vector2i) -> String:
 	var info := _tile_data.get(tile, {}) as Dictionary
 	if info.is_empty():
 		return BIOME_GRASSLAND
-	if _tile_base_biome_from_data(info) == BIOME_WATER:
+	var base_biome := _tile_base_biome_from_data(info)
+	if base_biome == BIOME_WATER:
 		return BIOME_WATER
 	var overlay_biome := String(info.get("biome_type", ""))
-	return overlay_biome if not overlay_biome.is_empty() else _tile_base_biome_from_data(info)
+	# Hills are a landform, not a climate - a snowy/sandy hill tile must keep
+	# its climate label so towns and streamed wilds stay themed.
+	if overlay_biome == BIOME_HILLS and (base_biome == BIOME_TUNDRA or base_biome == BIOME_DESERT or base_biome == BIOME_BADLANDS):
+		return base_biome
+	return overlay_biome if not overlay_biome.is_empty() else base_biome
 
 func _town_scene_seed_for_tile(tile_coord: Vector2i, details: Dictionary) -> String:
 	var existing_seed := String(details.get(TOWN_SCENE_SEED_KEY, "")).strip_edges()
@@ -1567,7 +1576,9 @@ func _show_structure_details_modal(tile_coord: Vector2i, details: Dictionary) ->
 	if structure_details_tabs != null:
 		structure_details_tabs.current_tab = 0
 
-	var biome_name := String(details.get("biome", "Unknown biome")).capitalize()
+	# No writer ever sets a "biome" key on the details dict; derive the
+	# display label from the tile itself.
+	var biome_name := _humanize_biome(_patch_biome_label_for_tile(tile_coord)).capitalize()
 	var population := int(details.get("population", 0))
 	var ruler_title := String(details.get("ruler_title", "")).strip_edges()
 	var ruler_name := String(details.get("ruler_name", "")).strip_edges()
@@ -1854,6 +1865,12 @@ func _generate_map() -> void:
 	if _is_generating:
 		return
 	_is_generating = true
+	# _estimate_sea_level overwrote water_level last run; restore the layout
+	# baseline before sampling heights so regeneration is deterministic.
+	if _layout_water_level < 0.0:
+		_layout_water_level = water_level
+	else:
+		water_level = _layout_water_level
 	# A new world invalidates every cached region-detail tile.
 	_exit_region_mode()
 	if _region_layer != null:
@@ -2477,7 +2494,9 @@ func _apply_overlays_and_metadata(
 				var tree_tile := tree_layer.get_cell_atlas_coords(coord)
 				if tree_tile == TREE_TILE or tree_tile == TREE_SNOW_TILE:
 					overlay_label = "forest"
-				elif tree_tile == JUNGLE_TREE_TILE:
+				# Lone trees carry the overlay flag too, so settlement and
+				# structure placement stops planting under standing tree art.
+				elif tree_tile == JUNGLE_TREE_TILE or tree_tile == TREE_LONE_TILE:
 					overlay_label = "tree"
 			var overlay_flags := 0
 			if overlay_label == "tree":
@@ -4764,6 +4783,12 @@ func _place_icebergs(
 				info["base_biome_id"] = water_biome_id
 				info["hill_biome_id"] = _biome_to_id(BIOME_GRASSLAND)
 				info["overlay_flags"] = 0
+				# The cultural/structure pipeline matches on the parallel
+				# label strings; calved tiles must read as water there too.
+				info["biome_type"] = BIOME_WATER
+				info["base_biome"] = BIOME_WATER
+				info["overlay"] = ""
+				info["hill_overlay"] = ""
 				info["structure"] = ""
 				info["structure_details"] = null
 				info["ambient_structure"] = null
@@ -7102,7 +7127,9 @@ func _assign_cultural_groups(
 			if bool(ambient_dict.get("replace_tree_overlay", false)) and tree_layer != null:
 				tree_layer.erase_cell(coord)
 				tile_info["overlay_flags"] = int(tile_info.get("overlay_flags", 0)) & ~TILE_OVERLAY_TREE & ~TILE_OVERLAY_FOREST
-			if settlement_layer != null and not tile_info.has("settlement_type") and ambient_dict.has("tile"):
+			# Never paint over existing settlement art: desert-city compound
+			# cells carry art without a tile-data marker.
+			if settlement_layer != null and not tile_info.has("settlement_type") and ambient_dict.has("tile") and settlement_layer.get_cell_source_id(coord) < 0:
 				settlement_layer.set_cell(coord, _atlas_source_id, ambient_dict.get("tile", TOWN_TILE) as Vector2i)
 				var ambient_id := String(ambient_dict.get("id", ""))
 				if ambient_id == "farm":
@@ -8992,6 +9019,12 @@ func _build_road_tiles() -> void:
 		# Roads clear the woods they cut through, like the browser overlay.
 		if tree_layer != null and tree_layer.get_cell_source_id(cell) >= 0:
 			tree_layer.erase_cell(cell)
+			# Clear the woodland flags too (mirrors _scatter_lumber_clearing)
+			# so the felled tile stops reading as forest to placement filters.
+			var road_info := _tile_data.get(cell, {}) as Dictionary
+			if not road_info.is_empty():
+				road_info["overlay_flags"] = int(road_info.get("overlay_flags", 0)) & ~TILE_OVERLAY_TREE & ~TILE_OVERLAY_FOREST
+				_tile_data[cell] = road_info
 
 func _is_road_endpoint(cell: Vector2i) -> bool:
 	var tile_info := _tile_data.get(cell, {}) as Dictionary
@@ -9517,6 +9550,8 @@ func _apply_cached_world_settings() -> void:
 			edge_ocean_strength = float(layout_preset.get("edge_ocean_strength", 0.2))
 			edge_ocean_falloff = float(layout_preset.get("edge_ocean_falloff", 0.32))
 			water_level = float(layout_preset.get("water_level", 0.45))
+			# Refresh the regen baseline so preset changes propagate.
+			_layout_water_level = water_level
 			falloff_power = float(layout_preset.get("falloff_power", 2.4))
 			# Browser worldGenerationProfiles (main.js:20044-20108).
 			_sea_level_shift = float(layout_preset.get("sea_level_shift", 0.02))

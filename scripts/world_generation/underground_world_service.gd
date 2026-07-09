@@ -116,6 +116,9 @@ static func _stamp_ruin(grid: Dictionary, floor_decor: Dictionary, center: Vecto
 		var room_center := center + Vector2i(rng.randi_range(-5, 5), rng.randi_range(-4, 4))
 		var radius := Vector2i(rng.randi_range(2, 3), rng.randi_range(2, 3))
 		_carve_ellipse_hall(grid, room_center, radius)
+	## The random rooms may all miss the center; carve a room there too
+	## (as _stamp_camp does) so the chest never sits sealed in rock.
+	_carve_ellipse_hall(grid, center, Vector2i(rng.randi_range(2, 3), rng.randi_range(2, 3)))
 	floor_decor[center] = "chest"
 	for _rubble in range(rng.randi_range(2, 4)):
 		var rubble_cell := center + Vector2i(rng.randi_range(-4, 4), rng.randi_range(-3, 3))

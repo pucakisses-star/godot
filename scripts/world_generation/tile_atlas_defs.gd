@@ -127,6 +127,10 @@ const BANDIT_CAMP_TILE := Vector2i(15, 2)
 const TRAVELERS_CAMP_TILE := Vector2i(1, 5)
 const DUNGEON_TILE := Vector2i(7, 2)
 const CENTAUR_ENCAMPMENT_TILE := Vector2i(10, 2)
+## Ambient culture structures (CultureTypes): tiles must be registered with
+## the tileset service or set_cell on them renders nothing.
+const PROSPECTOR_CAMP_TILE := Vector2i(7, 1)
+const OGRE_DEN_TILE := Vector2i(5, 1)
 
 ## Winding dirt-road segments (row 5 of the atlas), bucketed by which
 ## edges the trail leaves through. Organic art, so buckets hold variants.

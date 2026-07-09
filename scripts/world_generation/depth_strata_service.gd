@@ -165,8 +165,11 @@ static func stamp_stratum_features(grid: Dictionary, floor_decor: Dictionary, st
 
 	var starmetal_cells: Array[Vector2i] = []
 	if bool(stratum.get("starmetal", false)):
+		## Roll the deposit size once; rerolling the threshold every
+		## iteration made the loop nearly always stop at the minimum.
+		var starmetal_target := rng.randi_range(4, 6)
 		for _attempt in range(120):
-			if starmetal_cells.size() >= rng.randi_range(4, 6):
+			if starmetal_cells.size() >= starmetal_target:
 				break
 			var cell := hall_cells[rng.randi_range(0, hall_cells.size() - 1)]
 			if floor_decor.has(cell) or starmetal_cells.has(cell):
@@ -187,4 +190,8 @@ static func _carve_cavern_hollows(grid: Dictionary, hall_cells: Array[Vector2i],
 			for dx in range(-radius, radius + 1):
 				var wobble := 1.0 + 0.35 * sin(float(dx) * 0.9 + float(dy) * 1.3 + float(rng.randi_range(0, 6)))
 				if Vector2(dx, dy).length() <= float(radius) * 0.82 * wobble:
-					grid[center + Vector2i(dx, dy)] = 1
+					## Only blow out solid rock (0), like the sibling carvers,
+					## so hollows never shred placed houses and rooms.
+					var cell := center + Vector2i(dx, dy)
+					if int(grid.get(cell, 0)) == 0:
+						grid[cell] = 1

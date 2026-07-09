@@ -991,6 +991,10 @@ func _can_spawn_ambient_on_tile(coord: Vector2i, tile: Dictionary, is_land_base_
 		return false
 	if String(tile.get("structure", "")).strip_edges() != "":
 		return false
+	# Settlement tiles carry settlement_type with structure still "" - an
+	# ambient stamped there would corrupt the town/dwarfhold/city tile.
+	if not String(tile.get("settlement_type", "")).strip_edges().is_empty():
+		return false
 	return true
 
 func _ambient_option_matches(option: Dictionary, coord: Vector2i, tiles: Dictionary) -> bool:

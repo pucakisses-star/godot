@@ -28,11 +28,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	var mouse_event := event as InputEventMouseButton
 	if mouse_event != null:
+		# Wheel events arrive as pressed+released pairs - only the press may
+		# zoom (or every notch zooms twice), but both must return so the
+		# release never falls through to the pan logic.
 		if mouse_event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			adjust_zoom(zoom_step)
+			if mouse_event.pressed:
+				adjust_zoom(zoom_step)
 			return
 		if mouse_event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			adjust_zoom(-zoom_step)
+			if mouse_event.pressed:
+				adjust_zoom(-zoom_step)
 			return
 		if mouse_event.button_index == MOUSE_BUTTON_LEFT:
 			if mouse_event.pressed:

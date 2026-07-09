@@ -213,6 +213,8 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 	# Dwarves are folk of the deep stone: their ambient marks only rise on
 	# mountains (peaks or mountain overlays), never out on the open lowlands.
 	"dwarves": [
+		# (7,1) is PROSPECTOR_CAMP_TILE, registered with the tileset service
+		# so the camp actually renders (unregistered cells draw nothing).
 		{"id": "prospect_camp", "label": "Prospector's Camp", "tile": Vector2i(7, 1), "requires_mountain": true},
 		{"id": "homestead", "label": "Mountain Homestead", "tile": Vector2i(3, 1), "requires_mountain": true},
 		{"id": "craggy_tor", "label": "Craggy Tor", "tile": Vector2i(9, 0), "requires_mountain": true, "rarity": 0.12}
@@ -245,6 +247,8 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "cliff_aerie", "label": "Cliff Aerie", "tile": Vector2i(6, 1)}
 	],
 	"ogres": [
+		# (5,1) is OGRE_DEN_TILE, registered with the tileset service so the
+		# den actually renders.
 		{"id": "ogre_den", "label": "Ogre Den", "tile": Vector2i(5, 1)}
 	],
 	"trolls": [
@@ -297,6 +301,7 @@ const AMBIENT_STRUCTURE_OPTIONS_BY_CULTURE: Dictionary[String, Array] = {
 		{"id": "moonwell", "label": "Forest Shrine", "tile": Vector2i(2, 6), "requires_tree_neighbor": true, "requires_deep_forest": true}
 	],
 	"satyr": [
+		# (7,1) is PROSPECTOR_CAMP_TILE (see the dwarves entry above).
 		{"id": "revel_camp", "label": "Revel Glade", "tile": Vector2i(7, 1), "requires_tree_neighbor": true}
 	],
 	"fae": [
