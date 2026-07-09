@@ -267,6 +267,23 @@ const TOWN_TILE_ATLAS := {
 	"wall": Vector2i(1, 7),
 	"wall_alt": Vector2i(2, 7),
 	"plank_wall": Vector2i(25, 0),
+	# Timber-framed room autotile: a self-contained 9-slice (verified by
+	# per-cell PIL extraction of cols 24-26, rows 5-7 of town_tileset.png).
+	# Each piece is opaque toward the room interior and transparent toward
+	# the exterior, so a rectangular building perimeter reads as a lit top
+	# beam, darker side posts, corner joints and a bottom sill. The olive
+	# variant (rows 8-10) and the concave-corner cross set (cols 27-28) are
+	# left unmapped: town buildings are rectangles, so the border set frames
+	# them cleanly and stays one coherent timber style.
+	"wall_tl": Vector2i(24, 5),
+	"wall_top": Vector2i(25, 5),
+	"wall_tr": Vector2i(26, 5),
+	"wall_left": Vector2i(24, 6),
+	"wall_fill": Vector2i(25, 6),
+	"wall_right": Vector2i(26, 6),
+	"wall_bl": Vector2i(24, 7),
+	"wall_bottom": Vector2i(25, 7),
+	"wall_br": Vector2i(26, 7),
 	"floor": Vector2i(25, 1),
 	"door": Vector2i(26, 1),
 	"rug": Vector2i(33, 2),
