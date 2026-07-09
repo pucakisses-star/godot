@@ -298,21 +298,33 @@ static func place_house_decor_template(component: Array[Vector2i], overrides: Di
 ## Dormitories pack bunks on alternating cells (a bed at every odd local
 ## coordinate) with a chest and wardrobe by the walls — one bed per
 ## footprint.x * footprint.y placement estimate.
+## Targets sit one cell inside the bbox: the bbox edges ARE the wall ring
+## for rectangular rooms, and ring cells render as stone, which makes
+## pick_decor_tile suppress any furniture assigned there.
 static func place_dormitory_decor(component: Array[Vector2i], occupied: Dictionary, overrides: Dictionary, min_x: int, min_y: int, max_x: int, max_y: int, door_cells: Dictionary = {}) -> void:
+	try_assign_house_decor(overrides, occupied, Vector2i(min_x + 1, min_y + 1), "chest")
+	try_assign_house_decor(overrides, occupied, find_wall_adjacent_cell(component, occupied, overrides, Vector2i(max_x - 1, min_y + 1)), "wardrobe")
+	try_assign_house_decor(overrides, occupied, Vector2i((min_x + max_x) / 2, max_y - 1), "water_bucket")
 	for cell: Vector2i in component:
+		if cell.x <= min_x or cell.x >= max_x or cell.y <= min_y or cell.y >= max_y:
+			continue
 		if (cell.x - min_x) % 2 == 1 and (cell.y - min_y) % 2 == 1:
 			if is_adjacent_to_door(cell, door_cells):
 				continue
 			try_assign_house_decor(overrides, occupied, cell, "bed")
-	try_assign_house_decor(overrides, occupied, Vector2i(min_x, min_y), "chest")
-	try_assign_house_decor(overrides, occupied, find_wall_adjacent_cell(component, occupied, overrides, Vector2i(max_x, min_y)), "wardrobe")
-	try_assign_house_decor(overrides, occupied, Vector2i((min_x + max_x) / 2, max_y), "water_bucket")
 	ensure_house_has_bed(component, overrides, door_cells)
 
 ## Barracks lay a bed row every third rank with armor stands and a training
 ## target between them.
+## Chest and target land one cell inside the bbox for the same reason as
+## the dormitory: the bbox corners are wall-ring cells whose stone base
+## suppresses furniture.
 static func place_barracks_decor(component: Array[Vector2i], occupied: Dictionary, overrides: Dictionary, min_x: int, min_y: int, max_x: int, max_y: int, door_cells: Dictionary = {}) -> void:
+	try_assign_house_decor(overrides, occupied, Vector2i(min_x + 1, min_y + 1), "chest")
+	try_assign_house_decor(overrides, occupied, Vector2i(max_x - 1, max_y - 1), "target")
 	for cell: Vector2i in component:
+		if cell.x <= min_x or cell.x >= max_x or cell.y <= min_y or cell.y >= max_y:
+			continue
 		var local_x := cell.x - min_x
 		var local_y := cell.y - min_y
 		if is_adjacent_to_door(cell, door_cells):
@@ -321,8 +333,6 @@ static func place_barracks_decor(component: Array[Vector2i], occupied: Dictionar
 			try_assign_house_decor(overrides, occupied, cell, "bed")
 		elif local_y % 3 == 0 and local_x % 4 == 2:
 			try_assign_house_decor(overrides, occupied, cell, "armor_stand")
-	try_assign_house_decor(overrides, occupied, Vector2i(min_x, min_y), "chest")
-	try_assign_house_decor(overrides, occupied, Vector2i(max_x, max_y), "target")
 	ensure_house_has_bed(component, overrides, door_cells)
 
 static func ensure_house_has_bed(component: Array[Vector2i], overrides: Dictionary, door_cells: Dictionary = {}) -> void:
@@ -377,10 +387,21 @@ static func find_wall_adjacent_cell(component: Array[Vector2i], occupied: Dictio
 			return cell
 	return preferred_cell
 
+## The component includes its wall ring, and furniture only renders on
+## "floor" base tiles (cells fully inside the room). So "wall adjacent"
+## must mean an INTERIOR cell (all four neighbours in the component)
+## that touches the ring (some neighbour sits on the component edge).
+## The old test matched the ring cells themselves, whose stone base
+## made pick_decor_tile silently drop the furniture.
 static func is_component_wall_adjacent(cell: Vector2i, occupied: Dictionary) -> bool:
 	for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
 		if not occupied.has(cell + direction):
-			return true
+			return false
+	for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var neighbor := cell + direction
+		for inner_direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			if not occupied.has(neighbor + inner_direction):
+				return true
 	return false
 
 # --- internal helpers ---

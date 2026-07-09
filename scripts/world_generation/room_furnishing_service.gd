@@ -79,6 +79,14 @@ const PIECES := {
 	"int_stool_low": {"sheet": "interior", "rect": Rect2(370, 283, 12, 15), "cells_w": 1, "rows_block": 1, "z": 8},
 	"int_bench_rough": {"sheet": "interior", "rect": Rect2(7, 171, 34, 13), "cells_w": 2, "rows_block": 1, "z": 8},
 	"int_stump_table": {"sheet": "interior", "rect": Rect2(0, 208, 16, 16), "cells_w": 1, "rows_block": 1, "z": 8},
+	## ...grooming stations for the barber's parlor: a wash basin with jug
+	## and brush, a lather bowl on a razor strop, a shears-and-kettle
+	## counter, and a high-backed client chair drawn from behind so it
+	## reads as facing the station it is pulled up to...
+	"int_groom_basin": {"sheet": "interior", "rect": Rect2(240, 233, 16, 23), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_groom_lather": {"sheet": "interior", "rect": Rect2(256, 233, 16, 23), "cells_w": 1, "rows_block": 1, "z": 8},
+	"int_groom_shears": {"sheet": "interior", "rect": Rect2(288, 233, 16, 23), "cells_w": 1, "rows_block": 1, "z": 8},
+	"barber_chair": {"sheet": "house", "rect": Rect2(210, 8, 12, 21), "cells_w": 1, "rows_block": 1, "z": 8},
 	## ...and greenery to soften the stone.
 	"int_urn_basket": {"sheet": "interior", "rect": Rect2(384, 313, 16, 21), "cells_w": 1, "rows_block": 1, "z": 8},
 	"int_plant_potted": {"sheet": "interior", "rect": Rect2(402, 313, 12, 21), "cells_w": 1, "rows_block": 1, "z": 8},
@@ -91,9 +99,12 @@ const PIECES := {
 	"int_table_plant_fern": {"sheet": "interior", "rect": Rect2(497, 317, 15, 17), "cells_w": 1, "rows_block": 1, "z": 8}
 }
 
-## Building types whose interiors read as stocked shops.
+## Building types whose interiors read as stocked shops. The dwarfhold's
+## goods-and-supply storefronts earn the same stocked-shelf staples as
+## the town shops.
 const SHOP_DRESSING_TYPES := [
-	"market_stall", "general_store", "warehouse", "bakery", "tavern", "brewery"
+	"market_stall", "general_store", "warehouse", "bakery", "tavern", "brewery",
+	"general_goods_shop", "trade_supply_store"
 ]
 
 ## Trades share a dressing theme: the same hearth-and-anvil kit fits a
@@ -118,7 +129,14 @@ const DRESSING_THEME_BY_TYPE := {
 	"tailoring_shop": "craft", "carpenter": "craft", "tailor": "craft",
 	"cooperage": "craft", "tannery": "craft", "cobblers_shop": "craft",
 	"ropemakers_hall": "craft", "mason_lodge": "craft", "gemcutters_studio": "craft",
-	"miners_guild": "craft", "storage_warehouse": "stockroom"
+	"miners_guild": "craft", "storage_warehouse": "stockroom",
+	## Every remaining civic type from both catalogs resolves to a theme so
+	## no shop interior is left as bare planks: the barber gets its own
+	## grooming kit, and the goods-and-storage trades share the stockroom.
+	"barber_shop": "grooming",
+	"general_goods_shop": "stockroom", "trade_supply_store": "stockroom",
+	"general_store": "stockroom", "market_stall": "stockroom",
+	"warehouse": "stockroom", "stable": "stockroom"
 }
 
 ## Flood-fills the grid into connected components of one zone value,
@@ -497,57 +515,112 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 
 	# Trade-theme dressing goes first so the signature pieces claim the
 	# room's prime spots: the forge fire on the north wall, the temple
-	# rug in the center, racks and stands along the edges.
+	# rug in the center, racks and stands along the edges. Every theme
+	# then lines the walls with trade furniture so small shop floors
+	# read as densely dressed as the reference interiors.
 	var theme := String(DRESSING_THEME_BY_TYPE.get(building_type, ""))
 	var center_top := Vector2i(
 		box.position.x + maxi((box.size.x - 2) / 2, 0),
 		box.position.y + maxi((box.size.y - 2) / 2, 0)
 	)
+	var north_line: Array[Vector2i] = []
+	var south_line: Array[Vector2i] = []
+	for x: int in range(box.position.x, box.end.x):
+		north_line.append(Vector2i(x, box.position.y))
+		south_line.append(Vector2i(x, box.end.y - 1))
+	var west_line: Array[Vector2i] = []
+	var east_line: Array[Vector2i] = []
+	for y: int in range(box.position.y + 1, box.end.y - 1):
+		west_line.append(Vector2i(box.position.x, y))
+		east_line.append(Vector2i(box.end.x - 1, y))
+	# Line a wall with a cycling run of themed pieces; wider pieces claim
+	# their span so the next one lands past them.
+	var place_run := func(line_cells: Array[Vector2i], pool: Array) -> void:
+		if pool.is_empty():
+			return
+		var pool_index := 0
+		for line_cell: Vector2i in line_cells:
+			if try_place.call(String(pool[pool_index % pool.size()]), line_cell):
+				pool_index += 1
+	# Rugs are walk-through decor drawn under the furniture: inserted at
+	# the FRONT of the list and never claiming their cells, so seats and
+	# tables can stand on top of them.
+	var place_center_rug := func(rug_name: String) -> void:
+		if box.size.x < 3 or box.size.y < 3:
+			return
+		var rug_cell := Vector2i(
+			box.position.x + maxi((box.size.x - 2) / 2, 0),
+			box.position.y + maxi((box.size.y - 2) / 2, 0)
+		)
+		if interior_set.has(rug_cell):
+			placements.insert(0, {"piece": rug_name, "cell": rug_cell})
 	match theme:
+		"grooming":
+			# The barber's parlor: wash-basin, shears and lather stations
+			# line the north wall like mirror stands, each with a client
+			# chair pulled up in front; a reception counter sits by the
+			# entry wall with waiting seats down the west side and a rug
+			# in the middle of the floor.
+			place_center_rug.call("int_rug_red_square" if rng.randf() < 0.5 else "int_rug_green_square")
+			var stations: Array[String] = ["int_groom_basin", "int_groom_shears", "int_groom_lather"]
+			var station_index := 0
+			for line_cell: Vector2i in north_line:
+				if not try_place.call(stations[station_index % stations.size()], line_cell):
+					continue
+				station_index += 1
+				try_place.call("barber_chair", line_cell + Vector2i(0, 1))
+			# Narrow parlors whose north wall is mostly door approach still
+			# deserve a working floor: spill stations down the east wall,
+			# client chairs pulled up beside them.
+			if station_index < 2:
+				for line_cell: Vector2i in east_line:
+					if not try_place.call(stations[station_index % stations.size()], line_cell):
+						continue
+					station_index += 1
+					try_place.call("barber_chair", line_cell + Vector2i(-1, 0))
+			place_run.call(south_line, ["int_counter_linens", "int_stool_cushion"])
+			place_run.call(west_line, ["int_chair_cushion_red", "int_chair_cushion"])
+			place_run.call(east_line, ["int_candle_stand", "int_plant_potted"])
 		"smithy":
-			for x in range(box.position.x, box.end.x - 1):
+			for x: int in range(box.position.x, box.end.x - 1):
 				if try_place.call("int_hearth_arch", Vector2i(x, box.position.y)):
 					break
 			try_place.call("int_anvil", center_top)
-			for x in range(box.end.x - 2, box.position.x - 1, -1):
-				if try_place.call("int_weapon_rack_axes" if rng.randf() < 0.5 else "int_weapon_rack_pikes", Vector2i(x, box.position.y)):
-					break
+			place_run.call(north_line, ["int_weapon_rack_axes", "int_counter_jugs", "int_weapon_rack_pikes"])
 			var stand_pool: Array[String] = ["int_armor_stand_wood", "int_armor_stand_silver", "int_armor_stand_dark", "int_armor_stand_plate"]
-			var stand_corners: Array[Vector2i] = [
-				Vector2i(box.position.x, box.end.y - 1), Vector2i(box.end.x - 1, box.end.y - 1),
-				Vector2i(box.position.x, box.position.y), Vector2i(box.end.x - 1, box.position.y)
-			]
-			for corner: Vector2i in stand_corners:
-				if try_place.call(stand_pool[rng.randi_range(0, stand_pool.size() - 1)], corner) and rng.randf() < 0.4:
-					break
+			place_run.call(west_line, [stand_pool[rng.randi_range(0, stand_pool.size() - 1)], "int_pot_clay"])
+			place_run.call(east_line, [stand_pool[rng.randi_range(0, stand_pool.size() - 1)], "int_urn_basket"])
+			place_run.call(south_line, ["int_bench_rough", stand_pool[rng.randi_range(0, stand_pool.size() - 1)]])
 		"kitchen":
-			for x in range(box.position.x, box.end.x - 1):
+			for x: int in range(box.position.x, box.end.x - 1):
 				if try_place.call("int_kiln_beehive", Vector2i(x, box.position.y)):
 					break
-			var counter_run: Array[String] = ["int_counter_crockery", "int_counter_linens", "int_counter_jugs"]
-			for step in range(rng.randi_range(2, 3)):
-				try_place.call(counter_run[rng.randi_range(0, counter_run.size() - 1)], Vector2i(box.position.x + step * 2, box.end.y - 1))
+			place_run.call(north_line, ["int_counter_crockery", "int_counter_jugs", "int_cupboard_doors"])
+			place_run.call(south_line, ["int_counter_linens", "int_counter_crockery", "int_urn_basket"])
+			place_run.call(west_line, ["int_pot_clay", "int_shelf_small"])
 			try_place.call("int_roast_bird", center_top + Vector2i(1, 0))
+			try_place.call("int_stump_table", center_top)
 		"stately":
-			placements.append({"piece": "int_rug_red_long" if rng.randf() < 0.5 else "int_rug_green_long", "cell": center_top})
+			place_center_rug.call("int_rug_red_long" if rng.randf() < 0.5 else "int_rug_green_long")
 			for candle_offset: Vector2i in [Vector2i(-1, 0), Vector2i(2, 0)]:
 				try_place.call("int_candle_stand", center_top + candle_offset)
-			var book_run: Array[String] = ["int_bookshelf_wide", "int_bookshelf_red", "int_cabinet_tall"]
-			var books_placed := 0
-			for x in range(box.position.x, box.end.x):
-				if try_place.call(book_run[rng.randi_range(0, book_run.size() - 1)], Vector2i(x, box.position.y)):
-					books_placed += 1
-					if books_placed >= 3:
-						break
-			try_place.call("int_plant_tree", Vector2i(box.end.x - 1, box.end.y - 1))
+			place_run.call(north_line, ["int_bookshelf_wide", "int_bookshelf_red", "int_cabinet_tall"])
+			place_run.call(east_line, ["int_bookshelf_red", "int_plant_tree"])
+			place_run.call(west_line, ["int_cabinet_tall", "int_table_flower_white"])
+			# A reading table with a cushioned chair beside the rug turns
+			# the hall from a bare library into a working office.
+			if box.size.x >= 4 and box.size.y >= 4:
+				if try_place.call("long_table", center_top + Vector2i(-1, 1)):
+					try_place.call("int_chair_cushion_red", center_top + Vector2i(2, 1))
 		"guard":
 			# The rug goes first in the list: with furniture stacked by
 			# placement order, first placed means drawn underneath.
-			placements.insert(0, {"piece": "int_rug_green_square", "cell": center_top})
-			for x in range(box.position.x, box.end.x - 1):
-				if try_place.call("int_weapon_rack_pikes", Vector2i(x, box.position.y)):
-					break
+			place_center_rug.call("int_rug_green_square")
+			place_run.call(north_line, ["int_weapon_rack_pikes", "int_weapon_rack_axes"])
 			var stands: Array[String] = ["int_armor_stand_silver", "int_armor_stand_plate", "int_armor_stand_dark", "int_armor_stand_wood"]
+			place_run.call(west_line, [stands[rng.randi_range(0, stands.size() - 1)]])
+			place_run.call(east_line, [stands[rng.randi_range(0, stands.size() - 1)]])
+			place_run.call(south_line, ["int_bench_rough", stands[rng.randi_range(0, stands.size() - 1)]])
 			var stand_count := rng.randi_range(2, 3)
 			for _stand in range(stand_count * 4):
 				if stand_count <= 0:
@@ -555,6 +628,11 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 				if try_place.call(stands[rng.randi_range(0, stands.size() - 1)], interior[rng.randi_range(0, interior.size() - 1)]):
 					stand_count -= 1
 		"herbal":
+			place_center_rug.call("int_rug_green_square")
+			place_run.call(north_line, ["int_shelf_small", "int_shelf_flowerpot", "int_cupboard_doors"])
+			place_run.call(south_line, ["int_counter_crockery", "int_table_plant_fern"])
+			place_run.call(west_line, ["int_plant_potted", "int_pot_clay"])
+			place_run.call(east_line, ["int_plant_tree", "int_urn_basket"])
 			var green_pool: Array[String] = ["int_plant_potted", "int_plant_tree", "int_urn_basket", "int_table_flower_blue", "int_table_flower_white", "int_table_plant_fern", "int_shelf_flowerpot"]
 			var green_count := rng.randi_range(3, 5)
 			for _green in range(green_count * 4):
@@ -562,24 +640,38 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 					break
 				if try_place.call(green_pool[rng.randi_range(0, green_pool.size() - 1)], interior[rng.randi_range(0, interior.size() - 1)]):
 					green_count -= 1
-			for x in range(box.position.x, box.end.x):
-				if try_place.call("int_shelf_small", Vector2i(x, box.position.y)):
-					break
 		"hearthside":
-			for x in range(box.position.x, box.end.x - 1):
+			for x: int in range(box.position.x, box.end.x - 1):
 				if try_place.call("int_fireplace_dark", Vector2i(x, box.position.y)):
 					break
-			placements.append({"piece": "int_rug_red_square", "cell": center_top})
+			place_center_rug.call("int_rug_red_square")
+			place_run.call(north_line, ["int_counter_jugs", "int_cupboard_doors"])
+			# A common table ringed by stools makes the taproom read as a
+			# place people actually drink in.
+			if try_place.call("int_stump_table", center_top + Vector2i(0, 1)):
+				for stool_offset: Vector2i in [Vector2i(-1, 1), Vector2i(1, 1), Vector2i(0, 2)]:
+					try_place.call("int_stool_cushion" if rng.randf() < 0.5 else "int_stool_low", center_top + stool_offset)
 			try_place.call("int_roast_bird", center_top + Vector2i(-1, 1))
+			place_run.call(west_line, ["int_stool_low", "int_pot_clay"])
+			place_run.call(east_line, ["bar_barrel", "int_urn_basket"])
 		"craft":
-			for x in range(box.position.x, box.end.x - 1):
-				if try_place.call("int_bench_rough", Vector2i(x, box.position.y)):
-					break
-			try_place.call("int_urn_basket", Vector2i(box.end.x - 1, box.end.y - 1))
+			place_run.call(north_line, ["int_bench_rough", "int_counter_linens", "int_shelf_small"])
+			place_run.call(south_line, ["int_bench_rough", "int_urn_basket"])
+			place_run.call(west_line, ["int_pot_crate", "int_pot_clay"])
+			place_run.call(east_line, ["int_shelf_small", "int_urn_basket"])
+			try_place.call("int_stump_table", center_top)
 			try_place.call("int_stool_low", center_top + Vector2i(-1, 1))
+			try_place.call("int_stool_low", center_top + Vector2i(1, 1))
 		"stockroom":
+			place_run.call(north_line, ["int_counter_jugs", "int_pot_crate", "int_cupboard_doors"])
+			place_run.call(west_line, ["int_pot_crate", "int_urn_basket"])
+			place_run.call(east_line, ["int_urn_basket", "int_pot_clay"])
+			place_run.call(south_line, ["int_pot_crate", "int_pot_clay"])
+			# Loose floor crates are walk-through decor, so a wide room can
+			# take them without choking the aisles.
+			try_place.call("crate_floor", Vector2i(box.position.x, box.end.y - 2))
 			var stock_pool: Array[String] = ["int_pot_crate", "int_urn_basket", "int_pot_clay", "int_counter_jugs"]
-			var stock_count := rng.randi_range(3, 5)
+			var stock_count := rng.randi_range(4, 6)
 			for _stock in range(stock_count * 4):
 				if stock_count <= 0:
 					break
@@ -639,6 +731,39 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 		var piece := String(trade_pool[rng.randi_range(0, trade_pool.size() - 1)])
 		if try_place.call(piece, open_cells[rng.randi_range(0, open_cells.size() - 1)]):
 			trade_count -= 1
+
+	# --- Corners and clutter -----------------------------------------------
+	# The finishing pass every dressed interior gets: greenery or a candle
+	# stand tucked into the corners, then small props scattered along the
+	# walls, scaled to floor area. Placements still run the fit + openness
+	# guards, so the door approach and room connectivity stay intact.
+	var corner_pool: Array[String] = ["int_plant_tree", "int_plant_potted", "int_candle_stand", "int_urn_basket", "int_pot_clay"]
+	var corners: Array[Vector2i] = [
+		box.position, Vector2i(box.end.x - 1, box.position.y),
+		Vector2i(box.position.x, box.end.y - 1), Vector2i(box.end.x - 1, box.end.y - 1)
+	]
+	for corner: Vector2i in corners:
+		try_place.call(corner_pool[rng.randi_range(0, corner_pool.size() - 1)], corner)
+	var prop_pool: Array[String] = [
+		"int_pot_clay", "int_urn_basket", "int_table_flower_pot", "int_shelf_small",
+		"int_plant_potted", "int_stool_low", "df_box_1_0", "df_box_2_0", "df_tool_20_0"
+	]
+	var edge_cells: Array[Vector2i] = []
+	for cell: Vector2i in interior:
+		if cell.y == box.position.y or cell.x == box.position.x or cell.x == box.end.x - 1 or cell.y == box.end.y - 1:
+			edge_cells.append(cell)
+	var prop_count := rng.randi_range(2, mini(7, 3 + interior.size() / 5))
+	for _prop in range(prop_count * 6):
+		if prop_count <= 0:
+			break
+		var prop_name: String = prop_pool[rng.randi_range(0, prop_pool.size() - 1)]
+		var candidate: Vector2i
+		if not edge_cells.is_empty() and rng.randf() < 0.65:
+			candidate = edge_cells[rng.randi_range(0, edge_cells.size() - 1)]
+		else:
+			candidate = interior[rng.randi_range(0, interior.size() - 1)]
+		if try_place.call(prop_name, candidate):
+			prop_count -= 1
 	return placements
 
 ## Builds the sprite for a placement, anchored so its base sits on the
