@@ -4624,6 +4624,13 @@ func _assign_settlement_factions() -> void:
 	_settlement_factions = SettlementFactionService.generate_factions(
 		"town", _hold_state.selected_hold_population, building_cells_by_type, _rng
 	)
+	## Chronicle grudges (wars survived, beasts still at large) redirect one
+	## guild's agenda toward the town's real history.
+	SettlementFactionService.apply_history_agenda(
+		_settlement_factions,
+		WorldChronicleService.history_agenda_goals(_world_settings_snapshot(), _town_name),
+		_rng
+	)
 	SettlementFactionService.assign_members(_settlement_factions, _npc_states, Callable(self, "_is_npc_walkable_cell"), _rng)
 	_update_factions_panel()
 
@@ -4686,9 +4693,12 @@ func _show_npc_dialogue(state: Dictionary) -> void:
 		line = SettlementEconomyService.dialogue_line(role_title, NpcIdentityService.personal_line(identity, _rng), _rng)
 	else:
 		# World news travels: sometimes the gossip is about far-off wars
-		# and caravans instead of the town's own affairs.
+		# and caravans instead of the town's own affairs. History runs
+		# deepest — chronicle rumors recall the town's own recorded past.
 		var rumor := ""
-		if _rng.randf() < 0.4:
+		if _rng.randf() < 0.35:
+			rumor = WorldChronicleService.history_rumor(_world_settings_snapshot(), _town_name, _rng)
+		if rumor.is_empty() and _rng.randf() < 0.4:
 			rumor = WorldEventsService.rumor_from_events(_world_settings_snapshot(), _game_day, _rng)
 		if rumor.is_empty():
 			rumor = SettlementEconomyService.rumor_from_town_details(_town_details, _rng)
