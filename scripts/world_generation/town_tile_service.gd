@@ -31,7 +31,7 @@ static func _cell_hash(x: int, y: int) -> int:
 		value = -value
 	return value
 
-static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cells: Dictionary) -> String:
+static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cells: Dictionary, dark_grass_rect: Rect2i = Rect2i()) -> String:
 	if cell == CELL_WALL:
 		## Interior partitions are timber walls except where a door was
 		## punched to connect two rooms. A partition end that crosses the
@@ -49,22 +49,146 @@ static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cel
 		return wall_or_floor_tile(grid, x, y, cell, door_cells)
 	if cell == CELL_HALL or cell == CELL_PLAZA:
 		return pick_path_tile(grid, x, y, cell)
-	return pick_grass_tile(x, y)
+	return pick_grass_tile(grid, x, y, dark_grass_rect)
 
-## Deterministic grass variety: mostly plain green with occasional darker
-## patches, tuft clusters and mottled cells so open ground stops reading as
-## one endlessly repeated tile. Biome swaps remap every key downstream.
-static func pick_grass_tile(x: int, y: int) -> String:
+## Deterministic grass variety. Dark grass no longer scatters as lone
+## hard-edged squares: a low-frequency hash blob field gathers it into
+## multi-cell patches, and every patch cell picks the shipped fringe piece
+## matching which neighbors are plain, so patches read as soft leafy blobs.
+## Tufts and the all-side mottled blends stay single-cell accents (their art
+## sits on the plain grass base, so any adjacency already reads smooth).
+## Biome swaps remap every key downstream.
+static func pick_grass_tile(grid: Dictionary, x: int, y: int, dark_grass_rect: Rect2i = Rect2i()) -> String:
+	if is_dark_grass_cell(grid, x, y, dark_grass_rect):
+		var suffix := fringe_suffix(
+			not is_dark_grass_cell(grid, x, y - 1, dark_grass_rect),
+			not is_dark_grass_cell(grid, x, y + 1, dark_grass_rect),
+			not is_dark_grass_cell(grid, x - 1, y, dark_grass_rect),
+			not is_dark_grass_cell(grid, x + 1, y, dark_grass_rect),
+			not is_dark_grass_cell(grid, x - 1, y - 1, dark_grass_rect),
+			not is_dark_grass_cell(grid, x + 1, y - 1, dark_grass_rect),
+			not is_dark_grass_cell(grid, x - 1, y + 1, dark_grass_rect),
+			not is_dark_grass_cell(grid, x + 1, y + 1, dark_grass_rect),
+			true, x, y)
+		return "grass_dark" if suffix.is_empty() else "grass_dark_" + suffix
 	var roll := _cell_hash(x, y) % 37
-	if roll == 0:
-		return "grass_dark"
-	if roll <= 2:
+	if roll <= 1:
 		return "grass_tuft"
-	if roll <= 4:
+	if roll <= 3:
 		return "grass_tuft_alt"
-	if roll <= 7:
+	if roll <= 5:
 		return "grass_mottled"
+	if roll <= 7:
+		return "grass_mottled_alt"
 	return "grass"
+
+## Whether this open-green cell belongs to a dark-grass patch. Patches come
+## from a bilinearly-interpolated hash lattice (period 4 cells), so they are
+## organic multi-cell blobs, deterministic per seed layout. Only true open
+## green inside dark_grass_rect qualifies: lanes, plazas and buildings break
+## patches, and the rect (the town's key bounds shrunk off the perimeter)
+## keeps patches away from the painted clearing's rim so the streamed wilds
+## never abut a patch interior with foreign terrain.
+static func is_dark_grass_cell(grid: Dictionary, x: int, y: int, dark_grass_rect: Rect2i) -> bool:
+	if not dark_grass_rect.has_point(Vector2i(x, y)):
+		return false
+	if _cell_at(grid, x, y) != CELL_ROCK:
+		return false
+	return _grass_blob_field(x, y) > 0.72
+
+## Value noise over the cell grid: hash lattice every 4 cells, smoothstepped
+## bilinear blend between the four surrounding lattice values.
+static func _grass_blob_field(x: int, y: int) -> float:
+	var gx := int(floor(float(x) / 4.0))
+	var gy := int(floor(float(y) / 4.0))
+	var fx := (float(x) - float(gx) * 4.0) / 4.0
+	var fy := (float(y) - float(gy) * 4.0) / 4.0
+	fx = fx * fx * (3.0 - 2.0 * fx)
+	fy = fy * fy * (3.0 - 2.0 * fy)
+	var v00 := _lattice_value(gx, gy)
+	var v10 := _lattice_value(gx + 1, gy)
+	var v01 := _lattice_value(gx, gy + 1)
+	var v11 := _lattice_value(gx + 1, gy + 1)
+	return lerpf(lerpf(v00, v10, fx), lerpf(v01, v11, fx), fy)
+
+static func _lattice_value(gx: int, gy: int) -> float:
+	return float(_cell_hash(gx * 5 + 3, gy * 7 - 11) % 1024) / 1023.0
+
+## The shared mask -> fringe-piece vocabulary. The n/s/w/e flags say the
+## matching orthogonal neighbor is "open" (the fringing terrain), diagonals
+## likewise. With full_set the whole synthesized vocabulary is available
+## (strips, tips, islands); without it (the shipped dirt-path set) opposite
+## open edges hash-alternate between the two single-edge pieces and
+## three-open cells collapse to a convex corner, exactly the landed path
+## behavior. Returns "" for a fully interior cell.
+static func fringe_suffix(n_open: bool, s_open: bool, w_open: bool, e_open: bool, nw_open: bool, ne_open: bool, sw_open: bool, se_open: bool, full_set: bool, x: int, y: int) -> String:
+	if full_set:
+		if n_open and s_open and w_open and e_open:
+			return "island"
+		if n_open and w_open and e_open:
+			return "tip_n"
+		if s_open and w_open and e_open:
+			return "tip_s"
+		if n_open and s_open and w_open:
+			return "tip_w"
+		if n_open and s_open and e_open:
+			return "tip_e"
+	if n_open and w_open:
+		return "edge_nw"
+	if n_open and e_open:
+		return "edge_ne"
+	if s_open and w_open:
+		return "edge_sw"
+	if s_open and e_open:
+		return "edge_se"
+	if n_open and s_open:
+		if full_set:
+			return "edge_ns"
+		return "edge_n" if _cell_hash(x, y) % 2 == 0 else "edge_s"
+	if w_open and e_open:
+		if full_set:
+			return "edge_we"
+		return "edge_w" if _cell_hash(x, y) % 2 == 0 else "edge_e"
+	if n_open:
+		return "edge_n"
+	if s_open:
+		return "edge_s"
+	if w_open:
+		return "edge_w"
+	if e_open:
+		return "edge_e"
+	if nw_open:
+		return "in_nw"
+	if ne_open:
+		return "in_ne"
+	if sw_open:
+		return "in_sw"
+	if se_open:
+		return "in_se"
+	return ""
+
+## Which terrain family a base tile key belongs to, for seam autotiling in
+## the streamed wilds: cells of different families meet with a fringe piece
+## on one side instead of a hard cut. Fringe pieces stay in their under-
+## terrain's family (a grass-lapped sand cell is still sand).
+static func terrain_family_for_tile_key(tile_key: String) -> String:
+	if tile_key.begins_with("grass_dark"):
+		return "grass_dark"
+	if tile_key.begins_with("grass") or tile_key.begins_with("flowers"):
+		return "grass"
+	if tile_key.begins_with("tilled"):
+		return "tilled"
+	if tile_key.begins_with("water"):
+		return "water"
+	if tile_key.begins_with("sand"):
+		return "sand"
+	if tile_key.begins_with("snow_alt"):
+		return "snow_alt"
+	if tile_key.begins_with("snow"):
+		return "snow"
+	if tile_key.begins_with("road") or tile_key.begins_with("plaza"):
+		return "road"
+	return "other"
 
 ## Mask-based path autotiling: a lane/plaza cell that borders open grass
 ## picks the matching grass-fringed edge, convex-corner or inner-corner
@@ -72,41 +196,19 @@ static func pick_grass_tile(x: int, y: int) -> String:
 ## Building fabric and doors count as "closed" (paths butt flush against
 ## walls), and anything outside the grid decodes to CELL_ROCK = grass.
 static func pick_path_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
-	var n_open := _cell_at(grid, x, y - 1) == CELL_ROCK
-	var s_open := _cell_at(grid, x, y + 1) == CELL_ROCK
-	var w_open := _cell_at(grid, x - 1, y) == CELL_ROCK
-	var e_open := _cell_at(grid, x + 1, y) == CELL_ROCK
-	if n_open and w_open:
-		return "road_edge_nw"
-	if n_open and e_open:
-		return "road_edge_ne"
-	if s_open and w_open:
-		return "road_edge_sw"
-	if s_open and e_open:
-		return "road_edge_se"
-	if n_open and s_open:
-		return "road_edge_n" if _cell_hash(x, y) % 2 == 0 else "road_edge_s"
-	if w_open and e_open:
-		return "road_edge_w" if _cell_hash(x, y) % 2 == 0 else "road_edge_e"
-	if n_open:
-		return "road_edge_n"
-	if s_open:
-		return "road_edge_s"
-	if w_open:
-		return "road_edge_w"
-	if e_open:
-		return "road_edge_e"
-	# Fully path-flanked: a grass bite at one open diagonal rounds concave
-	# corners; otherwise the interior variant pool.
-	if _cell_at(grid, x - 1, y - 1) == CELL_ROCK:
-		return "road_in_nw"
-	if _cell_at(grid, x + 1, y - 1) == CELL_ROCK:
-		return "road_in_ne"
-	if _cell_at(grid, x - 1, y + 1) == CELL_ROCK:
-		return "road_in_sw"
-	if _cell_at(grid, x + 1, y + 1) == CELL_ROCK:
-		return "road_in_se"
-	return pick_path_interior_tile(x, y, cell == CELL_PLAZA)
+	var suffix := fringe_suffix(
+		_cell_at(grid, x, y - 1) == CELL_ROCK,
+		_cell_at(grid, x, y + 1) == CELL_ROCK,
+		_cell_at(grid, x - 1, y) == CELL_ROCK,
+		_cell_at(grid, x + 1, y) == CELL_ROCK,
+		_cell_at(grid, x - 1, y - 1) == CELL_ROCK,
+		_cell_at(grid, x + 1, y - 1) == CELL_ROCK,
+		_cell_at(grid, x - 1, y + 1) == CELL_ROCK,
+		_cell_at(grid, x + 1, y + 1) == CELL_ROCK,
+		false, x, y)
+	if suffix.is_empty():
+		return pick_path_interior_tile(x, y, cell == CELL_PLAZA)
+	return "road_" + suffix
 
 ## The interior (fully surrounded) path variants, hash-weighted.
 static func pick_path_interior_tile(x: int, y: int, is_plaza: bool) -> String:

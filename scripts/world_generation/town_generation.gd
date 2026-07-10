@@ -156,6 +156,15 @@ var _surface_biome_ctx: Dictionary = {}
 var _town_ground_biome := ""
 var _surface_road_cells: Dictionary = {}
 var _surface_blocked_cells: Dictionary = {}
+## Per-streaming-pass memo of terrain families sampled for seam autotiling
+## (cleared each pass; deterministic, so staleness only costs recompute).
+var _surface_family_memo: Dictionary = {}
+## Lazy atlas-coords -> terrain-family lookup for painted ground cells.
+var _atlas_family_by_coords: Dictionary = {}
+## Dark-grass blob patches only grow inside this rect (the current grid's
+## key bounds shrunk by one), so the painted clearing's rim stays plain and
+## the streamed wilds never butt foreign terrain against a patch interior.
+var _dark_grass_rect := Rect2i()
 var _surface_gates: Array[Dictionary] = []
 var _surface_gate_labels: Array[Label] = []
 # Non-enterable ambient structures (camps, watchtowers, shrines...) that sit
@@ -373,6 +382,7 @@ const DESERT_BASE_SWAP := {
 	"grass_tuft": "sand_pebbles",
 	"grass_tuft_alt": "sand_pebbles",
 	"grass_mottled": "sand_alt",
+	"grass_mottled_alt": "sand_alt",
 	# Desert lanes keep bare dirt: the grass-fringed path edges would paint
 	# green scallops onto sand, so they collapse back to plain road art.
 	"road_edge_n": "road", "road_edge_s": "road",
@@ -400,6 +410,7 @@ const SNOW_BASE_SWAP := {
 	"grass_tuft": "snow_alt",
 	"grass_tuft_alt": "snow_alt",
 	"grass_mottled": "snow",
+	"grass_mottled_alt": "snow",
 	"road_edge_n": "road_edge_n_snow", "road_edge_s": "road_edge_s_snow",
 	"road_edge_w": "road_edge_w_snow", "road_edge_e": "road_edge_e_snow",
 	"road_in_nw": "road_in_nw_snow", "road_in_ne": "road_in_ne_snow",
@@ -1604,24 +1615,49 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 		TILE_ATLAS.get("snow", Vector2i(0, 26)) as Vector2i,
 		TILE_ATLAS.get("snow_alt", Vector2i(1, 26)) as Vector2i
 	]
-	var synthetic_keys: Array[String] = [
-		"road_edge_nw", "road_edge_ne", "road_edge_sw", "road_edge_se",
-		"road_edge_n_snow", "road_edge_s_snow", "road_edge_w_snow", "road_edge_e_snow",
-		"road_in_nw_snow", "road_in_ne_snow", "road_in_sw_snow", "road_in_se_snow",
-		"road_edge_nw_snow", "road_edge_ne_snow", "road_edge_sw_snow", "road_edge_se_snow"
-	]
+	# Every appended-row cell is addressed through the atlas table, so the
+	# augmented sheet just needs to reach the deepest mapped row.
 	var max_row := 0
-	for coords: Vector2i in snow_coords:
-		max_row = maxi(max_row, coords.y)
-	for synthetic_key: String in synthetic_keys:
-		max_row = maxi(max_row, (TILE_ATLAS.get(synthetic_key, Vector2i.ZERO) as Vector2i).y)
+	for coords_variant: Variant in TILE_ATLAS.values():
+		max_row = maxi(max_row, (coords_variant as Vector2i).y)
 	var needed_height := maxi(base_image.get_height(), (max_row + 1) * tile_size.y)
 	var augmented := Image.create(base_image.get_width(), needed_height, false, Image.FORMAT_RGBA8)
 	augmented.blit_rect(base_image, Rect2i(Vector2i.ZERO, base_image.get_size()), Vector2i.ZERO)
 	for variant_index: int in range(snow_coords.size()):
 		_paint_snow_tile(augmented, snow_coords[variant_index], variant_index)
 	_paint_path_fringe_tiles(augmented)
+	_harmonize_demo_grass_tiles(augmented)
+	_paint_terrain_fringe_tiles(augmented)
 	return ImageTexture.create_from_image(augmented)
+
+## The sheet's grass-demo region (dark patches, tufts, mottled blends) sits
+## on its own mid-green (140,169,66), while the game's plain grass tile is
+## the flat (160,174,68). Left alone, every tuft/mottled accent and every
+## dark-patch fringe reads as a ghost square against the plain lawn - the
+## very hard cut this pass removes. Repaint the demo mid-green with the
+## plain grass color on all mapped demo tiles (before the dark-piece
+## compositor runs, so the synthesized extras inherit the fix).
+func _harmonize_demo_grass_tiles(image: Image) -> void:
+	var plain := (TILE_ATLAS.get("grass", Vector2i(1, 1)) as Vector2i) * tile_size
+	var plain_color := image.get_pixel(plain.x, plain.y)
+	var demo_keys: Array[String] = [
+		"grass_dark", "grass_dark_edge_n", "grass_dark_edge_s",
+		"grass_dark_edge_w", "grass_dark_edge_e",
+		"grass_dark_edge_nw", "grass_dark_edge_ne",
+		"grass_dark_edge_sw", "grass_dark_edge_se",
+		"grass_dark_in_nw", "grass_dark_in_ne",
+		"grass_dark_in_sw", "grass_dark_in_se",
+		"grass_tuft", "grass_tuft_alt", "grass_mottled", "grass_mottled_alt"
+	]
+	for demo_key: String in demo_keys:
+		var coords := TILE_ATLAS.get(demo_key, Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		for ty: int in range(tile_size.y):
+			for tx: int in range(tile_size.x):
+				var pixel := image.get_pixel(coords.x * tile_size.x + tx, coords.y * tile_size.y + ty)
+				if pixel.r8 == 140 and pixel.g8 == 169 and pixel.b8 == 66:
+					image.set_pixel(coords.x * tile_size.x + tx, coords.y * tile_size.y + ty, plain_color)
 
 ## A pixel of the path-fringe art counts as vegetation when green clearly
 ## leads red (leaf greens) OR clearly leads blue (the olive tuft speckles:
@@ -1685,6 +1721,127 @@ func _paint_path_fringe_tiles(image: Image) -> void:
 				if _fringe_pixel_is_grass(source_pixel):
 					out = image.get_pixel(snow_origin.x + tx, snow_origin.y + ty)
 				image.set_pixel(target.x * tile_size.x + tx, target.y * tile_size.y + ty, out)
+
+## A pixel of the shipped dark-grass demo art that belongs to the PLAIN
+## grass side: the demo uses exactly two greens (plain r=140/160 vs dark
+## r=106, measured), so the red channel separates them cleanly.
+func _dark_demo_pixel_is_plain(color: Color) -> bool:
+	return color.r8 >= 125
+
+## Fills in the terrain-transition art the sheet doesn't ship:
+## 1) the dark-grass pieces missing from the shipped patch demo (strips,
+##    peninsula tips, lone islands), composited as unions of the demo's edge
+##    and corner pieces — same trick as the road convex corners; and
+## 2) the synthesized fringe families of TOWN_FRINGE_FAMILIES (grass over
+##    sand/water/snow, sand over water, tilled-soil fringes, snow_alt
+##    drifts), painted as the under tile with the over tile scalloped across
+##    each piece's open sides. Purely deterministic pixel work at 2px block
+##    granularity so the results match the sheet's chunky 2x-upscaled style.
+func _paint_terrain_fringe_tiles(image: Image) -> void:
+	var dark_recipes := {
+		"grass_dark_edge_ns": ["grass_dark_edge_n", "grass_dark_edge_s"],
+		"grass_dark_edge_we": ["grass_dark_edge_w", "grass_dark_edge_e"],
+		"grass_dark_tip_n": ["grass_dark_edge_nw", "grass_dark_edge_ne"],
+		"grass_dark_tip_s": ["grass_dark_edge_sw", "grass_dark_edge_se"],
+		"grass_dark_tip_w": ["grass_dark_edge_nw", "grass_dark_edge_sw"],
+		"grass_dark_tip_e": ["grass_dark_edge_ne", "grass_dark_edge_se"],
+		"grass_dark_island": ["grass_dark_edge_nw", "grass_dark_edge_ne", "grass_dark_edge_sw", "grass_dark_edge_se"]
+	}
+	for target_key: String in dark_recipes.keys():
+		var sources := dark_recipes[target_key] as Array
+		var target := TILE_ATLAS.get(target_key, Vector2i(-1, -1)) as Vector2i
+		if target.x < 0:
+			continue
+		var primary := TILE_ATLAS.get(String(sources[0]), Vector2i.ZERO) as Vector2i
+		for ty: int in range(tile_size.y):
+			for tx: int in range(tile_size.x):
+				var out := image.get_pixel(primary.x * tile_size.x + tx, primary.y * tile_size.y + ty)
+				if not _dark_demo_pixel_is_plain(out):
+					for source_index: int in range(1, sources.size()):
+						var source := TILE_ATLAS.get(String(sources[source_index]), Vector2i.ZERO) as Vector2i
+						var candidate := image.get_pixel(source.x * tile_size.x + tx, source.y * tile_size.y + ty)
+						if _dark_demo_pixel_is_plain(candidate):
+							out = candidate
+							break
+				image.set_pixel(target.x * tile_size.x + tx, target.y * tile_size.y + ty, out)
+
+	for family_key: String in TILE_ATLAS_DEFS.TOWN_FRINGE_FAMILIES.keys():
+		var recipe := TILE_ATLAS_DEFS.TOWN_FRINGE_FAMILIES[family_key] as Dictionary
+		var under := TILE_ATLAS.get(String(recipe.get("under", "grass")), Vector2i.ZERO) as Vector2i
+		var over := TILE_ATLAS.get(String(recipe.get("over", "grass")), Vector2i.ZERO) as Vector2i
+		var rim := bool(recipe.get("rim", false))
+		for suffix: String in TILE_ATLAS_DEFS.TOWN_FRINGE_SUFFIXES:
+			var target := TILE_ATLAS.get("%s_%s" % [family_key, suffix], Vector2i(-1, -1)) as Vector2i
+			if target.x < 0:
+				continue
+			_paint_fringe_piece(image, target, under, over, suffix, family_key, rim)
+
+## Paints one synthesized fringe piece: the under tile everywhere, the over
+## tile across a scalloped band along each open side (union), with an
+## optional darkened rim along the over side of the boundary (waterlines).
+## The coverage mask lives on the 16x16 grid of 2px blocks; band depths are
+## periodic two-harmonic scallops plus hashed jitter, so adjacent pieces of
+## a family continue each other's fringe across tile seams.
+func _paint_fringe_piece(image: Image, target: Vector2i, under: Vector2i, over: Vector2i, suffix: String, family_key: String, rim: bool) -> void:
+	var blocks := 16
+	var covered: Array[bool] = []
+	covered.resize(blocks * blocks)
+	var open_n := suffix in ["edge_n", "edge_nw", "edge_ne", "edge_ns", "tip_n", "tip_w", "tip_e", "island"]
+	var open_s := suffix in ["edge_s", "edge_sw", "edge_se", "edge_ns", "tip_s", "tip_w", "tip_e", "island"]
+	var open_w := suffix in ["edge_w", "edge_nw", "edge_sw", "edge_we", "tip_w", "tip_n", "tip_s", "island"]
+	var open_e := suffix in ["edge_e", "edge_ne", "edge_se", "edge_we", "tip_e", "tip_n", "tip_s", "island"]
+	var family_hash := hash(family_key)
+	for by: int in range(blocks):
+		for bx: int in range(blocks):
+			var hit := false
+			if open_n and by < _fringe_band_depth(bx, 0.4, family_hash):
+				hit = true
+			if not hit and open_s and by >= blocks - _fringe_band_depth(bx, 2.3, family_hash + 7):
+				hit = true
+			if not hit and open_w and bx < _fringe_band_depth(by, 4.1, family_hash + 13):
+				hit = true
+			if not hit and open_e and bx >= blocks - _fringe_band_depth(by, 5.6, family_hash + 29):
+				hit = true
+			if not hit and suffix.begins_with("in_"):
+				# Diagonal bite: a wobbled corner cut, mirrored per quadrant.
+				var dx := bx if suffix.ends_with("nw") or suffix.ends_with("sw") else blocks - 1 - bx
+				var dy := by if suffix.ends_with("nw") or suffix.ends_with("ne") else blocks - 1 - by
+				hit = dx + dy < 5 + absi(family_hash + (dx - dy) * 31) % 3
+			covered[by * blocks + bx] = hit
+	for ty: int in range(tile_size.y):
+		for tx: int in range(tile_size.x):
+			var bx := tx / 2
+			var by := ty / 2
+			var out: Color
+			if covered[by * blocks + bx]:
+				out = image.get_pixel(over.x * tile_size.x + tx, over.y * tile_size.y + ty)
+				if rim and _fringe_block_on_boundary(covered, bx, by, blocks):
+					out = Color(out.r * 0.72, out.g * 0.72, out.b * 0.8, out.a)
+			else:
+				out = image.get_pixel(under.x * tile_size.x + tx, under.y * tile_size.y + ty)
+			image.set_pixel(target.x * tile_size.x + tx, target.y * tile_size.y + ty, out)
+
+## Scalloped band depth (in 2px blocks) at position t along a side: a base
+## depth plus two sine harmonics (periodic over the tile, so runs of the
+## same edge piece stay continuous) plus deterministic per-block jitter.
+func _fringe_band_depth(t: int, phase: float, salt: int) -> int:
+	var wave := 4.0 + 1.6 * sin(TAU * float(t) / 16.0 + phase) + 1.0 * sin(TAU * 2.0 * float(t) / 16.0 + phase * 1.7)
+	var jitter := absi(salt * 92821 + t * 68917) % 3 - 1
+	return clampi(roundi(wave) + jitter, 2, 7)
+
+## Whether a covered block touches the uncovered side of the mask (the
+## boundary rim). Blocks past the tile edge count as covered - the over
+## terrain continues in the neighboring cell, so the rim never outlines the
+## tile border itself.
+func _fringe_block_on_boundary(covered: Array[bool], bx: int, by: int, blocks: int) -> bool:
+	for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var nx := bx + offset.x
+		var ny := by + offset.y
+		if nx < 0 or ny < 0 or nx >= blocks or ny >= blocks:
+			continue
+		if not covered[ny * blocks + nx]:
+			return true
+	return false
 
 ## Paints a convincing 32px snow ground tile into one atlas cell: a
 ## near-white base with faint cool-blue speckle grain, soft blue shadow
@@ -2512,8 +2669,10 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	city_layer.clear()
 	decor_layer.clear()
 	_surface_chunks.clear()
+	_surface_family_memo.clear()
 	_surface_last_player_chunk = Vector2i(2147483647, 2147483647)
 	var bounds := _find_bounds(grid).grow(1)
+	_dark_grass_rect = _find_bounds(grid).grow(-1)
 	var house_decor_overrides := _build_house_decor_layouts(grid)
 	_latest_bed_count = 0
 	_bed_cells = []
@@ -2613,14 +2772,23 @@ func _stamp_village_yards() -> void:
 			decor_layer.erase_cell(gate_variant as Vector2i)
 			_actor_passable_cache.erase(gate_variant as Vector2i)
 		var crop_family := crop_families[_rng.randi_range(0, crop_families.size() - 1)]
+		# The tilled ranks are decided up front so each bed cell can pick the
+		# grass-fringed tilled piece matching its rank neighbors: single-rank
+		# beds get frayed north/south edges, rank ends get peninsula tips.
+		var tilled_cells: Dictionary = {}
+		if grow_crops:
+			for garden_variant: Variant in (yard.get("garden", []) as Array):
+				var garden_cell := garden_variant as Vector2i
+				if absi(garden_cell.y) % 2 == 0:
+					tilled_cells[garden_cell] = true
 		for garden_variant: Variant in (yard.get("garden", []) as Array):
 			var garden_cell := garden_variant as Vector2i
 			yard_ground[garden_cell] = true
 			# Clear tree/hedge scatter so the plot reads as tended ground.
 			decor_layer.erase_cell(garden_cell)
 			_actor_passable_cache.erase(garden_cell)
-			if grow_crops and absi(garden_cell.y) % 2 == 0:
-				_place_tile(city_layer, garden_cell, "tilled_soil")
+			if tilled_cells.has(garden_cell):
+				_place_tile(city_layer, garden_cell, _tilled_tile_key(garden_cell, tilled_cells))
 				_place_tile(decor_layer, garden_cell, "%s_%d" % [crop_family, _rng.randi_range(1, 2)])
 			elif _rng.randf() < 0.3 and _town_theme != "desert" and _town_ground_biome != TILE_ATLAS_DEFS.BIOME_TUNDRA:
 				_place_tile(decor_layer, garden_cell, "flowers_white" if _rng.randf() < 0.5 else "flowers_yellow")
@@ -3143,12 +3311,33 @@ func _stamp_farmstead(origin: Vector2i, with_windmill: bool) -> void:
 	if not pen_cells.is_empty():
 		_farm_pens.append(pen_cells)
 
-	# Tilled crop plot on the bottom-right: sandy soil in crop rows.
+	# Tilled crop plot on the bottom-right: sandy soil in crop rows, its rim
+	# wearing the grass fringe so the field doesn't cut a hard tan rectangle
+	# out of the green (desert/snow towns keep the plain barren plot).
 	var crop_rect := Rect2i(origin + Vector2i(7, 5), Vector2i(3, 4))
 	var crop_art := FARM_CROP_RECTS[_rng.randi_range(0, FARM_CROP_RECTS.size() - 1)]
+	var plot_fringed := _town_theme != "desert" and _town_ground_biome != TILE_ATLAS_DEFS.BIOME_TUNDRA
+	var plot_members: Dictionary = {}
 	for y in range(crop_rect.position.y, crop_rect.end.y):
 		for x in range(crop_rect.position.x, crop_rect.end.x):
-			_place_tile(city_layer, Vector2i(x, y), "sand")
+			plot_members[Vector2i(x, y)] = true
+	for y in range(crop_rect.position.y, crop_rect.end.y):
+		for x in range(crop_rect.position.x, crop_rect.end.x):
+			var plot_tile := "sand"
+			if plot_fringed:
+				var suffix := TownTileService.fringe_suffix(
+					not plot_members.has(Vector2i(x, y - 1)),
+					not plot_members.has(Vector2i(x, y + 1)),
+					not plot_members.has(Vector2i(x - 1, y)),
+					not plot_members.has(Vector2i(x + 1, y)),
+					not plot_members.has(Vector2i(x - 1, y - 1)),
+					not plot_members.has(Vector2i(x + 1, y - 1)),
+					not plot_members.has(Vector2i(x - 1, y + 1)),
+					not plot_members.has(Vector2i(x + 1, y + 1)),
+					true, x, y)
+				if not suffix.is_empty():
+					plot_tile = "sand_grass_" + suffix
+			_place_tile(city_layer, Vector2i(x, y), plot_tile)
 			var plant := Sprite2D.new()
 			plant.texture = FARM_PLANTS_TEXTURE
 			plant.region_enabled = true
@@ -4535,6 +4724,7 @@ func _stream_surface_chunks() -> void:
 	if player_chunk == _surface_last_player_chunk:
 		return
 	_surface_last_player_chunk = player_chunk
+	_surface_family_memo.clear()
 	for chunk_dy in range(-SURFACE_GEN_RADIUS, SURFACE_GEN_RADIUS + 1):
 		for chunk_dx in range(-SURFACE_GEN_RADIUS, SURFACE_GEN_RADIUS + 1):
 			_ensure_surface_chunk(player_chunk + Vector2i(chunk_dx, chunk_dy))
@@ -4580,6 +4770,12 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			if blocked:
 				_surface_blocked_cells[cell] = true
 				_actor_passable_cache.erase(cell)
+			elif not _surface_road_cells.has(cell):
+				# Terrain-seam autotiling: a sand/water/snow/dark-grass cell
+				# bordering another family swaps to the matching fringe piece
+				# so biome fronts, shorelines and forest floors blend instead
+				# of cutting hard along the cell grid.
+				base_key = _surface_fringe_base_key(cell, base_key)
 			_place_surface_tile(city_layer, cell, base_key, danger)
 			if not decor_key.is_empty():
 				_place_surface_tile(decor_layer, cell, decor_key, danger)
@@ -4678,6 +4874,124 @@ func _road_side_open(neighbor: Vector2i, danger: float) -> bool:
 		return false
 	var base_key := String(terrain.get("base", "grass"))
 	return base_key.begins_with("grass") or base_key.begins_with("flowers")
+
+## Terrain-seam autotiling for the streamed wilds: given the cell's freshly
+## computed base tile, return the fringe piece matching which of its eight
+## neighbors belong to the family that overhangs it. Dark grass wears a
+## plain-grass fringe toward meadows and lane verges; sand and snow wear a
+## grass overhang at biome fronts; water shorelines pick a grass, sand or
+## snow lap (in that order of preference); snow_alt drifts feather into
+## plain snow. Everything else keeps its tile. Deterministic: neighbor
+## families come from painted ground where it exists and from the same
+## noise field the painter will use where it doesn't.
+func _surface_fringe_base_key(cell: Vector2i, base_key: String) -> String:
+	var family := TownTileService.terrain_family_for_tile_key(base_key)
+	if not (family in ["grass_dark", "sand", "snow", "snow_alt", "water"]):
+		return base_key
+	var neighbor_families: Array[String] = []
+	for offset: Vector2i in [
+			Vector2i(0, -1), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(1, 0),
+			Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:
+		neighbor_families.append(_surface_cell_family(cell + offset))
+	var open_families: Array[String] = []
+	var prefix := ""
+	match family:
+		"grass_dark":
+			open_families = ["grass", "road"]
+			prefix = "grass_dark"
+		"sand":
+			# Sand meets grassland at desert fronts and snow at tundra ones
+			# (lakeshore beaches, barren lowlands): vote for the overhang.
+			var grass_side := 0
+			var snow_side := 0
+			for neighbor_family: String in neighbor_families:
+				match neighbor_family:
+					"grass", "grass_dark":
+						grass_side += 1
+					"snow", "snow_alt":
+						snow_side += 1
+			if snow_side > grass_side:
+				open_families = ["snow", "snow_alt"]
+				prefix = "sand_snow"
+			else:
+				open_families = ["grass", "grass_dark"]
+				prefix = "sand_grass"
+		"snow":
+			open_families = ["grass", "grass_dark"]
+			prefix = "snow_grass"
+		"snow_alt":
+			open_families = ["snow"]
+			prefix = "snow_alt"
+	if family == "water":
+		# Every dry land side counts as open (so the mask wraps the whole
+		# shoreline), and the overhang art follows the majority shore: a
+		# grass bank, a sand beach, or a snow lip. Mixed shores keep the
+		# majority material - a slightly-off fringe hue beats a hard cut.
+		var grass_votes := 0
+		var sand_votes := 0
+		var snow_votes := 0
+		for neighbor_family: String in neighbor_families:
+			match neighbor_family:
+				"grass", "grass_dark":
+					grass_votes += 1
+				"sand":
+					sand_votes += 1
+				"snow", "snow_alt":
+					snow_votes += 1
+		if grass_votes + sand_votes + snow_votes == 0:
+			return base_key
+		open_families = ["grass", "grass_dark", "sand", "snow", "snow_alt"]
+		if grass_votes >= sand_votes and grass_votes >= snow_votes:
+			prefix = "water_grass"
+		elif sand_votes >= snow_votes:
+			prefix = "water_sand"
+		else:
+			prefix = "water_snow"
+	var suffix := TownTileService.fringe_suffix(
+		neighbor_families[0] in open_families,
+		neighbor_families[1] in open_families,
+		neighbor_families[2] in open_families,
+		neighbor_families[3] in open_families,
+		neighbor_families[4] in open_families,
+		neighbor_families[5] in open_families,
+		neighbor_families[6] in open_families,
+		neighbor_families[7] in open_families,
+		true, cell.x, cell.y)
+	if suffix.is_empty():
+		return base_key
+	return "%s_%s" % [prefix, suffix]
+
+## The terrain family at a cell, for seam masks. Painted ground (the town,
+## already-streamed chunks, player builds) is the truth; unpainted wilds
+## are classified from the same deterministic terrain field the painter
+## uses, so masks agree across chunk borders regardless of paint order.
+## Memoized per streaming pass - neighbors are shared by adjacent cells.
+func _surface_cell_family(cell: Vector2i) -> String:
+	var memo: Variant = _surface_family_memo.get(cell)
+	if memo != null:
+		return String(memo)
+	var family := _compute_surface_cell_family(cell)
+	_surface_family_memo[cell] = family
+	return family
+
+func _compute_surface_cell_family(cell: Vector2i) -> String:
+	if _surface_blocked_cells.has(cell):
+		return "rock"
+	if _surface_road_cells.has(cell):
+		return "road"
+	if city_layer.get_cell_source_id(cell) >= 0:
+		return _family_for_atlas_coords(city_layer.get_cell_atlas_coords(cell))
+	var danger := SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells)
+	var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell + _surface_world_origin, _surface_noise, danger, _surface_biome_ctx)
+	if bool(terrain.get("blocked", false)):
+		return "rock"
+	return TownTileService.terrain_family_for_tile_key(String(terrain.get("base", "grass")))
+
+func _family_for_atlas_coords(atlas_coords: Vector2i) -> String:
+	if _atlas_family_by_coords.is_empty():
+		for tile_key: String in TILE_ATLAS.keys():
+			_atlas_family_by_coords[TILE_ATLAS[tile_key]] = TownTileService.terrain_family_for_tile_key(tile_key)
+	return String(_atlas_family_by_coords.get(atlas_coords, "other"))
 
 ## A gate is the far site's doorstep in the wilds. Settlements greet you
 ## with a paved clearing; a dwarfhold shows the carved mountain door you
@@ -5433,8 +5747,9 @@ func _update_companion(delta: float) -> void:
 func _is_water_cell(cell: Vector2i) -> bool:
 	if city_layer.get_cell_source_id(cell) < 0:
 		return false
-	var atlas_coords := city_layer.get_cell_atlas_coords(cell)
-	return atlas_coords == (TILE_ATLAS.get("water") as Vector2i) or atlas_coords == (TILE_ATLAS.get("water_calm") as Vector2i)
+	# Family-based so the grass/sand/snow-lapped shoreline pieces still count
+	# as water: they block walkers, take a boat, reflect, and fish.
+	return _family_for_atlas_coords(city_layer.get_cell_atlas_coords(cell)) == "water"
 
 ## --- Water reflections -------------------------------------------------------
 ## The shore mirrors whoever stands on it, Core Keeper style: a quad over
@@ -5703,11 +6018,10 @@ func _homestead_center() -> Vector2i:
 func _can_till_cell(cell: Vector2i) -> bool:
 	if not _can_build_on_cell(cell):
 		return false
-	var atlas_coords := city_layer.get_cell_atlas_coords(cell)
-	for grass_key: String in ["grass", "grass_dark", "grass_tuft", "grass_tuft_alt", "grass_mottled"]:
-		if atlas_coords == (TILE_ATLAS.get(grass_key) as Vector2i):
-			return true
-	return false
+	# Any grass-family ground takes the hoe, including the dark-grass patch
+	# fringes and mottled blends (family-based, so new variants stay covered).
+	var family := _family_for_atlas_coords(city_layer.get_cell_atlas_coords(cell))
+	return family == "grass" or family == "grass_dark"
 
 func _try_till_cell(cell: Vector2i) -> bool:
 	if int(_player_inventory.get("Iron Hoe", 0)) < 1:
@@ -5718,16 +6032,47 @@ func _try_till_cell(cell: Vector2i) -> bool:
 		return true
 	_farm_plots[cell] = {"crop": "", "stage": 0, "planted_h": 0.0}
 	_stamp_farm_plot(cell)
+	# A new plot closes its neighbors' masks: restamp adjoining plots so a
+	# growing field knits together instead of keeping stale inner fringes.
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			var neighbor := cell + Vector2i(offset_x, offset_y)
+			if neighbor != cell and _farm_plots.has(neighbor):
+				_stamp_farm_plot(neighbor)
 	_persist_farm()
 	GameAudioService.play_sfx(self, "till")
 	_set_save_status("You turn the earth. Click the plot with seeds in your pack to plant.", Color(0.75, 0.92, 0.7, 1.0))
 	return true
 
+## The tilled piece for a worked cell: fringe toward any bordering grass so
+## a plot frays into its lawn instead of cutting a hard brown square.
+## members marks sibling tilled cells (they stay flush with each other).
+func _tilled_tile_key(cell: Vector2i, members: Dictionary) -> String:
+	var suffix := TownTileService.fringe_suffix(
+		_tilled_side_open(cell + Vector2i(0, -1), members),
+		_tilled_side_open(cell + Vector2i(0, 1), members),
+		_tilled_side_open(cell + Vector2i(-1, 0), members),
+		_tilled_side_open(cell + Vector2i(1, 0), members),
+		_tilled_side_open(cell + Vector2i(-1, -1), members),
+		_tilled_side_open(cell + Vector2i(1, -1), members),
+		_tilled_side_open(cell + Vector2i(-1, 1), members),
+		_tilled_side_open(cell + Vector2i(1, 1), members),
+		true, cell.x, cell.y)
+	return "tilled_soil" if suffix.is_empty() else "tilled_" + suffix
+
+func _tilled_side_open(neighbor: Vector2i, members: Dictionary) -> bool:
+	if members.has(neighbor):
+		return false
+	if city_layer.get_cell_source_id(neighbor) < 0:
+		return false
+	var family := _family_for_atlas_coords(city_layer.get_cell_atlas_coords(neighbor))
+	return family == "grass" or family == "grass_dark"
+
 func _stamp_farm_plot(cell: Vector2i) -> void:
 	var plot := _farm_plots.get(cell, {}) as Dictionary
 	if plot.is_empty():
 		return
-	_place_tile(city_layer, cell, "tilled_soil")
+	_place_tile(city_layer, cell, _tilled_tile_key(cell, _farm_plots))
 	var crop := String(plot.get("crop", ""))
 	if crop.is_empty() or not CROP_DEFS.has(crop):
 		decor_layer.erase_cell(cell)
@@ -6506,11 +6851,23 @@ func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 	# is dropped straight onto the ocean.
 	if _wild_water and cell == CELL_ROCK:
 		return "water"
-	var tile_key := TownTileService.pick_base_tile(grid, x, y, cell, _door_cells)
-	if _town_theme == "desert" and DESERT_BASE_SWAP.has(tile_key):
-		return String(DESERT_BASE_SWAP[tile_key])
-	if _town_ground_biome == TILE_ATLAS_DEFS.BIOME_TUNDRA and SNOW_BASE_SWAP.has(tile_key):
-		return String(SNOW_BASE_SWAP[tile_key])
+	var tile_key := TownTileService.pick_base_tile(grid, x, y, cell, _door_cells, _dark_grass_rect)
+	if _town_theme == "desert":
+		# The whole dark-grass patch family flattens to the sand variant:
+		# sand_alt reads as sand, so desert greens need no fringe pieces.
+		if tile_key.begins_with("grass_dark"):
+			return "sand_alt"
+		if DESERT_BASE_SWAP.has(tile_key):
+			return String(DESERT_BASE_SWAP[tile_key])
+	if _town_ground_biome == TILE_ATLAS_DEFS.BIOME_TUNDRA:
+		# Dark-grass patches become snow_alt drifts wholesale: the synthesized
+		# snow_alt fringe family mirrors the grass_dark keys suffix for suffix,
+		# so tundra greens blend drift patches the same way grass towns blend
+		# dark grass.
+		if tile_key.begins_with("grass_dark"):
+			return tile_key.replace("grass_dark", "snow_alt")
+		if SNOW_BASE_SWAP.has(tile_key):
+			return String(SNOW_BASE_SWAP[tile_key])
 	return tile_key
 
 ## The opaque ground stamped under a framed-room wall cell so the frame's
