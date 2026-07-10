@@ -19,6 +19,10 @@ const CREATURE_SPEED := 44.0
 const AMBUSH_DANGER_FLOOR := 0.4
 const AMBUSH_CHANCE_PER_HOUR := 0.22
 
+## Camp garrisons (states carrying "home_cell") drift back toward their
+## fire once wandering carries them this far from it.
+const CREATURE_HOME_LEASH := 4
+
 const TRAVELER_CAP := 3
 const TRAVELER_STEP_SECONDS := 0.32
 const TRAVELER_ROLES := ["Peddler", "Pilgrim", "Courier", "Tinker", "Drover"]
@@ -121,6 +125,14 @@ static func update_creatures(
 			state["wander_timer"] = rng.randf_range(1.2, 3.0)
 			var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
 			var wander := directions[rng.randi_range(0, 3)]
+			# Camp garrisons keep to their ground: past the leash, the next
+			# step heads back toward the fire instead of drifting off.
+			if state.has("home_cell"):
+				var home := state.get("home_cell", cell) as Vector2i
+				if maxi(absi(cell.x - home.x), absi(cell.y - home.y)) > CREATURE_HOME_LEASH:
+					var homeward: Vector2i = CreatureCombatService.step_toward(cell, home, is_walkable)
+					if homeward != Vector2i.ZERO:
+						wander = homeward
 			if bool(is_walkable.call(cell + wander)):
 				state["cell"] = cell + wander
 				state["facing_dir"] = wander
@@ -134,7 +146,9 @@ static func update_creatures(
 
 static func despawn_far_creatures(states: Array[Dictionary], player_cell: Vector2i) -> void:
 	for index in range(states.size() - 1, -1, -1):
-		if bool(states[index].get("raider", false)):
+		# Raiders answer the raid clock; camp garrisons ("site_key") live
+		# and die with their site's chunk, never with player distance.
+		if bool(states[index].get("raider", false)) or not String(states[index].get("site_key", "")).is_empty():
 			continue
 		var cell := states[index].get("cell", Vector2i.ZERO) as Vector2i
 		if maxi(absi(cell.x - player_cell.x), absi(cell.y - player_cell.y)) <= CREATURE_DESPAWN_DISTANCE:
