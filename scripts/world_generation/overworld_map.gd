@@ -2351,6 +2351,10 @@ func _ambient_site_for_tile(coord: Vector2i, details: Dictionary) -> Dictionary:
 		"x": coord.x, "y": coord.y,
 		"class": "ambient",
 		"tile_atlas": [atlas_coords.x, atlas_coords.y],
+		# The structure id lets the walkable wilds pick a real footprint
+		# recipe (building/camp/prop) instead of guessing from the icon art;
+		# older saves without it fall back to an atlas-coordinate lookup.
+		"structure": structure_id,
 		"name": label
 	}
 

@@ -120,10 +120,14 @@ static func demolish_structure(grid: Dictionary, cells: Array, civic_type_map: D
 ## across the room (including the bounding wall rows, so the wall ring is
 ## severed and each room becomes its own zone component). Every resulting
 ## room keeps an interior of at least 2x2.
-static func subdivide_structure(grid: Dictionary, bbox: Rect2i, rng: RandomNumberGenerator) -> Array[Rect2i]:
+static func subdivide_structure(grid: Dictionary, bbox: Rect2i, rng: RandomNumberGenerator, max_rooms: int = 0) -> Array[Rect2i]:
 	var interior := Rect2i(bbox.position + Vector2i.ONE, bbox.size - Vector2i(2, 2))
 	var rooms: Array[Rect2i] = [interior]
 	var target_rooms := clampi(1 + (interior.size.x * interior.size.y) / 14, 1, 5)
+	## Wilds landmarks want a fixed room count (a cathedral is 2-3 halls, not
+	## five closets); 0 keeps the settlement scenes' area-driven default.
+	if max_rooms > 0:
+		target_rooms = mini(target_rooms, max_rooms)
 	var guard := 0
 	while rooms.size() < target_rooms and guard < 16:
 		guard += 1
