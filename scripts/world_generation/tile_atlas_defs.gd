@@ -257,10 +257,47 @@ const TOWN_MULTI_CELL_TILES := {
 
 const TOWN_TILE_ATLAS := {
 	"grass": Vector2i(1, 1),
-	"grass_dark": Vector2i(5, 1),
+	# The sheet ships a full dark-grass patch demo at cols 5-9, rows 0-2:
+	# solid interior at (6,1), plain-grass fringed edges around it, convex
+	# corners on the demo's diagonals and inner-corner "bites" in the 2x2
+	# block at cols 8-9 rows 0-1 (verified by per-cell dark-pixel edge
+	# profiling). "grass_dark" is re-pointed from (5,1) — which is actually
+	# the west EDGE piece and stamped alone read as a hard-cut square — to
+	# the true interior; the edge family below lets dark patches blend out.
+	"grass_dark": Vector2i(6, 1),
+	"grass_dark_edge_n": Vector2i(6, 0),
+	"grass_dark_edge_s": Vector2i(6, 2),
+	"grass_dark_edge_w": Vector2i(5, 1),
+	"grass_dark_edge_e": Vector2i(7, 1),
+	"grass_dark_edge_nw": Vector2i(5, 0),
+	"grass_dark_edge_ne": Vector2i(7, 0),
+	"grass_dark_edge_sw": Vector2i(5, 2),
+	"grass_dark_edge_se": Vector2i(7, 2),
+	"grass_dark_in_nw": Vector2i(8, 0),
+	"grass_dark_in_ne": Vector2i(9, 0),
+	"grass_dark_in_sw": Vector2i(8, 1),
+	"grass_dark_in_se": Vector2i(9, 1),
+	# Pieces the demo lacks (strips, peninsula tips, lone blobs) are
+	# composited into appended row 36 at atlas build time from unions of the
+	# shipped edge/corner art, the same trick as the road convex corners.
+	"grass_dark_edge_ns": Vector2i(0, 36),
+	"grass_dark_edge_we": Vector2i(1, 36),
+	"grass_dark_tip_n": Vector2i(2, 36),
+	"grass_dark_tip_s": Vector2i(3, 36),
+	"grass_dark_tip_w": Vector2i(4, 36),
+	"grass_dark_tip_e": Vector2i(5, 36),
+	"grass_dark_island": Vector2i(6, 36),
 	"grass_tuft": Vector2i(2, 3),
+	"grass_tuft_alt": Vector2i(1, 3),
+	# Re-pointed from (9,1): that cell is the dark demo's SE inner corner
+	# (now mapped as such above). (8,2)/(9,2) are the demo's true all-side
+	# 50/50 speckle blends, safe to scatter anywhere on plain grass.
+	"grass_mottled": Vector2i(8, 2),
+	"grass_mottled_alt": Vector2i(9, 2),
 	"flowers_white": Vector2i(4, 17),
 	"flowers_yellow": Vector2i(5, 18),
+	"flowers_pink": Vector2i(3, 19),
+	"flowers_pink_alt": Vector2i(4, 19),
 	# Snow ground lives on an extra row (26) appended to the sheet at load
 	# time by town_generation._configure_tile_layer; the shipped PNG is
 	# 44x26 (rows 0-25), so these coords address the painted-in snow cells.
@@ -268,36 +305,266 @@ const TOWN_TILE_ATLAS := {
 	"snow_alt": Vector2i(1, 26),
 	"road": Vector2i(14, 4),
 	"road_twig": Vector2i(13, 4),
+	"road_alt": Vector2i(10, 3),
+	"road_stone": Vector2i(9, 3),
+	"road_sprout": Vector2i(13, 3),
+	# Dirt-path fringe: the sheet's grass-blended blob set at cols 10-14,
+	# rows 0-2 (dirt patch demo). edge_* have grass on the named side;
+	# in_* keep dirt on all sides with a grass bite at the named diagonal.
+	"road_edge_n": Vector2i(11, 0),
+	"road_edge_s": Vector2i(11, 2),
+	"road_edge_w": Vector2i(10, 1),
+	"road_edge_e": Vector2i(12, 1),
+	"road_in_nw": Vector2i(13, 0),
+	"road_in_ne": Vector2i(14, 0),
+	"road_in_sw": Vector2i(13, 1),
+	"road_in_se": Vector2i(14, 1),
+	# Convex corners (grass on two adjacent sides) don't exist in the sheet;
+	# they are composited into appended row 27 at atlas build time from the
+	# union of the two matching edge pieces. Row 28 holds snow recolors of
+	# the whole fringe set (grass pixels swapped for painted snow) so tundra
+	# lanes blend into their snowfield the same way.
+	"road_edge_nw": Vector2i(0, 27),
+	"road_edge_ne": Vector2i(1, 27),
+	"road_edge_sw": Vector2i(2, 27),
+	"road_edge_se": Vector2i(3, 27),
+	"road_edge_n_snow": Vector2i(0, 28),
+	"road_edge_s_snow": Vector2i(1, 28),
+	"road_edge_w_snow": Vector2i(2, 28),
+	"road_edge_e_snow": Vector2i(3, 28),
+	"road_in_nw_snow": Vector2i(4, 28),
+	"road_in_ne_snow": Vector2i(5, 28),
+	"road_in_sw_snow": Vector2i(6, 28),
+	"road_in_se_snow": Vector2i(7, 28),
+	"road_edge_nw_snow": Vector2i(8, 28),
+	"road_edge_ne_snow": Vector2i(9, 28),
+	"road_edge_sw_snow": Vector2i(10, 28),
+	"road_edge_se_snow": Vector2i(11, 28),
+	# Terrain-seam fringe families, synthesized into appended rows 29-35 at
+	# atlas build time (the shipped sheet has no terrain transition art
+	# beyond the dirt-path and dark-grass demos). Each family is the "under"
+	# terrain tile with the "over" terrain scalloped onto the named side(s),
+	# one piece per TOWN_FRINGE_SUFFIXES entry: sand/water/snow cells that
+	# border grass wear a grass overhang, beaches lap sand over water,
+	# tilled plots fray into their lawns, and snow_alt drifts feather into
+	# plain snow (the tundra counterpart of the dark-grass patches).
+	"sand_grass_edge_n": Vector2i(0, 29),
+	"sand_grass_edge_s": Vector2i(1, 29),
+	"sand_grass_edge_w": Vector2i(2, 29),
+	"sand_grass_edge_e": Vector2i(3, 29),
+	"sand_grass_edge_nw": Vector2i(4, 29),
+	"sand_grass_edge_ne": Vector2i(5, 29),
+	"sand_grass_edge_sw": Vector2i(6, 29),
+	"sand_grass_edge_se": Vector2i(7, 29),
+	"sand_grass_in_nw": Vector2i(8, 29),
+	"sand_grass_in_ne": Vector2i(9, 29),
+	"sand_grass_in_sw": Vector2i(10, 29),
+	"sand_grass_in_se": Vector2i(11, 29),
+	"sand_grass_edge_ns": Vector2i(12, 29),
+	"sand_grass_edge_we": Vector2i(13, 29),
+	"sand_grass_tip_n": Vector2i(14, 29),
+	"sand_grass_tip_s": Vector2i(15, 29),
+	"sand_grass_tip_w": Vector2i(16, 29),
+	"sand_grass_tip_e": Vector2i(17, 29),
+	"sand_grass_island": Vector2i(18, 29),
+	"water_grass_edge_n": Vector2i(0, 39),
+	"water_grass_edge_s": Vector2i(4, 39),
+	"water_grass_edge_w": Vector2i(8, 39),
+	"water_grass_edge_e": Vector2i(12, 39),
+	"water_grass_edge_nw": Vector2i(16, 39),
+	"water_grass_edge_ne": Vector2i(20, 39),
+	"water_grass_edge_sw": Vector2i(24, 39),
+	"water_grass_edge_se": Vector2i(28, 39),
+	"water_grass_in_nw": Vector2i(32, 39),
+	"water_grass_in_ne": Vector2i(36, 39),
+	"water_grass_in_sw": Vector2i(40, 39),
+	"water_grass_in_se": Vector2i(0, 40),
+	"water_grass_edge_ns": Vector2i(4, 40),
+	"water_grass_edge_we": Vector2i(8, 40),
+	"water_grass_tip_n": Vector2i(12, 40),
+	"water_grass_tip_s": Vector2i(16, 40),
+	"water_grass_tip_w": Vector2i(20, 40),
+	"water_grass_tip_e": Vector2i(24, 40),
+	"water_grass_island": Vector2i(28, 40),
+	"water_sand_edge_n": Vector2i(0, 41),
+	"water_sand_edge_s": Vector2i(4, 41),
+	"water_sand_edge_w": Vector2i(8, 41),
+	"water_sand_edge_e": Vector2i(12, 41),
+	"water_sand_edge_nw": Vector2i(16, 41),
+	"water_sand_edge_ne": Vector2i(20, 41),
+	"water_sand_edge_sw": Vector2i(24, 41),
+	"water_sand_edge_se": Vector2i(28, 41),
+	"water_sand_in_nw": Vector2i(32, 41),
+	"water_sand_in_ne": Vector2i(36, 41),
+	"water_sand_in_sw": Vector2i(40, 41),
+	"water_sand_in_se": Vector2i(0, 42),
+	"water_sand_edge_ns": Vector2i(4, 42),
+	"water_sand_edge_we": Vector2i(8, 42),
+	"water_sand_tip_n": Vector2i(12, 42),
+	"water_sand_tip_s": Vector2i(16, 42),
+	"water_sand_tip_w": Vector2i(20, 42),
+	"water_sand_tip_e": Vector2i(24, 42),
+	"water_sand_island": Vector2i(28, 42),
+	"snow_grass_edge_n": Vector2i(0, 32),
+	"snow_grass_edge_s": Vector2i(1, 32),
+	"snow_grass_edge_w": Vector2i(2, 32),
+	"snow_grass_edge_e": Vector2i(3, 32),
+	"snow_grass_edge_nw": Vector2i(4, 32),
+	"snow_grass_edge_ne": Vector2i(5, 32),
+	"snow_grass_edge_sw": Vector2i(6, 32),
+	"snow_grass_edge_se": Vector2i(7, 32),
+	"snow_grass_in_nw": Vector2i(8, 32),
+	"snow_grass_in_ne": Vector2i(9, 32),
+	"snow_grass_in_sw": Vector2i(10, 32),
+	"snow_grass_in_se": Vector2i(11, 32),
+	"snow_grass_edge_ns": Vector2i(12, 32),
+	"snow_grass_edge_we": Vector2i(13, 32),
+	"snow_grass_tip_n": Vector2i(14, 32),
+	"snow_grass_tip_s": Vector2i(15, 32),
+	"snow_grass_tip_w": Vector2i(16, 32),
+	"snow_grass_tip_e": Vector2i(17, 32),
+	"snow_grass_island": Vector2i(18, 32),
+	"tilled_edge_n": Vector2i(0, 33),
+	"tilled_edge_s": Vector2i(1, 33),
+	"tilled_edge_w": Vector2i(2, 33),
+	"tilled_edge_e": Vector2i(3, 33),
+	"tilled_edge_nw": Vector2i(4, 33),
+	"tilled_edge_ne": Vector2i(5, 33),
+	"tilled_edge_sw": Vector2i(6, 33),
+	"tilled_edge_se": Vector2i(7, 33),
+	"tilled_in_nw": Vector2i(8, 33),
+	"tilled_in_ne": Vector2i(9, 33),
+	"tilled_in_sw": Vector2i(10, 33),
+	"tilled_in_se": Vector2i(11, 33),
+	"tilled_edge_ns": Vector2i(12, 33),
+	"tilled_edge_we": Vector2i(13, 33),
+	"tilled_tip_n": Vector2i(14, 33),
+	"tilled_tip_s": Vector2i(15, 33),
+	"tilled_tip_w": Vector2i(16, 33),
+	"tilled_tip_e": Vector2i(17, 33),
+	"tilled_island": Vector2i(18, 33),
+	"snow_alt_edge_n": Vector2i(0, 34),
+	"snow_alt_edge_s": Vector2i(1, 34),
+	"snow_alt_edge_w": Vector2i(2, 34),
+	"snow_alt_edge_e": Vector2i(3, 34),
+	"snow_alt_edge_nw": Vector2i(4, 34),
+	"snow_alt_edge_ne": Vector2i(5, 34),
+	"snow_alt_edge_sw": Vector2i(6, 34),
+	"snow_alt_edge_se": Vector2i(7, 34),
+	"snow_alt_in_nw": Vector2i(8, 34),
+	"snow_alt_in_ne": Vector2i(9, 34),
+	"snow_alt_in_sw": Vector2i(10, 34),
+	"snow_alt_in_se": Vector2i(11, 34),
+	"snow_alt_edge_ns": Vector2i(12, 34),
+	"snow_alt_edge_we": Vector2i(13, 34),
+	"snow_alt_tip_n": Vector2i(14, 34),
+	"snow_alt_tip_s": Vector2i(15, 34),
+	"snow_alt_tip_w": Vector2i(16, 34),
+	"snow_alt_tip_e": Vector2i(17, 34),
+	"snow_alt_island": Vector2i(18, 34),
+	"water_snow_edge_n": Vector2i(0, 43),
+	"water_snow_edge_s": Vector2i(4, 43),
+	"water_snow_edge_w": Vector2i(8, 43),
+	"water_snow_edge_e": Vector2i(12, 43),
+	"water_snow_edge_nw": Vector2i(16, 43),
+	"water_snow_edge_ne": Vector2i(20, 43),
+	"water_snow_edge_sw": Vector2i(24, 43),
+	"water_snow_edge_se": Vector2i(28, 43),
+	"water_snow_in_nw": Vector2i(32, 43),
+	"water_snow_in_ne": Vector2i(36, 43),
+	"water_snow_in_sw": Vector2i(40, 43),
+	"water_snow_in_se": Vector2i(0, 44),
+	"water_snow_edge_ns": Vector2i(4, 44),
+	"water_snow_edge_we": Vector2i(8, 44),
+	"water_snow_tip_n": Vector2i(12, 44),
+	"water_snow_tip_s": Vector2i(16, 44),
+	"water_snow_tip_w": Vector2i(20, 44),
+	"water_snow_tip_e": Vector2i(24, 44),
+	"water_snow_island": Vector2i(28, 44),
+	"sand_snow_edge_n": Vector2i(0, 37),
+	"sand_snow_edge_s": Vector2i(1, 37),
+	"sand_snow_edge_w": Vector2i(2, 37),
+	"sand_snow_edge_e": Vector2i(3, 37),
+	"sand_snow_edge_nw": Vector2i(4, 37),
+	"sand_snow_edge_ne": Vector2i(5, 37),
+	"sand_snow_edge_sw": Vector2i(6, 37),
+	"sand_snow_edge_se": Vector2i(7, 37),
+	"sand_snow_in_nw": Vector2i(8, 37),
+	"sand_snow_in_ne": Vector2i(9, 37),
+	"sand_snow_in_sw": Vector2i(10, 37),
+	"sand_snow_in_se": Vector2i(11, 37),
+	"sand_snow_edge_ns": Vector2i(12, 37),
+	"sand_snow_edge_we": Vector2i(13, 37),
+	"sand_snow_tip_n": Vector2i(14, 37),
+	"sand_snow_tip_s": Vector2i(15, 37),
+	"sand_snow_tip_w": Vector2i(16, 37),
+	"sand_snow_tip_e": Vector2i(17, 37),
+	"sand_snow_island": Vector2i(18, 37),
 	"sand": Vector2i(11, 4),
 	"sand_alt": Vector2i(9, 4),
 	"sand_pebbles": Vector2i(12, 3),
 	"plaza": Vector2i(17, 2),
 	"plaza_alt": Vector2i(18, 3),
+	"plaza_c": Vector2i(16, 0),
+	"plaza_d": Vector2i(15, 1),
 	"wall": Vector2i(1, 7),
 	"wall_alt": Vector2i(2, 7),
 	"plank_wall": Vector2i(25, 0),
-	# Timber-framed room autotile: a self-contained 9-slice (verified by
-	# per-cell PIL extraction of cols 24-26, rows 5-7 of town_tileset.png).
-	# Each piece is opaque toward the room interior and transparent toward
-	# the exterior, so a rectangular building perimeter reads as a lit top
-	# beam, darker side posts, corner joints and a bottom sill. The olive
-	# variant (rows 8-10) and the concave-corner cross set (cols 27-28) are
-	# left unmapped: town buildings are rectangles, so the border set frames
-	# them cleanly and stays one coherent timber style.
-	"wall_tl": Vector2i(24, 5),
-	"wall_top": Vector2i(25, 5),
-	"wall_tr": Vector2i(26, 5),
-	"wall_left": Vector2i(24, 6),
-	"wall_fill": Vector2i(25, 6),
-	"wall_right": Vector2i(26, 6),
-	"wall_bl": Vector2i(24, 7),
-	"wall_bottom": Vector2i(25, 7),
-	"wall_br": Vector2i(26, 7),
+	# Timber building autotile: the chunky golden log-wall set at cols 0-4,
+	# rows 6-8 of town_tileset.png (verified by per-cell PIL extraction and
+	# a composited mockup). Corner posts, a braced top beam, solid log side
+	# columns and a plank sill — fully opaque squares, so a building ring
+	# finally reads as WALLS instead of the faint thin frame the old cols
+	# 24-26 9-slice gave ("floor platforms"). The fill piece is the plain
+	# log face at (3,7); (1,7)/(2,7) hold the player-build "wall"/"wall_alt"
+	# keys, and the atlas validator forbids sharing coordinates.
+	"wall_tl": Vector2i(0, 6),
+	"wall_top": Vector2i(2, 6),
+	"wall_tr": Vector2i(4, 6),
+	"wall_left": Vector2i(0, 7),
+	"wall_fill": Vector2i(3, 7),
+	"wall_right": Vector2i(4, 7),
+	"wall_bl": Vector2i(0, 8),
+	"wall_bottom": Vector2i(2, 8),
+	"wall_br": Vector2i(4, 8),
 	"floor": Vector2i(25, 1),
 	"door": Vector2i(26, 1),
 	"rug": Vector2i(33, 2),
+	# Log-fence autotile set (cols 8-13, rows 6-9): a full 16-piece family
+	# keyed by which sides a piece's rails leave through (verified against
+	# per-cell edge-pixel connectivity). "fence" keeps its legacy coordinate
+	# (the N+E+W tee) because player-built fences persist that key;
+	# "fence_post" is re-pointed at the true lone post at (8,8) — its old
+	# coordinate (9,8) is the NE corner, now mapped as such.
 	"fence": Vector2i(10, 8),
-	"fence_post": Vector2i(9, 8),
+	"fence_post": Vector2i(8, 8),
+	"fence_ns": Vector2i(8, 7),
+	"fence_ns_alt": Vector2i(12, 7),
+	"fence_we": Vector2i(12, 6),
+	"fence_we_alt": Vector2i(13, 6),
+	"fence_we_low": Vector2i(10, 9),
+	"fence_se": Vector2i(9, 6),
+	"fence_sw": Vector2i(11, 6),
+	"fence_ne": Vector2i(9, 8),
+	"fence_nw": Vector2i(11, 8),
+	"fence_wes": Vector2i(10, 6),
+	"fence_nse": Vector2i(9, 7),
+	"fence_nsw": Vector2i(11, 7),
+	"fence_cross": Vector2i(10, 7),
+	"fence_cap_s": Vector2i(8, 6),
+	"fence_cap_e": Vector2i(9, 9),
+	"fence_cap_w": Vector2i(11, 9),
+	# Green-ground scatter: cut stumps, a fallen branch (passable litter).
+	"stump": Vector2i(0, 13),
+	"stump_alt": Vector2i(2, 13),
+	"branch": Vector2i(5, 16),
+	# The village well: a 2x2 composition — stone basin pair below, roofed
+	# crank pair above. The base cells block movement, the roof halves are
+	# passable visual caps (same convention as the *_top furniture keys).
+	"well_base_left": Vector2i(3, 15),
+	"well_base_right": Vector2i(4, 15),
+	"well_roof_left": Vector2i(3, 14),
+	"well_roof_right": Vector2i(4, 14),
 	"hedge": Vector2i(15, 7),
 	"hedge_alt": Vector2i(16, 7),
 	"tree": Vector2i(0, 16),
@@ -335,8 +602,12 @@ const TOWN_TILE_ATLAS := {
 	"oven_top": Vector2i(23, 21),
 	# Row 23 additions: open water, worked earth, and the three field
 	# crops (three growth stages each, lifted from the Farm plants sheet).
-	"water": Vector2i(0, 23),
-	"water_calm": Vector2i(1, 23),
+	# Animated water: each base owns TOWN_WATER_ANIMATION_FRAMES consecutive
+	# cells to its right (frames painted at atlas build; the shipped flat
+	# water art at (0,23)/(1,23) seeds the palette). The water fringe
+	# families below stride by 4 for the same reason.
+	"water": Vector2i(0, 38),
+	"water_calm": Vector2i(4, 38),
 	"tilled_soil": Vector2i(2, 23),
 	"crop_carrot_0": Vector2i(3, 23),
 	"crop_carrot_1": Vector2i(4, 23),
@@ -348,16 +619,106 @@ const TOWN_TILE_ATLAS := {
 	"crop_tomato_1": Vector2i(10, 23),
 	"crop_tomato_2": Vector2i(11, 23)
 }
+## The full fringe-piece vocabulary, one atlas column per suffix (in this
+## order) for every synthesized transition family. edge_* pieces carry the
+## "over" terrain on the named side(s), in_* keep the under-terrain on all
+## sides with an over-terrain bite at the named diagonal, tip_* are
+## peninsula ends open on three sides, island is fringed all round.
+const TOWN_FRINGE_SUFFIXES: Array[String] = [
+	"edge_n", "edge_s", "edge_w", "edge_e",
+	"edge_nw", "edge_ne", "edge_sw", "edge_se",
+	"in_nw", "in_ne", "in_sw", "in_se",
+	"edge_ns", "edge_we",
+	"tip_n", "tip_s", "tip_w", "tip_e",
+	"island"
+]
+
+## Frame count for the looping water animation. Every water-family tile
+## (open water, calm ponds, and each shoreline fringe piece) owns this many
+## consecutive atlas cells; frame 0 is the mapped base cell.
+const TOWN_WATER_ANIMATION_FRAMES := 4
+
+## The looped tile keys: their art is painted per frame at atlas build and
+## their atlas tiles get animation frames in _configure_tile_layer.
+static func town_water_animated_keys() -> Array[String]:
+	var keys: Array[String] = ["water", "water_calm"]
+	for family: String in ["water_grass", "water_sand", "water_snow"]:
+		for suffix: String in TOWN_FRINGE_SUFFIXES:
+			keys.append("%s_%s" % [family, suffix])
+	return keys
+
+## Recipes for the synthesized transition families: each paints the "under"
+## ground tile with the "over" ground scalloped across the open side(s),
+## into the appended atlas row holding that family's keys. "rim" darkens the
+## over-terrain pixels along the waterline so banks read as banks.
+const TOWN_FRINGE_FAMILIES := {
+	"sand_grass": {"under": "sand", "over": "grass", "rim": false},
+	"water_grass": {"under": "water", "over": "grass", "rim": true},
+	"water_sand": {"under": "water", "over": "sand", "rim": true},
+	"snow_grass": {"under": "snow", "over": "grass", "rim": false},
+	"tilled": {"under": "tilled_soil", "over": "grass", "rim": false},
+	"snow_alt": {"under": "snow_alt", "over": "snow", "rim": false},
+	"water_snow": {"under": "water", "over": "snow", "rim": true},
+	"sand_snow": {"under": "sand", "over": "snow", "rim": false}
+}
+
 ## The *_top keys are the upper halves of two-tile-tall furniture sprites.
 ## They render as visual caps over the cell above the furniture, so they
 ## stay passable — the blocking cell is the furniture base itself.
 const TOWN_PASSABLE_TILE_KEYS := [
-	"grass", "grass_dark", "grass_tuft", "flowers_white", "flowers_yellow",
+	"grass", "grass_dark", "grass_tuft", "grass_tuft_alt", "grass_mottled",
+	"grass_mottled_alt",
+	"grass_dark_edge_n", "grass_dark_edge_s", "grass_dark_edge_w", "grass_dark_edge_e",
+	"grass_dark_edge_nw", "grass_dark_edge_ne", "grass_dark_edge_sw", "grass_dark_edge_se",
+	"grass_dark_in_nw", "grass_dark_in_ne", "grass_dark_in_sw", "grass_dark_in_se",
+	"grass_dark_edge_ns", "grass_dark_edge_we",
+	"grass_dark_tip_n", "grass_dark_tip_s", "grass_dark_tip_w", "grass_dark_tip_e",
+	"grass_dark_island",
+	"flowers_white", "flowers_yellow", "flowers_pink", "flowers_pink_alt",
 	"snow", "snow_alt",
-	"road", "road_twig", "sand", "sand_alt", "sand_pebbles",
-	"plaza", "plaza_alt", "floor", "door", "rug",
+	"road", "road_twig", "road_alt", "road_stone", "road_sprout",
+	"road_edge_n", "road_edge_s", "road_edge_w", "road_edge_e",
+	"road_in_nw", "road_in_ne", "road_in_sw", "road_in_se",
+	"road_edge_nw", "road_edge_ne", "road_edge_sw", "road_edge_se",
+	"road_edge_n_snow", "road_edge_s_snow", "road_edge_w_snow", "road_edge_e_snow",
+	"road_in_nw_snow", "road_in_ne_snow", "road_in_sw_snow", "road_in_se_snow",
+	"road_edge_nw_snow", "road_edge_ne_snow", "road_edge_sw_snow", "road_edge_se_snow",
+	"sand", "sand_alt", "sand_pebbles",
+	# Grass-fringed sand, snow-drift variants, grass-fringed snow and the
+	# tilled-plot fringe are all walkable ground; the water fringe families
+	# are deliberately absent (a grass- or sand-lapped water cell is still
+	# water and still blocks walkers unless they boat).
+	"sand_grass_edge_n", "sand_grass_edge_s", "sand_grass_edge_w", "sand_grass_edge_e",
+	"sand_grass_edge_nw", "sand_grass_edge_ne", "sand_grass_edge_sw", "sand_grass_edge_se",
+	"sand_grass_in_nw", "sand_grass_in_ne", "sand_grass_in_sw", "sand_grass_in_se",
+	"sand_grass_edge_ns", "sand_grass_edge_we", "sand_grass_tip_n", "sand_grass_tip_s",
+	"sand_grass_tip_w", "sand_grass_tip_e", "sand_grass_island",
+	"sand_snow_edge_n", "sand_snow_edge_s", "sand_snow_edge_w", "sand_snow_edge_e",
+	"sand_snow_edge_nw", "sand_snow_edge_ne", "sand_snow_edge_sw", "sand_snow_edge_se",
+	"sand_snow_in_nw", "sand_snow_in_ne", "sand_snow_in_sw", "sand_snow_in_se",
+	"sand_snow_edge_ns", "sand_snow_edge_we", "sand_snow_tip_n", "sand_snow_tip_s",
+	"sand_snow_tip_w", "sand_snow_tip_e", "sand_snow_island",
+	"snow_grass_edge_n", "snow_grass_edge_s", "snow_grass_edge_w", "snow_grass_edge_e",
+	"snow_grass_edge_nw", "snow_grass_edge_ne", "snow_grass_edge_sw", "snow_grass_edge_se",
+	"snow_grass_in_nw", "snow_grass_in_ne", "snow_grass_in_sw", "snow_grass_in_se",
+	"snow_grass_edge_ns", "snow_grass_edge_we", "snow_grass_tip_n", "snow_grass_tip_s",
+	"snow_grass_tip_w", "snow_grass_tip_e", "snow_grass_island",
+	"snow_alt_edge_n", "snow_alt_edge_s", "snow_alt_edge_w", "snow_alt_edge_e",
+	"snow_alt_edge_nw", "snow_alt_edge_ne", "snow_alt_edge_sw", "snow_alt_edge_se",
+	"snow_alt_in_nw", "snow_alt_in_ne", "snow_alt_in_sw", "snow_alt_in_se",
+	"snow_alt_edge_ns", "snow_alt_edge_we", "snow_alt_tip_n", "snow_alt_tip_s",
+	"snow_alt_tip_w", "snow_alt_tip_e", "snow_alt_island",
+	"tilled_edge_n", "tilled_edge_s", "tilled_edge_w", "tilled_edge_e",
+	"tilled_edge_nw", "tilled_edge_ne", "tilled_edge_sw", "tilled_edge_se",
+	"tilled_in_nw", "tilled_in_ne", "tilled_in_sw", "tilled_in_se",
+	"tilled_edge_ns", "tilled_edge_we", "tilled_tip_n", "tilled_tip_s",
+	"tilled_tip_w", "tilled_tip_e", "tilled_island",
+	"plaza", "plaza_alt", "plaza_c", "plaza_d",
+	# A fallen branch is ground litter, not a barrier.
+	"branch",
+	"floor", "door", "rug",
 	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",
-	"forge_top", "oven_top",
+	"forge_top", "oven_top", "well_roof_left", "well_roof_right",
 	# Water is deliberately absent: it blocks walkers unless they boat.
 	"tilled_soil",
 	"crop_carrot_0", "crop_carrot_1", "crop_carrot_2",

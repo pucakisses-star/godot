@@ -141,7 +141,10 @@ const DRESSING_THEME_BY_TYPE := {
 	"barber_shop": "grooming",
 	"general_goods_shop": "stockroom", "trade_supply_store": "stockroom",
 	"general_store": "stockroom", "market_stall": "stockroom",
-	"warehouse": "stockroom", "stable": "stockroom"
+	"warehouse": "stockroom", "stable": "stockroom",
+	## Town back-of-house room roles (dealt by the interior planner): the
+	## storeroom behind a shopfront and the forge room behind a smithy.
+	"storeroom": "stockroom", "forge_room": "smithy"
 }
 
 ## Flood-fills the grid into connected components of one zone value,

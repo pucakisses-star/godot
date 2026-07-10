@@ -695,7 +695,11 @@ func _set_cell(grid: Dictionary, cell: Vector2i, tile: int) -> void:
 	var existing := _cell_at(grid, cell.x, cell.y)
 	if tile == CELL_HALL and existing == CELL_PLAZA:
 		return
-	if _is_corridor_cell(tile) and _is_structural_cell(existing):
+	## Corridors never eat building fabric: floors (structural cells) nor
+	## interior partition walls. Town lanes are traced AFTER the interior
+	## planner stamps CELL_WALL lines, so a winding path brushing a facade
+	## must not melt the wall into road.
+	if _is_corridor_cell(tile) and (_is_structural_cell(existing) or existing == CELL_WALL):
 		return
 	grid[cell] = tile
 
