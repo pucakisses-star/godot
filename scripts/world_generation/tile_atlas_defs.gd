@@ -617,7 +617,19 @@ const TOWN_TILE_ATLAS := {
 	"crop_beetroot_2": Vector2i(8, 23),
 	"crop_tomato_0": Vector2i(9, 23),
 	"crop_tomato_1": Vector2i(10, 23),
-	"crop_tomato_2": Vector2i(11, 23)
+	"crop_tomato_2": Vector2i(11, 23),
+	# Cellar stairways and the solid-earth fill around dug cellar rooms.
+	# The shipped sheet has no stair/hatch or underground-rock art (verified
+	# by full-sheet inventory: the closest pieces are plank BRIDGES at cols
+	# 22-27, rows 11-16), so all three are painted into appended row 45 at
+	# atlas build time (town_generation._paint_stair_tiles /
+	# _paint_cellar_rock_tile). "stairway_down" is a wooden cellar hatch with
+	# descending treads, "stairway_up" a stone flight rising into light;
+	# both keys mirror DWARFHOLD_TILE_ATLAS so the shared stair-walking code
+	# resolves them.
+	"stairway_down": Vector2i(0, 45),
+	"stairway_up": Vector2i(1, 45),
+	"cellar_rock": Vector2i(2, 45)
 }
 ## The full fringe-piece vocabulary, one atlas column per suffix (in this
 ## order) for every synthesized transition family. edge_* pieces carry the
@@ -723,7 +735,10 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	"tilled_soil",
 	"crop_carrot_0", "crop_carrot_1", "crop_carrot_2",
 	"crop_beetroot_0", "crop_beetroot_1", "crop_beetroot_2",
-	"crop_tomato_0", "crop_tomato_1", "crop_tomato_2"
+	"crop_tomato_0", "crop_tomato_1", "crop_tomato_2",
+	# Stairways carry walkers between levels; "cellar_rock" is deliberately
+	# absent (undug earth blocks movement, like the dwarfhold's stone).
+	"stairway_down", "stairway_up"
 ]
 
 static func validate_atlas_no_duplicates(atlas_name: String, atlas: Dictionary) -> bool:
