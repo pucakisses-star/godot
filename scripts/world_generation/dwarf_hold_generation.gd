@@ -183,6 +183,9 @@ var _player_pending_chest_interaction := Vector2i(2147483647, 2147483647)
 var _hover_tooltip_cell := Vector2i(2147483647, 2147483647)
 var _hover_tooltip_npc := ""
 var _hover_tooltip_layer: TileMapLayer
+## The floating world-space label shown while the cursor rests on a sign.
+var _sign_hover_label: Label
+var _sign_hover_cell := Vector2i(2147483647, 2147483647)
 var _npc_states: Array[Dictionary] = []
 var _settlement_factions: Array[Dictionary] = []
 var _factions_label: RichTextLabel
@@ -4901,6 +4904,12 @@ func _handle_player_right_click(mouse_position: Vector2) -> bool:
 	if npc_state.is_empty() or SettlementAfflictionService.is_active_zombie(npc_state):
 		if _npc_inspection_card != null:
 			_npc_inspection_card.close()
+		# No citizen claimed the click: a sign under the cursor reads
+		# itself aloud instead (a look, not a touch, at any distance).
+		var sign_info := _sign_text_for_cell(clicked_cell)
+		if not sign_info.is_empty():
+			_show_sign_dialogue(clicked_cell, sign_info)
+			return true
 		return false
 	_open_npc_inspection(npc_state)
 	return true
@@ -5372,6 +5381,68 @@ func _update_summary(grid: Dictionary, seed_text: String) -> void:
 	if not building_subtype_summary.is_empty():
 		city_summary.text += "\nBuilding Types: %s" % building_subtype_summary
 
+## Whether the decor layer holds the carved wooden sign at this cell —
+## the corridor boards by shopfronts and the boards hung inside shops.
+func _is_sign_decor_cell(cell: Vector2i) -> bool:
+	if decor_layer.get_cell_source_id(cell) < 0:
+		return false
+	return decor_layer.get_cell_atlas_coords(cell) == (TILE_ATLAS.get("sign", Vector2i(-1000, -1000)) as Vector2i)
+
+## The readable text for a sign cell, or {} when the cell holds no sign.
+## A sign inside a shop names that shop; a corridor sign names the civic
+## building it stands beside; a board with no business near it carries a
+## seeded notice. Deterministic per hold seed and cell.
+func _sign_text_for_cell(cell: Vector2i) -> Dictionary:
+	if not _is_sign_decor_cell(cell):
+		return {}
+	var sign_seed_text := seed_input.text.strip_edges()
+	var owner_cell := cell
+	if not _latest_civic_building_type_map.has(owner_cell):
+		for direction: Vector2i in [Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.DOWN]:
+			if _latest_civic_building_type_map.has(cell + direction):
+				owner_cell = cell + direction
+				break
+	if _latest_civic_building_type_map.has(owner_cell):
+		var display_name := String(_latest_civic_building_name_map.get(owner_cell, ""))
+		var trade := _building_type_for_cell_or_empty(owner_cell)
+		var trade_display := "" if trade.is_empty() else _display_name_for_building_type(trade)
+		var sign_text := SignTextService.business_sign_text(display_name, trade_display)
+		if not sign_text.is_empty():
+			return {"title": display_name if not display_name.is_empty() else "Sign", "text": sign_text}
+	return {"title": "Notice", "text": SignTextService.flavor_text(sign_seed_text, cell)}
+
+## Floats the sign's text above the board in world space — small, warm,
+## outlined so it reads over any ground — replacing the tile tooltip.
+func _show_sign_hover_label(cell: Vector2i, sign_info: Dictionary) -> void:
+	if _sign_hover_cell == cell and _sign_hover_label != null and is_instance_valid(_sign_hover_label):
+		return
+	_clear_sign_hover_label()
+	var label := Label.new()
+	label.text = String(sign_info.get("text", ""))
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 12)
+	label.add_theme_color_override("font_color", Color(0.97, 0.93, 0.8, 1.0))
+	label.add_theme_color_override("font_outline_color", Color(0.09, 0.07, 0.05, 1.0))
+	label.add_theme_constant_override("outline_size", 6)
+	label.z_index = 45
+	city_layer.add_child(label)
+	label.reset_size()
+	label.position = _cell_center_position(cell) - Vector2(label.size.x * 0.5, label.size.y + float(tile_size.y) * 0.75)
+	_sign_hover_label = label
+	_sign_hover_cell = cell
+
+func _clear_sign_hover_label() -> void:
+	if _sign_hover_label != null and is_instance_valid(_sign_hover_label):
+		_sign_hover_label.queue_free()
+	_sign_hover_label = null
+	_sign_hover_cell = Vector2i(2147483647, 2147483647)
+
+## Right-clicking a sign reads it aloud: the text opens in the same speech
+## panel NPC dialogue uses, anchored over the board. No portrait — boards
+## have no face — just the title line and the sign's text.
+func _show_sign_dialogue(cell: Vector2i, sign_info: Dictionary) -> void:
+	_spawn_speech_bubble("%s\n%s" % [String(sign_info.get("title", "Sign")), String(sign_info.get("text", ""))], _cell_center_position(cell))
+
 func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	if city_layer.tile_set == null:
 		_hide_hover_tooltip()
@@ -5389,6 +5460,15 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	var hovered_npc := _npc_state_near_mouse(mouse_position)
 	if hovered_npc.is_empty():
 		hovered_npc = _npc_state_at_cell(hovered_cell)
+	# A sign under the cursor floats its text above the board instead of
+	# the regular tile tooltip (a dwarf standing on it still wins).
+	if hovered_npc.is_empty():
+		var sign_info := _sign_text_for_cell(hovered_cell)
+		if not sign_info.is_empty():
+			_show_sign_hover_label(hovered_cell, sign_info)
+			tile_hover_tooltip.visible = false
+			return
+	_clear_sign_hover_label()
 	var hovered_npc_name := String((hovered_npc.get("identity", {}) as Dictionary).get("name", ""))
 	if tile_hover_tooltip.visible and hovered_cell == _hover_tooltip_cell and hovered_layer == _hover_tooltip_layer and hovered_npc_name == _hover_tooltip_npc:
 		_place_hover_tooltip(mouse_position + Vector2(16, 16))
@@ -5460,6 +5540,7 @@ func _npc_state_near_mouse(mouse_position: Vector2) -> Dictionary:
 	return best
 
 func _hide_hover_tooltip() -> void:
+	_clear_sign_hover_label()
 	tile_hover_tooltip.visible = false
 	_hover_tooltip_cell = Vector2i(2147483647, 2147483647)
 	_hover_tooltip_layer = null

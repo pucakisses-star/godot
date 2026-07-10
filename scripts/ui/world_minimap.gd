@@ -34,6 +34,12 @@ const BODY_BG := Color(0.05, 0.06, 0.05, 1.0)
 const TITLE_COLOR := Color(0.90, 0.82, 0.60, 1.0)
 
 const COLOR_UNGENERATED := Color(0.03, 0.03, 0.04, 0.55)
+## Fog of war on the expanded view: never-visited ground is solid black.
+const COLOR_UNEXPLORED := Color(0.0, 0.0, 0.0, 1.0)
+## Chunk geometry of the scene's exploration bitmask; must match the
+## EXPLORE_CHUNK_* constants in town_generation.gd.
+const EXPLORE_CHUNK_SHIFT := 5
+const EXPLORE_CHUNK_SIZE := 1 << EXPLORE_CHUNK_SHIFT
 const COLOR_WATER := Color(0.20, 0.42, 0.68, 1.0)
 const COLOR_ROAD := Color(0.62, 0.48, 0.30, 1.0)
 const COLOR_WALL := Color(0.42, 0.42, 0.45, 1.0)
@@ -273,6 +279,12 @@ func _draw_body() -> void:
 	# black void beyond the small live chunk around the player.
 	var biome_ctx := _read_dictionary("_surface_biome_ctx")
 	var world_origin := _read_vector2i("_surface_world_origin")
+	# Fog of war applies to the expanded (M) view only: ground the walker
+	# has never seen draws solid black. The docked corner map stays as-is.
+	# Scenes without an exploration mask keep the regular unmasked render.
+	var explored_variant: Variant = _scene.get("_explored_chunks") if _expanded else null
+	var fog_enabled := explored_variant is Dictionary
+	var explored: Dictionary = explored_variant as Dictionary if fog_enabled else {}
 
 	var span := 2 * radius + 1
 	var cell_px := body / float(span)
@@ -281,11 +293,14 @@ func _draw_body() -> void:
 	for dy: int in range(-radius, radius + 1):
 		for dx: int in range(-radius, radius + 1):
 			var cell := player_cell + Vector2i(dx, dy)
-			var cell_color := _color_for_cell(cell, city, decor, roads, blocked, biome_ctx, world_origin)
 			var top_left := origin + Vector2(float(dx + radius) * cell_px, float(dy + radius) * cell_px)
+			if fog_enabled and not _is_explored_cell(cell, explored, world_origin):
+				draw_rect(Rect2(top_left, rect_size), COLOR_UNEXPLORED, true)
+				continue
+			var cell_color := _color_for_cell(cell, city, decor, roads, blocked, biome_ctx, world_origin)
 			draw_rect(Rect2(top_left, rect_size), cell_color, true)
 
-	_draw_markers(origin, player_cell, cell_px, radius, body)
+	_draw_markers(origin, player_cell, cell_px, radius, body, fog_enabled, explored, world_origin)
 	draw_rect(body_rect, BORDER, false, 1.0)
 
 
@@ -335,14 +350,24 @@ func _biome_color(biome: String) -> Color:
 			return COLOR_GROUND
 
 
-func _draw_markers(origin: Vector2, player_cell: Vector2i, cell_px: float, radius: int, body: float) -> void:
+func _draw_markers(origin: Vector2, player_cell: Vector2i, cell_px: float, radius: int, body: float, fog_enabled: bool, explored: Dictionary, world_origin: Vector2i) -> void:
 	var pip := clampf(cell_px * 0.55, 2.0, 6.0)
+	# Under fog, pips only show on explored ground; the player always draws.
 	for gate: Dictionary in _read_dict_array("_surface_gates"):
-		_draw_pip(origin, player_cell, gate.get("anchor", Vector2i.ZERO) as Vector2i, cell_px, pip, radius, COLOR_GATE)
+		var gate_cell := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		if fog_enabled and not _is_explored_cell(gate_cell, explored, world_origin):
+			continue
+		_draw_pip(origin, player_cell, gate_cell, cell_px, pip, radius, COLOR_GATE)
 	for landmark: Dictionary in _read_dict_array("_surface_landmarks"):
-		_draw_pip(origin, player_cell, landmark.get("anchor", Vector2i.ZERO) as Vector2i, cell_px, pip, radius, COLOR_LANDMARK)
+		var landmark_cell := landmark.get("anchor", Vector2i.ZERO) as Vector2i
+		if fog_enabled and not _is_explored_cell(landmark_cell, explored, world_origin):
+			continue
+		_draw_pip(origin, player_cell, landmark_cell, cell_px, pip, radius, COLOR_LANDMARK)
 	for npc: Dictionary in _read_dict_array("_npc_states"):
-		_draw_pip(origin, player_cell, npc.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i, cell_px, pip, radius, COLOR_NPC)
+		var npc_cell := npc.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i
+		if fog_enabled and not _is_explored_cell(npc_cell, explored, world_origin):
+			continue
+		_draw_pip(origin, player_cell, npc_cell, cell_px, pip, radius, COLOR_NPC)
 	# Player last, dead centre, brighter and larger with a dark rim.
 	var center := origin + Vector2(body * 0.5, body * 0.5)
 	var player_r := clampf(cell_px * 0.9, 3.5, 7.0)
@@ -359,6 +384,22 @@ func _draw_pip(origin: Vector2, player_cell: Vector2i, cell: Vector2i, cell_px: 
 		(float(rel.y + radius) + 0.5) * cell_px
 	)
 	draw_circle(point, pip, color)
+
+
+## Bit lookup into the scene's world-space exploration bitmask (one bit per
+## cell, 32x32-cell chunks); scene cells convert through the world origin.
+func _is_explored_cell(cell: Vector2i, explored: Dictionary, world_origin: Vector2i) -> bool:
+	var world_cell := cell + world_origin
+	var chunk := Vector2i(world_cell.x >> EXPLORE_CHUNK_SHIFT, world_cell.y >> EXPLORE_CHUNK_SHIFT)
+	var mask_variant: Variant = explored.get(chunk)
+	if not (mask_variant is PackedByteArray):
+		return false
+	var mask := mask_variant as PackedByteArray
+	var local_index := (world_cell.y & (EXPLORE_CHUNK_SIZE - 1)) * EXPLORE_CHUNK_SIZE + (world_cell.x & (EXPLORE_CHUNK_SIZE - 1))
+	var byte_index := local_index >> 3
+	if byte_index >= mask.size():
+		return false
+	return (mask[byte_index] & (1 << (local_index & 7))) != 0
 
 
 func _read_vector2i(property: String) -> Vector2i:

@@ -195,6 +195,15 @@ var _surface_road_paths: Array[Array] = []
 ## Grass cells beside lane junctions that host a wooden direction post,
 ## planned by the lane tracer and rendered through _pick_decor_tile.
 var _direction_post_cells: Dictionary = {}
+## Shop signboards standing on the grass by a civic entrance: sign cell ->
+## the establishment's anchor cell (whose maps carry its name and trade).
+## Recomputed deterministically from the level data on every _show_level.
+var _shop_sign_cells: Dictionary = {}
+## Plaza-rim notice boards carrying seeded village notices (cell -> true).
+var _notice_board_cells: Dictionary = {}
+## The floating world-space label shown while the cursor rests on a sign.
+var _sign_hover_label: Label
+var _sign_hover_cell := Vector2i(2147483647, 2147483647)
 var _surface_anchor_cells: Array[Vector2i] = []
 var _surface_creatures: Array[Dictionary] = []
 ## Camp sites whose garrison was wiped out this visit ("x,y" site key ->
@@ -212,6 +221,22 @@ var _minimap: WorldMinimapScript
 var _minimap_refresh_timer := 0.0
 var _minimap_last_player_cell := Vector2i(2147483647, 2147483647)
 const MINIMAP_REFRESH_SECONDS := 0.2
+## Fog-of-war exploration: every cell the walker has actually seen (a disc
+## of EXPLORE_RADIUS around each cell stood on), stored per 32x32 chunk of
+## shared WORLD space (scene cell + _surface_world_origin) as a bitmask so
+## the expanded map can black out ground never visited.
+const EXPLORE_RADIUS := 14
+const EXPLORE_CHUNK_SHIFT := 5
+const EXPLORE_CHUNK_SIZE := 1 << EXPLORE_CHUNK_SHIFT
+const EXPLORE_CHUNK_BYTES := (EXPLORE_CHUNK_SIZE * EXPLORE_CHUNK_SIZE) >> 3
+const EXPLORE_PERSIST_SECONDS := 3.0
+## Vector2i world-chunk -> PackedByteArray(EXPLORE_CHUNK_BYTES) bitmask.
+var _explored_chunks: Dictionary = {}
+var _explored_last_cell := Vector2i(2147483647, 2147483647)
+var _explored_dirty := false
+var _explored_persist_timer := 0.0
+## The circular stamp of offsets marked around the player, built once.
+var _explore_disc_offsets: Array[Vector2i] = []
 const SURFACE_CREATURE_TEXTURE := preload("res://resources/images/npc/creature_characters.png")
 const BOAT_SPRITE_TEXTURE := preload("res://resources/images/npc/boat_sprite.png")
 var _player_attack_timer := 0.0
@@ -421,9 +446,10 @@ const DESERT_SKIPPED_DECOR: Array[String] = [
 ## Tundra towns sit on snow: the grass-family ground tiles swap to the
 ## painted-in snow tiles (mirrors DESERT_BASE_SWAP), and grassland greenery
 ## (bushes, hedges, blooms) is skipped so the settled area reads as winter.
-## The wind-bent conifers ("tree"/"tree_dark") are kept as evergreens, and
-## the path-fringe tiles swap to their snow recolors (appended atlas row 28)
-## so lanes scallop into the snowfield instead of sprouting grass.
+## The scatter trees ("tree"/"tree_dark") swap to their snow-capped variants
+## in _pick_decor_tile, and the path-fringe tiles swap to their snow recolors
+## (appended atlas row 28) so lanes scallop into the snowfield instead of
+## sprouting grass.
 const SNOW_BASE_SWAP := {
 	"grass": "snow",
 	"grass_dark": "snow_alt",
@@ -701,6 +727,10 @@ const TOWN_ROOM_BACK_ROLES := {
 ## stall is a single stand, a stable one straw-floored hall.
 const TOWN_OPEN_PLAN_BUILDING_TYPES := ["market_stall", "stable"]
 
+## Room roles that never earn a street signboard: nobody advertises the
+## kitchen. The shopfront room keeps the building's trade and its board.
+const SIGN_SKIPPED_ROOM_TYPES := {"kitchen": true, "storeroom": true, "forge_room": true}
+
 func _ready() -> void:
 	_apply_cached_town_scene_seed()
 	_configure_tile_layer()
@@ -774,6 +804,7 @@ func _process(delta: float) -> void:
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
 	_update_weather_frame(delta)
+	_update_exploration(delta)
 	_update_minimap(delta)
 
 func _advance_game_clock(delta: float) -> void:
@@ -1151,6 +1182,9 @@ func _exit_tree() -> void:
 ## Pushes the live clock/HP/satiety into the session. Runs on scene exit
 ## AND whenever SaveGameService writes a slot, so saves capture now.
 func flush_session_state() -> void:
+	# The explored mask rides the same flush: scene exits and slot saves
+	# both capture the freshest fog-of-war state.
+	_flush_exploration()
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return
@@ -1223,6 +1257,116 @@ func _update_minimap(delta: float) -> void:
 		return
 	_minimap_refresh_timer = MINIMAP_REFRESH_SECONDS
 	_minimap.refresh()
+
+## --- fog-of-war exploration ---------------------------------------------
+## The expanded map (M) only shows land the walker has actually seen: the
+## corridor walked plus a view disc around it. Tracking is hot-path cheap -
+## work happens only on the frame the player crosses into a new cell - and
+## the mask persists through world settings like the homestead does.
+
+## Marks the view disc when the player enters a new cell, then banks dirty
+## bits into the session settings on a slow throttle.
+func _update_exploration(delta: float) -> void:
+	if _player_sprite == null or _is_underground_level():
+		return
+	if _player_cell != _explored_last_cell:
+		_explored_last_cell = _player_cell
+		_mark_explored_around(_player_cell)
+	if not _explored_dirty:
+		return
+	_explored_persist_timer -= delta
+	if _explored_persist_timer <= 0.0:
+		_persist_exploration()
+
+## Sets the explored bit for every cell of the circular view disc around a
+## scene cell. Offsets run row-major so consecutive cells usually share a
+## chunk: the chunk's mask is fetched once and written back only on change
+## (PackedByteArray copies on write, so the write-back is required).
+func _mark_explored_around(center_cell: Vector2i) -> void:
+	if _explore_disc_offsets.is_empty():
+		for disc_dy: int in range(-EXPLORE_RADIUS, EXPLORE_RADIUS + 1):
+			for disc_dx: int in range(-EXPLORE_RADIUS, EXPLORE_RADIUS + 1):
+				if disc_dx * disc_dx + disc_dy * disc_dy <= EXPLORE_RADIUS * EXPLORE_RADIUS:
+					_explore_disc_offsets.append(Vector2i(disc_dx, disc_dy))
+	var world_center := center_cell + _surface_world_origin
+	var cached_chunk := Vector2i(2147483647, 2147483647)
+	var mask := PackedByteArray()
+	var mask_changed := false
+	for offset: Vector2i in _explore_disc_offsets:
+		var world_cell := world_center + offset
+		var chunk := Vector2i(world_cell.x >> EXPLORE_CHUNK_SHIFT, world_cell.y >> EXPLORE_CHUNK_SHIFT)
+		if chunk != cached_chunk:
+			if mask_changed:
+				_explored_chunks[cached_chunk] = mask
+			var mask_variant: Variant = _explored_chunks.get(chunk)
+			if mask_variant is PackedByteArray:
+				mask = mask_variant as PackedByteArray
+			else:
+				mask = PackedByteArray()
+				mask.resize(EXPLORE_CHUNK_BYTES)
+			cached_chunk = chunk
+			mask_changed = false
+		var local_index := (world_cell.y & (EXPLORE_CHUNK_SIZE - 1)) * EXPLORE_CHUNK_SIZE + (world_cell.x & (EXPLORE_CHUNK_SIZE - 1))
+		var byte_index := local_index >> 3
+		var bit := 1 << (local_index & 7)
+		if (mask[byte_index] & bit) == 0:
+			mask[byte_index] = mask[byte_index] | bit
+			mask_changed = true
+			_explored_dirty = true
+	if mask_changed:
+		_explored_chunks[cached_chunk] = mask
+
+## Settings key for this settlement's explored mask: world seed plus the
+## scene's overworld tile, so each settlement keeps its own mask and a
+## fresh world seed starts fully unexplored (no bleed between worlds).
+func _explored_store_key() -> String:
+	return "town_explored|%s|%d,%d" % [_surface_world_seed_text, _surface_own_tile.x, _surface_own_tile.y]
+
+## Packs the per-chunk bitmasks into JSON-safe base64 strings under "x,y"
+## chunk keys (the same convention hold_diffs/homestead cells use) and
+## stores them in the shared world settings.
+func _persist_exploration() -> void:
+	_explored_dirty = false
+	_explored_persist_timer = EXPLORE_PERSIST_SECONDS
+	if _surface_world_seed_text.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var stored: Dictionary = {}
+	for chunk_variant: Variant in _explored_chunks.keys():
+		var chunk := chunk_variant as Vector2i
+		stored["%d,%d" % [chunk.x, chunk.y]] = Marshalls.raw_to_base64(_explored_chunks[chunk_variant] as PackedByteArray)
+	settings[_explored_store_key()] = stored
+	_store_world_settings(settings)
+
+## Banks any unsaved exploration; runs before the surface world (and with
+## it the store key) rebuilds, and whenever the scene flushes session state.
+func _flush_exploration() -> void:
+	if _explored_dirty:
+		_persist_exploration()
+
+## Restores this settlement's explored mask. Runs after _setup_surface_world
+## stamps the seed and tile, so a newly generated world reads a fresh key
+## and comes back empty while re-entering the same settlement restores it.
+func _restore_exploration(settings: Dictionary) -> void:
+	_explored_chunks.clear()
+	_explored_last_cell = Vector2i(2147483647, 2147483647)
+	_explored_dirty = false
+	_explored_persist_timer = 0.0
+	var stored_variant: Variant = settings.get(_explored_store_key())
+	if not (stored_variant is Dictionary):
+		return
+	var stored := stored_variant as Dictionary
+	for key_variant: Variant in stored.keys():
+		var parts := String(key_variant).split(",")
+		if parts.size() != 2:
+			continue
+		var encoded_variant: Variant = stored[key_variant]
+		if not (encoded_variant is String):
+			continue
+		var mask := Marshalls.base64_to_raw(encoded_variant as String)
+		if mask.size() != EXPLORE_CHUNK_BYTES:
+			continue
+		_explored_chunks[Vector2i(int(parts[0]), int(parts[1]))] = mask
 
 func _update_hp_label() -> void:
 	if _hp_label == null:
@@ -1646,10 +1790,16 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 		TILE_ATLAS.get("snow_alt", Vector2i(1, 26)) as Vector2i
 	]
 	# Every appended-row cell is addressed through the atlas table, so the
-	# augmented sheet just needs to reach the deepest mapped row.
+	# augmented sheet just needs to reach the deepest mapped row. Multi-cell
+	# tiles (the full trees) span extra rows below their mapped coordinate.
 	var max_row := 0
 	for coords_variant: Variant in TILE_ATLAS.values():
-		max_row = maxi(max_row, (coords_variant as Vector2i).y)
+		var mapped_coords := coords_variant as Vector2i
+		var row_span := 1
+		if TILE_ATLAS_DEFS.TOWN_MULTI_CELL_TILES.has(mapped_coords):
+			var multi_entry := TILE_ATLAS_DEFS.TOWN_MULTI_CELL_TILES[mapped_coords] as Dictionary
+			row_span = (multi_entry.get("size", Vector2i.ONE) as Vector2i).y
+		max_row = maxi(max_row, mapped_coords.y + row_span - 1)
 	var needed_height := maxi(base_image.get_height(), (max_row + 1) * tile_size.y)
 	var augmented := Image.create(base_image.get_width(), needed_height, false, Image.FORMAT_RGBA8)
 	augmented.blit_rect(base_image, Rect2i(Vector2i.ZERO, base_image.get_size()), Vector2i.ZERO)
@@ -1667,6 +1817,10 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 	# cellar rooms.
 	_paint_stair_tiles(augmented)
 	_paint_cellar_rock_tile(augmented)
+	# Lakeshore water plants (transparent decor over the animated water) and
+	# the snow-dusted copies of the two full-height trees.
+	_paint_water_plant_tiles(augmented)
+	_paint_snowy_tree_tiles(augmented)
 	return ImageTexture.create_from_image(augmented)
 
 ## The shipped sheet's flat water cells that seed the animation palette.
@@ -2150,6 +2304,237 @@ func _paint_cellar_rock_tile(image: Image) -> void:
 			elif fleck % 67 == 1:
 				tone = Color(0.075, 0.06, 0.05, 1.0)
 			image.set_pixel(origin.x + tx, origin.y + ty, tone)
+
+## --- painted water plants and snow trees --------------------------------------
+
+## The water-plant palette, tuned to sit on the sheet's blue water without
+## vanishing: mid pad green with a dark rim and a pale top-left highlight,
+## plus reed greens and a ghost-pale ripple ring.
+const PLANT_PAD_GREEN := Color(0.30, 0.55, 0.24, 1.0)
+const PLANT_PAD_DARK := Color(0.14, 0.33, 0.16, 1.0)
+const PLANT_PAD_LIGHT := Color(0.52, 0.74, 0.34, 1.0)
+const PLANT_REED_DARK := Color(0.16, 0.40, 0.19, 1.0)
+const PLANT_REED_LIGHT := Color(0.40, 0.65, 0.28, 1.0)
+const PLANT_RIPPLE := Color(0.78, 0.88, 0.96, 0.5)
+
+## One 2px art block of a painted plant tile (the sheet is a 2x upscale, so
+## all synthesized art works on the 16x16 block grid).
+func _plant_block(image: Image, origin: Vector2i, bx: int, by: int, color: Color) -> void:
+	if bx < 0 or by < 0 or bx > 15 or by > 15:
+		return
+	for py: int in range(2):
+		for px: int in range(2):
+			image.set_pixel(origin.x + bx * 2 + px, origin.y + by * 2 + py, color)
+
+## One round lily pad on the block grid: an ellipse with a notch wedge cut
+## toward notch_angle, a dark rim on boundary blocks, and a pale highlight
+## along the upper-left inner rim. Everything outside stays transparent.
+func _paint_lily_pad(image: Image, origin: Vector2i, center: Vector2, radius: Vector2, notch_angle: float) -> void:
+	var covered: Dictionary = {}
+	for by: int in range(16):
+		for bx: int in range(16):
+			var dx := (float(bx) - center.x) / radius.x
+			var dy := (float(by) - center.y) / radius.y
+			if dx * dx + dy * dy > 1.0:
+				continue
+			# The notch: a wedge from just off-center to the rim.
+			var block_angle := atan2(float(by) - center.y, float(bx) - center.x)
+			var offset_angle := absf(angle_difference(block_angle, notch_angle))
+			if offset_angle < 0.42 and dx * dx + dy * dy > 0.12:
+				continue
+			covered[Vector2i(bx, by)] = true
+	for block_variant: Variant in covered.keys():
+		var block := block_variant as Vector2i
+		var on_rim := false
+		for neighbor: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			if not covered.has(block + neighbor):
+				on_rim = true
+				break
+		var tone := PLANT_PAD_GREEN
+		if on_rim:
+			# Upper-left rim catches the light; the rest darkens to a rim line.
+			var toward_light := float(block.x) < center.x - 0.5 and float(block.y) < center.y + 0.5
+			tone = PLANT_PAD_LIGHT if toward_light else PLANT_PAD_DARK
+		elif (block.x * 73856093 ^ block.y * 19349663) % 11 == 0:
+			# Sparse dark speckle so big pads aren't one flat green plate.
+			tone = PLANT_PAD_DARK.lerp(PLANT_PAD_GREEN, 0.5)
+		_plant_block(image, origin, block.x, block.y, tone)
+
+## One reed clump: a handful of slim blades leaning off vertical, alternating
+## dark and light greens with lit tips, breaking the surface through a faint
+## pale ripple ring at the waterline.
+func _paint_reed_clump(image: Image, origin: Vector2i, mirrored: bool, salt: int) -> void:
+	var water_line := 12
+	# Ripple ring first, so blades draw over its middle.
+	for ripple_dx: int in range(-4, 5):
+		var lift := 1 if absi(ripple_dx) >= 3 else 0
+		if absi(ripple_dx) == 4:
+			lift = 2
+		_plant_block(image, origin, 7 + ripple_dx, water_line - lift + 1, PLANT_RIPPLE)
+	var blade_count := 5
+	for blade_index: int in range(blade_count):
+		var blade_hash := absi((salt * 31 + blade_index) * 92821)
+		var base_x := 3 + blade_index * 2 + blade_hash % 2
+		var height := 5 + blade_hash % 6
+		var lean := (blade_hash / 7) % 3 - 1
+		var tone := PLANT_REED_DARK if blade_index % 2 == 0 else PLANT_REED_LIGHT
+		for step: int in range(height):
+			var bx := base_x + (lean * step) / maxi(height - 1, 1)
+			if mirrored:
+				bx = 15 - bx
+			var blade_tone := tone
+			if step >= height - 2:
+				blade_tone = PLANT_REED_LIGHT.lerp(Color(0.62, 0.8, 0.42, 1.0), 0.5)
+			_plant_block(image, origin, bx, water_line - step, blade_tone)
+
+## Paints the five water-plant decor tiles into appended atlas row 46:
+## a single pad, a clustered pair (plus a sprout of a third), a flowering
+## white lily, and two mirrored reed clumps. All transparent-backed decor
+## drawn over the animated water bases.
+func _paint_water_plant_tiles(image: Image) -> void:
+	var keys: Array[String] = ["lily_pad", "lily_pad_pair", "lily_flower", "reeds", "reeds_alt"]
+	for plant_key: String in keys:
+		var coords := TILE_ATLAS.get(plant_key, Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var origin := coords * tile_size
+		# Clear to full transparency; the decor layer supplies the water.
+		for ty: int in range(tile_size.y):
+			for tx: int in range(tile_size.x):
+				image.set_pixel(origin.x + tx, origin.y + ty, Color(0, 0, 0, 0))
+		match plant_key:
+			"lily_pad":
+				_paint_lily_pad(image, origin, Vector2(7.5, 8.0), Vector2(5.4, 4.4), 0.6)
+			"lily_pad_pair":
+				_paint_lily_pad(image, origin, Vector2(5.0, 5.5), Vector2(4.2, 3.4), 2.6)
+				_paint_lily_pad(image, origin, Vector2(10.5, 11.0), Vector2(3.4, 2.8), -0.7)
+				_paint_lily_pad(image, origin, Vector2(12.5, 4.5), Vector2(2.0, 1.6), 1.8)
+			"lily_flower":
+				_paint_lily_pad(image, origin, Vector2(7.5, 8.5), Vector2(5.0, 4.2), -2.2)
+				# The white blossom: two petal layers and a warm center.
+				var petal := Color(0.95, 0.96, 0.99, 1.0)
+				var petal_shade := Color(0.82, 0.85, 0.93, 1.0)
+				for petal_offset: Vector2i in [
+						Vector2i(-2, 0), Vector2i(2, 0), Vector2i(0, -2), Vector2i(0, 2),
+						Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:
+					var layer_tone := petal if petal_offset.y <= 0 else petal_shade
+					_plant_block(image, origin, 7 + petal_offset.x, 7 + petal_offset.y, layer_tone)
+				for core_offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+					_plant_block(image, origin, 7 + core_offset.x, 7 + core_offset.y, petal)
+				_plant_block(image, origin, 7, 7, Color(0.95, 0.78, 0.30, 1.0))
+			"reeds":
+				_paint_reed_clump(image, origin, false, 3)
+			"reeds_alt":
+				_paint_reed_clump(image, origin, true, 11)
+
+## A snow-tree source pixel that belongs to the canopy (dustable): leafy
+## green, where green clearly leads red and blue. Trunk browns, the dark
+## sprite outline and transparent surround all refuse snow, so caps sit
+## INSIDE the tree's outline and the silhouette survives.
+func _snow_tree_pixel_is_canopy(color: Color) -> bool:
+	if color.a <= 0.5:
+		return false
+	return color.g8 > color.r8 + 12 and color.g8 > color.b8 + 12
+
+## Copies both full-height tree regions into their appended-row cells and
+## dusts them with snow: every canopy block whose upward neighbor is not
+## canopy (sky or a dark branch crease) starts a snow run 1-4 blocks deep
+## with hash jitter — deep white caps across the crown top, thinner dusting
+## along lower branch shoulders — and the bottom block of each run shades
+## pale blue so caps read as lying ON the foliage.
+func _paint_snowy_tree_tiles(image: Image) -> void:
+	for recipe: Array in [["tree", "tree_snowy"], ["tree_dark", "tree_dark_snowy"]]:
+		var source := TILE_ATLAS.get(String(recipe[0]), Vector2i(-1, -1)) as Vector2i
+		var target := TILE_ATLAS.get(String(recipe[1]), Vector2i(-1, -1)) as Vector2i
+		if source.x < 0 or target.x < 0:
+			continue
+		var multi := TILE_ATLAS_DEFS.TOWN_MULTI_CELL_TILES.get(source, {}) as Dictionary
+		var size_cells := multi.get("size", Vector2i.ONE) as Vector2i
+		var size_px := Vector2i(size_cells.x * tile_size.x, size_cells.y * tile_size.y)
+		var region := image.get_region(Rect2i(source * tile_size, size_px))
+		image.blit_rect(region, Rect2i(Vector2i.ZERO, size_px), target * tile_size)
+		_dust_snow_on_tree(image, target * tile_size, size_px, hash(String(recipe[1])))
+
+func _dust_snow_on_tree(image: Image, origin: Vector2i, size_px: Vector2i, salt: int) -> void:
+	var blocks_x := size_px.x / 2
+	var blocks_y := size_px.y / 2
+	var snow_top := Color(0.94, 0.96, 1.0, 1.0)
+	var snow_shade := Color(0.74, 0.81, 0.94, 1.0)
+	# The canopy mask is read before any snow is painted, so a finished cap
+	# can never seed a second run cascading down the crown.
+	var canopy: Array[bool] = []
+	canopy.resize(blocks_x * blocks_y)
+	# The sheet's own lit yellow-green (g >= 150) paints every upward-facing
+	# lobe surface, so it doubles as the shoulder-dusting mask below.
+	var lit: Array[bool] = []
+	lit.resize(blocks_x * blocks_y)
+	for by: int in range(blocks_y):
+		for bx: int in range(blocks_x):
+			var mask_pixel := image.get_pixel(origin.x + bx * 2, origin.y + by * 2)
+			canopy[by * blocks_x + bx] = _snow_tree_pixel_is_canopy(mask_pixel)
+			lit[by * blocks_x + bx] = canopy[by * blocks_x + bx] and mask_pixel.g8 >= 150
+	# A cap starts on an upward-facing canopy surface (canopy with no canopy
+	# above). Lone one-block starters on the near-vertical crown sides are
+	# rejected - they read as white flecks stuck to the outline - by asking
+	# for a horizontal starter neighbor, so only genuine tops and branch
+	# shoulders (flat runs) catch snow. The bottom rows are the ground fringe
+	# around the trunk and stay bare.
+	var starter: Array[bool] = []
+	starter.resize(blocks_x * blocks_y)
+	for by: int in range(blocks_y - 6):
+		for bx: int in range(blocks_x):
+			starter[by * blocks_x + bx] = canopy[by * blocks_x + bx] \
+				and (by == 0 or not canopy[(by - 1) * blocks_x + bx])
+	for bx: int in range(blocks_x):
+		for by: int in range(blocks_y):
+			if not starter[by * blocks_x + bx]:
+				continue
+			var left_starts := bx > 0 and starter[by * blocks_x + bx - 1]
+			var right_starts := bx < blocks_x - 1 and starter[by * blocks_x + bx + 1]
+			if not (left_starts or right_starts):
+				continue
+			# Caps run deeper near the crown (small by), thinner further down.
+			var depth := 1 + absi(salt + bx * 68917 + by * 92821) % 3
+			if by < blocks_y / 3:
+				depth += 2
+			var run := 0
+			for step: int in range(depth):
+				if by + step >= blocks_y or (step > 0 and not canopy[(by + step) * blocks_x + bx]):
+					break
+				run = step
+			for step: int in range(run + 1):
+				var tone := snow_shade if step == run and run > 0 else snow_top
+				for py: int in range(2):
+					for px: int in range(2):
+						image.set_pixel(origin.x + bx * 2 + px, origin.y + (by + step) * 2 + py, tone)
+	# Dusted branch shoulders: whole horizontal runs of the lit lobe surfaces
+	# frost over (snow lies along a branch, it doesn't speckle), more often
+	# near the crown, each streak closed by pale-blue shade on its underside.
+	for by: int in range(blocks_y - 6):
+		var bx := 0
+		while bx < blocks_x:
+			if not lit[by * blocks_x + bx]:
+				bx += 1
+				continue
+			var run_end := bx
+			while run_end + 1 < blocks_x and lit[by * blocks_x + run_end + 1]:
+				run_end += 1
+			var run_hash := absi(hash(Vector3i(salt, bx + by * 41, run_end)))
+			var keep_one_in := 3 if by * 3 > blocks_y else 2
+			if run_end - bx >= 1 and run_hash % keep_one_in == 0:
+				# Jittered ends keep streaks from tracing the art exactly.
+				var trim_left := run_hash / 7 % 2
+				var trim_right := run_hash / 13 % 2
+				for run_x: int in range(bx + trim_left, run_end + 1 - trim_right):
+					for py: int in range(2):
+						for px: int in range(2):
+							image.set_pixel(origin.x + run_x * 2 + px, origin.y + by * 2 + py, snow_top)
+					var under_index := (by + 1) * blocks_x + run_x
+					if run_x > bx and run_x < run_end and canopy[under_index] and not lit[under_index]:
+						for py: int in range(2):
+							for px: int in range(2):
+								image.set_pixel(origin.x + run_x * 2 + px, origin.y + (by + 1) * 2 + py, snow_shade)
+			bx = run_end + 1
 
 func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 	if _passable_atlas_set.is_empty():
@@ -2706,6 +3091,93 @@ func _plan_direction_posts(grid: Dictionary) -> void:
 			_direction_post_cells[post_cell] = true
 			break
 
+## Plans the village's readable boards for the level on display, purely
+## from the stored level data (no RNG state), so re-showing a level always
+## rebuilds the same signs. Every civic room with a ring door gets a shop
+## signboard on the grass flanking its entrance, and the market square's
+## rim hosts up to two notice boards. Cellars and the wilds carry none.
+func _plan_village_signboards(grid: Dictionary) -> void:
+	_shop_sign_cells.clear()
+	_notice_board_cells.clear()
+	_clear_sign_hover_label()
+	if _wild_mode or _is_underground_level() or grid.is_empty():
+		return
+	var render_bounds := _find_bounds(grid).grow(1)
+	var used: Dictionary = _direction_post_cells.duplicate()
+	var building_ids := _latest_civic_buildings_by_id.keys()
+	building_ids.sort()
+	for building_id_variant: Variant in building_ids:
+		var payload := _latest_civic_buildings_by_id[building_id_variant] as Dictionary
+		# Back rooms (kitchens, stockrooms, forge annexes) hang no boards;
+		# the shopfront room wearing the building's trade carries the sign.
+		if SIGN_SKIPPED_ROOM_TYPES.has(String(payload.get("type", ""))):
+			continue
+		var anchor_variant: Variant = payload.get("anchor")
+		if not (anchor_variant is Vector2i):
+			continue
+		var sign_cell := _pick_signboard_cell_for_building(grid, payload, used, render_bounds)
+		if sign_cell.x == 2147483647:
+			continue
+		used[sign_cell] = true
+		_shop_sign_cells[sign_cell] = anchor_variant as Vector2i
+	# Notice boards: grass cells hugging the square, sorted for
+	# determinism, spaced so the two boards never crowd one corner.
+	var rim_cells: Array[Vector2i] = []
+	for key_variant: Variant in grid.keys():
+		var plaza_cell := key_variant as Vector2i
+		if int(grid[plaza_cell]) != CELL_PLAZA:
+			continue
+		for direction: Vector2i in [Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.DOWN]:
+			var rim_cell := plaza_cell + direction
+			if int(grid.get(rim_cell, CELL_ROCK)) != CELL_ROCK:
+				continue
+			if used.has(rim_cell) or not render_bounds.has_point(rim_cell):
+				continue
+			rim_cells.append(rim_cell)
+	rim_cells.sort()
+	for rim_cell: Vector2i in rim_cells:
+		if _notice_board_cells.size() >= 2:
+			break
+		var spaced := true
+		for placed_variant: Variant in _notice_board_cells.keys():
+			var placed := placed_variant as Vector2i
+			if absi(placed.x - rim_cell.x) + absi(placed.y - rim_cell.y) < 10:
+				spaced = false
+				break
+		if not spaced:
+			continue
+		used[rim_cell] = true
+		_notice_board_cells[rim_cell] = true
+
+## The open-grass cell where a civic room's signboard stands: beside the
+## stoop of its ring door, off the lane, never sealing a doorway. Returns
+## the invalid sentinel when no ring door faces usable grass.
+func _pick_signboard_cell_for_building(grid: Dictionary, payload: Dictionary, used: Dictionary, render_bounds: Rect2i) -> Vector2i:
+	var door_candidates: Array[Vector2i] = []
+	for cell_variant: Variant in (payload.get("cells", []) as Array):
+		var cell := cell_variant as Vector2i
+		if _door_cells.has(cell):
+			door_candidates.append(cell)
+	door_candidates.sort()
+	for door_cell: Vector2i in door_candidates:
+		for direction: Vector2i in [Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP]:
+			var outside := door_cell + direction
+			var outside_zone := int(grid.get(outside, CELL_ROCK))
+			# Only ring doors open onto the village; partition doors face
+			# another room and never earn a board.
+			if outside_zone != CELL_ROCK and outside_zone != CELL_HALL and outside_zone != CELL_PLAZA:
+				continue
+			var perpendicular := Vector2i(direction.y, direction.x)
+			for flank: Vector2i in [outside + perpendicular, outside - perpendicular, outside + direction + perpendicular, outside + direction - perpendicular]:
+				if used.has(flank) or _door_cells.has(flank):
+					continue
+				if int(grid.get(flank, CELL_ROCK)) != CELL_ROCK:
+					continue
+				if not render_bounds.has_point(flank):
+					continue
+				return flank
+	return Vector2i(2147483647, 2147483647)
+
 func _carve_winding_lane(grid: Dictionary, from_cell: Vector2i, to_cell: Vector2i, spine: Array[Vector2i]) -> void:
 	## Most lanes are 2 tiles wide; roughly a third widen to 3.
 	var wide := _rng.randf() < 0.3
@@ -2919,6 +3391,7 @@ func _show_level(target_level_index: int) -> void:
 	_latest_civic_building_type_map = level_data.get("civic_building_type_map", {}) as Dictionary
 	_latest_civic_building_name_map = _build_civic_building_name_lookup(_latest_civic_buildings_by_id, seed_input.text.strip_edges(), "townsfolk")
 	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
+	_plan_village_signboards(grid)
 	_village_yards = level_data.get("village_yards", []) as Array
 	var well_variant: Variant = level_data.get("well_cell")
 	_village_well_cell = (well_variant as Vector2i) if well_variant is Vector2i else Vector2i(2147483647, 2147483647)
@@ -3642,7 +4115,8 @@ func _build_farmsteads() -> void:
 ## removable greenery (trees, hedges, flowers) as decor.
 func _farmstead_site_fits(origin: Vector2i) -> bool:
 	var removable: Array[Vector2i] = []
-	for key: String in ["tree", "tree_dark", "hedge", "hedge_alt", "flowers_white",
+	for key: String in ["tree", "tree_dark", "tree_snowy", "tree_dark_snowy",
+			"hedge", "hedge_alt", "flowers_white",
 			"flowers_yellow", "flowers_pink", "flowers_pink_alt", "stump", "stump_alt"]:
 		removable.append(TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i)
 	for y in range(FARMSTEAD_SITE.y):
@@ -4520,6 +4994,12 @@ func _handle_player_right_click(mouse_position: Vector2) -> bool:
 	if npc_state.is_empty() or SettlementAfflictionService.is_active_zombie(npc_state):
 		if _npc_inspection_card != null:
 			_npc_inspection_card.close()
+		# No citizen claimed the click: a sign under the cursor reads
+		# itself aloud instead (a look, not a touch, at any distance).
+		var sign_info := _sign_text_for_cell(clicked_cell)
+		if not sign_info.is_empty():
+			_show_sign_dialogue(clicked_cell, sign_info)
+			return true
 		return false
 	_open_npc_inspection(npc_state)
 	return true
@@ -4893,6 +5373,9 @@ const SURFACE_SITE_REACH_TILES := 20
 const SURFACE_ROAD_MAX_CELLS := 14 * WORLD_CELLS_PER_OVERWORLD_TILE
 
 func _setup_surface_world(grid: Dictionary) -> void:
+	# The exploration store key changes with the seed/tile stamped below:
+	# bank any unsaved exploration under the old key before the rebuild.
+	_flush_exploration()
 	for gate_label: Label in _surface_gate_labels:
 		if is_instance_valid(gate_label):
 			gate_label.queue_free()
@@ -4996,6 +5479,7 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	_surface_anchor_cells.append(bbox_center)
 	_refresh_surface_site_window(own_tile)
 	_restore_homestead(settings)
+	_restore_exploration(settings)
 
 ## The overworld tile a wilds cell stands on, in shared world space.
 func _overworld_tile_for_cell(cell: Vector2i) -> Vector2i:
@@ -5961,8 +6445,10 @@ func _plan_landmark_prop(landmark: Dictionary, recipe: Dictionary) -> Dictionary
 			blocked[anchor + Vector2i.LEFT] = true
 			blocked[anchor + Vector2i.RIGHT] = true
 		"grove":
+			# Grove sentinels on snow ground wear the snow-capped variant.
+			var grove_tree := "tree_dark_snowy" if ground_family.begins_with("snow") else "tree_dark"
 			for offset: Vector2i in [Vector2i.ZERO, Vector2i(-3, 2), Vector2i(3, 2)]:
-				decor[anchor + offset] = "tree_dark"
+				decor[anchor + offset] = grove_tree
 				blocked[anchor + offset] = true
 		_:
 			return {}
@@ -6125,6 +6611,16 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 				var world_cell: Vector2i = cell + _surface_world_origin
 				if not _is_tree_anchor_cell(world_cell):
 					decor_key = _understory_decor_key(world_cell, base_key, danger)
+				elif base_key.begins_with("snow"):
+					# Snow-covered pines on tundra ground. The swap happens at
+					# placement only - the terrain field keeps answering
+					# tree/tree_dark, so the anchor-lattice and crown-suppression
+					# checks above and in _cell_under_tree_crown are untouched.
+					decor_key += "_snowy"
+			# Lakeshore water plants: lily pads and reed clumps over the shore
+			# shallows, where the water is within a few cells of dry land.
+			if decor_key.is_empty() and base_key.begins_with("water"):
+				decor_key = _water_plant_decor_key(cell)
 			# Roads cut through everything and stay clear of trees; a road cell
 			# is never a barrier, so a trail carves a pass through crags.
 			if _surface_road_cells.has(cell):
@@ -6202,6 +6698,105 @@ func _cell_under_tree_crown(world_cell: Vector2i, danger: float) -> bool:
 			if decor == "tree" or decor == "tree_dark":
 				return true
 	return false
+
+## Water plants stop at this Chebyshev distance from dry land: beyond it the
+## lake is open deep water and stays bare.
+const WATER_PLANT_MAX_SHORE_DISTANCE := 4
+## Per-distance placement chance (percent) inside a plant blob: dense right
+## off the bank, thinning to almost nothing at the deep edge of the shallows.
+const WATER_PLANT_DENSITY_BY_DISTANCE: Array[int] = [0, 60, 42, 22, 9]
+
+## The water-plant dressing for one painted water cell: lily pads (singles,
+## clustered pairs, the occasional flowering white lily) through the shore
+## shallows, reed clumps hugging the bank, nothing in open deep water. All
+## verdicts are deterministic per world cell - a coarse hash lattice gathers
+## the plants into shoreline blobs (reference style, not a uniform sprinkle)
+## and per-cell hash rolls pick the species - so re-streaming a lake rebuilds
+## the exact same beds. Snow-shored (tundra) water stays bare: green pads on
+## a winter lake read wrong against the snow-lapped fringe.
+func _water_plant_decor_key(cell: Vector2i) -> String:
+	var world_cell: Vector2i = cell + _surface_world_origin
+	# Coarse cluster gate first - it is cheap and rejects most open water
+	# before the ring scan below ever runs.
+	if _water_plant_blob_field(world_cell) < 0.60:
+		return ""
+	# Tundra water is winter water even when a sand ring separates it from
+	# the snowfield (the coast band), so the biome label backs up the
+	# snow-shore check below.
+	if SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, world_cell) == TILE_ATLAS_DEFS.BIOME_TUNDRA:
+		return ""
+	var shore := _water_shore_info(cell)
+	var shore_distance := int(shore.get("distance", WATER_PLANT_MAX_SHORE_DISTANCE + 1))
+	if shore_distance > WATER_PLANT_MAX_SHORE_DISTANCE:
+		return ""
+	if bool(shore.get("snow", false)):
+		return ""
+	var cell_hash := absi(world_cell.x * 73856093 ^ world_cell.y * 19349663)
+	if cell_hash % 100 >= WATER_PLANT_DENSITY_BY_DISTANCE[shore_distance]:
+		return ""
+	# Reeds break the surface right against the bank; pads float further out.
+	if shore_distance <= 2 and (cell_hash / 100) % 3 == 0:
+		return "reeds" if (cell_hash / 300) % 2 == 0 else "reeds_alt"
+	var pad_roll := (cell_hash / 900) % 8
+	if pad_roll == 0:
+		# The flowering share: one blossom per ~8 pad placements.
+		return "lily_flower"
+	if pad_roll <= 2:
+		return "lily_pad_pair"
+	return "lily_pad"
+
+## Where the shore is, seen from a water cell: expanding Chebyshev rings up
+## to the plant limit, answered from the same memoized deterministic terrain
+## families the fringe autotiling uses (painted ground where it exists, the
+## noise field where it doesn't), so verdicts are stable across re-streaming.
+## "snow" is true when the dry land on the nearest ring AND the ring behind
+## it is at least a third snow-family - winter lakes wear a one-cell sand
+## beach at the waterline, so the nearest ring alone would miss the
+## snowfield right behind it.
+func _water_shore_info(cell: Vector2i) -> Dictionary:
+	var nearest := 0
+	var land := 0
+	var snow_land := 0
+	for distance: int in range(1, WATER_PLANT_MAX_SHORE_DISTANCE + 2):
+		for dy: int in range(-distance, distance + 1):
+			for dx: int in range(-distance, distance + 1):
+				if maxi(absi(dx), absi(dy)) != distance:
+					continue
+				var family := _surface_cell_family(cell + Vector2i(dx, dy))
+				if family == "water":
+					continue
+				land += 1
+				if family.begins_with("snow"):
+					snow_land += 1
+		if land > 0 and nearest == 0:
+			nearest = distance
+		if nearest > 0 and distance >= nearest + 1:
+			break
+	if nearest == 0 or nearest > WATER_PLANT_MAX_SHORE_DISTANCE:
+		return {"distance": WATER_PLANT_MAX_SHORE_DISTANCE + 1, "snow": false}
+	return {"distance": nearest, "snow": snow_land * 3 >= land}
+
+## Value noise over world cells (hash lattice every 3 cells, smoothstepped
+## bilinear blend), the same trick as the town's dark-grass patches but with
+## its own salt: high-field cells form the multi-cell plant beds.
+func _water_plant_blob_field(world_cell: Vector2i) -> float:
+	var gx := int(floor(float(world_cell.x) / 3.0))
+	var gy := int(floor(float(world_cell.y) / 3.0))
+	var fx := (float(world_cell.x) - float(gx) * 3.0) / 3.0
+	var fy := (float(world_cell.y) - float(gy) * 3.0) / 3.0
+	fx = fx * fx * (3.0 - 2.0 * fx)
+	fy = fy * fy * (3.0 - 2.0 * fy)
+	var v00 := _water_plant_lattice_value(gx, gy)
+	var v10 := _water_plant_lattice_value(gx + 1, gy)
+	var v01 := _water_plant_lattice_value(gx, gy + 1)
+	var v11 := _water_plant_lattice_value(gx + 1, gy + 1)
+	return lerpf(lerpf(v00, v10, fx), lerpf(v01, v11, fx), fy)
+
+func _water_plant_lattice_value(gx: int, gy: int) -> float:
+	var value := (gx * 11 + 5) * 73856093 ^ (gy * 7 - 3) * 19349663
+	if value < 0:
+		value = -value
+	return float(value % 1024) / 1023.0
 
 ## Wilds road tile with the same grass-fringed autotiling the village lanes
 ## use: a side is "open" when its neighbor is grassy non-road ground, so
@@ -7721,7 +8316,12 @@ func _try_chop_tree(cell: Vector2i) -> bool:
 	if decor_layer.get_cell_source_id(cell) < 0:
 		return false
 	var atlas_coords := decor_layer.get_cell_atlas_coords(cell)
-	if atlas_coords != (TILE_ATLAS.get("tree") as Vector2i) and atlas_coords != (TILE_ATLAS.get("tree_dark") as Vector2i):
+	var choppable := false
+	for tree_key: String in ["tree", "tree_dark", "tree_snowy", "tree_dark_snowy"]:
+		if atlas_coords == (TILE_ATLAS.get(tree_key, Vector2i(-1, -1)) as Vector2i):
+			choppable = true
+			break
+	if not choppable:
 		return false
 	# Grab the tree's art before it is cleared so the break FX can topple a
 	# ghost of it; the tree leans away from the player as it falls.
@@ -8321,6 +8921,10 @@ func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: St
 	# Direction posts stand where the lane tracer marked a junction.
 	if _direction_post_cells.has(Vector2i(x, y)):
 		return "direction_post"
+	# Shop signboards by civic entrances and plaza-rim notice boards share
+	# the carved-board art; their text resolves via _sign_text_for_cell.
+	if _shop_sign_cells.has(Vector2i(x, y)) or _notice_board_cells.has(Vector2i(x, y)):
+		return "signboard"
 	# Nothing grows in the cellar's solid earth: no trees, hedges or blooms
 	# scattered over undug rock (interior furniture still places normally).
 	if _is_underground_level() and cell == CELL_ROCK:
@@ -8329,14 +8933,14 @@ func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: St
 	# The desert has no greenery: cacti and bones are scattered as sprites instead.
 	if _town_theme == "desert" and DESERT_SKIPPED_DECOR.has(decor_key):
 		return ""
-	# Snow towns skip grassland blooms and bushes and turn the leafy scatter
-	# trees into the darker evergreen so the settled area reads as a winter
-	# village, not a meadow.
+	# Snow towns skip grassland blooms and bushes, and their scatter trees
+	# stand snow-capped on the snow ground so the settled area reads as a
+	# winter village, not a meadow.
 	if _town_ground_biome == TILE_ATLAS_DEFS.BIOME_TUNDRA:
 		if SNOW_SKIPPED_DECOR.has(decor_key):
 			return ""
-		if decor_key == "tree":
-			return "tree_dark"
+		if decor_key == "tree" or decor_key == "tree_dark":
+			return decor_key + "_snowy"
 	return decor_key
 
 
@@ -8402,6 +9006,62 @@ func _update_summary(grid: Dictionary, seed_text: String) -> void:
 	if not building_subtype_summary.is_empty():
 		city_summary.text += "\nBuilding Types: %s" % building_subtype_summary
 
+## The readable text for a sign-like decor cell, or {} when the cell holds
+## no sign. Deterministic per settlement seed and cell: direction posts
+## point at the nearest named gazetteer sites, shop signboards carry their
+## establishment's name and trade, notice boards a seeded village notice.
+func _sign_text_for_cell(cell: Vector2i) -> Dictionary:
+	var sign_seed_text := seed_input.text.strip_edges()
+	if _direction_post_cells.has(cell):
+		var post_text := SignTextService.direction_post_text(_surface_all_sites, _overworld_tile_for_cell(cell), sign_seed_text, cell)
+		if post_text.is_empty():
+			post_text = SignTextService.flavor_text(sign_seed_text, cell)
+		return {"title": "Direction Post", "text": post_text}
+	if _shop_sign_cells.has(cell):
+		var anchor := _shop_sign_cells[cell] as Vector2i
+		var display_name := String(_latest_civic_building_name_map.get(anchor, ""))
+		var trade := _building_type_for_cell_or_empty(anchor)
+		var trade_display := "" if trade.is_empty() else _display_name_for_building_type(trade)
+		var sign_text := SignTextService.business_sign_text(display_name, trade_display)
+		if sign_text.is_empty():
+			sign_text = SignTextService.flavor_text(sign_seed_text, cell)
+		return {"title": display_name if not display_name.is_empty() else "Sign", "text": sign_text}
+	if _notice_board_cells.has(cell):
+		return {"title": "Notice Board", "text": SignTextService.flavor_text(sign_seed_text, cell)}
+	return {}
+
+## Floats the sign's text above the board in world space — small, warm,
+## outlined so it reads over any ground — replacing the tile tooltip.
+func _show_sign_hover_label(cell: Vector2i, sign_info: Dictionary) -> void:
+	if _sign_hover_cell == cell and _sign_hover_label != null and is_instance_valid(_sign_hover_label):
+		return
+	_clear_sign_hover_label()
+	var label := Label.new()
+	label.text = String(sign_info.get("text", ""))
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 12)
+	label.add_theme_color_override("font_color", Color(0.97, 0.93, 0.8, 1.0))
+	label.add_theme_color_override("font_outline_color", Color(0.09, 0.07, 0.05, 1.0))
+	label.add_theme_constant_override("outline_size", 6)
+	label.z_index = 45
+	city_layer.add_child(label)
+	label.reset_size()
+	label.position = _cell_center_position(cell) - Vector2(label.size.x * 0.5, label.size.y + float(tile_size.y) * 0.75)
+	_sign_hover_label = label
+	_sign_hover_cell = cell
+
+func _clear_sign_hover_label() -> void:
+	if _sign_hover_label != null and is_instance_valid(_sign_hover_label):
+		_sign_hover_label.queue_free()
+	_sign_hover_label = null
+	_sign_hover_cell = Vector2i(2147483647, 2147483647)
+
+## Right-clicking a sign reads it aloud: the text opens in the same speech
+## panel NPC dialogue uses, anchored over the board. No portrait — boards
+## have no face — just the title line and the sign's text.
+func _show_sign_dialogue(cell: Vector2i, sign_info: Dictionary) -> void:
+	_spawn_speech_bubble("%s\n%s" % [String(sign_info.get("title", "Sign")), String(sign_info.get("text", ""))], _cell_center_position(cell))
+
 func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	if city_layer.tile_set == null:
 		_hide_hover_tooltip()
@@ -8419,6 +9079,15 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	var hovered_npc := _npc_state_near_mouse(mouse_position)
 	if hovered_npc.is_empty():
 		hovered_npc = _npc_state_at_cell(hovered_cell)
+	# A sign under the cursor floats its text above the board instead of
+	# the regular tile tooltip (a villager on the stoop still wins).
+	if hovered_npc.is_empty():
+		var sign_info := _sign_text_for_cell(hovered_cell)
+		if not sign_info.is_empty():
+			_show_sign_hover_label(hovered_cell, sign_info)
+			tile_hover_tooltip.visible = false
+			return
+	_clear_sign_hover_label()
 	var hovered_npc_name := String((hovered_npc.get("identity", {}) as Dictionary).get("name", ""))
 	if tile_hover_tooltip.visible and hovered_cell == _hover_tooltip_cell and hovered_layer == _hover_tooltip_layer and hovered_npc_name == _hover_tooltip_npc:
 		_place_hover_tooltip(mouse_position + Vector2(16, 16))
@@ -8477,6 +9146,7 @@ func _npc_state_near_mouse(mouse_position: Vector2) -> Dictionary:
 	return best
 
 func _hide_hover_tooltip() -> void:
+	_clear_sign_hover_label()
 	tile_hover_tooltip.visible = false
 	_hover_tooltip_cell = Vector2i(2147483647, 2147483647)
 	_hover_tooltip_layer = null

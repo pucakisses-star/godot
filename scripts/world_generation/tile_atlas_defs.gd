@@ -252,7 +252,13 @@ const TOWN_TILE_ATLAS_TEXTURE := "res://resources/images/town/town_tileset.png"
 ## single-quadrant stamps these replace looked like broken tree strips.
 const TOWN_MULTI_CELL_TILES := {
 	Vector2i(0, 16): {"size": Vector2i(3, 2), "origin": Vector2i(0, -16)},
-	Vector2i(0, 18): {"size": Vector2i(3, 3), "origin": Vector2i(0, -32)}
+	Vector2i(0, 18): {"size": Vector2i(3, 3), "origin": Vector2i(0, -32)},
+	# Snow-dusted copies of the two trees above, painted into appended rows
+	# 47-51 at atlas build time (town_generation._paint_snowy_tree_tiles) for
+	# tundra ground: white caps on the crown tops, dusted shoulders along the
+	# upper branch silhouettes.
+	Vector2i(0, 47): {"size": Vector2i(3, 2), "origin": Vector2i(0, -16)},
+	Vector2i(0, 49): {"size": Vector2i(3, 3), "origin": Vector2i(0, -32)}
 }
 
 const TOWN_TILE_ATLAS := {
@@ -561,6 +567,10 @@ const TOWN_TILE_ATLAS := {
 	# branch debris. It is placed deliberately at lane junctions, never in
 	# the natural scatter pools.
 	"direction_post": Vector2i(5, 16),
+	# (6,16) is a free-standing carved notice board on two legs. It stands
+	# by shop entrances (with the establishment's name) and on the market
+	# rim (with village notices) — placed deliberately, never scattered.
+	"signboard": Vector2i(6, 16),
 	# The village well: a 2x2 composition — stone basin pair below, roofed
 	# crank pair above. The base cells block movement, the roof halves are
 	# passable visual caps (same convention as the *_top furniture keys).
@@ -632,7 +642,21 @@ const TOWN_TILE_ATLAS := {
 	# resolves them.
 	"stairway_down": Vector2i(0, 45),
 	"stairway_up": Vector2i(1, 45),
-	"cellar_rock": Vector2i(2, 45)
+	"cellar_rock": Vector2i(2, 45),
+	# Lakeshore water plants, painted into appended row 46 at atlas build time
+	# (town_generation._paint_water_plant_tiles; the shipped sheet has no
+	# aquatic plant art at all — verified by full-sheet inventory). Transparent
+	# surrounds: they draw on the decor layer over the animated water bases.
+	"lily_pad": Vector2i(0, 46),
+	"lily_pad_pair": Vector2i(1, 46),
+	"lily_flower": Vector2i(2, 46),
+	"reeds": Vector2i(3, 46),
+	"reeds_alt": Vector2i(4, 46),
+	# Snow-dusted full-height trees for snow ground (multi-cell, see
+	# TOWN_MULTI_CELL_TILES): swapped in at placement time wherever the plain
+	# trees would land on a snow-family base tile.
+	"tree_snowy": Vector2i(0, 47),
+	"tree_dark_snowy": Vector2i(0, 49)
 }
 ## The full fringe-piece vocabulary, one atlas column per suffix (in this
 ## order) for every synthesized transition family. edge_* pieces carry the
@@ -690,6 +714,10 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	"grass_dark_tip_n", "grass_dark_tip_s", "grass_dark_tip_w", "grass_dark_tip_e",
 	"grass_dark_island",
 	"flowers_white", "flowers_yellow", "flowers_pink", "flowers_pink_alt",
+	# Water plants are passable overlays like the flowers: the water BASE tile
+	# under them already blocks walkers (and carries boats), so the decor key
+	# must never re-add a collision box of its own.
+	"lily_pad", "lily_pad_pair", "lily_flower", "reeds", "reeds_alt",
 	"snow", "snow_alt",
 	"road", "road_twig", "road_alt", "road_stone", "road_sprout",
 	"road_edge_n", "road_edge_s", "road_edge_w", "road_edge_e",
