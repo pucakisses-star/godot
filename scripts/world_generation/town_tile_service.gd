@@ -47,18 +47,132 @@ static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cel
 		)
 	if _is_structural_cell(cell):
 		return wall_or_floor_tile(grid, x, y, cell, door_cells)
-	match cell:
-		CELL_HALL:
-			return "road" if _cell_hash(x, y) % 11 != 0 else "road_twig"
-		CELL_PLAZA:
-			return "plaza" if _cell_hash(x, y) % 5 != 0 else "plaza_alt"
-		_:
-			var roll := _cell_hash(x, y) % 23
-			if roll == 0:
-				return "grass_dark"
-			if roll == 1 or roll == 2:
-				return "grass_tuft"
-			return "grass"
+	if cell == CELL_HALL or cell == CELL_PLAZA:
+		return pick_path_tile(grid, x, y, cell)
+	return pick_grass_tile(x, y)
+
+## Deterministic grass variety: mostly plain green with occasional darker
+## patches, tuft clusters and mottled cells so open ground stops reading as
+## one endlessly repeated tile. Biome swaps remap every key downstream.
+static func pick_grass_tile(x: int, y: int) -> String:
+	var roll := _cell_hash(x, y) % 37
+	if roll == 0:
+		return "grass_dark"
+	if roll <= 2:
+		return "grass_tuft"
+	if roll <= 4:
+		return "grass_tuft_alt"
+	if roll <= 7:
+		return "grass_mottled"
+	return "grass"
+
+## Mask-based path autotiling: a lane/plaza cell that borders open grass
+## picks the matching grass-fringed edge, convex-corner or inner-corner
+## piece, so paths get soft scalloped borders instead of hard square edges.
+## Building fabric and doors count as "closed" (paths butt flush against
+## walls), and anything outside the grid decodes to CELL_ROCK = grass.
+static func pick_path_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
+	var n_open := _cell_at(grid, x, y - 1) == CELL_ROCK
+	var s_open := _cell_at(grid, x, y + 1) == CELL_ROCK
+	var w_open := _cell_at(grid, x - 1, y) == CELL_ROCK
+	var e_open := _cell_at(grid, x + 1, y) == CELL_ROCK
+	if n_open and w_open:
+		return "road_edge_nw"
+	if n_open and e_open:
+		return "road_edge_ne"
+	if s_open and w_open:
+		return "road_edge_sw"
+	if s_open and e_open:
+		return "road_edge_se"
+	if n_open and s_open:
+		return "road_edge_n" if _cell_hash(x, y) % 2 == 0 else "road_edge_s"
+	if w_open and e_open:
+		return "road_edge_w" if _cell_hash(x, y) % 2 == 0 else "road_edge_e"
+	if n_open:
+		return "road_edge_n"
+	if s_open:
+		return "road_edge_s"
+	if w_open:
+		return "road_edge_w"
+	if e_open:
+		return "road_edge_e"
+	# Fully path-flanked: a grass bite at one open diagonal rounds concave
+	# corners; otherwise the interior variant pool.
+	if _cell_at(grid, x - 1, y - 1) == CELL_ROCK:
+		return "road_in_nw"
+	if _cell_at(grid, x + 1, y - 1) == CELL_ROCK:
+		return "road_in_ne"
+	if _cell_at(grid, x - 1, y + 1) == CELL_ROCK:
+		return "road_in_sw"
+	if _cell_at(grid, x + 1, y + 1) == CELL_ROCK:
+		return "road_in_se"
+	return pick_path_interior_tile(x, y, cell == CELL_PLAZA)
+
+## The interior (fully surrounded) path variants, hash-weighted.
+static func pick_path_interior_tile(x: int, y: int, is_plaza: bool) -> String:
+	if is_plaza:
+		var plaza_roll := _cell_hash(x, y) % 11
+		if plaza_roll == 0:
+			return "plaza_alt"
+		if plaza_roll == 1 or plaza_roll == 2:
+			return "plaza_c"
+		if plaza_roll == 3:
+			return "plaza_d"
+		return "plaza"
+	var roll := _cell_hash(x, y) % 13
+	if roll == 0:
+		return "road_twig"
+	if roll == 1 or roll == 2:
+		return "road_alt"
+	if roll == 3:
+		return "road_stone"
+	if roll == 4:
+		return "road_sprout"
+	return "road"
+
+## Connection-aware fence piece: the four flags say which orthogonal
+## neighbors are also fence cells. Straight runs rotate through art
+## variants by cell hash so long rails stay lively; the isolated case is
+## the true lone post.
+static func fence_tile_for_connections(north: bool, east: bool, south: bool, west: bool, x: int, y: int) -> String:
+	var mask := (1 if north else 0) | (2 if east else 0) | (4 if south else 0) | (8 if west else 0)
+	match mask:
+		1:
+			return "fence_post"
+		2:
+			return "fence_cap_e"
+		3:
+			return "fence_ne"
+		4:
+			return "fence_cap_s"
+		5:
+			return "fence_ns" if _cell_hash(x, y) % 3 != 0 else "fence_ns_alt"
+		6:
+			return "fence_se"
+		7:
+			return "fence_nse"
+		8:
+			return "fence_cap_w"
+		9:
+			return "fence_nw"
+		10:
+			var run_roll := _cell_hash(x, y) % 3
+			if run_roll == 0:
+				return "fence_we_alt"
+			if run_roll == 1:
+				return "fence_we_low"
+			return "fence_we"
+		11:
+			return "fence"
+		12:
+			return "fence_sw"
+		13:
+			return "fence_nsw"
+		14:
+			return "fence_wes"
+		15:
+			return "fence_cross"
+	return "fence_post"
 
 ## Autotiles a building cell into the timber-framed 9-slice. A perimeter
 ## cell borders the exterior on at least one side; we read which of its four
@@ -152,8 +266,8 @@ static func pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_ti
 		return ""
 	return ""
 
-## Trees, hedges and flowers scattered over open grass, thinning out next
-## to streets so road edges stay readable.
+## Trees, hedges, flowers, stumps and fallen branches scattered over open
+## grass, thinning out next to streets so road edges stay readable.
 static func _pick_green_scatter_tile(grid: Dictionary, x: int, y: int, rng: RandomNumberGenerator) -> String:
 	var next_to_street := false
 	for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
@@ -164,15 +278,31 @@ static func _pick_green_scatter_tile(grid: Dictionary, x: int, y: int, rng: Rand
 	var roll := rng.randf()
 	if next_to_street:
 		if roll < 0.03:
-			return "flowers_white" if rng.randf() < 0.5 else "flowers_yellow"
+			return _pick_flower_tile(rng)
 		return ""
-	if roll < 0.045:
+	# Full trees span 3 atlas cells of canopy, so they only root on
+	# even/even anchor cells: two trees can never sit side by side and
+	# carve each other into vertical strips. The boosted anchor rate keeps
+	# the overall tree density at the old ~4.5%.
+	if posmod(x, 2) == 0 and posmod(y, 2) == 0 and roll < 0.17:
 		return "tree" if rng.randf() < 0.6 else "tree_dark"
 	if roll < 0.075:
 		return "hedge" if rng.randf() < 0.5 else "hedge_alt"
 	if roll < 0.11:
-		return "flowers_white" if rng.randf() < 0.5 else "flowers_yellow"
+		return _pick_flower_tile(rng)
+	if roll < 0.122:
+		return "stump" if rng.randf() < 0.6 else "stump_alt"
+	if roll < 0.132:
+		return "branch"
 	return ""
+
+static func _pick_flower_tile(rng: RandomNumberGenerator) -> String:
+	var flower_roll := rng.randf()
+	if flower_roll < 0.4:
+		return "flowers_white"
+	if flower_roll < 0.8:
+		return "flowers_yellow"
+	return "flowers_pink" if rng.randf() < 0.5 else "flowers_pink_alt"
 
 static func tile_name_from_atlas(atlas_coords: Vector2i, tile_atlas: Dictionary) -> String:
 	for tile_key: String in tile_atlas.keys():

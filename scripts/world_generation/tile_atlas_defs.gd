@@ -259,8 +259,12 @@ const TOWN_TILE_ATLAS := {
 	"grass": Vector2i(1, 1),
 	"grass_dark": Vector2i(5, 1),
 	"grass_tuft": Vector2i(2, 3),
+	"grass_tuft_alt": Vector2i(1, 3),
+	"grass_mottled": Vector2i(9, 1),
 	"flowers_white": Vector2i(4, 17),
 	"flowers_yellow": Vector2i(5, 18),
+	"flowers_pink": Vector2i(3, 19),
+	"flowers_pink_alt": Vector2i(4, 19),
 	# Snow ground lives on an extra row (26) appended to the sheet at load
 	# time by town_generation._configure_tile_layer; the shipped PNG is
 	# 44x26 (rows 0-25), so these coords address the painted-in snow cells.
@@ -268,11 +272,48 @@ const TOWN_TILE_ATLAS := {
 	"snow_alt": Vector2i(1, 26),
 	"road": Vector2i(14, 4),
 	"road_twig": Vector2i(13, 4),
+	"road_alt": Vector2i(10, 3),
+	"road_stone": Vector2i(9, 3),
+	"road_sprout": Vector2i(13, 3),
+	# Dirt-path fringe: the sheet's grass-blended blob set at cols 10-14,
+	# rows 0-2 (dirt patch demo). edge_* have grass on the named side;
+	# in_* keep dirt on all sides with a grass bite at the named diagonal.
+	"road_edge_n": Vector2i(11, 0),
+	"road_edge_s": Vector2i(11, 2),
+	"road_edge_w": Vector2i(10, 1),
+	"road_edge_e": Vector2i(12, 1),
+	"road_in_nw": Vector2i(13, 0),
+	"road_in_ne": Vector2i(14, 0),
+	"road_in_sw": Vector2i(13, 1),
+	"road_in_se": Vector2i(14, 1),
+	# Convex corners (grass on two adjacent sides) don't exist in the sheet;
+	# they are composited into appended row 27 at atlas build time from the
+	# union of the two matching edge pieces. Row 28 holds snow recolors of
+	# the whole fringe set (grass pixels swapped for painted snow) so tundra
+	# lanes blend into their snowfield the same way.
+	"road_edge_nw": Vector2i(0, 27),
+	"road_edge_ne": Vector2i(1, 27),
+	"road_edge_sw": Vector2i(2, 27),
+	"road_edge_se": Vector2i(3, 27),
+	"road_edge_n_snow": Vector2i(0, 28),
+	"road_edge_s_snow": Vector2i(1, 28),
+	"road_edge_w_snow": Vector2i(2, 28),
+	"road_edge_e_snow": Vector2i(3, 28),
+	"road_in_nw_snow": Vector2i(4, 28),
+	"road_in_ne_snow": Vector2i(5, 28),
+	"road_in_sw_snow": Vector2i(6, 28),
+	"road_in_se_snow": Vector2i(7, 28),
+	"road_edge_nw_snow": Vector2i(8, 28),
+	"road_edge_ne_snow": Vector2i(9, 28),
+	"road_edge_sw_snow": Vector2i(10, 28),
+	"road_edge_se_snow": Vector2i(11, 28),
 	"sand": Vector2i(11, 4),
 	"sand_alt": Vector2i(9, 4),
 	"sand_pebbles": Vector2i(12, 3),
 	"plaza": Vector2i(17, 2),
 	"plaza_alt": Vector2i(18, 3),
+	"plaza_c": Vector2i(16, 0),
+	"plaza_d": Vector2i(15, 1),
 	"wall": Vector2i(1, 7),
 	"wall_alt": Vector2i(2, 7),
 	"plank_wall": Vector2i(25, 0),
@@ -296,8 +337,34 @@ const TOWN_TILE_ATLAS := {
 	"floor": Vector2i(25, 1),
 	"door": Vector2i(26, 1),
 	"rug": Vector2i(33, 2),
+	# Log-fence autotile set (cols 8-13, rows 6-9): a full 16-piece family
+	# keyed by which sides a piece's rails leave through (verified against
+	# per-cell edge-pixel connectivity). "fence" keeps its legacy coordinate
+	# (the N+E+W tee) because player-built fences persist that key;
+	# "fence_post" is re-pointed at the true lone post at (8,8) — its old
+	# coordinate (9,8) is the NE corner, now mapped as such.
 	"fence": Vector2i(10, 8),
-	"fence_post": Vector2i(9, 8),
+	"fence_post": Vector2i(8, 8),
+	"fence_ns": Vector2i(8, 7),
+	"fence_ns_alt": Vector2i(12, 7),
+	"fence_we": Vector2i(12, 6),
+	"fence_we_alt": Vector2i(13, 6),
+	"fence_we_low": Vector2i(10, 9),
+	"fence_se": Vector2i(9, 6),
+	"fence_sw": Vector2i(11, 6),
+	"fence_ne": Vector2i(9, 8),
+	"fence_nw": Vector2i(11, 8),
+	"fence_wes": Vector2i(10, 6),
+	"fence_nse": Vector2i(9, 7),
+	"fence_nsw": Vector2i(11, 7),
+	"fence_cross": Vector2i(10, 7),
+	"fence_cap_s": Vector2i(8, 6),
+	"fence_cap_e": Vector2i(9, 9),
+	"fence_cap_w": Vector2i(11, 9),
+	# Green-ground scatter: cut stumps, a fallen branch (passable litter).
+	"stump": Vector2i(0, 13),
+	"stump_alt": Vector2i(2, 13),
+	"branch": Vector2i(5, 16),
 	# The village well: a 2x2 composition — stone basin pair below, roofed
 	# crank pair above. The base cells block movement, the roof halves are
 	# passable visual caps (same convention as the *_top furniture keys).
@@ -359,10 +426,21 @@ const TOWN_TILE_ATLAS := {
 ## They render as visual caps over the cell above the furniture, so they
 ## stay passable — the blocking cell is the furniture base itself.
 const TOWN_PASSABLE_TILE_KEYS := [
-	"grass", "grass_dark", "grass_tuft", "flowers_white", "flowers_yellow",
+	"grass", "grass_dark", "grass_tuft", "grass_tuft_alt", "grass_mottled",
+	"flowers_white", "flowers_yellow", "flowers_pink", "flowers_pink_alt",
 	"snow", "snow_alt",
-	"road", "road_twig", "sand", "sand_alt", "sand_pebbles",
-	"plaza", "plaza_alt", "floor", "door", "rug",
+	"road", "road_twig", "road_alt", "road_stone", "road_sprout",
+	"road_edge_n", "road_edge_s", "road_edge_w", "road_edge_e",
+	"road_in_nw", "road_in_ne", "road_in_sw", "road_in_se",
+	"road_edge_nw", "road_edge_ne", "road_edge_sw", "road_edge_se",
+	"road_edge_n_snow", "road_edge_s_snow", "road_edge_w_snow", "road_edge_e_snow",
+	"road_in_nw_snow", "road_in_ne_snow", "road_in_sw_snow", "road_in_se_snow",
+	"road_edge_nw_snow", "road_edge_ne_snow", "road_edge_sw_snow", "road_edge_se_snow",
+	"sand", "sand_alt", "sand_pebbles",
+	"plaza", "plaza_alt", "plaza_c", "plaza_d",
+	# A fallen branch is ground litter, not a barrier.
+	"branch",
+	"floor", "door", "rug",
 	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",
 	"forge_top", "oven_top", "well_roof_left", "well_roof_right",
 	# Water is deliberately absent: it blocks walkers unless they boat.

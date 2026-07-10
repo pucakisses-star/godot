@@ -370,23 +370,47 @@ const DESERT_DECOR_RARE: Array[String] = [
 const DESERT_BASE_SWAP := {
 	"grass": "sand",
 	"grass_dark": "sand_alt",
-	"grass_tuft": "sand_pebbles"
+	"grass_tuft": "sand_pebbles",
+	"grass_tuft_alt": "sand_pebbles",
+	"grass_mottled": "sand_alt",
+	# Desert lanes keep bare dirt: the grass-fringed path edges would paint
+	# green scallops onto sand, so they collapse back to plain road art.
+	"road_edge_n": "road", "road_edge_s": "road",
+	"road_edge_w": "road", "road_edge_e": "road",
+	"road_edge_nw": "road", "road_edge_ne": "road",
+	"road_edge_sw": "road", "road_edge_se": "road",
+	"road_in_nw": "road", "road_in_ne": "road",
+	"road_in_sw": "road", "road_in_se": "road",
+	"road_sprout": "road_alt"
 }
 const DESERT_SKIPPED_DECOR: Array[String] = [
 	"tree", "tree_dark", "hedge", "hedge_alt",
-	"flowers_white", "flowers_yellow"
+	"flowers_white", "flowers_yellow", "flowers_pink", "flowers_pink_alt",
+	"stump", "stump_alt", "branch"
 ]
 ## Tundra towns sit on snow: the grass-family ground tiles swap to the
 ## painted-in snow tiles (mirrors DESERT_BASE_SWAP), and grassland greenery
 ## (bushes, hedges, blooms) is skipped so the settled area reads as winter.
-## The wind-bent conifers ("tree"/"tree_dark") are kept as evergreens.
+## The wind-bent conifers ("tree"/"tree_dark") are kept as evergreens, and
+## the path-fringe tiles swap to their snow recolors (appended atlas row 28)
+## so lanes scallop into the snowfield instead of sprouting grass.
 const SNOW_BASE_SWAP := {
 	"grass": "snow",
 	"grass_dark": "snow_alt",
-	"grass_tuft": "snow_alt"
+	"grass_tuft": "snow_alt",
+	"grass_tuft_alt": "snow_alt",
+	"grass_mottled": "snow",
+	"road_edge_n": "road_edge_n_snow", "road_edge_s": "road_edge_s_snow",
+	"road_edge_w": "road_edge_w_snow", "road_edge_e": "road_edge_e_snow",
+	"road_in_nw": "road_in_nw_snow", "road_in_ne": "road_in_ne_snow",
+	"road_in_sw": "road_in_sw_snow", "road_in_se": "road_in_se_snow",
+	"road_edge_nw": "road_edge_nw_snow", "road_edge_ne": "road_edge_ne_snow",
+	"road_edge_sw": "road_edge_sw_snow", "road_edge_se": "road_edge_se_snow",
+	"road_sprout": "road"
 }
 const SNOW_SKIPPED_DECOR: Array[String] = [
-	"hedge", "hedge_alt", "flowers_white", "flowers_yellow"
+	"hedge", "hedge_alt", "flowers_white", "flowers_yellow",
+	"flowers_pink", "flowers_pink_alt"
 ]
 
 ## Spritesheet slots in townsfolk_characters.png block order.
@@ -1562,10 +1586,13 @@ func _configure_tile_layer() -> void:
 	decor_layer.tile_set = tile_set
 	_apply_water_flow_material()
 
-## Builds the town/surface atlas texture: the shipped tilesheet with one
-## extra 32px row appended at the bottom, holding procedurally painted snow
-## ground tiles (the PNG ships no snow art). Everything stays in source 0 so
-## _shaded_alternative and every other atlas consumer keeps working.
+## Builds the town/surface atlas texture: the shipped tilesheet with extra
+## 32px rows appended at the bottom, holding procedurally painted tiles the
+## PNG doesn't ship — snow ground (row 26), grass-fringed convex path
+## corners composited from the edge pieces (row 27), and snow recolors of
+## the whole path-fringe set for tundra lanes (row 28). Everything stays in
+## source 0 so _shaded_alternative and every other atlas consumer keeps
+## working.
 func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 	var base_image := base_texture.get_image()
 	if base_image == null:
@@ -1577,15 +1604,87 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 		TILE_ATLAS.get("snow", Vector2i(0, 26)) as Vector2i,
 		TILE_ATLAS.get("snow_alt", Vector2i(1, 26)) as Vector2i
 	]
+	var synthetic_keys: Array[String] = [
+		"road_edge_nw", "road_edge_ne", "road_edge_sw", "road_edge_se",
+		"road_edge_n_snow", "road_edge_s_snow", "road_edge_w_snow", "road_edge_e_snow",
+		"road_in_nw_snow", "road_in_ne_snow", "road_in_sw_snow", "road_in_se_snow",
+		"road_edge_nw_snow", "road_edge_ne_snow", "road_edge_sw_snow", "road_edge_se_snow"
+	]
 	var max_row := 0
 	for coords: Vector2i in snow_coords:
 		max_row = maxi(max_row, coords.y)
+	for synthetic_key: String in synthetic_keys:
+		max_row = maxi(max_row, (TILE_ATLAS.get(synthetic_key, Vector2i.ZERO) as Vector2i).y)
 	var needed_height := maxi(base_image.get_height(), (max_row + 1) * tile_size.y)
 	var augmented := Image.create(base_image.get_width(), needed_height, false, Image.FORMAT_RGBA8)
 	augmented.blit_rect(base_image, Rect2i(Vector2i.ZERO, base_image.get_size()), Vector2i.ZERO)
 	for variant_index: int in range(snow_coords.size()):
 		_paint_snow_tile(augmented, snow_coords[variant_index], variant_index)
+	_paint_path_fringe_tiles(augmented)
 	return ImageTexture.create_from_image(augmented)
+
+## A pixel of the path-fringe art counts as vegetation when green clearly
+## leads red (leaf greens) OR clearly leads blue (the olive tuft speckles:
+## measured g-b >= 73 for tufts vs <= 55 for every dirt tone in the fringe
+## set). Dirt browns and dark outline pixels stay with the dirt side so
+## edges keep their definition.
+func _fringe_pixel_is_grass(color: Color) -> bool:
+	if color.a <= 0.15:
+		return false
+	return color.g8 > color.r8 + 8 or color.g8 - color.b8 >= 62
+
+## Composites the missing convex path corners (grass on two adjacent sides)
+## from unions of the sheet's edge pieces, then recolors the full fringe set
+## with the painted snow ground for tundra lanes. Deterministic: pure pixel
+## transforms of shipped art plus the seeded snow tile.
+func _paint_path_fringe_tiles(image: Image) -> void:
+	var edge_sources := {
+		"n": TILE_ATLAS.get("road_edge_n", Vector2i.ZERO) as Vector2i,
+		"s": TILE_ATLAS.get("road_edge_s", Vector2i.ZERO) as Vector2i,
+		"w": TILE_ATLAS.get("road_edge_w", Vector2i.ZERO) as Vector2i,
+		"e": TILE_ATLAS.get("road_edge_e", Vector2i.ZERO) as Vector2i
+	}
+	# Convex corners: keep the dirt of one edge piece, but let either
+	# source's grass win so the fringe wraps both named sides.
+	var corner_recipes := {
+		"road_edge_nw": ["n", "w"],
+		"road_edge_ne": ["n", "e"],
+		"road_edge_sw": ["s", "w"],
+		"road_edge_se": ["s", "e"]
+	}
+	for corner_key: String in corner_recipes.keys():
+		var sides := corner_recipes[corner_key] as Array
+		var primary := edge_sources[sides[0]] as Vector2i
+		var secondary := edge_sources[sides[1]] as Vector2i
+		var target := TILE_ATLAS.get(corner_key, Vector2i.ZERO) as Vector2i
+		for ty: int in range(tile_size.y):
+			for tx: int in range(tile_size.x):
+				var primary_pixel := image.get_pixel(primary.x * tile_size.x + tx, primary.y * tile_size.y + ty)
+				var secondary_pixel := image.get_pixel(secondary.x * tile_size.x + tx, secondary.y * tile_size.y + ty)
+				var out := primary_pixel
+				if not _fringe_pixel_is_grass(primary_pixel) and _fringe_pixel_is_grass(secondary_pixel):
+					out = secondary_pixel
+				image.set_pixel(target.x * tile_size.x + tx, target.y * tile_size.y + ty, out)
+	# Snow recolors: copy each fringe piece and swap its grass pixels for
+	# the painted snow ground at the same offsets.
+	var snow_origin := (TILE_ATLAS.get("snow", Vector2i(0, 26)) as Vector2i) * tile_size
+	var fringe_keys: Array[String] = [
+		"road_edge_n", "road_edge_s", "road_edge_w", "road_edge_e",
+		"road_in_nw", "road_in_ne", "road_in_sw", "road_in_se",
+		"road_edge_nw", "road_edge_ne", "road_edge_sw", "road_edge_se"
+	]
+	for fringe_key: String in fringe_keys:
+		var source := TILE_ATLAS.get(fringe_key, Vector2i.ZERO) as Vector2i
+		var target := TILE_ATLAS.get(fringe_key + "_snow", Vector2i(-1, -1)) as Vector2i
+		if target.x < 0:
+			continue
+		for ty: int in range(tile_size.y):
+			for tx: int in range(tile_size.x):
+				var source_pixel := image.get_pixel(source.x * tile_size.x + tx, source.y * tile_size.y + ty)
+				var out := source_pixel
+				if _fringe_pixel_is_grass(source_pixel):
+					out = image.get_pixel(snow_origin.x + tx, snow_origin.y + ty)
+				image.set_pixel(target.x * tile_size.x + tx, target.y * tile_size.y + ty, out)
 
 ## Paints a convincing 32px snow ground tile into one atlas cell: a
 ## near-white base with faint cool-blue speckle grain, soft blue shadow
@@ -2291,12 +2390,41 @@ func _fit_yard_beside(grid: Dictionary, door_cells: Dictionary, bbox: Rect2i) ->
 
 ## The well stands at the market square's heart: a 2x2 decor composition
 ## whose basin row blocks movement while the roof halves stay walk-under.
+## The anchor (basin-left) is searched over the whole plaza nearest its
+## heart — the old fixed (-1,0) probe silently dropped the well whenever
+## the organic plaza shape missed that exact spot. One breathing-room ring
+## is required around the composition so the well never hugs the plaza rim.
 func _pick_village_well_cell(grid: Dictionary) -> Vector2i:
-	var anchor := Vector2i(-1, 0)
-	for offset: Vector2i in [Vector2i.ZERO, Vector2i.RIGHT, Vector2i.UP, Vector2i(1, -1)]:
-		if int(grid.get(anchor + offset, CELL_ROCK)) != CELL_PLAZA:
-			return DwarfHoldStateModel.INVALID_CELL
-	return anchor
+	var plaza_cells: Array[Vector2i] = []
+	var centroid := Vector2.ZERO
+	for key_variant: Variant in grid.keys():
+		if int(grid[key_variant]) == CELL_PLAZA:
+			var plaza_cell := key_variant as Vector2i
+			plaza_cells.append(plaza_cell)
+			centroid += Vector2(plaza_cell)
+	if plaza_cells.is_empty():
+		return DwarfHoldStateModel.INVALID_CELL
+	centroid /= float(plaza_cells.size())
+	plaza_cells.sort_custom(func(cell_a: Vector2i, cell_b: Vector2i) -> bool:
+		var da := Vector2(cell_a).distance_squared_to(centroid)
+		var db := Vector2(cell_b).distance_squared_to(centroid)
+		if is_equal_approx(da, db):
+			return cell_a < cell_b
+		return da < db
+	)
+	for margin: int in [1, 0]:
+		for anchor: Vector2i in plaza_cells:
+			var fits := true
+			for y in range(-1 - margin, 1 + margin):
+				for x in range(-margin, 2 + margin):
+					if int(grid.get(anchor + Vector2i(x, y), CELL_ROCK)) != CELL_PLAZA:
+						fits = false
+						break
+				if not fits:
+					break
+			if fits:
+				return anchor
+	return DwarfHoldStateModel.INVALID_CELL
 
 func _show_level(target_level_index: int) -> void:
 	if _hold_state.generated_levels.is_empty():
@@ -2467,14 +2595,18 @@ func _stamp_village_yards() -> void:
 	var crop_families: Array[String] = ["crop_carrot", "crop_beetroot", "crop_tomato"]
 	for yard_variant: Variant in _village_yards:
 		var yard := yard_variant as Dictionary
+		# Connection-aware fencing: rails and posts form one line set (the
+		# gate cell was never added, so its flanks resolve to end caps and
+		# the gap reads as a gateway instead of a missing tooth).
+		var fence_line: Dictionary = {}
 		for rail_variant: Variant in (yard.get("rails", []) as Array):
-			var rail_cell := rail_variant as Vector2i
-			_place_tile(decor_layer, rail_cell, "fence")
-			yard_ground[rail_cell] = true
+			fence_line[rail_variant as Vector2i] = true
 		for post_variant: Variant in (yard.get("posts", []) as Array):
-			var post_cell := post_variant as Vector2i
-			_place_tile(decor_layer, post_cell, "fence_post")
-			yard_ground[post_cell] = true
+			fence_line[post_variant as Vector2i] = true
+		for fence_variant: Variant in fence_line.keys():
+			var fence_cell := fence_variant as Vector2i
+			_place_tile(decor_layer, fence_cell, _fence_tile_for_line(fence_line, fence_cell))
+			yard_ground[fence_cell] = true
 		var gate_variant: Variant = yard.get("gate")
 		if gate_variant is Vector2i:
 			# The gate stays open ground; clear any scatter decor off it.
@@ -2498,6 +2630,17 @@ func _stamp_village_yards() -> void:
 			if not yard_ground.has(green_cell):
 				remaining_green.append(green_cell)
 		_green_cells = remaining_green
+
+## Picks the fence piece whose rails match the line's actual neighbors, so
+## runs, corners, tees and gate-flanking end caps all connect.
+func _fence_tile_for_line(fence_line: Dictionary, cell: Vector2i) -> String:
+	return TownTileService.fence_tile_for_connections(
+		fence_line.has(cell + Vector2i.UP),
+		fence_line.has(cell + Vector2i.RIGHT),
+		fence_line.has(cell + Vector2i.DOWN),
+		fence_line.has(cell + Vector2i.LEFT),
+		cell.x, cell.y
+	)
 
 func _pick_level_stair_cells(grid: Dictionary, level_index: int, level_count: int) -> Dictionary:
 	var result := {}
@@ -2932,7 +3075,8 @@ func _build_farmsteads() -> void:
 ## removable greenery (trees, hedges, flowers) as decor.
 func _farmstead_site_fits(origin: Vector2i) -> bool:
 	var removable: Array[Vector2i] = []
-	for key: String in ["tree", "tree_dark", "hedge", "hedge_alt", "flowers_white", "flowers_yellow"]:
+	for key: String in ["tree", "tree_dark", "hedge", "hedge_alt", "flowers_white",
+			"flowers_yellow", "flowers_pink", "flowers_pink_alt", "stump", "stump_alt", "branch"]:
 		removable.append(TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i)
 	for y in range(FARMSTEAD_SITE.y):
 		for x in range(FARMSTEAD_SITE.x):
@@ -2982,16 +3126,20 @@ func _stamp_farmstead(origin: Vector2i, with_windmill: bool) -> void:
 	var pen_rect := Rect2i(origin + Vector2i(0, 5), Vector2i(6, 4))
 	var gate_cell := Vector2i(pen_rect.position.x + pen_rect.size.x / 2, pen_rect.end.y - 1)
 	var pen_cells: Array[Vector2i] = []
+	var pen_fence: Dictionary = {}
 	for y in range(pen_rect.position.y, pen_rect.end.y):
 		for x in range(pen_rect.position.x, pen_rect.end.x):
 			var cell := Vector2i(x, y)
 			var on_edge := x == pen_rect.position.x or x == pen_rect.end.x - 1 or y == pen_rect.position.y or y == pen_rect.end.y - 1
 			if on_edge and cell != gate_cell:
-				# Rails run along the top and bottom; posts hold the sides.
-				var side := x == pen_rect.position.x or x == pen_rect.end.x - 1
-				_place_tile(decor_layer, cell, "fence_post" if side else "fence")
+				pen_fence[cell] = true
 			elif not on_edge:
 				pen_cells.append(cell)
+	# Connection-aware pieces: corner posts, straight rails, and end caps
+	# flanking the gate, instead of the old two-tile checkerboard.
+	for fence_variant: Variant in pen_fence.keys():
+		var fence_cell := fence_variant as Vector2i
+		_place_tile(decor_layer, fence_cell, _fence_tile_for_line(pen_fence, fence_cell))
 	if not pen_cells.is_empty():
 		_farm_pens.append(pen_cells)
 
@@ -4413,10 +4561,18 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			if base_key.begins_with("flowers_"):
 				decor_key = base_key
 				base_key = "grass"
+			# Full-height trees only root on spaced anchor cells; the wilds'
+			# noise wants a tree on nearly every deep-forest cell, and
+			# side-by-side 3-cell canopies carved each other into vertical
+			# strips. Off-anchor tree cells drop to understory scatter.
+			if decor_key == "tree" or decor_key == "tree_dark":
+				var world_cell: Vector2i = cell + _surface_world_origin
+				if not _is_tree_anchor_cell(world_cell):
+					decor_key = _understory_decor_key(world_cell, base_key)
 			# Roads cut through everything and stay clear of trees; a road cell
 			# is never a barrier, so a trail carves a pass through crags.
 			if _surface_road_cells.has(cell):
-				base_key = "road" if (cell.x + cell.y) % 3 != 0 else "road_twig"
+				base_key = _surface_road_tile_key(cell, danger)
 				decor_key = ""
 				blocked = false
 			# Crag cells keep their rocky tile but stop movement, so a range
@@ -4434,6 +4590,94 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			painted.append(cell)
 	_surface_chunks[chunk] = painted
 	_stamp_gates_in_rect(rect)
+
+## Trees may only root where both axes hit the 2-cell lattice (with a
+## deterministic per-row jog so the woods don't grid up): a 3-cell-wide
+## canopy can then never be flush against a neighbor's trunk column, so no
+## tree is ever reduced to a 1-cell vertical strip.
+func _is_tree_anchor_cell(world_cell: Vector2i) -> bool:
+	if posmod(world_cell.y, 2) != 0:
+		return false
+	var row_jog := absi(world_cell.y * 40503 >> 4) % 2
+	return posmod(world_cell.x + row_jog, 2) == 0
+
+## What grows where a too-crowded tree was thinned out: mostly open ground,
+## with occasional bushes, stumps and fallen branches so the forest floor
+## keeps its clutter. Bushes stay off snow and sand (leafy green reads
+## wrong there); stumps and branches suit any ground.
+func _understory_decor_key(world_cell: Vector2i, base_key: String) -> String:
+	var cell_hash := absi(world_cell.x * 73856093 ^ world_cell.y * 19349663)
+	var roll := cell_hash % 12
+	if roll <= 1:
+		if base_key.begins_with("snow") or base_key.begins_with("sand"):
+			return ""
+		return "hedge" if roll == 0 else "hedge_alt"
+	if roll == 2:
+		return "stump" if cell_hash % 5 != 0 else "stump_alt"
+	if roll == 3:
+		return "branch"
+	return ""
+
+## Wilds road tile with the same grass-fringed autotiling the village lanes
+## use: a side is "open" when its neighbor is grassy non-road ground, so
+## trails scallop into meadows but stay bare dirt against sand, snow, rock
+## and water. Neighbor terrain comes from the same deterministic field the
+## chunk painter uses.
+func _surface_road_tile_key(cell: Vector2i, danger: float) -> String:
+	var n_open := _road_side_open(cell + Vector2i.UP, danger)
+	var s_open := _road_side_open(cell + Vector2i.DOWN, danger)
+	var w_open := _road_side_open(cell + Vector2i.LEFT, danger)
+	var e_open := _road_side_open(cell + Vector2i.RIGHT, danger)
+	if n_open and w_open:
+		return "road_edge_nw"
+	if n_open and e_open:
+		return "road_edge_ne"
+	if s_open and w_open:
+		return "road_edge_sw"
+	if s_open and e_open:
+		return "road_edge_se"
+	if n_open and s_open:
+		return "road_edge_n" if (cell.x + cell.y) % 2 == 0 else "road_edge_s"
+	if w_open and e_open:
+		return "road_edge_w" if (cell.x + cell.y) % 2 == 0 else "road_edge_e"
+	if n_open:
+		return "road_edge_n"
+	if s_open:
+		return "road_edge_s"
+	if w_open:
+		return "road_edge_w"
+	if e_open:
+		return "road_edge_e"
+	if _road_side_open(cell + Vector2i(-1, -1), danger):
+		return "road_in_nw"
+	if _road_side_open(cell + Vector2i(1, -1), danger):
+		return "road_in_ne"
+	if _road_side_open(cell + Vector2i(-1, 1), danger):
+		return "road_in_sw"
+	if _road_side_open(cell + Vector2i(1, 1), danger):
+		return "road_in_se"
+	var roll := absi(cell.x * 73856093 ^ cell.y * 19349663) % 9
+	if roll == 0:
+		return "road_twig"
+	if roll == 1:
+		return "road_alt"
+	if roll == 2:
+		return "road_stone"
+	return "road"
+
+## True when the neighbor of a road cell is open grassy ground: town grass
+## verges and wild grass-family terrain qualify; roads, buildings, water,
+## sand, snow and rock do not.
+func _road_side_open(neighbor: Vector2i, danger: float) -> bool:
+	if _surface_road_cells.has(neighbor):
+		return false
+	if _latest_grid.has(neighbor):
+		return int(_latest_grid.get(neighbor, 0)) == TownTileService.CELL_ROCK
+	var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(neighbor + _surface_world_origin, _surface_noise, danger, _surface_biome_ctx)
+	if bool(terrain.get("blocked", false)):
+		return false
+	var base_key := String(terrain.get("base", "grass"))
+	return base_key.begins_with("grass") or base_key.begins_with("flowers")
 
 ## A gate is the far site's doorstep in the wilds. Settlements greet you
 ## with a paved clearing; a dwarfhold shows the carved mountain door you
@@ -5460,7 +5704,7 @@ func _can_till_cell(cell: Vector2i) -> bool:
 	if not _can_build_on_cell(cell):
 		return false
 	var atlas_coords := city_layer.get_cell_atlas_coords(cell)
-	for grass_key: String in ["grass", "grass_dark", "grass_tuft"]:
+	for grass_key: String in ["grass", "grass_dark", "grass_tuft", "grass_tuft_alt", "grass_mottled"]:
 		if atlas_coords == (TILE_ATLAS.get(grass_key) as Vector2i):
 			return true
 	return false
