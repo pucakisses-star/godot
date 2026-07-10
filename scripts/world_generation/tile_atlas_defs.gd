@@ -276,28 +276,35 @@ const TOWN_TILE_ATLAS := {
 	"wall": Vector2i(1, 7),
 	"wall_alt": Vector2i(2, 7),
 	"plank_wall": Vector2i(25, 0),
-	# Timber-framed room autotile: a self-contained 9-slice (verified by
-	# per-cell PIL extraction of cols 24-26, rows 5-7 of town_tileset.png).
-	# Each piece is opaque toward the room interior and transparent toward
-	# the exterior, so a rectangular building perimeter reads as a lit top
-	# beam, darker side posts, corner joints and a bottom sill. The olive
-	# variant (rows 8-10) and the concave-corner cross set (cols 27-28) are
-	# left unmapped: town buildings are rectangles, so the border set frames
-	# them cleanly and stays one coherent timber style.
-	"wall_tl": Vector2i(24, 5),
-	"wall_top": Vector2i(25, 5),
-	"wall_tr": Vector2i(26, 5),
-	"wall_left": Vector2i(24, 6),
-	"wall_fill": Vector2i(25, 6),
-	"wall_right": Vector2i(26, 6),
-	"wall_bl": Vector2i(24, 7),
-	"wall_bottom": Vector2i(25, 7),
-	"wall_br": Vector2i(26, 7),
+	# Timber building autotile: the chunky golden log-wall set at cols 0-4,
+	# rows 6-8 of town_tileset.png (verified by per-cell PIL extraction and
+	# a composited mockup). Corner posts, a braced top beam, solid log side
+	# columns and a plank sill — fully opaque squares, so a building ring
+	# finally reads as WALLS instead of the faint thin frame the old cols
+	# 24-26 9-slice gave ("floor platforms"). The fill piece is the plain
+	# log face at (3,7); (1,7)/(2,7) hold the player-build "wall"/"wall_alt"
+	# keys, and the atlas validator forbids sharing coordinates.
+	"wall_tl": Vector2i(0, 6),
+	"wall_top": Vector2i(2, 6),
+	"wall_tr": Vector2i(4, 6),
+	"wall_left": Vector2i(0, 7),
+	"wall_fill": Vector2i(3, 7),
+	"wall_right": Vector2i(4, 7),
+	"wall_bl": Vector2i(0, 8),
+	"wall_bottom": Vector2i(2, 8),
+	"wall_br": Vector2i(4, 8),
 	"floor": Vector2i(25, 1),
 	"door": Vector2i(26, 1),
 	"rug": Vector2i(33, 2),
 	"fence": Vector2i(10, 8),
 	"fence_post": Vector2i(9, 8),
+	# The village well: a 2x2 composition — stone basin pair below, roofed
+	# crank pair above. The base cells block movement, the roof halves are
+	# passable visual caps (same convention as the *_top furniture keys).
+	"well_base_left": Vector2i(3, 15),
+	"well_base_right": Vector2i(4, 15),
+	"well_roof_left": Vector2i(3, 14),
+	"well_roof_right": Vector2i(4, 14),
 	"hedge": Vector2i(15, 7),
 	"hedge_alt": Vector2i(16, 7),
 	"tree": Vector2i(0, 16),
@@ -357,7 +364,7 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	"road", "road_twig", "sand", "sand_alt", "sand_pebbles",
 	"plaza", "plaza_alt", "floor", "door", "rug",
 	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",
-	"forge_top", "oven_top",
+	"forge_top", "oven_top", "well_roof_left", "well_roof_right",
 	# Water is deliberately absent: it blocks walkers unless they boat.
 	"tilled_soil",
 	"crop_carrot_0", "crop_carrot_1", "crop_carrot_2",

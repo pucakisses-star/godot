@@ -217,6 +217,10 @@ var _game_day := 1
 var _calendar_start_year := 250
 var _bed_cells: Array[Vector2i] = []
 var _green_cells: Array[Vector2i] = []
+## Village dressing planned at generation time (deterministic per seed):
+## fenced garden yards beside houses and the market-square well anchor.
+var _village_yards: Array = []
+var _village_well_cell := Vector2i(2147483647, 2147483647)
 var _farm_animals: Array[Dictionary] = []
 var _farm_animal_textures: Dictionary = {}
 var _pending_player_spawn_cell := Vector2i(2147483647, 2147483647)
@@ -447,11 +451,15 @@ const CHEST_LOOT_TABLE := [
 	{"name": "Gold Trinket", "min": 1, "max": 1}
 ]
 
+## Footprints are half-extents: a (3,2) minimum is a 7x5 gross plot, a
+## (5,4) maximum an 11x9 one — big enough for the interior planner to
+## split every shop into a shopfront plus back rooms (multi-room plots
+## need at least a 4-gross span per axis or they get demolished).
 const CIVIC_BUILDING_TYPES := {
 	"smithy": {
 		"placement_weight": 1.1,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(3, 2),
+		"preferred_footprint_max": Vector2i(4, 3),
 		"decor_tile_pool": ["forge", "armor_stand", "barrel", "bucket"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -460,8 +468,8 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"tavern": {
 		"placement_weight": 1.2,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(5, 4),
 		"decor_tile_pool": ["barrel", "jug", "bench", "counter"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -470,8 +478,8 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"inn": {
 		"placement_weight": 0.8,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(5, 4),
 		"decor_tile_pool": ["bed", "counter", "barrel", "table"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -480,15 +488,15 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"bakery": {
 		"placement_weight": 0.9,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(3, 2),
+		"preferred_footprint_max": Vector2i(4, 3),
 		"decor_tile_pool": ["oven", "sack", "counter", "table"],
 		"adjacency_preferences": {}
 	},
 	"general_store": {
 		"placement_weight": 1.0,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(3, 2),
+		"preferred_footprint_max": Vector2i(5, 3),
 		"decor_tile_pool": ["counter", "shelf", "sack", "pot"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -497,7 +505,7 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"market_stall": {
 		"placement_weight": 1.15,
-		"preferred_footprint_min": Vector2i(1, 1),
+		"preferred_footprint_min": Vector2i(2, 2),
 		"preferred_footprint_max": Vector2i(2, 2),
 		"decor_tile_pool": ["stall", "stall_alt", "sack", "barrel_open"],
 		"adjacency_preferences": {
@@ -507,15 +515,15 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"chapel": {
 		"placement_weight": 0.6,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(3, 2),
+		"preferred_footprint_max": Vector2i(4, 4),
 		"decor_tile_pool": ["brazier", "flowers_pot", "bench", "plant_tall"],
 		"adjacency_preferences": {}
 	},
 	"guild_hall": {
 		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(3, 3),
+		"preferred_footprint_max": Vector2i(5, 4),
 		"decor_tile_pool": ["table", "bench", "shelf", "chest"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -524,8 +532,8 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"town_hall": {
 		"placement_weight": 0.4,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(5, 4),
 		"decor_tile_pool": ["table", "bench", "brazier", "shelf"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -541,28 +549,28 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"carpenter": {
 		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(3, 2),
+		"preferred_footprint_max": Vector2i(4, 3),
 		"decor_tile_pool": ["bench", "table", "barrel", "bucket"],
 		"adjacency_preferences": {}
 	},
 	"tailor": {
 		"placement_weight": 0.6,
-		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_min": Vector2i(3, 2),
 		"preferred_footprint_max": Vector2i(3, 3),
 		"decor_tile_pool": ["table", "dresser", "chest", "plant"],
 		"adjacency_preferences": {}
 	},
 	"apothecary": {
 		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_min": Vector2i(3, 2),
 		"preferred_footprint_max": Vector2i(3, 3),
 		"decor_tile_pool": ["pot", "jug", "plant_tall", "shelf"],
 		"adjacency_preferences": {}
 	},
 	"guardhouse": {
 		"placement_weight": 0.65,
-		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_min": Vector2i(3, 2),
 		"preferred_footprint_max": Vector2i(4, 3),
 		"decor_tile_pool": ["armor_stand", "bed_alt", "chest", "bench"],
 		"adjacency_preferences": {
@@ -572,19 +580,71 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"stable": {
 		"placement_weight": 0.5,
-		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_min": Vector2i(3, 2),
 		"preferred_footprint_max": Vector2i(4, 3),
 		"decor_tile_pool": ["bucket", "sack", "bench", "barrel_open"],
 		"adjacency_preferences": {}
 	},
 	"workshop": {
 		"placement_weight": 0.8,
+		"preferred_footprint_min": Vector2i(3, 2),
+		"preferred_footprint_max": Vector2i(4, 3),
+		"decor_tile_pool": ["bench", "table", "bucket", "barrel"],
+		"adjacency_preferences": {}
+	},
+	## Back-of-house room roles. Never placed as standalone buildings
+	## (placement_weight 0) — the interior planner retags a shopfront's
+	## rear rooms with them so each room furnishes to its function: the
+	## inn's kitchen, the store's stockroom, the smithy's forge annex.
+	"kitchen": {
+		"placement_weight": 0.0,
 		"preferred_footprint_min": Vector2i(2, 2),
 		"preferred_footprint_max": Vector2i(3, 3),
-		"decor_tile_pool": ["bench", "table", "bucket", "barrel"],
+		"decor_tile_pool": ["oven", "pot", "sack", "bucket"],
+		"adjacency_preferences": {}
+	},
+	"storeroom": {
+		"placement_weight": 0.0,
+		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_max": Vector2i(3, 3),
+		"decor_tile_pool": ["sack", "barrel", "chest", "barrel_open"],
+		"adjacency_preferences": {}
+	},
+	"forge_room": {
+		"placement_weight": 0.0,
+		"preferred_footprint_min": Vector2i(2, 2),
+		"preferred_footprint_max": Vector2i(3, 3),
+		"decor_tile_pool": ["forge", "barrel", "bucket", "armor_stand"],
 		"adjacency_preferences": {}
 	}
 }
+
+## Back rooms behind each town shopfront, dealt from the entrance inward:
+## a tavern is taproom + kitchen + bedrooms, an inn adds a bedroom wing, a
+## general store keeps a stockroom, a smithy backs onto its forge annex.
+## "bedroom" re-zones the room to CELL_HOUSE so it gets beds, house
+## furnishing, and a slot in the NPC sleep schedule.
+const TOWN_ROOM_BACK_ROLES := {
+	"tavern": ["kitchen", "bedroom", "bedroom"],
+	"inn": ["kitchen", "bedroom", "bedroom", "bedroom"],
+	"bakery": ["kitchen", "storeroom"],
+	"general_store": ["storeroom", "bedroom"],
+	"smithy": ["forge_room", "storeroom"],
+	"chapel": ["bedroom", "storeroom"],
+	"guild_hall": ["storeroom", "bedroom"],
+	"town_hall": ["storeroom", "bedroom"],
+	"warehouse": ["storeroom", "storeroom"],
+	"carpenter": ["workshop", "storeroom"],
+	"tailor": ["storeroom", "bedroom"],
+	"apothecary": ["storeroom", "bedroom"],
+	"guardhouse": ["bedroom", "storeroom"],
+	"stable": ["storeroom"],
+	"workshop": ["storeroom"]
+}
+
+## Buildings that read as one open floor and never subdivide: a market
+## stall is a single stand, a stable one straw-floored hall.
+const TOWN_OPEN_PLAN_BUILDING_TYPES := ["market_stall", "stable"]
 
 func _ready() -> void:
 	_apply_cached_town_scene_seed()
@@ -1769,6 +1829,61 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	_latest_civic_building_type_map = {}
 	_latest_civic_building_name_map = {}
 	_latest_residence_type_map = {}
+	var village_yards: Array[Dictionary] = []
+	var well_cell := DwarfHoldStateModel.INVALID_CELL
+	var level_door_cells: Dictionary = {}
+
+	## The surface level is a VILLAGE, not a carved cave city: one modest
+	## market square, free-standing multi-room lots scattered around it with
+	## green verges between them, winding 2-3 tile lanes from every door to
+	## the square, fenced kitchen gardens, and a well on the plaza. The
+	## blob-carved street pipeline below survives only for the underground
+	## cellar levels, where wide dug halls still make sense.
+	if level_index == 0:
+		var plaza_radius := Vector2i(_rng.randi_range(4, 6), _rng.randi_range(3, 4))
+		_dig_plaza_zone(grid, Vector2i.ZERO, plaza_radius, _roll_plaza_shape(), CELL_PLAZA)
+		requested_zone_counts["plazas"] = 1
+		for _building_index in requested_building_count:
+			var civic_type := _pick_civic_building_type()
+			var civic_definition := CIVIC_BUILDING_TYPES[civic_type] as Dictionary
+			var civic_footprint := _roll_civic_footprint(civic_definition)
+			_place_village_lot(grid, civic_footprint, CELL_BUILDING, civic_type, plaza_radius)
+		var village_beds_planned := 0
+		var village_residences_placed := 0
+		for _residence_attempt in requested_bed_count * 2 + 60:
+			if village_beds_planned >= requested_bed_count:
+				break
+			var residence_type := _roll_residence_type()
+			# Small remainders shouldn't burn the budget on one huge barracks.
+			if requested_bed_count - village_beds_planned < 6 and residence_type != "house":
+				residence_type = "house"
+			var residence_footprint := _roll_residence_footprint(residence_type)
+			if _place_village_lot(grid, residence_footprint, CELL_HOUSE, residence_type, plaza_radius):
+				village_beds_planned += _estimate_residence_beds(residence_type, residence_footprint)
+				village_residences_placed += 1
+		requested_zone_counts["houses"] = village_residences_placed
+		## Interiors first (doors define where lanes start), then the lane
+		## network, then yards on whichever house flanks stayed green.
+		level_door_cells = _plan_town_building_interiors(grid)
+		_trace_village_lanes(grid, level_door_cells)
+		village_yards = _plan_house_yards(grid, level_door_cells)
+		well_cell = _pick_village_well_cell(grid)
+		var village_civic_buildings := _compute_civic_buildings_by_id(grid)
+		var village_stairs := _pick_level_stair_cells(grid, level_index, level_count)
+		_repair_town_level_connectivity(grid, level_door_cells, village_stairs, level_index)
+		return {
+			"grid": grid,
+			"door_cells": level_door_cells,
+			"zone_counts": _count_zone_components(grid),
+			"requested_zone_counts": requested_zone_counts,
+			"civic_buildings_by_id": village_civic_buildings,
+			"civic_building_type_map": _build_civic_building_type_lookup(village_civic_buildings),
+			"residence_type_map": _latest_residence_type_map,
+			"stair_cells": village_stairs,
+			"village_yards": village_yards,
+			"well_cell": well_cell
+		}
+
 	var plaza_layouts: Array[Dictionary] = []
 	var central_plaza_radius := Vector2i(
 		maxi(3, roundi(float(_rng.randi_range(6, 10)) * footprint_scale)),
@@ -1896,13 +2011,17 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 			_place_structure_along_halls(grid, CELL_BUILDING, civic_footprint, civic_type)
 
 	_ensure_walkable_connectivity(grid)
-	var level_door_cells := _compute_single_doors(grid)
-	_ensure_door_connectivity(grid, level_door_cells)
-	_ensure_walkable_connectivity(grid)
+	## Multi-room interiors replace the old one-door-per-rectangle pass:
+	## cellar shops get partition walls, internal doors and room roles just
+	## like the surface lots.
+	level_door_cells = _plan_town_building_interiors(grid)
 	var civic_buildings_by_id := _compute_civic_buildings_by_id(grid)
 	var civic_building_type_map := _build_civic_building_type_lookup(civic_buildings_by_id)
 	var zone_counts := _count_zone_components(grid)
 	var stair_cells := _pick_level_stair_cells(grid, level_index, level_count)
+	## The non-negotiable pass: at tile passability (the same rules movement
+	## uses), every walkable cell must reach every other.
+	_repair_town_level_connectivity(grid, level_door_cells, stair_cells, level_index)
 	return {
 		"grid": grid,
 		"door_cells": level_door_cells,
@@ -1911,8 +2030,273 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 		"civic_buildings_by_id": civic_buildings_by_id,
 		"civic_building_type_map": civic_building_type_map,
 		"residence_type_map": _latest_residence_type_map,
-		"stair_cells": stair_cells
+		"stair_cells": stair_cells,
+		"village_yards": village_yards,
+		"well_cell": well_cell
 	}
+
+## --- Village architecture ---------------------------------------------------
+## Shared multi-room interior planning (see SettlementArchitectureService):
+## BSP partitions, spanning-tree internal doors, exterior doors, and the
+## town's own room-role deals (taproom + kitchen + bedrooms; showroom +
+## storeroom; smithy + forge annex). Demolished nooks return to open grass,
+## and grass-facing walls host doors because the lawn itself is walkable.
+func _plan_town_building_interiors(grid: Dictionary) -> Dictionary:
+	return SettlementArchitectureService.plan_building_interiors(grid, {
+		"rng": _rng,
+		"civic_type_map": _latest_civic_building_type_map,
+		"residence_type_map": _latest_residence_type_map,
+		"back_roles": TOWN_ROOM_BACK_ROLES,
+		"default_back_role": "storeroom",
+		"open_plan_types": TOWN_OPEN_PLAN_BUILDING_TYPES,
+		"demolish_zone": CELL_ROCK,
+		"door_on_open_ground": true
+	})
+
+## Tile passability at generation time, mirroring TownTileService's render
+## rules: open grass, lanes and the square are walkable; building cells
+## walk only on floor and doors; partitions open only at doors. Bounded to
+## the settled grid so the BFS cannot leak across the infinite implicit
+## grass outside town.
+func _town_generation_passable(grid: Dictionary, door_cells: Dictionary, bounds: Rect2i, cell: Vector2i) -> bool:
+	if not bounds.has_point(cell):
+		return false
+	var zone := int(grid.get(cell, CELL_ROCK))
+	match zone:
+		CELL_ROCK, CELL_HALL, CELL_PLAZA:
+			return true
+		CELL_WALL:
+			return door_cells.has(cell)
+		CELL_HOUSE, CELL_BUILDING:
+			var tile := TownTileService.wall_or_floor_tile(grid, cell.x, cell.y, zone, door_cells)
+			return tile == "floor" or tile == "door"
+		_:
+			return false
+
+func _repair_town_level_connectivity(grid: Dictionary, door_cells: Dictionary, stair_cells: Dictionary, level_index: int) -> void:
+	var bounds := _find_bounds(grid).grow(1)
+	var is_passable := func(cell: Vector2i) -> bool:
+		return _town_generation_passable(grid, door_cells, bounds, cell)
+	SettlementArchitectureService.repair_level_connectivity(grid, door_cells, stair_cells, level_index, is_passable, "Town")
+
+## Free-standing village lot: a rectangular plot dropped on open grass
+## around the market square, keeping a 2-cell green verge to every other
+## zone so lanes, yards and trees fit between the buildings. Early attempts
+## hug the square, later ones drift outward, so the village densifies from
+## the center like a real settlement.
+func _place_village_lot(grid: Dictionary, footprint: Vector2i, structure_tile: int, building_type: String, plaza_radius: Vector2i) -> bool:
+	var base_reach := float(maxi(plaza_radius.x, plaza_radius.y) + maxi(footprint.x, footprint.y)) + 4.0
+	for attempt in 260:
+		var reach := base_reach + float(attempt) * 0.3 + _rng.randf() * 6.0
+		var angle := _rng.randf() * TAU
+		## Slight landscape bias: villages spread wider than tall so the
+		## screen-shaped map reads naturally.
+		var center := Vector2i(roundi(cos(angle) * reach * 1.25), roundi(sin(angle) * reach * 0.8))
+		if not _can_place_village_lot(grid, center, footprint):
+			continue
+		_dig_structure_with_room(grid, center, footprint, structure_tile)
+		_register_building_type_metadata(center, footprint, structure_tile, building_type)
+		return true
+	return false
+
+func _can_place_village_lot(grid: Dictionary, center: Vector2i, footprint: Vector2i) -> bool:
+	var from_cell := center - footprint - Vector2i(2, 2)
+	var to_cell := center + footprint + Vector2i(2, 2)
+	for y in range(from_cell.y, to_cell.y + 1):
+		for x in range(from_cell.x, to_cell.x + 1):
+			if _cell_at(grid, x, y) != CELL_ROCK:
+				return false
+	return true
+
+## --- Village lanes: winding paths instead of carved boulevards -------------
+## Every building entrance gets a 2-3 tile wide winding dirt lane to the
+## nearest already-traced road cell; the market square rim seeds the
+## network, so streets grow outward as an organic tree. Entrances are wired
+## nearest-first, which makes far homesteads branch off their neighbors'
+## lanes rather than cutting their own highways to the square.
+func _trace_village_lanes(grid: Dictionary, door_cells: Dictionary) -> void:
+	var spine: Array[Vector2i] = []
+	for key_variant: Variant in grid.keys():
+		if int(grid[key_variant]) == CELL_PLAZA:
+			spine.append(key_variant as Vector2i)
+	if spine.is_empty():
+		spine.append(Vector2i.ZERO)
+	var entries: Array[Vector2i] = []
+	for door_variant: Variant in door_cells.keys():
+		var door_cell := door_variant as Vector2i
+		var door_zone := int(grid.get(door_cell, CELL_ROCK))
+		## Internal partition doors sit on CELL_WALL cells; only ring doors
+		## (still zoned as their building) open onto the village green.
+		if door_zone != CELL_HOUSE and door_zone != CELL_BUILDING:
+			continue
+		for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			var outside := door_cell + direction
+			if int(grid.get(outside, CELL_ROCK)) == CELL_ROCK and int(grid.get(door_cell - direction, CELL_ROCK)) == door_zone:
+				entries.append(outside)
+				break
+	entries.sort_custom(func(cell_a: Vector2i, cell_b: Vector2i) -> bool:
+		var da := cell_a.length_squared()
+		var db := cell_b.length_squared()
+		if da == db:
+			return cell_a < cell_b
+		return da < db
+	)
+	for entry: Vector2i in entries:
+		var target := entry
+		var best_distance := 2147483647
+		for spine_cell: Vector2i in spine:
+			var candidate_distance := entry.distance_squared_to(spine_cell)
+			if candidate_distance < best_distance:
+				best_distance = candidate_distance
+				target = spine_cell
+		_carve_winding_lane(grid, entry, target, spine)
+
+func _carve_winding_lane(grid: Dictionary, from_cell: Vector2i, to_cell: Vector2i, spine: Array[Vector2i]) -> void:
+	## Most lanes are 2 tiles wide; roughly a third widen to 3.
+	var wide := _rng.randf() < 0.3
+	var cursor := from_cell
+	var guard := 0
+	while cursor != to_cell and guard < 900:
+		guard += 1
+		_stamp_lane_cell(grid, cursor, wide)
+		## Every other lane cell joins the spine so later lanes can branch
+		## off this one instead of tracing their own way to the square.
+		if guard % 2 == 0:
+			spine.append(cursor)
+		var delta := to_cell - cursor
+		var step_horizontal := absi(delta.x) > absi(delta.y)
+		if delta.x != 0 and delta.y != 0:
+			## Weight the step toward the longer remaining axis: the lane
+			## drifts diagonally instead of running ruler-straight legs.
+			step_horizontal = _rng.randf() < float(absi(delta.x)) / float(absi(delta.x) + absi(delta.y))
+		var step := Vector2i(signi(delta.x), 0) if step_horizontal else Vector2i(0, signi(delta.y))
+		## An occasional sideways wobble far from the goal keeps it winding.
+		if _rng.randf() < 0.12 and absi(delta.x) + absi(delta.y) > 5:
+			step = Vector2i(0, 1 if _rng.randf() < 0.5 else -1) if step.x != 0 else Vector2i(1 if _rng.randf() < 0.5 else -1, 0)
+		cursor += step
+	_stamp_lane_cell(grid, to_cell, wide)
+
+func _stamp_lane_cell(grid: Dictionary, cell: Vector2i, wide: bool) -> void:
+	## A 2x2 stamp guarantees a continuous >=2-tile lane along any step
+	## direction; wide lanes stamp the 3x3 block around the cursor.
+	## _set_cell refuses to eat building floors, walls, or the square.
+	var origin := cell - Vector2i.ONE if wide else cell
+	var span := 3 if wide else 2
+	for offset_y in span:
+		for offset_x in span:
+			_set_cell(grid, origin + Vector2i(offset_x, offset_y), CELL_HALL)
+
+## --- Yards & the village well ----------------------------------------------
+## Some houses stake out a fenced yard on a free flank: fence rails with a
+## gate gap (the farm-pen art) around rows of garden crops and flowers.
+## Yards are planned at generation time so they are deterministic per seed
+## and never block a lane; the fences themselves are stamped as decor.
+func _plan_house_yards(grid: Dictionary, door_cells: Dictionary) -> Array[Dictionary]:
+	var yards: Array[Dictionary] = []
+	for component_info: Dictionary in SettlementArchitectureService.collect_structure_components(grid):
+		if int(component_info.get("zone", CELL_ROCK)) != CELL_HOUSE:
+			continue
+		## Rooms of one house are separate components (walls sever them), so
+		## the roll runs per room — sides that face a sibling room fail the
+		## all-grass check and never get a yard.
+		if _rng.randf() > 0.35:
+			continue
+		var bbox := component_info.get("bbox", Rect2i()) as Rect2i
+		var yard := _fit_yard_beside(grid, door_cells, bbox)
+		if not yard.is_empty():
+			yards.append(yard)
+	return yards
+
+func _fit_yard_beside(grid: Dictionary, door_cells: Dictionary, bbox: Rect2i) -> Dictionary:
+	var depth := _rng.randi_range(3, 4)
+	var sides: Array[Vector2i] = [Vector2i.DOWN, Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT]
+	_seeded_shuffle(sides)
+	for side: Vector2i in sides:
+		var rect := Rect2i()
+		if side == Vector2i.DOWN:
+			rect = Rect2i(Vector2i(bbox.position.x, bbox.end.y), Vector2i(bbox.size.x, depth))
+		elif side == Vector2i.UP:
+			rect = Rect2i(Vector2i(bbox.position.x, bbox.position.y - depth), Vector2i(bbox.size.x, depth))
+		elif side == Vector2i.LEFT:
+			rect = Rect2i(Vector2i(bbox.position.x - depth, bbox.position.y), Vector2i(depth, bbox.size.y))
+		else:
+			rect = Rect2i(Vector2i(bbox.end.x, bbox.position.y), Vector2i(depth, bbox.size.y))
+		if rect.size.x < 3 or rect.size.y < 3:
+			continue
+		## The yard, its fence line, and one cell of breathing room beyond
+		## must all be open grass — lanes were traced first, so a yard can
+		## never wall off a doorway. The margin row on the house's own side
+		## is exempt: that's the building wall the yard leans against.
+		var margin := rect.grow(1)
+		var clear := true
+		for y in range(margin.position.y, margin.end.y):
+			for x in range(margin.position.x, margin.end.x):
+				var on_house_margin := (side == Vector2i.DOWN and y < rect.position.y) \
+					or (side == Vector2i.UP and y >= rect.end.y) \
+					or (side == Vector2i.LEFT and x >= rect.end.x) \
+					or (side == Vector2i.RIGHT and x < rect.position.x)
+				if on_house_margin:
+					continue
+				if _cell_at(grid, x, y) != CELL_ROCK:
+					clear = false
+					break
+			if not clear:
+				break
+		if not clear:
+			continue
+		## A doorway directly on the shared house wall must stay clear too.
+		var door_blocked := false
+		for door_variant: Variant in door_cells.keys():
+			var door_cell := door_variant as Vector2i
+			if rect.grow(1).has_point(door_cell) and bbox.has_point(door_cell):
+				door_blocked = true
+				break
+		if door_blocked:
+			continue
+		var rails: Array[Vector2i] = []
+		var posts: Array[Vector2i] = []
+		var garden: Array[Vector2i] = []
+		## Fence the three open edges; the house wall closes the fourth.
+		## The gate sits mid-way along the edge opposite the house.
+		var gate := rect.position + rect.size / 2
+		if side == Vector2i.DOWN:
+			gate = Vector2i(rect.position.x + rect.size.x / 2, rect.end.y - 1)
+		elif side == Vector2i.UP:
+			gate = Vector2i(rect.position.x + rect.size.x / 2, rect.position.y)
+		elif side == Vector2i.LEFT:
+			gate = Vector2i(rect.position.x, rect.position.y + rect.size.y / 2)
+		else:
+			gate = Vector2i(rect.end.x - 1, rect.position.y + rect.size.y / 2)
+		for y in range(rect.position.y, rect.end.y):
+			for x in range(rect.position.x, rect.end.x):
+				var cell := Vector2i(x, y)
+				var house_edge := (side == Vector2i.DOWN and y == rect.position.y) \
+					or (side == Vector2i.UP and y == rect.end.y - 1) \
+					or (side == Vector2i.LEFT and x == rect.end.x - 1) \
+					or (side == Vector2i.RIGHT and x == rect.position.x)
+				var on_rim := x == rect.position.x or x == rect.end.x - 1 or y == rect.position.y or y == rect.end.y - 1
+				if cell == gate:
+					continue
+				if on_rim and not house_edge:
+					## Horizontal runs read as rails, vertical as posts —
+					## the same art split the farm pens use.
+					if y == rect.position.y or y == rect.end.y - 1:
+						rails.append(cell)
+					else:
+						posts.append(cell)
+				else:
+					garden.append(cell)
+		return {"rails": rails, "posts": posts, "gate": gate, "garden": garden, "rect": rect}
+	return {}
+
+## The well stands at the market square's heart: a 2x2 decor composition
+## whose basin row blocks movement while the roof halves stay walk-under.
+func _pick_village_well_cell(grid: Dictionary) -> Vector2i:
+	var anchor := Vector2i(-1, 0)
+	for offset: Vector2i in [Vector2i.ZERO, Vector2i.RIGHT, Vector2i.UP, Vector2i(1, -1)]:
+		if int(grid.get(anchor + offset, CELL_ROCK)) != CELL_PLAZA:
+			return DwarfHoldStateModel.INVALID_CELL
+	return anchor
 
 func _show_level(target_level_index: int) -> void:
 	if _hold_state.generated_levels.is_empty():
@@ -1936,6 +2320,9 @@ func _show_level(target_level_index: int) -> void:
 	_latest_civic_building_type_map = level_data.get("civic_building_type_map", {}) as Dictionary
 	_latest_civic_building_name_map = _build_civic_building_name_lookup(_latest_civic_buildings_by_id, seed_input.text.strip_edges(), "townsfolk")
 	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
+	_village_yards = level_data.get("village_yards", []) as Array
+	var well_variant: Variant = level_data.get("well_cell")
+	_village_well_cell = (well_variant as Vector2i) if well_variant is Vector2i else Vector2i(2147483647, 2147483647)
 	_hold_state.active_level_stairs = level_data.get("stair_cells", {}) as Dictionary
 
 	_chest_inventories.clear()
@@ -2045,7 +2432,72 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		_place_tile(city_layer, stair_cell, "stairway_up" if stair_key == "up" else "stairway_down")
 		decor_layer.erase_cell(stair_cell)
 		_actor_passable_cache.erase(stair_cell)
+	_stamp_village_well(stair_cells)
+	_stamp_village_yards()
 	_reset_view(bounds)
+
+## Stamps the market-square well: basin pair on the anchor row (blocking),
+## roofed crank pair above (passable visual caps). Skipped when a stairway
+## claimed one of its cells.
+func _stamp_village_well(stair_cells: Dictionary) -> void:
+	if _village_well_cell.x == 2147483647:
+		return
+	var pieces := {
+		_village_well_cell: "well_base_left",
+		_village_well_cell + Vector2i.RIGHT: "well_base_right",
+		_village_well_cell + Vector2i.UP: "well_roof_left",
+		_village_well_cell + Vector2i(1, -1): "well_roof_right"
+	}
+	for stair_variant: Variant in stair_cells.values():
+		if pieces.has(stair_variant as Vector2i):
+			return
+	for piece_cell: Vector2i in pieces.keys():
+		_place_tile(decor_layer, piece_cell, String(pieces[piece_cell]))
+
+## Stamps every planned yard: fence rails and posts with a gate gap, and
+## garden rows inside — tilled soil with a crop on alternating ranks, the
+## rest flowers or open grass. Desert and snow towns keep the fence but
+## skip the tilled beds, matching their barren dressing rules. Yard ground
+## leaves _green_cells so farmsteads, animals, and scatter keep off it.
+func _stamp_village_yards() -> void:
+	if _village_yards.is_empty():
+		return
+	var yard_ground: Dictionary = {}
+	var grow_crops := _town_theme != "desert" and _town_ground_biome != TILE_ATLAS_DEFS.BIOME_TUNDRA
+	var crop_families: Array[String] = ["crop_carrot", "crop_beetroot", "crop_tomato"]
+	for yard_variant: Variant in _village_yards:
+		var yard := yard_variant as Dictionary
+		for rail_variant: Variant in (yard.get("rails", []) as Array):
+			var rail_cell := rail_variant as Vector2i
+			_place_tile(decor_layer, rail_cell, "fence")
+			yard_ground[rail_cell] = true
+		for post_variant: Variant in (yard.get("posts", []) as Array):
+			var post_cell := post_variant as Vector2i
+			_place_tile(decor_layer, post_cell, "fence_post")
+			yard_ground[post_cell] = true
+		var gate_variant: Variant = yard.get("gate")
+		if gate_variant is Vector2i:
+			# The gate stays open ground; clear any scatter decor off it.
+			decor_layer.erase_cell(gate_variant as Vector2i)
+			_actor_passable_cache.erase(gate_variant as Vector2i)
+		var crop_family := crop_families[_rng.randi_range(0, crop_families.size() - 1)]
+		for garden_variant: Variant in (yard.get("garden", []) as Array):
+			var garden_cell := garden_variant as Vector2i
+			yard_ground[garden_cell] = true
+			# Clear tree/hedge scatter so the plot reads as tended ground.
+			decor_layer.erase_cell(garden_cell)
+			_actor_passable_cache.erase(garden_cell)
+			if grow_crops and absi(garden_cell.y) % 2 == 0:
+				_place_tile(city_layer, garden_cell, "tilled_soil")
+				_place_tile(decor_layer, garden_cell, "%s_%d" % [crop_family, _rng.randi_range(1, 2)])
+			elif _rng.randf() < 0.3 and _town_theme != "desert" and _town_ground_biome != TILE_ATLAS_DEFS.BIOME_TUNDRA:
+				_place_tile(decor_layer, garden_cell, "flowers_white" if _rng.randf() < 0.5 else "flowers_yellow")
+	if not yard_ground.is_empty():
+		var remaining_green: Array[Vector2i] = []
+		for green_cell: Vector2i in _green_cells:
+			if not yard_ground.has(green_cell):
+				remaining_green.append(green_cell)
+		_green_cells = remaining_green
 
 func _pick_level_stair_cells(grid: Dictionary, level_index: int, level_count: int) -> Dictionary:
 	var result := {}
@@ -2303,9 +2755,9 @@ func _furnish_interiors(grid: Dictionary) -> void:
 		var component: Array[Vector2i] = []
 		for cell_variant: Variant in (component_variant as Array):
 			component.append(cell_variant as Vector2i)
-		var placements: Array[Dictionary] = RoomFurnishingService.plan_house_furnishing(component, is_occupied, _door_cells, _rng)
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_house_furnishing(component, is_occupied, _door_cells, _rng, grid)
 		_apply_furnishing_placements(placements)
-		_place_house_hearth(component, is_occupied)
+		_place_house_hearth(grid, component, is_occupied)
 	# Shops get stock on the shelves.
 	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_BUILDING):
 		var component: Array[Vector2i] = []
@@ -2314,7 +2766,7 @@ func _furnish_interiors(grid: Dictionary) -> void:
 		if component.is_empty():
 			continue
 		var building_type := String(_latest_civic_building_type_map.get(component[0], ""))
-		var placements: Array[Dictionary] = RoomFurnishingService.plan_shop_dressing(component, building_type, is_occupied, _door_cells, _rng)
+		var placements: Array[Dictionary] = RoomFurnishingService.plan_shop_dressing(component, building_type, is_occupied, _door_cells, _rng, grid)
 		_apply_furnishing_placements(placements)
 	# Fire-bearing furniture anywhere on the map casts a warm pool.
 	for cell: Vector2i in decor_layer.get_used_cells():
@@ -2342,9 +2794,10 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 			_spawn_hearth_glow(base_cell, 2.4)
 
 ## Every roomy house earns a hearth on its north wall row: an oven tile,
-## its chimney cap, and firelight.
-func _place_house_hearth(component: Array[Vector2i], is_occupied: Callable) -> void:
-	var interior: Array[Vector2i] = RoomFurnishingService.interior_cells(component)
+## its chimney cap, and firelight. The grid lets interior_cells treat
+## partition-wall neighbors as inside, so multi-room houses keep theirs.
+func _place_house_hearth(grid: Dictionary, component: Array[Vector2i], is_occupied: Callable) -> void:
+	var interior: Array[Vector2i] = RoomFurnishingService.interior_cells(component, grid)
 	if interior.size() < 9:
 		return
 	var north_row := interior[0].y

@@ -12,6 +12,10 @@ const CELL_HALL := 1
 const CELL_HOUSE := 2
 const CELL_BUILDING := 3
 const CELL_PLAZA := 4
+## Interior partition wall inside a multi-room building (matches
+## SettlementSceneBase.CELL_WALL). Renders as timber wall unless a door is
+## punched through it, and never counts as room floor.
+const CELL_WALL := 6
 
 const TOWN_FURNITURE_TILES: Array[String] = [
 	"bed", "bed_alt", "chest", "wardrobe", "dresser", "shelf", "table",
@@ -28,6 +32,19 @@ static func _cell_hash(x: int, y: int) -> int:
 	return value
 
 static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cells: Dictionary) -> String:
+	if cell == CELL_WALL:
+		## Interior partitions are timber walls except where a door was
+		## punched to connect two rooms. A partition end that crosses the
+		## outer ring picks the matching frame piece so the facade reads as
+		## one continuous timber shell.
+		if door_cells.has(Vector2i(x, y)):
+			return "door"
+		return _wall_piece_for_sides(
+			not _is_building_fabric(_cell_at(grid, x, y - 1)),
+			not _is_building_fabric(_cell_at(grid, x, y + 1)),
+			not _is_building_fabric(_cell_at(grid, x - 1, y)),
+			not _is_building_fabric(_cell_at(grid, x + 1, y))
+		)
 	if _is_structural_cell(cell):
 		return wall_or_floor_tile(grid, x, y, cell, door_cells)
 	match cell:
@@ -55,17 +72,23 @@ static func wall_or_floor_tile(grid: Dictionary, x: int, y: int, cell: int, door
 	if door_cells.has(current_cell):
 		return "door"
 
-	var up_open := _cell_at(grid, x, y - 1) != cell
-	var down_open := _cell_at(grid, x, y + 1) != cell
-	var left_open := _cell_at(grid, x - 1, y) != cell
-	var right_open := _cell_at(grid, x + 1, y) != cell
+	## A partition wall counts as "same room": floor tiles flanking an
+	## interior CELL_WALL line must stay floor, or every room would grow a
+	## second timber ring inside the partition and 2x2 interiors would vanish.
+	var up_open := not _is_same_room(_cell_at(grid, x, y - 1), cell)
+	var down_open := not _is_same_room(_cell_at(grid, x, y + 1), cell)
+	var left_open := not _is_same_room(_cell_at(grid, x - 1, y), cell)
+	var right_open := not _is_same_room(_cell_at(grid, x + 1, y), cell)
 
 	if not (up_open or down_open or left_open or right_open):
 		return "floor"
+	return _wall_piece_for_sides(up_open, down_open, left_open, right_open)
 
-	# Convex corners (two adjacent sides face outside) first, then the four
-	# straight edges. The top edge is the old "north face": interior below,
-	# exterior above.
+## Maps which of a wall cell's four orthogonal sides face outside onto the
+## timber-framed 9-slice: convex corners (two adjacent open sides) first,
+## then the four straight edges; a fully-enclosed wall cell is the opaque
+## fill piece (interior partitions).
+static func _wall_piece_for_sides(up_open: bool, down_open: bool, left_open: bool, right_open: bool) -> String:
 	if up_open and left_open:
 		return "wall_tl"
 	if up_open and right_open:
@@ -169,6 +192,8 @@ static func zone_name_for_cell(cell: Vector2i, grid: Dictionary, building_type_m
 			return "Market Square"
 		CELL_HOUSE:
 			return "House"
+		CELL_WALL:
+			return "Wall"
 		CELL_BUILDING:
 			var subtype := building_type_for_cell_or_empty(cell, building_type_map)
 			if subtype.is_empty():
@@ -367,3 +392,15 @@ static func _is_corridor_cell(cell: int) -> bool:
 
 static func _is_structural_cell(cell: int) -> bool:
 	return cell == CELL_HOUSE or cell == CELL_BUILDING
+
+## The neighbor belongs to the same room's fabric: its own zone, or an
+## interior partition wall separating it from a sibling room.
+static func _is_same_room(neighbor_cell: int, cell: int) -> bool:
+	return neighbor_cell == cell or neighbor_cell == CELL_WALL
+
+## Any cell that is part of a building's solid mass — either zone's floor
+## plus partition walls. Used to autotile the timber shell around mixed
+## buildings (an inn whose bedroom wing was re-zoned to CELL_HOUSE still
+## reads as one continuous structure).
+static func _is_building_fabric(cell: int) -> bool:
+	return cell == CELL_HOUSE or cell == CELL_BUILDING or cell == CELL_WALL
