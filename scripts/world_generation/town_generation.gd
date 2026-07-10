@@ -1648,6 +1648,7 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 		_paint_snow_tile(augmented, snow_coords[variant_index], variant_index)
 	_paint_path_fringe_tiles(augmented)
 	_harmonize_demo_grass_tiles(augmented)
+	_repaint_hedge_decor_tiles(augmented)
 	# Water frames must exist before the fringe pass samples them as the
 	# "under" terrain of the shoreline pieces.
 	_paint_water_frames(augmented)
@@ -1745,6 +1746,33 @@ func _harmonize_demo_grass_tiles(image: Image) -> void:
 				var pixel := image.get_pixel(coords.x * tile_size.x + tx, coords.y * tile_size.y + ty)
 				if pixel.r8 == 140 and pixel.g8 == 169 and pixel.b8 == 66:
 					image.set_pixel(coords.x * tile_size.x + tx, coords.y * tile_size.y + ty, plain_color)
+
+## The sheet's lone standalone bush: a rounded shrub with a transparent
+## surround and its own ground shadow, sitting unmapped next to the fence
+## family. It becomes the single-cell hedge decor art below.
+const SHEET_HEDGE_BUSH_SOURCE := Vector2i(14, 9)
+
+## The mapped "hedge"/"hedge_alt" cells (15,7)/(16,7) are interior slabs of
+## the sheet's big multi-tile hedge blob: opaque edge to edge, and mostly the
+## flat demo dark-grass ground (106,164,65) the demo scene sat on.
+## Stamped as single-cell decor they render as wrong-colored green squares
+## over the real ground instead of bushes. Color-keying that backing away
+## leaves only ragged edge scraps (the bush art itself lives in other cells),
+## so instead both cells are repainted with the sheet's own standalone bush
+## - mirrored for the alt so the pair still reads as two variants. The decor
+## layer draws over the ground tile, so the transparent surround is correct.
+func _repaint_hedge_decor_tiles(image: Image) -> void:
+	var source := SHEET_HEDGE_BUSH_SOURCE * tile_size
+	for hedge_variant: Array in [["hedge", false], ["hedge_alt", true]]:
+		var coords := TILE_ATLAS.get(String(hedge_variant[0]), Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var mirrored := bool(hedge_variant[1])
+		for ty: int in range(tile_size.y):
+			for tx: int in range(tile_size.x):
+				var source_x := (tile_size.x - 1 - tx) if mirrored else tx
+				var pixel := image.get_pixel(source.x + source_x, source.y + ty)
+				image.set_pixel(coords.x * tile_size.x + tx, coords.y * tile_size.y + ty, pixel)
 
 ## A pixel of the path-fringe art counts as vegetation when green clearly
 ## leads red (leaf greens) OR clearly leads blue (the olive tuft speckles:
@@ -2700,6 +2728,12 @@ func _show_level(target_level_index: int) -> void:
 	_shop_stocks.clear()
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
+	# _restore_homestead (via _setup_surface_world above) stamps saved builds
+	# before _render_city clears both layers and repaints the town rect plus
+	# its one-cell border ring; a build hugging the town edge sits on that
+	# ring, so the repaint wiped its art while _player_built_cells kept
+	# blocking the cell (and a ring chest stopped answering clicks).
+	_restamp_player_builds()
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
 	_furnish_interiors(grid)
@@ -4297,7 +4331,13 @@ func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 	if target_cell == _player_cell:
 		_player_move_path.clear()
 		return
-	if _latest_grid.is_empty() or not _latest_grid.has(target_cell):
+	if _latest_grid.is_empty():
+		return
+	# A target outside the generated grid is the streamed wilds (in wild and
+	# ocean embarks the grid is only the 11x11 clearing): accept it whenever
+	# the keyboard step's passability would, so "click to walk / click to
+	# row" works beyond the clearing. Grid targets keep the town logic.
+	if not _latest_grid.has(target_cell) and not _is_walkable_cell(target_cell):
 		return
 
 	# Mid-glide the walker belongs to the tile it is arriving at, not the
@@ -4400,8 +4440,11 @@ func _build_player_path(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2
 	return result
 
 func _can_step_to_cell(from_cell: Vector2i, to_cell: Vector2i, goal_cell: Vector2i) -> bool:
-	if not _latest_grid.has(to_cell):
-		return false
+	# No grid-membership gate: off-grid cells are the streamed wilds, where
+	# the same actor passability the keyboard consults decides the step, so
+	# click paths may leave the embark clearing. Grid cells resolve through
+	# the identical walkability check, unchanged. The path BFS keeps its
+	# 8000-cell flood cap, so unreachable wilds clicks stay bounded.
 	if not _is_walkable_cell(to_cell):
 		return false
 	if to_cell != goal_cell and _is_cell_occupied_by_npc(to_cell):
@@ -6753,6 +6796,21 @@ func _stamp_player_build(cell: Vector2i, tile_key: String) -> void:
 	else:
 		_place_tile(decor_layer, cell, tile_key)
 	_actor_passable_cache.erase(cell)
+
+## Re-stamps every owned build and field whose cell _render_city overpainted:
+## only cells the city pass tiled (the town rect plus its grow(1) border
+## ring) have ground here, so this is a no-op for builds out in streamed-
+## chunk territory - their cells are still untiled and _ensure_surface_chunk
+## re-stamps them when their chunk paints.
+func _restamp_player_builds() -> void:
+	for cell_variant: Variant in _player_built_cells.keys():
+		var cell := cell_variant as Vector2i
+		if city_layer.get_cell_source_id(cell) >= 0:
+			_stamp_player_build(cell, String(_player_built_cells[cell_variant]))
+	for plot_variant: Variant in _farm_plots.keys():
+		var plot_cell := plot_variant as Vector2i
+		if city_layer.get_cell_source_id(plot_cell) >= 0:
+			_stamp_farm_plot(plot_cell)
 
 func _remove_player_build(cell: Vector2i) -> void:
 	var tile_key := String(_player_built_cells.get(cell, ""))
