@@ -6,6 +6,10 @@ const CELL_HALL := 1
 const CELL_HOUSE := 2
 const CELL_BUILDING := 3
 const CELL_PLAZA := 4
+## Interior partition wall inside a multi-room building (matches
+## SettlementSceneBase.CELL_WALL). Renders as stone unless a door is
+## punched through it, and never counts as room floor.
+const CELL_WALL := 6
 
 static func place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String, tile_atlas: Dictionary) -> void:
 	var atlas_coords: Vector2i = tile_atlas.get(tile_key, Vector2i(-1, -1))
@@ -14,6 +18,12 @@ static func place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: Str
 	target_layer.set_cell(cell, 0, atlas_coords, 0)
 
 static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cells: Dictionary, tile_atlas: Dictionary) -> String:
+	if cell == CELL_WALL:
+		## Interior partitions are solid stone except where a door was
+		## punched to connect two rooms.
+		if door_cells.has(Vector2i(x, y)):
+			return "door"
+		return "stone"
 	if _is_structural_cell(cell):
 		return wall_or_floor_tile(grid, x, y, cell, door_cells)
 	match cell:
@@ -50,10 +60,13 @@ static func wall_or_floor_tile(grid: Dictionary, x: int, y: int, cell: int, door
 	var right_open := _is_corridor_cell(right_cell)
 	var top_open := _is_corridor_cell(top_cell)
 	var bottom_open := _is_corridor_cell(bottom_cell)
-	var left_same := left_cell == cell
-	var right_same := right_cell == cell
-	var top_same := top_cell == cell
-	var bottom_same := bottom_cell == cell
+	## A partition wall counts as "same room": the floor tiles flanking an
+	## interior wall must stay floor, or every room would grow a second
+	## stone ring inside the partition and 2x2 interiors would vanish.
+	var left_same := left_cell == cell or left_cell == CELL_WALL
+	var right_same := right_cell == cell or right_cell == CELL_WALL
+	var top_same := top_cell == cell or top_cell == CELL_WALL
+	var bottom_same := bottom_cell == cell or bottom_cell == CELL_WALL
 
 	if left_open:
 		return "stone"
@@ -144,6 +157,10 @@ static func is_adjacent_to_stone_or_wall(grid: Dictionary, x: int, y: int, door_
 		var neighbor_cell := _cell_at(grid, neighbor.x, neighbor.y)
 		if neighbor_cell == CELL_ROCK:
 			return true
+		## Interior partitions read as walls too, so wardrobes and shelves
+		## may back onto them just like onto the outer ring.
+		if neighbor_cell == CELL_WALL and not door_cells.has(neighbor):
+			return true
 		if _is_structural_cell(neighbor_cell) and wall_or_floor_tile(grid, neighbor.x, neighbor.y, neighbor_cell, door_cells) == "stone":
 			return true
 	return false
@@ -166,6 +183,8 @@ static func zone_name_for_cell(cell: Vector2i, grid: Dictionary, civic_building_
 			return "Plaza"
 		CELL_HOUSE:
 			return "House"
+		CELL_WALL:
+			return "Wall"
 		CELL_BUILDING:
 			var subtype := building_type_for_cell_or_empty(cell, civic_building_type_map)
 			if subtype.is_empty():

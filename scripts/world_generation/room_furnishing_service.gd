@@ -24,6 +24,11 @@ const DF_FURNITURE_TEXTURE := preload("res://resources/images/dwarfhold/df_furni
 ## stocked counters and houseplants (16px art like the house sheets).
 const INTERIOR_TILESET_TEXTURE := preload("res://resources/images/dwarfhold/Interior_Tileset_2x.png")
 
+## Interior partition wall (matches SettlementSceneBase.CELL_WALL): floor
+## cells beside a partition still count as interior, so rooms carved out
+## of a larger building keep a furnishable floor.
+const CELL_WALL := 6
+
 const PIECES := {
 	"round_rug": {"sheet": "house", "rect": Rect2(0, 0, 52, 52), "cells_w": 4, "rows_block": 0, "z": 4},
 	"cabinet": {"sheet": "house", "rect": Rect2(48, 8, 48, 48), "cells_w": 3, "rows_block": 1, "z": 8},
@@ -166,8 +171,10 @@ static func collect_zone_components(grid: Dictionary, zone: int) -> Array:
 	return components
 
 ## Interior cells are the ones fully inside the room (every neighbor is
-## part of the same component), i.e. not the wall ring.
-static func interior_cells(component: Array[Vector2i]) -> Array[Vector2i]:
+## part of the same component), i.e. not the wall ring. When the caller
+## passes the grid, a CELL_WALL neighbor also counts as "inside": floor
+## against an interior partition renders as floor, so it is furnishable.
+static func interior_cells(component: Array[Vector2i], grid: Dictionary = {}) -> Array[Vector2i]:
 	var member: Dictionary = {}
 	for cell: Vector2i in component:
 		member[cell] = true
@@ -175,9 +182,13 @@ static func interior_cells(component: Array[Vector2i]) -> Array[Vector2i]:
 	for cell: Vector2i in component:
 		var inside := true
 		for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-			if not member.has(cell + direction):
-				inside = false
-				break
+			var neighbor: Vector2i = cell + direction
+			if member.has(neighbor):
+				continue
+			if int(grid.get(neighbor, 0)) == CELL_WALL:
+				continue
+			inside = false
+			break
 		if inside:
 			interior.append(cell)
 	return interior
@@ -292,9 +303,9 @@ static func _room_openness(new_blocked: Array[Vector2i], interior: Array[Vector2
 ## Furnishing plan for one house: a list of {"piece", "cell"} placements.
 ## Bigger rooms earn bigger furniture; the wall ring and door approaches
 ## stay clear so residents can still reach their beds.
-static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Callable, door_cells: Dictionary, rng: RandomNumberGenerator) -> Array[Dictionary]:
+static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Callable, door_cells: Dictionary, rng: RandomNumberGenerator, grid: Dictionary = {}) -> Array[Dictionary]:
 	var placements: Array[Dictionary] = []
-	var interior := interior_cells(component)
+	var interior := interior_cells(component, grid)
 	if interior.size() < 4:
 		return placements
 	var interior_set: Dictionary = {}
@@ -488,11 +499,11 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 
 ## Dressing for shopfront interiors: stocked shelves along the north
 ## wall, crates of goods in the corners, loose produce by the counter.
-static func plan_shop_dressing(component: Array[Vector2i], building_type: String, is_occupied: Callable, door_cells: Dictionary, rng: RandomNumberGenerator) -> Array[Dictionary]:
+static func plan_shop_dressing(component: Array[Vector2i], building_type: String, is_occupied: Callable, door_cells: Dictionary, rng: RandomNumberGenerator, grid: Dictionary = {}) -> Array[Dictionary]:
 	var placements: Array[Dictionary] = []
 	if not SHOP_DRESSING_TYPES.has(building_type) and not DRESSING_THEME_BY_TYPE.has(building_type):
 		return placements
-	var interior := interior_cells(component)
+	var interior := interior_cells(component, grid)
 	if interior.size() < 6:
 		return placements
 	var interior_set: Dictionary = {}
