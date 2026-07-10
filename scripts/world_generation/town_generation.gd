@@ -430,9 +430,10 @@ const DESERT_SKIPPED_DECOR: Array[String] = [
 ## Tundra towns sit on snow: the grass-family ground tiles swap to the
 ## painted-in snow tiles (mirrors DESERT_BASE_SWAP), and grassland greenery
 ## (bushes, hedges, blooms) is skipped so the settled area reads as winter.
-## The wind-bent conifers ("tree"/"tree_dark") are kept as evergreens, and
-## the path-fringe tiles swap to their snow recolors (appended atlas row 28)
-## so lanes scallop into the snowfield instead of sprouting grass.
+## The scatter trees ("tree"/"tree_dark") swap to their snow-capped variants
+## in _pick_decor_tile, and the path-fringe tiles swap to their snow recolors
+## (appended atlas row 28) so lanes scallop into the snowfield instead of
+## sprouting grass.
 const SNOW_BASE_SWAP := {
 	"grass": "snow",
 	"grass_dark": "snow_alt",
@@ -1659,10 +1660,16 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 		TILE_ATLAS.get("snow_alt", Vector2i(1, 26)) as Vector2i
 	]
 	# Every appended-row cell is addressed through the atlas table, so the
-	# augmented sheet just needs to reach the deepest mapped row.
+	# augmented sheet just needs to reach the deepest mapped row. Multi-cell
+	# tiles (the full trees) span extra rows below their mapped coordinate.
 	var max_row := 0
 	for coords_variant: Variant in TILE_ATLAS.values():
-		max_row = maxi(max_row, (coords_variant as Vector2i).y)
+		var mapped_coords := coords_variant as Vector2i
+		var row_span := 1
+		if TILE_ATLAS_DEFS.TOWN_MULTI_CELL_TILES.has(mapped_coords):
+			var multi_entry := TILE_ATLAS_DEFS.TOWN_MULTI_CELL_TILES[mapped_coords] as Dictionary
+			row_span = (multi_entry.get("size", Vector2i.ONE) as Vector2i).y
+		max_row = maxi(max_row, mapped_coords.y + row_span - 1)
 	var needed_height := maxi(base_image.get_height(), (max_row + 1) * tile_size.y)
 	var augmented := Image.create(base_image.get_width(), needed_height, false, Image.FORMAT_RGBA8)
 	augmented.blit_rect(base_image, Rect2i(Vector2i.ZERO, base_image.get_size()), Vector2i.ZERO)
@@ -1680,6 +1687,10 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 	# cellar rooms.
 	_paint_stair_tiles(augmented)
 	_paint_cellar_rock_tile(augmented)
+	# Lakeshore water plants (transparent decor over the animated water) and
+	# the snow-dusted copies of the two full-height trees.
+	_paint_water_plant_tiles(augmented)
+	_paint_snowy_tree_tiles(augmented)
 	return ImageTexture.create_from_image(augmented)
 
 ## The shipped sheet's flat water cells that seed the animation palette.
@@ -2163,6 +2174,237 @@ func _paint_cellar_rock_tile(image: Image) -> void:
 			elif fleck % 67 == 1:
 				tone = Color(0.075, 0.06, 0.05, 1.0)
 			image.set_pixel(origin.x + tx, origin.y + ty, tone)
+
+## --- painted water plants and snow trees --------------------------------------
+
+## The water-plant palette, tuned to sit on the sheet's blue water without
+## vanishing: mid pad green with a dark rim and a pale top-left highlight,
+## plus reed greens and a ghost-pale ripple ring.
+const PLANT_PAD_GREEN := Color(0.30, 0.55, 0.24, 1.0)
+const PLANT_PAD_DARK := Color(0.14, 0.33, 0.16, 1.0)
+const PLANT_PAD_LIGHT := Color(0.52, 0.74, 0.34, 1.0)
+const PLANT_REED_DARK := Color(0.16, 0.40, 0.19, 1.0)
+const PLANT_REED_LIGHT := Color(0.40, 0.65, 0.28, 1.0)
+const PLANT_RIPPLE := Color(0.78, 0.88, 0.96, 0.5)
+
+## One 2px art block of a painted plant tile (the sheet is a 2x upscale, so
+## all synthesized art works on the 16x16 block grid).
+func _plant_block(image: Image, origin: Vector2i, bx: int, by: int, color: Color) -> void:
+	if bx < 0 or by < 0 or bx > 15 or by > 15:
+		return
+	for py: int in range(2):
+		for px: int in range(2):
+			image.set_pixel(origin.x + bx * 2 + px, origin.y + by * 2 + py, color)
+
+## One round lily pad on the block grid: an ellipse with a notch wedge cut
+## toward notch_angle, a dark rim on boundary blocks, and a pale highlight
+## along the upper-left inner rim. Everything outside stays transparent.
+func _paint_lily_pad(image: Image, origin: Vector2i, center: Vector2, radius: Vector2, notch_angle: float) -> void:
+	var covered: Dictionary = {}
+	for by: int in range(16):
+		for bx: int in range(16):
+			var dx := (float(bx) - center.x) / radius.x
+			var dy := (float(by) - center.y) / radius.y
+			if dx * dx + dy * dy > 1.0:
+				continue
+			# The notch: a wedge from just off-center to the rim.
+			var block_angle := atan2(float(by) - center.y, float(bx) - center.x)
+			var offset_angle := absf(angle_difference(block_angle, notch_angle))
+			if offset_angle < 0.42 and dx * dx + dy * dy > 0.12:
+				continue
+			covered[Vector2i(bx, by)] = true
+	for block_variant: Variant in covered.keys():
+		var block := block_variant as Vector2i
+		var on_rim := false
+		for neighbor: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			if not covered.has(block + neighbor):
+				on_rim = true
+				break
+		var tone := PLANT_PAD_GREEN
+		if on_rim:
+			# Upper-left rim catches the light; the rest darkens to a rim line.
+			var toward_light := float(block.x) < center.x - 0.5 and float(block.y) < center.y + 0.5
+			tone = PLANT_PAD_LIGHT if toward_light else PLANT_PAD_DARK
+		elif (block.x * 73856093 ^ block.y * 19349663) % 11 == 0:
+			# Sparse dark speckle so big pads aren't one flat green plate.
+			tone = PLANT_PAD_DARK.lerp(PLANT_PAD_GREEN, 0.5)
+		_plant_block(image, origin, block.x, block.y, tone)
+
+## One reed clump: a handful of slim blades leaning off vertical, alternating
+## dark and light greens with lit tips, breaking the surface through a faint
+## pale ripple ring at the waterline.
+func _paint_reed_clump(image: Image, origin: Vector2i, mirrored: bool, salt: int) -> void:
+	var water_line := 12
+	# Ripple ring first, so blades draw over its middle.
+	for ripple_dx: int in range(-4, 5):
+		var lift := 1 if absi(ripple_dx) >= 3 else 0
+		if absi(ripple_dx) == 4:
+			lift = 2
+		_plant_block(image, origin, 7 + ripple_dx, water_line - lift + 1, PLANT_RIPPLE)
+	var blade_count := 5
+	for blade_index: int in range(blade_count):
+		var blade_hash := absi((salt * 31 + blade_index) * 92821)
+		var base_x := 3 + blade_index * 2 + blade_hash % 2
+		var height := 5 + blade_hash % 6
+		var lean := (blade_hash / 7) % 3 - 1
+		var tone := PLANT_REED_DARK if blade_index % 2 == 0 else PLANT_REED_LIGHT
+		for step: int in range(height):
+			var bx := base_x + (lean * step) / maxi(height - 1, 1)
+			if mirrored:
+				bx = 15 - bx
+			var blade_tone := tone
+			if step >= height - 2:
+				blade_tone = PLANT_REED_LIGHT.lerp(Color(0.62, 0.8, 0.42, 1.0), 0.5)
+			_plant_block(image, origin, bx, water_line - step, blade_tone)
+
+## Paints the five water-plant decor tiles into appended atlas row 46:
+## a single pad, a clustered pair (plus a sprout of a third), a flowering
+## white lily, and two mirrored reed clumps. All transparent-backed decor
+## drawn over the animated water bases.
+func _paint_water_plant_tiles(image: Image) -> void:
+	var keys: Array[String] = ["lily_pad", "lily_pad_pair", "lily_flower", "reeds", "reeds_alt"]
+	for plant_key: String in keys:
+		var coords := TILE_ATLAS.get(plant_key, Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var origin := coords * tile_size
+		# Clear to full transparency; the decor layer supplies the water.
+		for ty: int in range(tile_size.y):
+			for tx: int in range(tile_size.x):
+				image.set_pixel(origin.x + tx, origin.y + ty, Color(0, 0, 0, 0))
+		match plant_key:
+			"lily_pad":
+				_paint_lily_pad(image, origin, Vector2(7.5, 8.0), Vector2(5.4, 4.4), 0.6)
+			"lily_pad_pair":
+				_paint_lily_pad(image, origin, Vector2(5.0, 5.5), Vector2(4.2, 3.4), 2.6)
+				_paint_lily_pad(image, origin, Vector2(10.5, 11.0), Vector2(3.4, 2.8), -0.7)
+				_paint_lily_pad(image, origin, Vector2(12.5, 4.5), Vector2(2.0, 1.6), 1.8)
+			"lily_flower":
+				_paint_lily_pad(image, origin, Vector2(7.5, 8.5), Vector2(5.0, 4.2), -2.2)
+				# The white blossom: two petal layers and a warm center.
+				var petal := Color(0.95, 0.96, 0.99, 1.0)
+				var petal_shade := Color(0.82, 0.85, 0.93, 1.0)
+				for petal_offset: Vector2i in [
+						Vector2i(-2, 0), Vector2i(2, 0), Vector2i(0, -2), Vector2i(0, 2),
+						Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:
+					var layer_tone := petal if petal_offset.y <= 0 else petal_shade
+					_plant_block(image, origin, 7 + petal_offset.x, 7 + petal_offset.y, layer_tone)
+				for core_offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+					_plant_block(image, origin, 7 + core_offset.x, 7 + core_offset.y, petal)
+				_plant_block(image, origin, 7, 7, Color(0.95, 0.78, 0.30, 1.0))
+			"reeds":
+				_paint_reed_clump(image, origin, false, 3)
+			"reeds_alt":
+				_paint_reed_clump(image, origin, true, 11)
+
+## A snow-tree source pixel that belongs to the canopy (dustable): leafy
+## green, where green clearly leads red and blue. Trunk browns, the dark
+## sprite outline and transparent surround all refuse snow, so caps sit
+## INSIDE the tree's outline and the silhouette survives.
+func _snow_tree_pixel_is_canopy(color: Color) -> bool:
+	if color.a <= 0.5:
+		return false
+	return color.g8 > color.r8 + 12 and color.g8 > color.b8 + 12
+
+## Copies both full-height tree regions into their appended-row cells and
+## dusts them with snow: every canopy block whose upward neighbor is not
+## canopy (sky or a dark branch crease) starts a snow run 1-4 blocks deep
+## with hash jitter — deep white caps across the crown top, thinner dusting
+## along lower branch shoulders — and the bottom block of each run shades
+## pale blue so caps read as lying ON the foliage.
+func _paint_snowy_tree_tiles(image: Image) -> void:
+	for recipe: Array in [["tree", "tree_snowy"], ["tree_dark", "tree_dark_snowy"]]:
+		var source := TILE_ATLAS.get(String(recipe[0]), Vector2i(-1, -1)) as Vector2i
+		var target := TILE_ATLAS.get(String(recipe[1]), Vector2i(-1, -1)) as Vector2i
+		if source.x < 0 or target.x < 0:
+			continue
+		var multi := TILE_ATLAS_DEFS.TOWN_MULTI_CELL_TILES.get(source, {}) as Dictionary
+		var size_cells := multi.get("size", Vector2i.ONE) as Vector2i
+		var size_px := Vector2i(size_cells.x * tile_size.x, size_cells.y * tile_size.y)
+		var region := image.get_region(Rect2i(source * tile_size, size_px))
+		image.blit_rect(region, Rect2i(Vector2i.ZERO, size_px), target * tile_size)
+		_dust_snow_on_tree(image, target * tile_size, size_px, hash(String(recipe[1])))
+
+func _dust_snow_on_tree(image: Image, origin: Vector2i, size_px: Vector2i, salt: int) -> void:
+	var blocks_x := size_px.x / 2
+	var blocks_y := size_px.y / 2
+	var snow_top := Color(0.94, 0.96, 1.0, 1.0)
+	var snow_shade := Color(0.74, 0.81, 0.94, 1.0)
+	# The canopy mask is read before any snow is painted, so a finished cap
+	# can never seed a second run cascading down the crown.
+	var canopy: Array[bool] = []
+	canopy.resize(blocks_x * blocks_y)
+	# The sheet's own lit yellow-green (g >= 150) paints every upward-facing
+	# lobe surface, so it doubles as the shoulder-dusting mask below.
+	var lit: Array[bool] = []
+	lit.resize(blocks_x * blocks_y)
+	for by: int in range(blocks_y):
+		for bx: int in range(blocks_x):
+			var mask_pixel := image.get_pixel(origin.x + bx * 2, origin.y + by * 2)
+			canopy[by * blocks_x + bx] = _snow_tree_pixel_is_canopy(mask_pixel)
+			lit[by * blocks_x + bx] = canopy[by * blocks_x + bx] and mask_pixel.g8 >= 150
+	# A cap starts on an upward-facing canopy surface (canopy with no canopy
+	# above). Lone one-block starters on the near-vertical crown sides are
+	# rejected - they read as white flecks stuck to the outline - by asking
+	# for a horizontal starter neighbor, so only genuine tops and branch
+	# shoulders (flat runs) catch snow. The bottom rows are the ground fringe
+	# around the trunk and stay bare.
+	var starter: Array[bool] = []
+	starter.resize(blocks_x * blocks_y)
+	for by: int in range(blocks_y - 6):
+		for bx: int in range(blocks_x):
+			starter[by * blocks_x + bx] = canopy[by * blocks_x + bx] \
+				and (by == 0 or not canopy[(by - 1) * blocks_x + bx])
+	for bx: int in range(blocks_x):
+		for by: int in range(blocks_y):
+			if not starter[by * blocks_x + bx]:
+				continue
+			var left_starts := bx > 0 and starter[by * blocks_x + bx - 1]
+			var right_starts := bx < blocks_x - 1 and starter[by * blocks_x + bx + 1]
+			if not (left_starts or right_starts):
+				continue
+			# Caps run deeper near the crown (small by), thinner further down.
+			var depth := 1 + absi(salt + bx * 68917 + by * 92821) % 3
+			if by < blocks_y / 3:
+				depth += 2
+			var run := 0
+			for step: int in range(depth):
+				if by + step >= blocks_y or (step > 0 and not canopy[(by + step) * blocks_x + bx]):
+					break
+				run = step
+			for step: int in range(run + 1):
+				var tone := snow_shade if step == run and run > 0 else snow_top
+				for py: int in range(2):
+					for px: int in range(2):
+						image.set_pixel(origin.x + bx * 2 + px, origin.y + (by + step) * 2 + py, tone)
+	# Dusted branch shoulders: whole horizontal runs of the lit lobe surfaces
+	# frost over (snow lies along a branch, it doesn't speckle), more often
+	# near the crown, each streak closed by pale-blue shade on its underside.
+	for by: int in range(blocks_y - 6):
+		var bx := 0
+		while bx < blocks_x:
+			if not lit[by * blocks_x + bx]:
+				bx += 1
+				continue
+			var run_end := bx
+			while run_end + 1 < blocks_x and lit[by * blocks_x + run_end + 1]:
+				run_end += 1
+			var run_hash := absi(hash(Vector3i(salt, bx + by * 41, run_end)))
+			var keep_one_in := 3 if by * 3 > blocks_y else 2
+			if run_end - bx >= 1 and run_hash % keep_one_in == 0:
+				# Jittered ends keep streaks from tracing the art exactly.
+				var trim_left := run_hash / 7 % 2
+				var trim_right := run_hash / 13 % 2
+				for run_x: int in range(bx + trim_left, run_end + 1 - trim_right):
+					for py: int in range(2):
+						for px: int in range(2):
+							image.set_pixel(origin.x + run_x * 2 + px, origin.y + by * 2 + py, snow_top)
+					var under_index := (by + 1) * blocks_x + run_x
+					if run_x > bx and run_x < run_end and canopy[under_index] and not lit[under_index]:
+						for py: int in range(2):
+							for px: int in range(2):
+								image.set_pixel(origin.x + run_x * 2 + px, origin.y + (by + 1) * 2 + py, snow_shade)
+			bx = run_end + 1
 
 func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 	if _passable_atlas_set.is_empty():
@@ -3743,7 +3985,8 @@ func _build_farmsteads() -> void:
 ## removable greenery (trees, hedges, flowers) as decor.
 func _farmstead_site_fits(origin: Vector2i) -> bool:
 	var removable: Array[Vector2i] = []
-	for key: String in ["tree", "tree_dark", "hedge", "hedge_alt", "flowers_white",
+	for key: String in ["tree", "tree_dark", "tree_snowy", "tree_dark_snowy",
+			"hedge", "hedge_alt", "flowers_white",
 			"flowers_yellow", "flowers_pink", "flowers_pink_alt", "stump", "stump_alt"]:
 		removable.append(TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i)
 	for y in range(FARMSTEAD_SITE.y):
@@ -6068,8 +6311,10 @@ func _plan_landmark_prop(landmark: Dictionary, recipe: Dictionary) -> Dictionary
 			blocked[anchor + Vector2i.LEFT] = true
 			blocked[anchor + Vector2i.RIGHT] = true
 		"grove":
+			# Grove sentinels on snow ground wear the snow-capped variant.
+			var grove_tree := "tree_dark_snowy" if ground_family.begins_with("snow") else "tree_dark"
 			for offset: Vector2i in [Vector2i.ZERO, Vector2i(-3, 2), Vector2i(3, 2)]:
-				decor[anchor + offset] = "tree_dark"
+				decor[anchor + offset] = grove_tree
 				blocked[anchor + offset] = true
 		_:
 			return {}
@@ -6232,6 +6477,16 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 				var world_cell: Vector2i = cell + _surface_world_origin
 				if not _is_tree_anchor_cell(world_cell):
 					decor_key = _understory_decor_key(world_cell, base_key, danger)
+				elif base_key.begins_with("snow"):
+					# Snow-covered pines on tundra ground. The swap happens at
+					# placement only - the terrain field keeps answering
+					# tree/tree_dark, so the anchor-lattice and crown-suppression
+					# checks above and in _cell_under_tree_crown are untouched.
+					decor_key += "_snowy"
+			# Lakeshore water plants: lily pads and reed clumps over the shore
+			# shallows, where the water is within a few cells of dry land.
+			if decor_key.is_empty() and base_key.begins_with("water"):
+				decor_key = _water_plant_decor_key(cell)
 			# Roads cut through everything and stay clear of trees; a road cell
 			# is never a barrier, so a trail carves a pass through crags.
 			if _surface_road_cells.has(cell):
@@ -6309,6 +6564,105 @@ func _cell_under_tree_crown(world_cell: Vector2i, danger: float) -> bool:
 			if decor == "tree" or decor == "tree_dark":
 				return true
 	return false
+
+## Water plants stop at this Chebyshev distance from dry land: beyond it the
+## lake is open deep water and stays bare.
+const WATER_PLANT_MAX_SHORE_DISTANCE := 4
+## Per-distance placement chance (percent) inside a plant blob: dense right
+## off the bank, thinning to almost nothing at the deep edge of the shallows.
+const WATER_PLANT_DENSITY_BY_DISTANCE: Array[int] = [0, 60, 42, 22, 9]
+
+## The water-plant dressing for one painted water cell: lily pads (singles,
+## clustered pairs, the occasional flowering white lily) through the shore
+## shallows, reed clumps hugging the bank, nothing in open deep water. All
+## verdicts are deterministic per world cell - a coarse hash lattice gathers
+## the plants into shoreline blobs (reference style, not a uniform sprinkle)
+## and per-cell hash rolls pick the species - so re-streaming a lake rebuilds
+## the exact same beds. Snow-shored (tundra) water stays bare: green pads on
+## a winter lake read wrong against the snow-lapped fringe.
+func _water_plant_decor_key(cell: Vector2i) -> String:
+	var world_cell: Vector2i = cell + _surface_world_origin
+	# Coarse cluster gate first - it is cheap and rejects most open water
+	# before the ring scan below ever runs.
+	if _water_plant_blob_field(world_cell) < 0.60:
+		return ""
+	# Tundra water is winter water even when a sand ring separates it from
+	# the snowfield (the coast band), so the biome label backs up the
+	# snow-shore check below.
+	if SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, world_cell) == TILE_ATLAS_DEFS.BIOME_TUNDRA:
+		return ""
+	var shore := _water_shore_info(cell)
+	var shore_distance := int(shore.get("distance", WATER_PLANT_MAX_SHORE_DISTANCE + 1))
+	if shore_distance > WATER_PLANT_MAX_SHORE_DISTANCE:
+		return ""
+	if bool(shore.get("snow", false)):
+		return ""
+	var cell_hash := absi(world_cell.x * 73856093 ^ world_cell.y * 19349663)
+	if cell_hash % 100 >= WATER_PLANT_DENSITY_BY_DISTANCE[shore_distance]:
+		return ""
+	# Reeds break the surface right against the bank; pads float further out.
+	if shore_distance <= 2 and (cell_hash / 100) % 3 == 0:
+		return "reeds" if (cell_hash / 300) % 2 == 0 else "reeds_alt"
+	var pad_roll := (cell_hash / 900) % 8
+	if pad_roll == 0:
+		# The flowering share: one blossom per ~8 pad placements.
+		return "lily_flower"
+	if pad_roll <= 2:
+		return "lily_pad_pair"
+	return "lily_pad"
+
+## Where the shore is, seen from a water cell: expanding Chebyshev rings up
+## to the plant limit, answered from the same memoized deterministic terrain
+## families the fringe autotiling uses (painted ground where it exists, the
+## noise field where it doesn't), so verdicts are stable across re-streaming.
+## "snow" is true when the dry land on the nearest ring AND the ring behind
+## it is at least a third snow-family - winter lakes wear a one-cell sand
+## beach at the waterline, so the nearest ring alone would miss the
+## snowfield right behind it.
+func _water_shore_info(cell: Vector2i) -> Dictionary:
+	var nearest := 0
+	var land := 0
+	var snow_land := 0
+	for distance: int in range(1, WATER_PLANT_MAX_SHORE_DISTANCE + 2):
+		for dy: int in range(-distance, distance + 1):
+			for dx: int in range(-distance, distance + 1):
+				if maxi(absi(dx), absi(dy)) != distance:
+					continue
+				var family := _surface_cell_family(cell + Vector2i(dx, dy))
+				if family == "water":
+					continue
+				land += 1
+				if family.begins_with("snow"):
+					snow_land += 1
+		if land > 0 and nearest == 0:
+			nearest = distance
+		if nearest > 0 and distance >= nearest + 1:
+			break
+	if nearest == 0 or nearest > WATER_PLANT_MAX_SHORE_DISTANCE:
+		return {"distance": WATER_PLANT_MAX_SHORE_DISTANCE + 1, "snow": false}
+	return {"distance": nearest, "snow": snow_land * 3 >= land}
+
+## Value noise over world cells (hash lattice every 3 cells, smoothstepped
+## bilinear blend), the same trick as the town's dark-grass patches but with
+## its own salt: high-field cells form the multi-cell plant beds.
+func _water_plant_blob_field(world_cell: Vector2i) -> float:
+	var gx := int(floor(float(world_cell.x) / 3.0))
+	var gy := int(floor(float(world_cell.y) / 3.0))
+	var fx := (float(world_cell.x) - float(gx) * 3.0) / 3.0
+	var fy := (float(world_cell.y) - float(gy) * 3.0) / 3.0
+	fx = fx * fx * (3.0 - 2.0 * fx)
+	fy = fy * fy * (3.0 - 2.0 * fy)
+	var v00 := _water_plant_lattice_value(gx, gy)
+	var v10 := _water_plant_lattice_value(gx + 1, gy)
+	var v01 := _water_plant_lattice_value(gx, gy + 1)
+	var v11 := _water_plant_lattice_value(gx + 1, gy + 1)
+	return lerpf(lerpf(v00, v10, fx), lerpf(v01, v11, fx), fy)
+
+func _water_plant_lattice_value(gx: int, gy: int) -> float:
+	var value := (gx * 11 + 5) * 73856093 ^ (gy * 7 - 3) * 19349663
+	if value < 0:
+		value = -value
+	return float(value % 1024) / 1023.0
 
 ## Wilds road tile with the same grass-fringed autotiling the village lanes
 ## use: a side is "open" when its neighbor is grassy non-road ground, so
@@ -7828,7 +8182,12 @@ func _try_chop_tree(cell: Vector2i) -> bool:
 	if decor_layer.get_cell_source_id(cell) < 0:
 		return false
 	var atlas_coords := decor_layer.get_cell_atlas_coords(cell)
-	if atlas_coords != (TILE_ATLAS.get("tree") as Vector2i) and atlas_coords != (TILE_ATLAS.get("tree_dark") as Vector2i):
+	var choppable := false
+	for tree_key: String in ["tree", "tree_dark", "tree_snowy", "tree_dark_snowy"]:
+		if atlas_coords == (TILE_ATLAS.get(tree_key, Vector2i(-1, -1)) as Vector2i):
+			choppable = true
+			break
+	if not choppable:
 		return false
 	# Grab the tree's art before it is cleared so the break FX can topple a
 	# ghost of it; the tree leans away from the player as it falls.
@@ -8440,14 +8799,14 @@ func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: St
 	# The desert has no greenery: cacti and bones are scattered as sprites instead.
 	if _town_theme == "desert" and DESERT_SKIPPED_DECOR.has(decor_key):
 		return ""
-	# Snow towns skip grassland blooms and bushes and turn the leafy scatter
-	# trees into the darker evergreen so the settled area reads as a winter
-	# village, not a meadow.
+	# Snow towns skip grassland blooms and bushes, and their scatter trees
+	# stand snow-capped on the snow ground so the settled area reads as a
+	# winter village, not a meadow.
 	if _town_ground_biome == TILE_ATLAS_DEFS.BIOME_TUNDRA:
 		if SNOW_SKIPPED_DECOR.has(decor_key):
 			return ""
-		if decor_key == "tree":
-			return "tree_dark"
+		if decor_key == "tree" or decor_key == "tree_dark":
+			return decor_key + "_snowy"
 	return decor_key
 
 
