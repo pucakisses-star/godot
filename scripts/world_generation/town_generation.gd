@@ -197,6 +197,9 @@ var _surface_road_paths: Array[Array] = []
 var _direction_post_cells: Dictionary = {}
 var _surface_anchor_cells: Array[Vector2i] = []
 var _surface_creatures: Array[Dictionary] = []
+## Camp sites whose garrison was wiped out this visit ("x,y" site key ->
+## true): a cleared camp stays quiet until the scene is re-entered.
+var _camp_cleared_sites: Dictionary = {}
 var _surface_spawn_timer := 0.0
 var _surface_ambush_stamp := -1
 var _player_hp := PlayerStatsService.BASE_MAX_HP
@@ -3044,7 +3047,9 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		if decor_layer.get_cell_source_id(cap_cell) >= 0:
 			var cap_atlas := decor_layer.get_cell_atlas_coords(cap_cell)
 			for top_key_variant: Variant in TALL_DECOR_TOPS.values():
-				if cap_atlas == TILE_ATLAS.get(String(top_key_variant), Vector2i(-1000, -1000)) as Vector2i:
+				# Parenthesized: "as" binds looser than "==", so the bare cast
+				# tried to cast the comparison's bool and errored every pass.
+				if cap_atlas == (TILE_ATLAS.get(String(top_key_variant), Vector2i(-1000, -1000)) as Vector2i):
 					decor_layer.erase_cell(cap_cell)
 					_actor_passable_cache.erase(cap_cell)
 					break
@@ -4185,6 +4190,9 @@ func _update_faction_events() -> void:
 
 func _show_npc_dialogue(state: Dictionary) -> void:
 	var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
+	# Wilds keepers speak as their true calling, not the town role table.
+	if bool(state.get("wilds_keeper", false)):
+		role_title = String((state.get("identity", {}) as Dictionary).get("profession", role_title))
 	if not state.has("identity"):
 		state["identity"] = NpcIdentityService.generate(_rng, role_title, "townsfolk")
 		state["npc_name"] = String((state["identity"] as Dictionary).get("name", "A villager"))
@@ -4560,6 +4568,8 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 			return
 		if bool(npc_state.get("traveler", false)) and _try_open_traveler_trade(npc_state):
 			return
+		if bool(npc_state.get("wilds_keeper", false)) and _try_open_keeper_trade(npc_state):
+			return
 		_show_npc_dialogue(npc_state)
 		return
 	var shop_type := _shop_type_at_cell(clicked_cell)
@@ -4818,7 +4828,7 @@ func _update_npc_movement(delta: float) -> void:
 func _scheduled_states() -> Array[Dictionary]:
 	var living: Array[Dictionary] = []
 	for state: Dictionary in _npc_states:
-		if SettlementAfflictionService.is_active_zombie(state) or bool(state.get("traveler", false)) or bool(state.get("raid_duty", false)):
+		if SettlementAfflictionService.is_active_zombie(state) or bool(state.get("traveler", false)) or bool(state.get("raid_duty", false)) or bool(state.get("wilds_keeper", false)):
 			continue
 		living.append(state)
 	return living
@@ -4920,11 +4930,13 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	CompanionService.despawn(_companion)
 	_companion = {}
 	for state_index in range(_npc_states.size() - 1, -1, -1):
-		if bool(_npc_states[state_index].get("traveler", false)):
+		if bool(_npc_states[state_index].get("traveler", false)) or bool(_npc_states[state_index].get("wilds_keeper", false)):
 			var traveler_sprite := _npc_states[state_index].get("sprite") as Sprite2D
 			if traveler_sprite != null:
 				traveler_sprite.queue_free()
 			_npc_states.remove_at(state_index)
+	# A rebuilt scene garrisons its camps afresh.
+	_camp_cleared_sites.clear()
 	## Cellars are sealed underground interiors. The teardown above still
 	## ran (gates, creatures, caravans and travelers never survive the
 	## descent), but no wilds belong down here: clearing the noise set is
@@ -5209,6 +5221,43 @@ const AMBIENT_PROP_RECIPES := {
 	"old_growth": {"prop": "grove"}
 }
 
+## Hostile bands garrisoning war-class camps: camp structure id -> pool of
+## UndergroundCreatureService def indices whose art best fits the camp's
+## owner (orcs for orc/war camps, the swift lizardmen standing in for
+## gnoll and bandit packs, warlords for the troll/ogre dens).
+const AMBIENT_CAMP_HOSTILES := {
+	"war_camp": [6, 6, 7],
+	"orc_camp": [6, 6, 7], "orcCamp": [6, 6, 7],
+	"gnollCamp": [3, 3, 4], "gnoll_den": [3, 4, 4],
+	"trollCamp": [5, 7], "ogreCamp": [7, 7], "ogre_den": [7, 7],
+	"banditCamp": [3, 4, 6], "raider_camp": [4, 6, 6],
+	"thorn_camp": [3, 4, 5], "war_banner": [6, 7], "war_pyre": [6, 7, 7]
+}
+
+## Keepers of the friendly wilds buildings: structure id -> the professions
+## living there. Each entry becomes one named NPC with a full identity.
+const AMBIENT_KEEPER_ROSTER := {
+	"hermit_hut": ["Hermit"],
+	"chapel": ["Priest"], "temple": ["Priest"], "monastery": ["Priest"],
+	"cathedral": ["Priest", "Acolyte"],
+	"hunting_lodge": ["Hunter"],
+	"homestead": ["Settler", "Settler"],
+	"farmhouse": ["Settler", "Settler"],
+	"farm": ["Settler", "Settler"],
+	"watchtower": ["Watchman"],
+	"lumber_mill": ["Woodcutter"]
+}
+
+## Which existing stock pool a trading keeper opens: the hermit deals in
+## herbs and remedies, the hunter in cured meats, hides and provisions.
+const AMBIENT_KEEPER_STOCK := {"Hermit": "apothecary", "Hunter": "market_stall"}
+
+## Spoils rifled from a cleared war camp's tents: arms and armor fittings.
+const AMBIENT_CAMP_SPOILS: Array[String] = ["Forged Blade", "Iron Ingot", "Whetstone", "Leather Strap"]
+
+const AMBIENT_KEEPER_WANDER_RADIUS := 3
+const AMBIENT_KEEPER_STEP_SPEED := 30.0
+
 ## Legacy-save fallback: older worlds persisted only the icon's atlas
 ## coords, so map them back to a representative structure id. (3,1) is
 ## shared by the mine icon and the mountain homestead; both read fine as
@@ -5248,6 +5297,7 @@ func _stamp_landmarks_in_chunk(chunk: Vector2i, chunk_rect: Rect2i) -> void:
 			landmark["rect"] = plan.get("bounds", landmark.get("rect", Rect2i())) as Rect2i
 		_apply_landmark_plan_slice(landmark, plan, chunk, chunk_rect)
 		stamped_chunks[chunk] = true
+		_maybe_spawn_landmark_inhabitants(landmark, plan, chunk_rect)
 
 ## Applies the slice of a footprint plan inside one chunk: ground/decor
 ## tiles, blocked-cell registration, and the sprites (furniture pieces,
@@ -5352,6 +5402,12 @@ func _create_landmark_icon_sprite(atlas_coords: Vector2i, cell: Vector2i, icon_s
 ## cells); the ground tiles are erased by the chunk evictor itself via the
 ## painted-cell list. The plan is kept - re-streaming replays it verbatim.
 func _unstamp_surface_landmark_chunk(landmark: Dictionary, chunk: Vector2i, chunk_rect: Rect2i) -> void:
+	# Inhabitants live and die with the anchor's chunk: its eviction frees
+	# their sprites and states; re-streaming it spawns them anew (unless the
+	# camp was cleared this visit).
+	var plan := landmark.get("plan", {}) as Dictionary
+	if plan.has("anchor") and chunk_rect.has_point(plan.get("anchor", Vector2i.ZERO) as Vector2i):
+		_free_landmark_inhabitants(landmark)
 	var nodes_by_chunk := landmark.get("nodes_by_chunk", {}) as Dictionary
 	for node_variant: Variant in nodes_by_chunk.get(chunk, []) as Array:
 		var node := node_variant as Node
@@ -5374,6 +5430,7 @@ func _unstamp_surface_landmark_chunk(landmark: Dictionary, chunk: Vector2i, chun
 ## Full teardown of a landmark's spawned state (window exit or rebuild):
 ## every chunk's nodes and every blocked cell it registered.
 func _unstamp_surface_landmark_nodes(landmark: Dictionary) -> void:
+	_free_landmark_inhabitants(landmark)
 	var nodes_by_chunk := landmark.get("nodes_by_chunk", {}) as Dictionary
 	for chunk_variant: Variant in nodes_by_chunk.keys():
 		for node_variant: Variant in nodes_by_chunk.get(chunk_variant, []) as Array:
@@ -5391,6 +5448,209 @@ func _unstamp_surface_landmark_nodes(landmark: Dictionary) -> void:
 			_surface_landmark_blocked_cells.erase(cell)
 			_actor_passable_cache.erase(cell)
 	(landmark.get("stamped_chunks", {}) as Dictionary).clear()
+
+## --- Site inhabitants --------------------------------------------------------
+## The wilds' stage sets get their cast: war-class camps garrison a hostile
+## band from the surface creature pipeline, friendly buildings house their
+## keeper(s) with full identities. Everything rolls deterministically from
+## world seed + site tile, spawns when the chunk holding the site's anchor
+## streams in, and is freed when that chunk evicts.
+
+## Spawns a landmark's inhabitants the moment its anchor cell streams in.
+## Camps wiped out this visit stay quiet until scene re-entry.
+func _maybe_spawn_landmark_inhabitants(landmark: Dictionary, plan: Dictionary, chunk_rect: Rect2i) -> void:
+	if bool(landmark.get("inhabited", false)) or not bool(plan.get("ok", false)):
+		return
+	if not plan.has("anchor"):
+		return
+	var anchor := plan.get("anchor", Vector2i.ZERO) as Vector2i
+	if not chunk_rect.has_point(anchor):
+		return
+	var structure_id := String(landmark.get("structure", ""))
+	if AMBIENT_CAMP_HOSTILES.has(structure_id):
+		landmark["inhabited"] = true
+		if not _camp_cleared_sites.has(String(landmark.get("key", ""))):
+			_spawn_camp_hostiles(landmark, plan, structure_id)
+	elif AMBIENT_KEEPER_ROSTER.has(structure_id):
+		landmark["inhabited"] = true
+		_spawn_site_keepers(landmark, plan, structure_id)
+
+## Open ground to stand on inside a footprint: plan cells in the anchor's
+## own chunk (the one whose streaming triggered the spawn, so the pick is
+## independent of which neighbor chunks happen to be in), unblocked and
+## walkable, shuffled by the site's seeded rng.
+func _landmark_spawn_cells(plan: Dictionary, rng: RandomNumberGenerator, count: int) -> Array[Vector2i]:
+	var anchor := plan.get("anchor", Vector2i.ZERO) as Vector2i
+	var anchor_chunk_rect: Rect2i = SurfaceWorldService.chunk_rect(SurfaceWorldService.chunk_for_cell(anchor))
+	var blocked := plan.get("blocked", {}) as Dictionary
+	var open_cells: Array[Vector2i] = []
+	for cell_variant: Variant in (plan.get("ground", {}) as Dictionary).keys():
+		var cell := cell_variant as Vector2i
+		if cell == anchor or blocked.has(cell) or not anchor_chunk_rect.has_point(cell):
+			continue
+		if not _is_walkable_cell(cell) or _is_cell_occupied_by_npc(cell):
+			continue
+		open_cells.append(cell)
+	# Dictionary key order is not contractual; sort before the seeded
+	# shuffle so the same site always seats its folk on the same cells.
+	open_cells.sort()
+	_seeded_shuffle_with(open_cells, rng)
+	if open_cells.size() > count:
+		open_cells.resize(count)
+	return open_cells
+
+## A war camp's garrison: 2-4 hostiles from the camp's def pool, leashed to
+## the fire, run by the same AI/combat/loot pipeline as every wild creature.
+func _spawn_camp_hostiles(landmark: Dictionary, plan: Dictionary, structure_id: String) -> void:
+	var site_key := String(landmark.get("key", ""))
+	var tile := landmark.get("tile", Vector2i.ZERO) as Vector2i
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s|garrison|%d,%d" % [_surface_world_seed_text, tile.x, tile.y])
+	var pool := AMBIENT_CAMP_HOSTILES.get(structure_id, []) as Array
+	if pool.is_empty():
+		return
+	var band_size := rng.randi_range(2, 4)
+	var anchor := plan.get("anchor", Vector2i.ZERO) as Vector2i
+	for cell: Vector2i in _landmark_spawn_cells(plan, rng, band_size):
+		var def_index := int(pool[rng.randi_range(0, pool.size() - 1)])
+		var size_before := _surface_creatures.size()
+		SurfaceLifeService.spawn_creature(
+			_surface_creatures, SURFACE_CREATURE_TEXTURE, def_index,
+			cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, rng, true
+		)
+		if _surface_creatures.size() > size_before:
+			var creature := _surface_creatures[_surface_creatures.size() - 1]
+			creature["site_key"] = site_key
+			creature["home_cell"] = anchor
+
+## A friendly building's keeper(s): named, composed townsfolk sprites with
+## identities seeded from world seed + site tile, so the same hermit greets
+## every visit. Keepers anchor to their site and never join town schedules.
+func _spawn_site_keepers(landmark: Dictionary, plan: Dictionary, structure_id: String) -> void:
+	var site_key := String(landmark.get("key", ""))
+	var tile := landmark.get("tile", Vector2i.ZERO) as Vector2i
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s|keeper|%d,%d" % [_surface_world_seed_text, tile.x, tile.y])
+	var roster := AMBIENT_KEEPER_ROSTER.get(structure_id, []) as Array
+	var cells := _landmark_spawn_cells(plan, rng, roster.size())
+	for keeper_index in range(mini(roster.size(), cells.size())):
+		var profession := String(roster[keeper_index])
+		var identity: Dictionary = NpcIdentityService.generate(rng, profession, "human")
+		var layers: Dictionary = NpcIdentityService.appearance_for_identity(identity, "human")
+		var sprite := Sprite2D.new()
+		sprite.texture = DwarfSpriteComposer.compose(layers)
+		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sprite.scale = Vector2(float(tile_size.x) / 32.0, float(tile_size.y) / 32.0) * float(layers.get("body_scale", 1.0))
+		sprite.z_index = 11
+		var cell := cells[keeper_index]
+		sprite.position = _cell_center_position(cell)
+		actor_layer.add_child(sprite)
+		_npc_states.append({
+			"wilds_keeper": true,
+			"site_key": site_key,
+			"role": ROLE_VILLAGER,
+			"identity": identity,
+			"npc_name": String(identity.get("name", "A keeper")),
+			"composed": true,
+			"cell": cell,
+			"sprite": sprite,
+			"home_cell": cell,
+			"work_cell": plan.get("anchor", cell) as Vector2i,
+			"wander_timer": rng.randf_range(1.0, 3.0),
+			# Synthetic far-away stock anchor, unique and stable per keeper,
+			# for the traveler-style trade popup.
+			"shop_anchor": Vector2i(3000000 + tile.x * 8 + keeper_index, tile.y)
+		})
+
+## Frees every creature and keeper belonging to a site (chunk eviction,
+## window exit, or full rebuild). Live garrisons return on re-stream.
+func _free_landmark_inhabitants(landmark: Dictionary) -> void:
+	if not bool(landmark.get("inhabited", false)):
+		return
+	landmark["inhabited"] = false
+	var site_key := String(landmark.get("key", ""))
+	for index in range(_surface_creatures.size() - 1, -1, -1):
+		if String(_surface_creatures[index].get("site_key", "")) != site_key:
+			continue
+		var creature_sprite := _surface_creatures[index].get("sprite") as Sprite2D
+		if creature_sprite != null:
+			creature_sprite.queue_free()
+		_surface_creatures.remove_at(index)
+	for index in range(_npc_states.size() - 1, -1, -1):
+		if String(_npc_states[index].get("site_key", "")) != site_key:
+			continue
+		var keeper_sprite := _npc_states[index].get("sprite") as Sprite2D
+		if keeper_sprite != null:
+			keeper_sprite.queue_free()
+		_npc_states.remove_at(index)
+
+## When the last of a camp's band falls this visit, the site is cleared:
+## the tents give up their plunder (war camps hoard arms) and the camp
+## stays quiet until the scene is re-entered.
+func _note_camp_creature_down(site_key: String) -> void:
+	for creature: Dictionary in _surface_creatures:
+		if String(creature.get("site_key", "")) == site_key:
+			return
+	_camp_cleared_sites[site_key] = true
+	var plunder := 8 + _rng.randi_range(0, 12)
+	_adjust_coins(plunder)
+	var spoil := AMBIENT_CAMP_SPOILS[_rng.randi_range(0, AMBIENT_CAMP_SPOILS.size() - 1)]
+	_add_to_inventory(spoil, 1)
+	GameAudioService.play_sfx(self, "coin")
+	_set_save_status("Camp cleared! You plunder %d coins and a %s from the tents." % [plunder, spoil], Color(0.7, 0.95, 0.7, 1.0))
+
+## Keepers idle around their doorstep: a short wander leashed to the home
+## cell, never following the town scheduler and never leaving the site.
+func _update_wilds_keepers(delta: float) -> void:
+	for state: Dictionary in _npc_states:
+		if not bool(state.get("wilds_keeper", false)):
+			continue
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		state["wander_timer"] = float(state.get("wander_timer", 0.0)) - delta
+		if float(state.get("wander_timer", 0.0)) <= 0.0:
+			state["wander_timer"] = _rng.randf_range(2.0, 5.0)
+			var home := state.get("home_cell", state.get("cell", Vector2i.ZERO)) as Vector2i
+			var cell := state.get("cell", home) as Vector2i
+			var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
+			var step := directions[_rng.randi_range(0, 3)]
+			var target := cell + step
+			if maxi(absi(target.x - home.x), absi(target.y - home.y)) <= AMBIENT_KEEPER_WANDER_RADIUS \
+					and _is_walkable_cell(target) and not _is_cell_occupied_by_npc(target) \
+					and target != _player_cell and _surface_creature_index_at_cell(target) < 0:
+				state["cell"] = target
+				sprite.flip_h = step.x < 0
+		var target_position := _cell_center_position(state.get("cell", Vector2i.ZERO) as Vector2i)
+		sprite.position = sprite.position.move_toward(target_position, AMBIENT_KEEPER_STEP_SPEED * delta)
+
+## Hermits and hunters trade from their doorstep, traveler-style: a
+## synthetic stock anchor keyed to the site, stock rolled once per scene
+## from the keeper's own name, leash measured from where they stand.
+func _try_open_keeper_trade(state: Dictionary) -> bool:
+	var profession := String((state.get("identity", {}) as Dictionary).get("profession", ""))
+	if not AMBIENT_KEEPER_STOCK.has(profession):
+		return false
+	var stock_type := String(AMBIENT_KEEPER_STOCK[profession])
+	var anchor := state.get("shop_anchor", Vector2i(3000001, 0)) as Vector2i
+	if not _shop_stocks.has(anchor):
+		var stock_rng := RandomNumberGenerator.new()
+		stock_rng.seed = hash(String((state.get("identity", {}) as Dictionary).get("name", "keeper")))
+		_shop_stocks[anchor] = SettlementEconomyService.generate_shop_stock(stock_type, stock_rng)
+	_selected_chest_cell = Vector2i(2147483647, 2147483647)
+	_trade_shop_cell = anchor
+	# The leash measures from where the keeper stands, not the synthetic
+	# far-away stock anchor, so a single step can't slam the popup shut.
+	_trade_leash_cell = state.get("cell", _player_cell) as Vector2i
+	_trade_shop_type = stock_type
+	chest_popup.visible = true
+	chest_popup_title.text = "Trade — %s" % String(state.get("npc_name", "A keeper"))
+	chest_popup_take_all_button.disabled = true
+	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
+	if section_label != null:
+		section_label.text = _with_market_hint("Wares on offer")
+	_refresh_trade_panel()
+	return true
 
 ## --- Footprint planning ----------------------------------------------------
 
@@ -5539,7 +5799,7 @@ func _plan_landmark_building(landmark: Dictionary, recipe: Dictionary, rng: Rand
 				sprites.append({"type": "glow", "cell": base_cell, "radius": 2.4, "color": AMBIENT_GLOW_WARM})
 	sprites.append({"type": "label", "cell": Vector2i(footprint.position.x, footprint.position.y - 2)})
 	return {
-		"ok": true, "kind": "building",
+		"ok": true, "kind": "building", "anchor": anchor,
 		"ground": ground, "decor": decor, "blocked": blocked,
 		"sprites": sprites, "bounds": apron.grow(1)
 	}
@@ -5605,7 +5865,7 @@ func _plan_landmark_camp(landmark: Dictionary, recipe: Dictionary, rng: RandomNu
 		decor[clutter_cell] = clutter_pool[rng.randi_range(0, clutter_pool.size() - 1)]
 	sprites.append({"type": "label", "cell": anchor + Vector2i(-3, -5)})
 	return {
-		"ok": true, "kind": "camp",
+		"ok": true, "kind": "camp", "anchor": anchor,
 		"ground": ground, "decor": decor, "blocked": blocked,
 		"sprites": sprites, "bounds": Rect2i(anchor - Vector2i(5, 5), Vector2i(11, 11))
 	}
@@ -6309,6 +6569,7 @@ func _update_surface_life(delta: float) -> void:
 		Callable(self, "_damage_player")
 	)
 	SurfaceLifeService.despawn_far_creatures(_surface_creatures, _player_cell)
+	_update_wilds_keepers(delta)
 	var finished: Array[int] = SurfaceLifeService.update_travelers(delta, _npc_states, Callable(self, "_cell_center_position"))
 	for finished_position in range(finished.size() - 1, -1, -1):
 		var state_index := finished[finished_position]
@@ -6440,8 +6701,12 @@ func _strike_surface_creature(creature_index: int, damage: int) -> void:
 	if sprite != null:
 		_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
 		sprite.queue_free()
+	var fallen_site_key := String(state.get("site_key", ""))
 	_surface_creatures.remove_at(creature_index)
 	_set_save_status("The %s falls — %d coins scavenged." % [creature_name, coins], Color(0.85, 0.95, 0.7, 1.0))
+	# The last of a camp's garrison marks the site cleared (with plunder).
+	if not fallen_site_key.is_empty():
+		_note_camp_creature_down(fallen_site_key)
 
 ## --- The homestead layer ---------------------------------------------------
 ## Everything the player owns above ground: built walls and floors, tilled
