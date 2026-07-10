@@ -554,10 +554,13 @@ const TOWN_TILE_ATLAS := {
 	"fence_cap_s": Vector2i(8, 6),
 	"fence_cap_e": Vector2i(9, 9),
 	"fence_cap_w": Vector2i(11, 9),
-	# Green-ground scatter: cut stumps, a fallen branch (passable litter).
+	# Green-ground scatter: cut stumps (passable litter).
 	"stump": Vector2i(0, 13),
 	"stump_alt": Vector2i(2, 13),
-	"branch": Vector2i(5, 16),
+	# (5,16) is a wooden direction post with pointing arms — not fallen-
+	# branch debris. It is placed deliberately at lane junctions, never in
+	# the natural scatter pools.
+	"direction_post": Vector2i(5, 16),
 	# The village well: a 2x2 composition — stone basin pair below, roofed
 	# crank pair above. The base cells block movement, the roof halves are
 	# passable visual caps (same convention as the *_top furniture keys).
@@ -726,8 +729,8 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	"tilled_edge_ns", "tilled_edge_we", "tilled_tip_n", "tilled_tip_s",
 	"tilled_tip_w", "tilled_tip_e", "tilled_island",
 	"plaza", "plaza_alt", "plaza_c", "plaza_d",
-	# A fallen branch is ground litter, not a barrier.
-	"branch",
+	# A direction post is a slim marker beside the lane, not a barrier.
+	"direction_post",
 	"floor", "door", "rug",
 	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",
 	"forge_top", "oven_top", "well_roof_left", "well_roof_right",

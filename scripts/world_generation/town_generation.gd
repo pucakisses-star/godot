@@ -192,6 +192,9 @@ var _surface_landmark_blocked_cells: Dictionary = {}
 var _surface_world_seed_text := ""
 var _surface_arrival_lock := false
 var _surface_road_paths: Array[Array] = []
+## Grass cells beside lane junctions that host a wooden direction post,
+## planned by the lane tracer and rendered through _pick_decor_tile.
+var _direction_post_cells: Dictionary = {}
 var _surface_anchor_cells: Array[Vector2i] = []
 var _surface_creatures: Array[Dictionary] = []
 var _surface_spawn_timer := 0.0
@@ -410,7 +413,7 @@ const DESERT_BASE_SWAP := {
 const DESERT_SKIPPED_DECOR: Array[String] = [
 	"tree", "tree_dark", "hedge", "hedge_alt",
 	"flowers_white", "flowers_yellow", "flowers_pink", "flowers_pink_alt",
-	"stump", "stump_alt", "branch"
+	"stump", "stump_alt"
 ]
 ## Tundra towns sit on snow: the grass-family ground tiles swap to the
 ## painted-in snow tiles (mirrors DESERT_BASE_SWAP), and grassland greenery
@@ -2664,6 +2667,41 @@ func _trace_village_lanes(grid: Dictionary, door_cells: Dictionary) -> void:
 				best_distance = candidate_distance
 				target = spine_cell
 		_carve_winding_lane(grid, entry, target, spine)
+	_plan_direction_posts(grid)
+
+## Wooden direction posts stand beside a handful of lane junctions (hall
+## cells where three or more lane arms meet), on the grass just off the
+## lane, so crossroads read as signed crossroads. Deterministic per seed
+## and sparse: a hash gate plus a hard cap keeps it to a few per town.
+func _plan_direction_posts(grid: Dictionary) -> void:
+	_direction_post_cells.clear()
+	var junctions: Array[Vector2i] = []
+	for key_variant: Variant in grid.keys():
+		var cell := key_variant as Vector2i
+		if int(grid[cell]) != CELL_HALL:
+			continue
+		var arms := 0
+		for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			var neighbor_zone := int(grid.get(cell + direction, CELL_ROCK))
+			if neighbor_zone == CELL_HALL or neighbor_zone == CELL_PLAZA:
+				arms += 1
+		if arms >= 3 and absi(cell.x * 92821 ^ cell.y * 68917) % 9 == 0:
+			junctions.append(cell)
+	junctions.sort_custom(func(cell_a: Vector2i, cell_b: Vector2i) -> bool:
+		return cell_a < cell_b
+	)
+	for junction: Vector2i in junctions:
+		if _direction_post_cells.size() >= 6:
+			break
+		for direction: Vector2i in [Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.DOWN]:
+			var post_cell := junction + direction
+			# The post wants open grass beside the lane, clear of other posts.
+			if int(grid.get(post_cell, CELL_ROCK)) != CELL_ROCK:
+				continue
+			if _direction_post_cells.has(post_cell):
+				continue
+			_direction_post_cells[post_cell] = true
+			break
 
 func _carve_winding_lane(grid: Dictionary, from_cell: Vector2i, to_cell: Vector2i, spine: Array[Vector2i]) -> void:
 	## Most lanes are 2 tiles wide; roughly a third widen to 3.
@@ -3600,7 +3638,7 @@ func _build_farmsteads() -> void:
 func _farmstead_site_fits(origin: Vector2i) -> bool:
 	var removable: Array[Vector2i] = []
 	for key: String in ["tree", "tree_dark", "hedge", "hedge_alt", "flowers_white",
-			"flowers_yellow", "flowers_pink", "flowers_pink_alt", "stump", "stump_alt", "branch"]:
+			"flowers_yellow", "flowers_pink", "flowers_pink_alt", "stump", "stump_alt"]:
 		removable.append(TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i)
 	for y in range(FARMSTEAD_SITE.y):
 		for x in range(FARMSTEAD_SITE.x):
@@ -5826,7 +5864,7 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			if decor_key == "tree" or decor_key == "tree_dark":
 				var world_cell: Vector2i = cell + _surface_world_origin
 				if not _is_tree_anchor_cell(world_cell):
-					decor_key = _understory_decor_key(world_cell, base_key)
+					decor_key = _understory_decor_key(world_cell, base_key, danger)
 			# Roads cut through everything and stay clear of trees; a road cell
 			# is never a barrier, so a trail carves a pass through crags.
 			if _surface_road_cells.has(cell):
@@ -5867,21 +5905,43 @@ func _is_tree_anchor_cell(world_cell: Vector2i) -> bool:
 	return posmod(world_cell.x + row_jog, 2) == 0
 
 ## What grows where a too-crowded tree was thinned out: mostly open ground,
-## with occasional bushes, stumps and fallen branches so the forest floor
-## keeps its clutter. Bushes stay off snow and sand (leafy green reads
-## wrong there); stumps and branches suit any ground.
-func _understory_decor_key(world_cell: Vector2i, base_key: String) -> String:
+## with occasional bushes and stumps so the forest floor keeps its clutter.
+## Bushes stay off snow and sand (leafy green reads wrong there); stumps
+## suit any ground. Nothing grows under a neighboring tree's crown: the
+## overhanging canopy art would be overdrawn by decor placed there.
+func _understory_decor_key(world_cell: Vector2i, base_key: String, danger: float) -> String:
 	var cell_hash := absi(world_cell.x * 73856093 ^ world_cell.y * 19349663)
 	var roll := cell_hash % 12
+	if roll > 3:
+		return ""
+	if _cell_under_tree_crown(world_cell, danger):
+		return ""
 	if roll <= 1:
 		if base_key.begins_with("snow") or base_key.begins_with("sand"):
 			return ""
 		return "hedge" if roll == 0 else "hedge_alt"
-	if roll == 2:
-		return "stump" if cell_hash % 5 != 0 else "stump_alt"
-	if roll == 3:
-		return "branch"
-	return ""
+	return "stump" if cell_hash % 5 != 0 else "stump_alt"
+
+## Whether a nearby lattice anchor holds a tree whose 3-cell-wide crown
+## (up to two rows above the anchor) visually covers this cell. Only the
+## few candidate anchors in the crown window are tested, with the same
+## deterministic terrain field the chunk painter uses, so the verdict is
+## stable across streaming and re-streaming.
+func _cell_under_tree_crown(world_cell: Vector2i, danger: float) -> bool:
+	for anchor_y: int in range(world_cell.y, world_cell.y + 3):
+		for anchor_x: int in range(world_cell.x - 2, world_cell.x + 1):
+			var anchor := Vector2i(anchor_x, anchor_y)
+			if anchor == world_cell or not _is_tree_anchor_cell(anchor):
+				continue
+			var scene_cell := anchor - _surface_world_origin
+			# Cells the town rendered or a road claimed never get a tree.
+			if _latest_grid.has(scene_cell) or _surface_road_cells.has(scene_cell):
+				continue
+			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(anchor, _surface_noise, danger, _surface_biome_ctx)
+			var decor := String(terrain.get("decor", ""))
+			if decor == "tree" or decor == "tree_dark":
+				return true
+	return false
 
 ## Wilds road tile with the same grass-fringed autotiling the village lanes
 ## use: a side is "open" when its neighbor is grassy non-road ground, so
@@ -7993,6 +8053,9 @@ func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: St
 	# No shrubs or grass tufts sprout on the open sea.
 	if _wild_water and (base_tile == "water" or base_tile == "water_calm"):
 		return ""
+	# Direction posts stand where the lane tracer marked a junction.
+	if _direction_post_cells.has(Vector2i(x, y)):
+		return "direction_post"
 	# Nothing grows in the cellar's solid earth: no trees, hedges or blooms
 	# scattered over undug rock (interior furniture still places normally).
 	if _is_underground_level() and cell == CELL_ROCK:
