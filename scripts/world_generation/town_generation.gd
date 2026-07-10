@@ -173,6 +173,20 @@ var _surface_gate_labels: Array[Label] = []
 var _surface_landmarks: Array[Dictionary] = []
 var _surface_landmark_layer: Node2D = null
 var _surface_landmark_atlas_texture: Texture2D = null
+## Sliding site window: the whole overworld gazetteer, cached once per
+## surface build, is projected into the wilds around the player's CURRENT
+## overworld tile instead of one-shot around the entered settlement.
+var _surface_all_sites: Array = []
+var _surface_own_tile := Vector2i.ZERO
+var _surface_window_tile := Vector2i(2147483647, 2147483647)
+var _surface_planned_site_keys: Dictionary = {}
+## Roads persist once traced (trails stay), so re-entering the window
+## never re-traces; keyed by site key.
+var _surface_site_road_traced: Dictionary = {}
+## Cells blocked by stamped landmark footprints (furniture, props, tents),
+## keyed cell -> site key so per-site unstamps release exactly their own.
+var _surface_landmark_blocked_cells: Dictionary = {}
+var _surface_world_seed_text := ""
 var _surface_arrival_lock := false
 var _surface_road_paths: Array[Array] = []
 var _surface_anchor_cells: Array[Vector2i] = []
@@ -1997,6 +2011,9 @@ func _compute_passable_cell_for_actor(cell: Vector2i) -> bool:
 	# movement; roads never enter this set, so passes stay open.
 	if _surface_blocked_cells.has(cell):
 		return false
+	# Stamped ambient footprints: tents, props and furniture in the wilds.
+	if _surface_landmark_blocked_cells.has(cell):
+		return false
 	if _farm_blocked_cells.has(cell) or _furnishing_blocked_cells.has(cell):
 		return false
 	if city_layer.get_cell_source_id(cell) < 0:
@@ -2683,7 +2700,6 @@ func _show_level(target_level_index: int) -> void:
 	_shop_stocks.clear()
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
-	_spawn_surface_landmarks()
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
 	_furnish_interiors(grid)
@@ -4534,7 +4550,10 @@ const SURFACE_EVICT_RADIUS := 4
 ## to that site's own scene.
 const WORLD_CELLS_PER_OVERWORLD_TILE := 64
 const SURFACE_SITE_REACH_TILES := 20
-const SURFACE_ROAD_COUNT := 4
+## A settlement entering the window only earns a connecting road when the
+## nearest network anchor is within this many cells, so trails stay local
+## instead of spanning the map corner to corner.
+const SURFACE_ROAD_MAX_CELLS := 14 * WORLD_CELLS_PER_OVERWORLD_TILE
 
 func _setup_surface_world(grid: Dictionary) -> void:
 	for gate_label: Label in _surface_gate_labels:
@@ -4545,7 +4564,16 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	_surface_blocked_cells.clear()
 	_surface_road_paths.clear()
 	_surface_gates.clear()
+	# Landmark sprites (furnishing pieces, glows, icons, labels) live on the
+	# decor/actor/city layers; free them explicitly before dropping the list.
+	for landmark: Dictionary in _surface_landmarks:
+		_unstamp_surface_landmark_nodes(landmark)
 	_surface_landmarks.clear()
+	_surface_planned_site_keys.clear()
+	_surface_site_road_traced.clear()
+	_surface_landmark_blocked_cells.clear()
+	_surface_all_sites = []
+	_surface_window_tile = Vector2i(2147483647, 2147483647)
 	if _surface_landmark_layer != null and is_instance_valid(_surface_landmark_layer):
 		for child: Node in _surface_landmark_layer.get_children():
 			child.queue_free()
@@ -4576,6 +4604,7 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	if game_session != null and game_session.has_method("get_world_settings"):
 		settings = game_session.call("get_world_settings")
 	var world_seed_text := str(settings.get("world_seed", seed_text))
+	_surface_world_seed_text = world_seed_text
 	_surface_noise = SurfaceWorldService.make_noise_set(hash("surface|%s" % world_seed_text))
 	var min_cell := Vector2i(2147483647, 2147483647)
 	var max_cell := Vector2i(-2147483648, -2147483648)
@@ -4606,59 +4635,123 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	else:
 		var town_centre_world_cell := own_tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2)
 		_town_ground_biome = SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, town_centre_world_cell)
-	_plan_surface_sites(own_tile, bbox_center, settings)
+	# The whole gazetteer rides along; the sliding window (re-evaluated as
+	# the walker crosses overworld-tile boundaries) decides which sites are
+	# live as gates and landmark footprints at any moment.
+	_surface_all_sites = WorldSitesService.sites_from_settings(settings)
+	_surface_own_tile = own_tile
+	_surface_anchor_cells.append(bbox_center)
+	_refresh_surface_site_window(own_tile)
 	_restore_homestead(settings)
 
-## Neighboring gazetteer sites become gates in the wilds, the nearest
-## few joined to town by a dirt road.
-func _plan_surface_sites(own_tile: Vector2i, town_center: Vector2i, settings: Dictionary) -> void:
-	var reachable: Array[Dictionary] = []
-	for site_variant: Variant in WorldSitesService.sites_from_settings(settings):
+## The overworld tile a wilds cell stands on, in shared world space.
+func _overworld_tile_for_cell(cell: Vector2i) -> Vector2i:
+	var world_cell := cell + _surface_world_origin
+	return Vector2i(
+		int(floor(float(world_cell.x) / float(WORLD_CELLS_PER_OVERWORLD_TILE))),
+		int(floor(float(world_cell.y) / float(WORLD_CELLS_PER_OVERWORLD_TILE))))
+
+## Re-evaluates the sliding site window around the given overworld tile:
+## gazetteer sites entering the window get planned (gates registered,
+## footprints queued for stamping when their chunks stream), sites leaving
+## get unplanned. Enter/exit radii differ so a walker pacing a tile border
+## doesn't thrash plans. Entering sites are planned nearest-first so each
+## new road connects to the closest part of the growing network.
+const SURFACE_SITE_WINDOW_EXIT_TILES := SURFACE_SITE_REACH_TILES + 2
+
+func _refresh_surface_site_window(center_tile: Vector2i) -> void:
+	_surface_window_tile = center_tile
+	var entering: Array[Dictionary] = []
+	for site_variant: Variant in _surface_all_sites:
 		var site := site_variant as Dictionary
 		var tile: Vector2i = WorldSitesService.site_tile(site)
-		if tile == own_tile:
+		if tile == _surface_own_tile:
 			continue
-		var tile_distance := maxi(absi(tile.x - own_tile.x), absi(tile.y - own_tile.y))
-		if tile_distance > SURFACE_SITE_REACH_TILES:
-			continue
-		var anchor: Vector2i = tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2) - _surface_world_origin
-		# Ambient structures are non-enterable scenery: raise them as landmarks
-		# rather than gates, at their true walking distance from town.
-		if String(site.get("class", "")) == "ambient":
-			_register_surface_landmark(site, anchor)
-			continue
-		if WorldSitesService.scene_path_for(site).is_empty():
-			continue
-		reachable.append({"site": site, "anchor": anchor, "distance": tile_distance})
-	reachable.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var site_key := "%d,%d" % [tile.x, tile.y]
+		var tile_distance := maxi(absi(tile.x - center_tile.x), absi(tile.y - center_tile.y))
+		if _surface_planned_site_keys.has(site_key):
+			if tile_distance > SURFACE_SITE_WINDOW_EXIT_TILES:
+				_unplan_surface_site(site_key)
+		elif tile_distance <= SURFACE_SITE_REACH_TILES:
+			entering.append({"site": site, "key": site_key, "distance": tile_distance})
+	entering.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return int(a.get("distance", 0)) < int(b.get("distance", 0)))
-	_surface_anchor_cells.append(town_center)
-	for entry_index in reachable.size():
-		var entry := reachable[entry_index]
-		var anchor := entry.get("anchor", Vector2i.ZERO) as Vector2i
-		# Settlements greet from their whole clearing; a hold's carved
-		# mountain door and a dungeon's mouth only open at the door itself.
-		var trigger_cells: Array[Vector2i] = []
-		match String((entry.get("site", {}) as Dictionary).get("class", "")):
-			"dwarfhold", "dungeon":
-				trigger_cells = [anchor, anchor + Vector2i(0, 1)]
-		_surface_gates.append({
-			"rect": Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7)),
-			"anchor": anchor,
-			"site": entry.get("site", {}),
-			"stamped": false,
-			"trigger_cells": trigger_cells,
-			"label": null
-		})
-		_surface_anchor_cells.append(anchor)
-		if entry_index < SURFACE_ROAD_COUNT:
-			_trace_surface_road(town_center, anchor)
+	for entry: Dictionary in entering:
+		_plan_surface_site(entry.get("site", {}) as Dictionary, String(entry.get("key", "")))
 
-## Records an ambient structure as a wilds landmark. Landmarks off the town
-## footprint keep their overworld-atlas art; those on it are dropped so the
-## streets stay clean. Sprites are raised later (see _spawn_surface_landmarks)
-## once the city layers - and their tileset - exist.
-func _register_surface_landmark(site: Dictionary, anchor: Vector2i) -> void:
+## Registers one gazetteer site in the live window: ambient structures
+## become landmark footprints, enterable sites become arrival gates joined
+## to the nearest live anchor by a dirt road (once, ever - trails persist).
+func _plan_surface_site(site: Dictionary, site_key: String) -> void:
+	var tile: Vector2i = WorldSitesService.site_tile(site)
+	var anchor: Vector2i = tile * WORLD_CELLS_PER_OVERWORLD_TILE + Vector2i(WORLD_CELLS_PER_OVERWORLD_TILE / 2, WORLD_CELLS_PER_OVERWORLD_TILE / 2) - _surface_world_origin
+	if String(site.get("class", "")) == "ambient":
+		# Ambient structures are non-enterable scenery: real walkable
+		# footprints stamped when their chunks stream in.
+		_surface_planned_site_keys[site_key] = true
+		_register_surface_landmark(site, anchor, site_key)
+		return
+	if WorldSitesService.scene_path_for(site).is_empty():
+		return
+	_surface_planned_site_keys[site_key] = true
+	# Settlements greet from their whole clearing; a hold's carved
+	# mountain door and a dungeon's mouth only open at the door itself.
+	var trigger_cells: Array[Vector2i] = []
+	match String(site.get("class", "")):
+		"dwarfhold", "dungeon":
+			trigger_cells = [anchor, anchor + Vector2i(0, 1)]
+	_surface_gates.append({
+		"key": site_key,
+		"rect": Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7)),
+		"anchor": anchor,
+		"site": site,
+		"stamped": false,
+		"trigger_cells": trigger_cells,
+		"label": null
+	})
+	if not _surface_site_road_traced.has(site_key):
+		# One connecting road per settlement, to the nearest anchor already
+		# in the network (the entered town's center seeds it). Distant
+		# outliers stay roadless, as the old nearest-few rule left them.
+		var nearest := Vector2i(2147483647, 2147483647)
+		var nearest_distance := 2147483647
+		for known_anchor: Vector2i in _surface_anchor_cells:
+			var known_distance := maxi(absi(known_anchor.x - anchor.x), absi(known_anchor.y - anchor.y))
+			if known_distance < nearest_distance:
+				nearest_distance = known_distance
+				nearest = known_anchor
+		if nearest.x != 2147483647 and nearest_distance <= SURFACE_ROAD_MAX_CELLS:
+			_trace_surface_road(nearest, anchor)
+			_surface_site_road_traced[site_key] = true
+	_surface_anchor_cells.append(anchor)
+
+## Removes a site that slid out of the window. Its chunks are far outside
+## the eviction radius by then, so stamped ground is already gone; this
+## clears the bookkeeping (gate, anchor, landmark plan) and any nodes.
+func _unplan_surface_site(site_key: String) -> void:
+	_surface_planned_site_keys.erase(site_key)
+	for gate_index in range(_surface_gates.size() - 1, -1, -1):
+		var gate := _surface_gates[gate_index]
+		if String(gate.get("key", "")) != site_key:
+			continue
+		var gate_label := gate.get("label") as Label
+		if gate_label != null and is_instance_valid(gate_label):
+			_surface_gate_labels.erase(gate_label)
+			gate_label.queue_free()
+		_surface_anchor_cells.erase(gate.get("anchor", Vector2i.ZERO) as Vector2i)
+		_surface_gates.remove_at(gate_index)
+	for landmark_index in range(_surface_landmarks.size() - 1, -1, -1):
+		var landmark := _surface_landmarks[landmark_index]
+		if String(landmark.get("key", "")) != site_key:
+			continue
+		_unstamp_surface_landmark_nodes(landmark)
+		_surface_landmarks.remove_at(landmark_index)
+
+## Records an ambient structure as a wilds landmark with a real footprint
+## recipe. Landmarks on the town footprint are dropped so the streets stay
+## clean. The footprint plan itself is computed lazily (and deterministically
+## from world seed + site tile) the first time one of its chunks streams.
+func _register_surface_landmark(site: Dictionary, anchor: Vector2i, site_key: String) -> void:
 	if _surface_protect_rect.has_area() and _surface_protect_rect.has_point(anchor):
 		return
 	var atlas_variant: Variant = site.get("tile_atlas", [])
@@ -4668,10 +4761,25 @@ func _register_surface_landmark(site: Dictionary, anchor: Vector2i) -> void:
 		atlas_coords = Vector2i(int(atlas_array[0]), int(atlas_array[1]))
 	if atlas_coords.x < 0 or atlas_coords.y < 0:
 		return
+	var structure_id := String(site.get("structure", ""))
+	if structure_id.is_empty():
+		# Older saves persisted only the icon's atlas coords; map them back
+		# to a representative structure id so recipes still apply.
+		structure_id = String(AMBIENT_ID_BY_ATLAS.get(atlas_coords, ""))
 	_surface_landmarks.append({
+		"key": site_key,
+		"tile": WorldSitesService.site_tile(site),
 		"anchor": anchor,
 		"tile_atlas": atlas_coords,
-		"name": String(site.get("name", ""))
+		"structure": structure_id,
+		"name": String(site.get("name", "")),
+		# Footprint plan (lazy) and its bounding rect for chunk intersection.
+		"plan": {},
+		"rect": Rect2i(anchor - Vector2i(8, 8), Vector2i(17, 17)),
+		# Chunk -> true for every chunk whose slice of this footprint is
+		# currently stamped; nodes_by_chunk carries that chunk's sprites.
+		"stamped_chunks": {},
+		"nodes_by_chunk": {}
 	})
 
 ## Keeps the landmark layer locked to the city layer's pan/zoom, exactly as
@@ -4695,38 +4803,604 @@ func _ensure_surface_landmark_layer() -> void:
 	landmark_parent.add_child(_surface_landmark_layer)
 	_sync_surface_landmark_transform()
 
-## One-shot spawn of every planned landmark's sprite at its true world cell,
-## using the shared overworld atlas art. Non-blocking scenery: no cell is
-## added to _surface_blocked_cells.
-func _spawn_surface_landmarks() -> void:
-	if _surface_landmarks.is_empty():
-		return
+## --- Ambient landmark footprints ------------------------------------------
+## Every ambient gazetteer site inside the window becomes a REAL place in
+## the wilds: buildings with timber walls and furnished interiors, camps
+## with tents around a fire, or a blocking prop. Footprints are planned
+## deterministically (world seed + site tile) and stamped chunk-slice by
+## chunk-slice as the terrain streams, so re-streams reproduce the same
+## world byte for byte.
+
+## Building-class ambients: a walled structure with door(s), rooms via the
+## shared BSP planner, and interiors dressed by furnishing theme ("house"
+## uses the home template instead of a shop theme).
+const AMBIENT_BUILDING_RECIPES := {
+	"cathedral": {"w": 11, "h": 9, "rooms": 3, "dress": "temple"},
+	"temple": {"w": 8, "h": 7, "rooms": 2, "dress": "temple"},
+	"monastery": {"w": 9, "h": 7, "rooms": 2, "dress": "temple"},
+	"chapel": {"w": 7, "h": 6, "rooms": 2, "dress": "chapel"},
+	"castle": {"w": 10, "h": 8, "rooms": 3, "dress": "guardhouse"},
+	"hunting_lodge": {"w": 6, "h": 5, "rooms": 1, "dress": "tavern"},
+	"roadsideTavern": {"w": 7, "h": 6, "rooms": 2, "dress": "tavern"},
+	"homestead": {"w": 6, "h": 5, "rooms": 1, "dress": "house"},
+	"farmhouse": {"w": 6, "h": 5, "rooms": 1, "dress": "house"},
+	"farm": {"w": 6, "h": 5, "rooms": 1, "dress": "house"},
+	"desert_hut": {"w": 5, "h": 4, "rooms": 1, "dress": "house"},
+	"hermit_hut": {"w": 5, "h": 4, "rooms": 1, "dress": "apothecary"},
+	"watchtower": {"w": 5, "h": 5, "rooms": 1, "dress": "guardhouse"},
+	"orc_watchtower": {"w": 5, "h": 5, "rooms": 1, "dress": "guardhouse"},
+	"lumber_mill": {"w": 6, "h": 5, "rooms": 1, "dress": "carpenter"}
+}
+
+## Camp-class ambients: a dirt clearing, campfire with a warm glow, tents
+## (overworld tent art, grounded and blocking), crates and racks. "war"
+## camps add weapon racks; "pyre" swaps the fire bowl for the burning-pyre
+## art with a bigger glow.
+const AMBIENT_CAMP_RECIPES := {
+	"tent_camp": {"tents": 4},
+	"wanderer_camp": {"tents": 4},
+	"travelerCamp": {"tents": 4},
+	"centaur_camp": {"tents": 4},
+	"centaurEncampment": {"tents": 4},
+	"prospect_camp": {"tents": 3},
+	"revel_camp": {"tents": 3},
+	"war_camp": {"tents": 5, "war": true},
+	"orc_camp": {"tents": 5, "war": true},
+	"orcCamp": {"tents": 5, "war": true},
+	"gnollCamp": {"tents": 4, "war": true},
+	"trollCamp": {"tents": 3, "war": true},
+	"ogreCamp": {"tents": 3, "war": true},
+	"banditCamp": {"tents": 4, "war": true},
+	"raider_camp": {"tents": 4, "war": true},
+	"thorn_camp": {"tents": 3, "war": true},
+	"war_banner": {"tents": 3, "war": true},
+	"gnoll_den": {"tents": 3, "war": true},
+	"ogre_den": {"tents": 2, "war": true},
+	"war_pyre": {"tents": 2, "war": true, "pyre": true}
+}
+
+## Prop-class ambients rendered from town tileset art; anything not listed
+## in one of the recipe tables keeps its overworld icon, now grounded as a
+## blocking 1-cell prop.
+const AMBIENT_PROP_RECIPES := {
+	"moonwell": {"prop": "well"},
+	"great_tree": {"prop": "grand_icon"},
+	"old_growth": {"prop": "grove"}
+}
+
+## Legacy-save fallback: older worlds persisted only the icon's atlas
+## coords, so map them back to a representative structure id. (3,1) is
+## shared by the mine icon and the mountain homestead; both read fine as
+## a small homestead building.
+const AMBIENT_ID_BY_ATLAS := {
+	Vector2i(10, 1): "chapel", Vector2i(9, 1): "temple", Vector2i(11, 0): "cathedral",
+	Vector2i(2, 2): "monastery", Vector2i(6, 4): "castle", Vector2i(16, 0): "hunting_lodge",
+	Vector2i(12, 1): "roadsideTavern", Vector2i(13, 1): "homestead", Vector2i(3, 1): "homestead",
+	Vector2i(4, 5): "farmhouse", Vector2i(15, 1): "farm", Vector2i(0, 4): "hermit_hut",
+	Vector2i(3, 4): "watchtower", Vector2i(17, 2): "orc_watchtower", Vector2i(9, 6): "desert_hut",
+	Vector2i(0, 6): "lumber_mill",
+	Vector2i(1, 5): "tent_camp", Vector2i(11, 3): "war_camp", Vector2i(10, 2): "centaur_camp",
+	Vector2i(16, 2): "war_banner", Vector2i(15, 2): "thorn_camp", Vector2i(7, 1): "prospect_camp",
+	Vector2i(13, 3): "war_pyre", Vector2i(5, 1): "ogre_den",
+	Vector2i(2, 6): "moonwell", Vector2i(14, 1): "great_tree", Vector2i(0, 2): "old_growth"
+}
+
+const AMBIENT_TENT_ICON := Vector2i(1, 5)
+const AMBIENT_PYRE_ICON := Vector2i(13, 3)
+const AMBIENT_GLOW_WARM := Color(1.0, 0.72, 0.35, 1.0)
+const AMBIENT_GLOW_MOON := Color(0.45, 0.72, 1.0, 1.0)
+
+## Stamps every landmark slice that falls inside the freshly streamed
+## chunk. Plans are computed lazily on first contact; a plan that fails
+## (waterlogged site) leaves the landmark as a non-blocking icon.
+func _stamp_landmarks_in_chunk(chunk: Vector2i, chunk_rect: Rect2i) -> void:
+	for landmark: Dictionary in _surface_landmarks:
+		if not chunk_rect.intersects(landmark.get("rect", Rect2i()) as Rect2i):
+			continue
+		var stamped_chunks := landmark.get("stamped_chunks", {}) as Dictionary
+		if stamped_chunks.has(chunk):
+			continue
+		var plan := landmark.get("plan", {}) as Dictionary
+		if plan.is_empty():
+			plan = _plan_landmark_footprint(landmark)
+			landmark["plan"] = plan
+			landmark["rect"] = plan.get("bounds", landmark.get("rect", Rect2i())) as Rect2i
+		_apply_landmark_plan_slice(landmark, plan, chunk, chunk_rect)
+		stamped_chunks[chunk] = true
+
+## Applies the slice of a footprint plan inside one chunk: ground/decor
+## tiles, blocked-cell registration, and the sprites (furniture pieces,
+## glows, icon art, name label) anchored in this chunk.
+func _apply_landmark_plan_slice(landmark: Dictionary, plan: Dictionary, chunk: Vector2i, chunk_rect: Rect2i) -> void:
+	var site_key := String(landmark.get("key", ""))
+	var ground := plan.get("ground", {}) as Dictionary
+	for cell_variant: Variant in ground.keys():
+		var cell := cell_variant as Vector2i
+		if not chunk_rect.has_point(cell) or _latest_grid.has(cell):
+			continue
+		# Stamps wear the same danger gloom as the terrain around them, so
+		# a deep-wild chapel doesn't sit on an artificially sunlit square.
+		_place_surface_tile(city_layer, cell, String(ground[cell]), SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells))
+	var decor := plan.get("decor", {}) as Dictionary
+	for cell_variant: Variant in decor.keys():
+		var cell := cell_variant as Vector2i
+		if not chunk_rect.has_point(cell) or _latest_grid.has(cell):
+			continue
+		var decor_key := String(decor[cell])
+		if decor_key.is_empty():
+			decor_layer.erase_cell(cell)
+		else:
+			_place_surface_tile(decor_layer, cell, decor_key, SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells))
+		_actor_passable_cache.erase(cell)
+	var blocked := plan.get("blocked", {}) as Dictionary
+	for cell_variant: Variant in blocked.keys():
+		var cell := cell_variant as Vector2i
+		if not chunk_rect.has_point(cell):
+			continue
+		_surface_landmark_blocked_cells[cell] = site_key
+		_actor_passable_cache.erase(cell)
+	var nodes: Array = []
+	for sprite_variant: Variant in plan.get("sprites", []) as Array:
+		var sprite_def := sprite_variant as Dictionary
+		var cell := sprite_def.get("cell", Vector2i.ZERO) as Vector2i
+		if not chunk_rect.has_point(cell):
+			continue
+		match String(sprite_def.get("type", "")):
+			"piece":
+				var piece_sprite: Sprite2D = RoomFurnishingService.create_piece_sprite(String(sprite_def.get("piece", "")), cell, tile_size)
+				if piece_sprite != null:
+					decor_layer.add_child(piece_sprite)
+					nodes.append(piece_sprite)
+			"glow":
+				var glow_sprite: Sprite2D = RoomFurnishingService.create_glow_sprite(
+					_cell_center_position(cell),
+					float(sprite_def.get("radius", 2.5)) * float(tile_size.x),
+					sprite_def.get("color", AMBIENT_GLOW_WARM) as Color)
+				glow_sprite.visible = _lighting_enabled
+				actor_layer.add_child(glow_sprite)
+				_glow_sprites.append(glow_sprite)
+				nodes.append(glow_sprite)
+			"icon":
+				var icon_sprite := _create_landmark_icon_sprite(
+					sprite_def.get("atlas", Vector2i.ZERO) as Vector2i,
+					cell, float(sprite_def.get("scale", 1.5)))
+				if icon_sprite != null:
+					nodes.append(icon_sprite)
+			"label":
+				var name_label := Label.new()
+				name_label.text = String(landmark.get("name", ""))
+				name_label.add_theme_font_size_override("font_size", 15)
+				name_label.add_theme_color_override("font_color", Color(0.92, 0.9, 0.78, 1.0))
+				name_label.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.06, 1.0))
+				name_label.add_theme_constant_override("outline_size", 4)
+				name_label.position = city_layer.map_to_local(cell)
+				name_label.z_index = 30
+				city_layer.add_child(name_label)
+				nodes.append(name_label)
+	if not nodes.is_empty():
+		var nodes_by_chunk := landmark.get("nodes_by_chunk", {}) as Dictionary
+		var chunk_nodes := nodes_by_chunk.get(chunk, []) as Array
+		chunk_nodes.append_array(nodes)
+		nodes_by_chunk[chunk] = chunk_nodes
+
+## The grounded overworld-icon sprite (the pre-footprint landmark look),
+## bottom-anchored on its cell so the art "sits" on the ground.
+func _create_landmark_icon_sprite(atlas_coords: Vector2i, cell: Vector2i, icon_scale: float) -> Sprite2D:
 	_ensure_surface_landmark_layer()
 	if _surface_landmark_layer == null:
-		return
+		return null
 	if _surface_landmark_atlas_texture == null:
 		_surface_landmark_atlas_texture = load(TILE_ATLAS_DEFS.ATLAS_TEXTURE) as Texture2D
 	if _surface_landmark_atlas_texture == null:
-		return
-	for child: Node in _surface_landmark_layer.get_children():
-		child.queue_free()
-	var landmark_scale := float(tile_size.x) * 1.5 / 32.0
+		return null
+	var sprite := Sprite2D.new()
+	sprite.texture = _surface_landmark_atlas_texture
+	sprite.region_enabled = true
+	sprite.region_rect = Rect2(Vector2(atlas_coords) * 32.0, Vector2(32.0, 32.0))
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.centered = false
+	var landmark_scale := float(tile_size.x) * icon_scale / 32.0
+	sprite.scale = Vector2.ONE * landmark_scale
 	var span := 32.0 * landmark_scale
-	for landmark: Dictionary in _surface_landmarks:
-		var atlas_coords := landmark.get("tile_atlas", Vector2i.ZERO) as Vector2i
-		var anchor := landmark.get("anchor", Vector2i.ZERO) as Vector2i
-		var sprite := Sprite2D.new()
-		sprite.texture = _surface_landmark_atlas_texture
-		sprite.region_enabled = true
-		sprite.region_rect = Rect2(Vector2(atlas_coords) * 32.0, Vector2(32.0, 32.0))
-		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-		sprite.centered = false
-		sprite.scale = Vector2.ONE * landmark_scale
-		# Bottom-anchor on the anchor cell: centered across it, base on the
-		# cell's lower edge, so the structure "sits" on the ground.
-		var center := _cell_center_position(anchor)
-		sprite.position = Vector2(center.x - span * 0.5, center.y + float(tile_size.y) * 0.5 - span)
-		_surface_landmark_layer.add_child(sprite)
+	var center := _cell_center_position(cell)
+	sprite.position = Vector2(center.x - span * 0.5, center.y + float(tile_size.y) * 0.5 - span)
+	_surface_landmark_layer.add_child(sprite)
+	return sprite
+
+## Frees one chunk's slice of a stamped landmark (its sprites and blocked
+## cells); the ground tiles are erased by the chunk evictor itself via the
+## painted-cell list. The plan is kept - re-streaming replays it verbatim.
+func _unstamp_surface_landmark_chunk(landmark: Dictionary, chunk: Vector2i, chunk_rect: Rect2i) -> void:
+	var nodes_by_chunk := landmark.get("nodes_by_chunk", {}) as Dictionary
+	for node_variant: Variant in nodes_by_chunk.get(chunk, []) as Array:
+		var node := node_variant as Node
+		if node != null and is_instance_valid(node):
+			if node is Node2D:
+				_glow_sprites.erase(node as Node2D)
+			node.queue_free()
+	nodes_by_chunk.erase(chunk)
+	var site_key := String(landmark.get("key", ""))
+	var blocked := (landmark.get("plan", {}) as Dictionary).get("blocked", {}) as Dictionary
+	for cell_variant: Variant in blocked.keys():
+		var cell := cell_variant as Vector2i
+		if not chunk_rect.has_point(cell):
+			continue
+		if String(_surface_landmark_blocked_cells.get(cell, "")) == site_key:
+			_surface_landmark_blocked_cells.erase(cell)
+			_actor_passable_cache.erase(cell)
+	(landmark.get("stamped_chunks", {}) as Dictionary).erase(chunk)
+
+## Full teardown of a landmark's spawned state (window exit or rebuild):
+## every chunk's nodes and every blocked cell it registered.
+func _unstamp_surface_landmark_nodes(landmark: Dictionary) -> void:
+	var nodes_by_chunk := landmark.get("nodes_by_chunk", {}) as Dictionary
+	for chunk_variant: Variant in nodes_by_chunk.keys():
+		for node_variant: Variant in nodes_by_chunk.get(chunk_variant, []) as Array:
+			var node := node_variant as Node
+			if node != null and is_instance_valid(node):
+				if node is Node2D:
+					_glow_sprites.erase(node as Node2D)
+				node.queue_free()
+	nodes_by_chunk.clear()
+	var site_key := String(landmark.get("key", ""))
+	var blocked := (landmark.get("plan", {}) as Dictionary).get("blocked", {}) as Dictionary
+	for cell_variant: Variant in blocked.keys():
+		var cell := cell_variant as Vector2i
+		if String(_surface_landmark_blocked_cells.get(cell, "")) == site_key:
+			_surface_landmark_blocked_cells.erase(cell)
+			_actor_passable_cache.erase(cell)
+	(landmark.get("stamped_chunks", {}) as Dictionary).clear()
+
+## --- Footprint planning ----------------------------------------------------
+
+## The footprint's RNG is seeded from world seed + site tile alone, so the
+## same site plans the same footprint on every visit, walk order be damned.
+func _landmark_rng(tile: Vector2i) -> RandomNumberGenerator:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s|ambient|%d,%d" % [_surface_world_seed_text, tile.x, tile.y])
+	return rng
+
+## The deterministic terrain base key at a wilds cell, ignoring danger
+## shading (water and ground family don't depend on it).
+func _landmark_terrain_base(cell: Vector2i) -> String:
+	var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(cell + _surface_world_origin, _surface_noise, 0.0, _surface_biome_ctx)
+	return String(terrain.get("base", "grass"))
+
+func _landmark_rect_is_wet(rect: Rect2i) -> bool:
+	for y in range(rect.position.y, rect.end.y):
+		for x in range(rect.position.x, rect.end.x):
+			if _landmark_terrain_base(Vector2i(x, y)).begins_with("water"):
+				return true
+	return false
+
+## Never stamp onto water: nudge the footprint to the nearest dry spot
+## within a few cells, or report failure so the site stays an icon.
+func _landmark_dry_anchor(anchor: Vector2i, half_extent: Vector2i) -> Vector2i:
+	for radius in range(0, 7):
+		for dy in range(-radius, radius + 1):
+			for dx in range(-radius, radius + 1):
+				if maxi(absi(dx), absi(dy)) != radius:
+					continue
+				var candidate := anchor + Vector2i(dx, dy)
+				var rect := Rect2i(candidate - half_extent, half_extent * 2 + Vector2i.ONE)
+				if _surface_protect_rect.has_area() and rect.intersects(_surface_protect_rect):
+					continue
+				if not _landmark_rect_is_wet(rect):
+					return candidate
+	return Vector2i(2147483647, 2147483647)
+
+## Which open-ground palette the clearing around a footprint wears, from
+## the terrain family at its anchor: snow sites clear to snowfield, desert
+## ones to sand, everything else to meadow grass.
+func _landmark_ground_family(anchor: Vector2i) -> String:
+	var family := TownTileService.terrain_family_for_tile_key(_landmark_terrain_base(anchor))
+	if family == "sand":
+		return "sand"
+	if family == "snow" or family == "snow_alt":
+		return "snow"
+	return "grass"
+
+func _landmark_clearing_key(family: String, rng: RandomNumberGenerator) -> String:
+	match family:
+		"sand":
+			return "sand" if rng.randf() > 0.2 else "sand_alt"
+		"snow":
+			return "snow" if rng.randf() > 0.2 else "snow_alt"
+	if rng.randf() > 0.25:
+		return "grass"
+	return "grass_tuft" if rng.randf() > 0.5 else "grass_mottled"
+
+## Dispatch: build the full deterministic footprint plan for one landmark.
+## Returns {"ok": false} only when even the icon art is missing.
+func _plan_landmark_footprint(landmark: Dictionary) -> Dictionary:
+	var structure_id := String(landmark.get("structure", ""))
+	var rng := _landmark_rng(landmark.get("tile", Vector2i.ZERO) as Vector2i)
+	var plan: Dictionary = {}
+	if AMBIENT_BUILDING_RECIPES.has(structure_id):
+		plan = _plan_landmark_building(landmark, AMBIENT_BUILDING_RECIPES[structure_id] as Dictionary, rng)
+	elif AMBIENT_CAMP_RECIPES.has(structure_id):
+		plan = _plan_landmark_camp(landmark, AMBIENT_CAMP_RECIPES[structure_id] as Dictionary, rng)
+	elif AMBIENT_PROP_RECIPES.has(structure_id):
+		plan = _plan_landmark_prop(landmark, AMBIENT_PROP_RECIPES[structure_id] as Dictionary)
+	if plan.is_empty():
+		plan = _plan_landmark_icon(landmark)
+	return plan
+
+## A real building in the wilds: timber wall ring (the town wall pieces),
+## interior rooms from the shared BSP planner, a door onto open ground,
+## themed furnishings, and a clearing apron with a dirt doorstep.
+func _plan_landmark_building(landmark: Dictionary, recipe: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
+	var plot_size := Vector2i(int(recipe.get("w", 6)), int(recipe.get("h", 5)))
+	var half := plot_size / 2
+	var apron_half := half + Vector2i(2, 2)
+	var anchor := _landmark_dry_anchor(landmark.get("anchor", Vector2i.ZERO) as Vector2i, apron_half)
+	if anchor.x == 2147483647:
+		print("[Wilds] '%s' (%s) is waterlogged; kept as icon" % [String(landmark.get("name", "")), String(landmark.get("structure", ""))])
+		return {}
+	var footprint := Rect2i(anchor - half, plot_size)
+	var apron := footprint.grow(2)
+	var zone_grid: Dictionary = {}
+	for y in range(footprint.position.y, footprint.end.y):
+		for x in range(footprint.position.x, footprint.end.x):
+			zone_grid[Vector2i(x, y)] = CELL_BUILDING
+	var door_cells: Dictionary = {}
+	var rooms: Array[Rect2i] = SettlementArchitectureService.subdivide_structure(zone_grid, footprint, rng, int(recipe.get("rooms", 1)))
+	SettlementArchitectureService.punch_internal_doors(zone_grid, rooms, CELL_BUILDING, door_cells, rng)
+	var entrances: Array[Vector2i] = SettlementArchitectureService.punch_exterior_doors(zone_grid, footprint, CELL_BUILDING, door_cells, rng, true)
+	var ground: Dictionary = {}
+	var decor: Dictionary = {}
+	var blocked: Dictionary = {}
+	var sprites: Array = []
+	var ground_family := _landmark_ground_family(anchor)
+	for y in range(apron.position.y, apron.end.y):
+		for x in range(apron.position.x, apron.end.x):
+			var cell := Vector2i(x, y)
+			if zone_grid.has(cell):
+				ground[cell] = TownTileService.pick_base_tile(zone_grid, x, y, int(zone_grid[cell]), door_cells)
+			else:
+				ground[cell] = _landmark_clearing_key(ground_family, rng)
+			# The clearing fells any streamed trees and scrub under the site.
+			decor[cell] = ""
+	# A short dirt doorstep from each entrance onto the open ground.
+	for entrance: Vector2i in entrances:
+		for direction: Vector2i in [Vector2i.DOWN, Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT]:
+			if zone_grid.has(entrance + direction):
+				continue
+			for step in range(1, 4):
+				var path_cell: Vector2i = entrance + direction * step
+				ground[path_cell] = "road"
+				decor[path_cell] = ""
+			break
+	# Themed interiors: each BSP room is its own zone component, dressed by
+	# the same furnishing planners the village houses and shops use.
+	var furnished: Dictionary = {}
+	var is_occupied := func(check_cell: Vector2i) -> bool:
+		return furnished.has(check_cell)
+	var dress_type := String(recipe.get("dress", "house"))
+	for component_variant: Variant in RoomFurnishingService.collect_zone_components(zone_grid, CELL_BUILDING):
+		var component: Array[Vector2i] = []
+		for cell_variant: Variant in (component_variant as Array):
+			component.append(cell_variant as Vector2i)
+		var placements: Array[Dictionary] = []
+		if dress_type == "house":
+			placements = RoomFurnishingService.plan_house_furnishing(component, is_occupied, door_cells, rng, zone_grid)
+		else:
+			placements = RoomFurnishingService.plan_shop_dressing(component, dress_type, is_occupied, door_cells, rng, zone_grid)
+		for placement: Dictionary in placements:
+			var piece_name := String(placement.get("piece", ""))
+			var base_cell := placement.get("cell", Vector2i.ZERO) as Vector2i
+			sprites.append({"type": "piece", "cell": base_cell, "piece": piece_name})
+			if int((RoomFurnishingService.PIECES.get(piece_name, {}) as Dictionary).get("rows_block", 1)) > 0:
+				for footprint_cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
+					blocked[footprint_cell] = true
+					furnished[footprint_cell] = true
+			if RoomFurnishingService.piece_emits_light(piece_name):
+				sprites.append({"type": "glow", "cell": base_cell, "radius": 2.4, "color": AMBIENT_GLOW_WARM})
+	sprites.append({"type": "label", "cell": Vector2i(footprint.position.x, footprint.position.y - 2)})
+	return {
+		"ok": true, "kind": "building",
+		"ground": ground, "decor": decor, "blocked": blocked,
+		"sprites": sprites, "bounds": apron.grow(1)
+	}
+
+## A camp: roundish dirt clearing, campfire (or burning pyre) with a warm
+## glow at its heart, tents ringing the fire, crates and racks scattered.
+func _plan_landmark_camp(landmark: Dictionary, recipe: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
+	var anchor := _landmark_dry_anchor(landmark.get("anchor", Vector2i.ZERO) as Vector2i, Vector2i(4, 4))
+	if anchor.x == 2147483647:
+		print("[Wilds] '%s' (%s) is waterlogged; kept as icon" % [String(landmark.get("name", "")), String(landmark.get("structure", ""))])
+		return {}
+	var members: Dictionary = {}
+	for dy in range(-3, 4):
+		for dx in range(-3, 4):
+			# Clip the square's corners so the clearing reads as a blob.
+			if Vector2(dx, dy).length() > 3.4:
+				continue
+			members[anchor + Vector2i(dx, dy)] = true
+	var ground: Dictionary = {}
+	var decor: Dictionary = {}
+	var blocked: Dictionary = {}
+	var sprites: Array = []
+	var ground_family := _landmark_ground_family(anchor)
+	for cell_variant: Variant in members.keys():
+		var cell := cell_variant as Vector2i
+		ground[cell] = _camp_clearing_tile(cell, members, ground_family, rng)
+		decor[cell] = ""
+	# The fire: a brazier bowl, or the burning war-pyre art for pyre camps.
+	if bool(recipe.get("pyre", false)):
+		sprites.append({"type": "icon", "cell": anchor, "atlas": AMBIENT_PYRE_ICON, "scale": 1.7})
+		blocked[anchor] = true
+		sprites.append({"type": "glow", "cell": anchor, "radius": 4.0, "color": AMBIENT_GLOW_WARM})
+	else:
+		decor[anchor] = "brazier"
+		sprites.append({"type": "glow", "cell": anchor, "radius": 3.0, "color": AMBIENT_GLOW_WARM})
+	# Tents around the fire, from the overworld tent art, each blocking its
+	# ground cell. Slots are fixed; the rng picks which stay empty.
+	var tent_slots: Array[Vector2i] = [
+		Vector2i(-2, -2), Vector2i(2, -2), Vector2i(-3, 1), Vector2i(3, 1),
+		Vector2i(0, -3), Vector2i(-1, 2)
+	]
+	_seeded_shuffle_with(tent_slots, rng)
+	var tent_count := clampi(int(recipe.get("tents", 3)), 0, tent_slots.size())
+	for tent_index in range(tent_count):
+		var tent_cell: Vector2i = anchor + tent_slots[tent_index]
+		sprites.append({"type": "icon", "cell": tent_cell, "atlas": AMBIENT_TENT_ICON, "scale": 1.35})
+		blocked[tent_cell] = true
+	# Camp clutter: crates and sacks; war camps rack their arms.
+	var clutter_pool: Array[String] = ["barrel", "barrel_open", "jug", "bucket"]
+	if bool(recipe.get("war", false)):
+		clutter_pool.append_array(["armor_stand", "armor_stand", "stall"])
+	else:
+		clutter_pool.append("stall_alt")
+	var clutter_slots: Array[Vector2i] = [
+		Vector2i(1, 1), Vector2i(-2, 0), Vector2i(2, -1), Vector2i(-1, -2), Vector2i(1, 3)
+	]
+	for clutter_index in range(2 + rng.randi_range(0, 2)):
+		if clutter_index >= clutter_slots.size():
+			break
+		var clutter_cell: Vector2i = anchor + clutter_slots[clutter_index]
+		if blocked.has(clutter_cell) or clutter_cell == anchor:
+			continue
+		decor[clutter_cell] = clutter_pool[rng.randi_range(0, clutter_pool.size() - 1)]
+	sprites.append({"type": "label", "cell": anchor + Vector2i(-3, -5)})
+	return {
+		"ok": true, "kind": "camp",
+		"ground": ground, "decor": decor, "blocked": blocked,
+		"sprites": sprites, "bounds": Rect2i(anchor - Vector2i(5, 5), Vector2i(11, 11))
+	}
+
+## Dirt-clearing autotile: edge pieces where the blob meets open ground
+## (grass fringe on grass, snow recolors on snow, bare dirt on sand),
+## scatter variety inside.
+func _camp_clearing_tile(cell: Vector2i, members: Dictionary, family: String, rng: RandomNumberGenerator) -> String:
+	var scatter_roll := rng.randi_range(0, 8)
+	var scatter := "road"
+	if scatter_roll == 0:
+		scatter = "road_twig"
+	elif scatter_roll == 1:
+		scatter = "road_alt"
+	elif scatter_roll == 2:
+		scatter = "road_stone"
+	# Desert camps sit on bare dirt against sand: fringes would paint green.
+	if family == "sand":
+		return scatter
+	var suffix_snow := "_snow" if family == "snow" else ""
+	var n_open := not members.has(cell + Vector2i.UP)
+	var s_open := not members.has(cell + Vector2i.DOWN)
+	var w_open := not members.has(cell + Vector2i.LEFT)
+	var e_open := not members.has(cell + Vector2i.RIGHT)
+	if n_open and w_open:
+		return "road_edge_nw%s" % suffix_snow
+	if n_open and e_open:
+		return "road_edge_ne%s" % suffix_snow
+	if s_open and w_open:
+		return "road_edge_sw%s" % suffix_snow
+	if s_open and e_open:
+		return "road_edge_se%s" % suffix_snow
+	if n_open:
+		return "road_edge_n%s" % suffix_snow
+	if s_open:
+		return "road_edge_s%s" % suffix_snow
+	if w_open:
+		return "road_edge_w%s" % suffix_snow
+	if e_open:
+		return "road_edge_e%s" % suffix_snow
+	if not members.has(cell + Vector2i(-1, -1)):
+		return "road_in_nw%s" % suffix_snow
+	if not members.has(cell + Vector2i(1, -1)):
+		return "road_in_ne%s" % suffix_snow
+	if not members.has(cell + Vector2i(-1, 1)):
+		return "road_in_sw%s" % suffix_snow
+	if not members.has(cell + Vector2i(1, 1)):
+		return "road_in_se%s" % suffix_snow
+	return scatter
+
+## Prop landmarks from town tileset art: the moonwell (village well on a
+## dark-grass glade, moonlit glow), the great tree (full dark canopy), or
+## an old-growth grove of three.
+func _plan_landmark_prop(landmark: Dictionary, recipe: Dictionary) -> Dictionary:
+	var prop := String(recipe.get("prop", ""))
+	var anchor := _landmark_dry_anchor(landmark.get("anchor", Vector2i.ZERO) as Vector2i, Vector2i(3, 3))
+	if anchor.x == 2147483647:
+		print("[Wilds] '%s' (%s) is waterlogged; kept as icon" % [String(landmark.get("name", "")), String(landmark.get("structure", ""))])
+		return {}
+	var ground: Dictionary = {}
+	var decor: Dictionary = {}
+	var blocked: Dictionary = {}
+	var sprites: Array = []
+	var ground_family := _landmark_ground_family(anchor)
+	match prop:
+		"well":
+			# A moonlit glade: dark grass under the well where the ground is
+			# grassy at all (snow and sand glades stay their own colour).
+			if ground_family == "grass":
+				for dy in range(-2, 2):
+					for dx in range(-2, 3):
+						ground[anchor + Vector2i(dx, dy)] = "grass_dark"
+			for dy in range(-2, 2):
+				for dx in range(-2, 3):
+					decor[anchor + Vector2i(dx, dy)] = ""
+			decor[anchor] = "well_base_left"
+			decor[anchor + Vector2i.RIGHT] = "well_base_right"
+			decor[anchor + Vector2i.UP] = "well_roof_left"
+			decor[anchor + Vector2i(1, -1)] = "well_roof_right"
+			sprites.append({"type": "glow", "cell": anchor, "radius": 2.6, "color": AMBIENT_GLOW_MOON})
+		"grand_icon":
+			# The great tree towers over the woods: its overworld art blown
+			# up to a three-cell crown on a shaded glade, base row blocked.
+			if ground_family == "grass":
+				for dy in range(-1, 2):
+					for dx in range(-1, 2):
+						ground[anchor + Vector2i(dx, dy)] = "grass_dark"
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					decor[anchor + Vector2i(dx, dy)] = ""
+			sprites.append({"type": "icon", "cell": anchor, "atlas": landmark.get("tile_atlas", Vector2i.ZERO) as Vector2i, "scale": 3.0})
+			blocked[anchor] = true
+			blocked[anchor + Vector2i.LEFT] = true
+			blocked[anchor + Vector2i.RIGHT] = true
+		"grove":
+			for offset: Vector2i in [Vector2i.ZERO, Vector2i(-3, 2), Vector2i(3, 2)]:
+				decor[anchor + offset] = "tree_dark"
+				blocked[anchor + offset] = true
+		_:
+			return {}
+	sprites.append({"type": "label", "cell": anchor + Vector2i(-2, -4)})
+	return {
+		"ok": true, "kind": "prop",
+		"ground": ground, "decor": decor, "blocked": blocked,
+		"sprites": sprites, "bounds": Rect2i(anchor - Vector2i(5, 5), Vector2i(11, 11))
+	}
+
+## The fallback: the overworld icon, grounded and now BLOCKING its anchor
+## cell when that cell is dry (a mid-lake icon stays pure scenery).
+func _plan_landmark_icon(landmark: Dictionary) -> Dictionary:
+	var anchor := landmark.get("anchor", Vector2i.ZERO) as Vector2i
+	var atlas_coords := landmark.get("tile_atlas", Vector2i(-1, -1)) as Vector2i
+	if atlas_coords.x < 0:
+		return {"ok": false}
+	var blocked: Dictionary = {}
+	if not _landmark_terrain_base(anchor).begins_with("water"):
+		blocked[anchor] = true
+	var sprites: Array = [
+		{"type": "icon", "cell": anchor, "atlas": atlas_coords, "scale": 1.5},
+		{"type": "label", "cell": anchor + Vector2i(-2, -3)}
+	]
+	return {
+		"ok": true, "kind": "icon",
+		"ground": {}, "decor": {}, "blocked": blocked,
+		"sprites": sprites, "bounds": Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7))
+	}
+
+## Fisher-Yates with a caller-owned rng, so footprint plans shuffle
+## deterministically from their site seed (unlike _seeded_shuffle, which
+## draws from the scene's shared stream).
+func _seeded_shuffle_with(arr: Array, rng: RandomNumberGenerator) -> void:
+	for index in range(arr.size() - 1, 0, -1):
+		var swap_index := rng.randi_range(0, index)
+		var held: Variant = arr[index]
+		arr[index] = arr[swap_index]
+		arr[swap_index] = held
 
 ## A two-cell-wide dirt road, cell by cell, into the shared road map -
 ## and an ordered polyline travelers can walk.
@@ -4739,10 +5413,28 @@ func _trace_surface_road(from_cell: Vector2i, to_cell: Vector2i) -> void:
 	for step in range(steps + 1):
 		var t := float(step) / float(steps)
 		var cell := Vector2i(roundi(lerpf(from_cell.x, to_cell.x, t)), roundi(lerpf(from_cell.y, to_cell.y, t)))
-		_surface_road_cells[cell] = true
-		_surface_road_cells[cell + (Vector2i(1, 0) if absi(delta.y) >= absi(delta.x) else Vector2i(0, 1))] = true
+		var sidecar: Vector2i = cell + (Vector2i(1, 0) if absi(delta.y) >= absi(delta.x) else Vector2i(0, 1))
+		for road_cell: Vector2i in [cell, sidecar]:
+			if _surface_road_cells.has(road_cell):
+				continue
+			_surface_road_cells[road_cell] = true
+			# Roads traced mid-walk (a site sliding into the window) must
+			# show up in ground that already streamed; unstreamed chunks
+			# pick the road up from the shared map when they paint.
+			_repaint_streamed_road_cell(road_cell)
 		path.append(cell)
 	_surface_road_paths.append(path)
+
+func _repaint_streamed_road_cell(cell: Vector2i) -> void:
+	if not _surface_chunks.has(SurfaceWorldService.chunk_for_cell(cell)):
+		return
+	if _latest_grid.has(cell) or _player_built_cells.has(cell) or _farm_plots.has(cell):
+		return
+	var danger := SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells)
+	_place_surface_tile(city_layer, cell, _surface_road_tile_key(cell, danger), danger)
+	decor_layer.erase_cell(cell)
+	_surface_blocked_cells.erase(cell)
+	_actor_passable_cache.erase(cell)
 
 ## The tileset has no truly dark grass, so the gloom is painted with
 ## modulated alternative tiles: four danger buckets, each a dimmer,
@@ -4786,6 +5478,13 @@ func _shaded_alternative(layer_tile_set: TileSet, atlas_coords: Vector2i, bucket
 func _stream_surface_chunks() -> void:
 	if _surface_noise.is_empty() or _player_sprite == null:
 		return
+	# Sliding site window: crossing an overworld-tile boundary re-evaluates
+	# which gazetteer sites are live. Checked before the chunk early-out
+	# because tile borders (64 cells) don't align with chunk borders (24).
+	if not _surface_all_sites.is_empty():
+		var player_tile := _overworld_tile_for_cell(_player_cell)
+		if player_tile != _surface_window_tile:
+			_refresh_surface_site_window(player_tile)
 	var player_chunk: Vector2i = SurfaceWorldService.chunk_for_cell(_player_cell)
 	if player_chunk == _surface_last_player_chunk:
 		return
@@ -4852,6 +5551,7 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			painted.append(cell)
 	_surface_chunks[chunk] = painted
 	_stamp_gates_in_rect(rect)
+	_stamp_landmarks_in_chunk(chunk, rect)
 
 ## Trees may only root where both axes hit the 2-cell lattice (with a
 ## deterministic per-row jog so the woods don't grid up): a 3-cell-wide
@@ -5217,6 +5917,11 @@ func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 				_surface_gate_labels.erase(stale_label)
 				stale_label.queue_free()
 			gate["label"] = null
+		# Landmark footprints release this chunk's slice (sprites, blocked
+		# cells); the cached plan re-stamps it identically on return.
+		for landmark: Dictionary in _surface_landmarks:
+			if (landmark.get("stamped_chunks", {}) as Dictionary).has(chunk):
+				_unstamp_surface_landmark_chunk(landmark, chunk, chunk_cells)
 
 ## --- Life on the surface -------------------------------------------------
 ## The radial rule made flesh: danger at the player's feet decides how
