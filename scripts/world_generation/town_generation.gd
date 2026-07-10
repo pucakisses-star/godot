@@ -195,6 +195,15 @@ var _surface_road_paths: Array[Array] = []
 ## Grass cells beside lane junctions that host a wooden direction post,
 ## planned by the lane tracer and rendered through _pick_decor_tile.
 var _direction_post_cells: Dictionary = {}
+## Shop signboards standing on the grass by a civic entrance: sign cell ->
+## the establishment's anchor cell (whose maps carry its name and trade).
+## Recomputed deterministically from the level data on every _show_level.
+var _shop_sign_cells: Dictionary = {}
+## Plaza-rim notice boards carrying seeded village notices (cell -> true).
+var _notice_board_cells: Dictionary = {}
+## The floating world-space label shown while the cursor rests on a sign.
+var _sign_hover_label: Label
+var _sign_hover_cell := Vector2i(2147483647, 2147483647)
 var _surface_anchor_cells: Array[Vector2i] = []
 var _surface_creatures: Array[Dictionary] = []
 ## Camp sites whose garrison was wiped out this visit ("x,y" site key ->
@@ -700,6 +709,10 @@ const TOWN_ROOM_BACK_ROLES := {
 ## Buildings that read as one open floor and never subdivide: a market
 ## stall is a single stand, a stable one straw-floored hall.
 const TOWN_OPEN_PLAN_BUILDING_TYPES := ["market_stall", "stable"]
+
+## Room roles that never earn a street signboard: nobody advertises the
+## kitchen. The shopfront room keeps the building's trade and its board.
+const SIGN_SKIPPED_ROOM_TYPES := {"kitchen": true, "storeroom": true, "forge_room": true}
 
 func _ready() -> void:
 	_apply_cached_town_scene_seed()
@@ -2706,6 +2719,93 @@ func _plan_direction_posts(grid: Dictionary) -> void:
 			_direction_post_cells[post_cell] = true
 			break
 
+## Plans the village's readable boards for the level on display, purely
+## from the stored level data (no RNG state), so re-showing a level always
+## rebuilds the same signs. Every civic room with a ring door gets a shop
+## signboard on the grass flanking its entrance, and the market square's
+## rim hosts up to two notice boards. Cellars and the wilds carry none.
+func _plan_village_signboards(grid: Dictionary) -> void:
+	_shop_sign_cells.clear()
+	_notice_board_cells.clear()
+	_clear_sign_hover_label()
+	if _wild_mode or _is_underground_level() or grid.is_empty():
+		return
+	var render_bounds := _find_bounds(grid).grow(1)
+	var used: Dictionary = _direction_post_cells.duplicate()
+	var building_ids := _latest_civic_buildings_by_id.keys()
+	building_ids.sort()
+	for building_id_variant: Variant in building_ids:
+		var payload := _latest_civic_buildings_by_id[building_id_variant] as Dictionary
+		# Back rooms (kitchens, stockrooms, forge annexes) hang no boards;
+		# the shopfront room wearing the building's trade carries the sign.
+		if SIGN_SKIPPED_ROOM_TYPES.has(String(payload.get("type", ""))):
+			continue
+		var anchor_variant: Variant = payload.get("anchor")
+		if not (anchor_variant is Vector2i):
+			continue
+		var sign_cell := _pick_signboard_cell_for_building(grid, payload, used, render_bounds)
+		if sign_cell.x == 2147483647:
+			continue
+		used[sign_cell] = true
+		_shop_sign_cells[sign_cell] = anchor_variant as Vector2i
+	# Notice boards: grass cells hugging the square, sorted for
+	# determinism, spaced so the two boards never crowd one corner.
+	var rim_cells: Array[Vector2i] = []
+	for key_variant: Variant in grid.keys():
+		var plaza_cell := key_variant as Vector2i
+		if int(grid[plaza_cell]) != CELL_PLAZA:
+			continue
+		for direction: Vector2i in [Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.DOWN]:
+			var rim_cell := plaza_cell + direction
+			if int(grid.get(rim_cell, CELL_ROCK)) != CELL_ROCK:
+				continue
+			if used.has(rim_cell) or not render_bounds.has_point(rim_cell):
+				continue
+			rim_cells.append(rim_cell)
+	rim_cells.sort()
+	for rim_cell: Vector2i in rim_cells:
+		if _notice_board_cells.size() >= 2:
+			break
+		var spaced := true
+		for placed_variant: Variant in _notice_board_cells.keys():
+			var placed := placed_variant as Vector2i
+			if absi(placed.x - rim_cell.x) + absi(placed.y - rim_cell.y) < 10:
+				spaced = false
+				break
+		if not spaced:
+			continue
+		used[rim_cell] = true
+		_notice_board_cells[rim_cell] = true
+
+## The open-grass cell where a civic room's signboard stands: beside the
+## stoop of its ring door, off the lane, never sealing a doorway. Returns
+## the invalid sentinel when no ring door faces usable grass.
+func _pick_signboard_cell_for_building(grid: Dictionary, payload: Dictionary, used: Dictionary, render_bounds: Rect2i) -> Vector2i:
+	var door_candidates: Array[Vector2i] = []
+	for cell_variant: Variant in (payload.get("cells", []) as Array):
+		var cell := cell_variant as Vector2i
+		if _door_cells.has(cell):
+			door_candidates.append(cell)
+	door_candidates.sort()
+	for door_cell: Vector2i in door_candidates:
+		for direction: Vector2i in [Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP]:
+			var outside := door_cell + direction
+			var outside_zone := int(grid.get(outside, CELL_ROCK))
+			# Only ring doors open onto the village; partition doors face
+			# another room and never earn a board.
+			if outside_zone != CELL_ROCK and outside_zone != CELL_HALL and outside_zone != CELL_PLAZA:
+				continue
+			var perpendicular := Vector2i(direction.y, direction.x)
+			for flank: Vector2i in [outside + perpendicular, outside - perpendicular, outside + direction + perpendicular, outside + direction - perpendicular]:
+				if used.has(flank) or _door_cells.has(flank):
+					continue
+				if int(grid.get(flank, CELL_ROCK)) != CELL_ROCK:
+					continue
+				if not render_bounds.has_point(flank):
+					continue
+				return flank
+	return Vector2i(2147483647, 2147483647)
+
 func _carve_winding_lane(grid: Dictionary, from_cell: Vector2i, to_cell: Vector2i, spine: Array[Vector2i]) -> void:
 	## Most lanes are 2 tiles wide; roughly a third widen to 3.
 	var wide := _rng.randf() < 0.3
@@ -2919,6 +3019,7 @@ func _show_level(target_level_index: int) -> void:
 	_latest_civic_building_type_map = level_data.get("civic_building_type_map", {}) as Dictionary
 	_latest_civic_building_name_map = _build_civic_building_name_lookup(_latest_civic_buildings_by_id, seed_input.text.strip_edges(), "townsfolk")
 	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
+	_plan_village_signboards(grid)
 	_village_yards = level_data.get("village_yards", []) as Array
 	var well_variant: Variant = level_data.get("well_cell")
 	_village_well_cell = (well_variant as Vector2i) if well_variant is Vector2i else Vector2i(2147483647, 2147483647)
@@ -4520,6 +4621,12 @@ func _handle_player_right_click(mouse_position: Vector2) -> bool:
 	if npc_state.is_empty() or SettlementAfflictionService.is_active_zombie(npc_state):
 		if _npc_inspection_card != null:
 			_npc_inspection_card.close()
+		# No citizen claimed the click: a sign under the cursor reads
+		# itself aloud instead (a look, not a touch, at any distance).
+		var sign_info := _sign_text_for_cell(clicked_cell)
+		if not sign_info.is_empty():
+			_show_sign_dialogue(clicked_cell, sign_info)
+			return true
 		return false
 	_open_npc_inspection(npc_state)
 	return true
@@ -8321,6 +8428,10 @@ func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: St
 	# Direction posts stand where the lane tracer marked a junction.
 	if _direction_post_cells.has(Vector2i(x, y)):
 		return "direction_post"
+	# Shop signboards by civic entrances and plaza-rim notice boards share
+	# the carved-board art; their text resolves via _sign_text_for_cell.
+	if _shop_sign_cells.has(Vector2i(x, y)) or _notice_board_cells.has(Vector2i(x, y)):
+		return "signboard"
 	# Nothing grows in the cellar's solid earth: no trees, hedges or blooms
 	# scattered over undug rock (interior furniture still places normally).
 	if _is_underground_level() and cell == CELL_ROCK:
@@ -8402,6 +8513,62 @@ func _update_summary(grid: Dictionary, seed_text: String) -> void:
 	if not building_subtype_summary.is_empty():
 		city_summary.text += "\nBuilding Types: %s" % building_subtype_summary
 
+## The readable text for a sign-like decor cell, or {} when the cell holds
+## no sign. Deterministic per settlement seed and cell: direction posts
+## point at the nearest named gazetteer sites, shop signboards carry their
+## establishment's name and trade, notice boards a seeded village notice.
+func _sign_text_for_cell(cell: Vector2i) -> Dictionary:
+	var sign_seed_text := seed_input.text.strip_edges()
+	if _direction_post_cells.has(cell):
+		var post_text := SignTextService.direction_post_text(_surface_all_sites, _overworld_tile_for_cell(cell), sign_seed_text, cell)
+		if post_text.is_empty():
+			post_text = SignTextService.flavor_text(sign_seed_text, cell)
+		return {"title": "Direction Post", "text": post_text}
+	if _shop_sign_cells.has(cell):
+		var anchor := _shop_sign_cells[cell] as Vector2i
+		var display_name := String(_latest_civic_building_name_map.get(anchor, ""))
+		var trade := _building_type_for_cell_or_empty(anchor)
+		var trade_display := "" if trade.is_empty() else _display_name_for_building_type(trade)
+		var sign_text := SignTextService.business_sign_text(display_name, trade_display)
+		if sign_text.is_empty():
+			sign_text = SignTextService.flavor_text(sign_seed_text, cell)
+		return {"title": display_name if not display_name.is_empty() else "Sign", "text": sign_text}
+	if _notice_board_cells.has(cell):
+		return {"title": "Notice Board", "text": SignTextService.flavor_text(sign_seed_text, cell)}
+	return {}
+
+## Floats the sign's text above the board in world space — small, warm,
+## outlined so it reads over any ground — replacing the tile tooltip.
+func _show_sign_hover_label(cell: Vector2i, sign_info: Dictionary) -> void:
+	if _sign_hover_cell == cell and _sign_hover_label != null and is_instance_valid(_sign_hover_label):
+		return
+	_clear_sign_hover_label()
+	var label := Label.new()
+	label.text = String(sign_info.get("text", ""))
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 12)
+	label.add_theme_color_override("font_color", Color(0.97, 0.93, 0.8, 1.0))
+	label.add_theme_color_override("font_outline_color", Color(0.09, 0.07, 0.05, 1.0))
+	label.add_theme_constant_override("outline_size", 6)
+	label.z_index = 45
+	city_layer.add_child(label)
+	label.reset_size()
+	label.position = _cell_center_position(cell) - Vector2(label.size.x * 0.5, label.size.y + float(tile_size.y) * 0.75)
+	_sign_hover_label = label
+	_sign_hover_cell = cell
+
+func _clear_sign_hover_label() -> void:
+	if _sign_hover_label != null and is_instance_valid(_sign_hover_label):
+		_sign_hover_label.queue_free()
+	_sign_hover_label = null
+	_sign_hover_cell = Vector2i(2147483647, 2147483647)
+
+## Right-clicking a sign reads it aloud: the text opens in the same speech
+## panel NPC dialogue uses, anchored over the board. No portrait — boards
+## have no face — just the title line and the sign's text.
+func _show_sign_dialogue(cell: Vector2i, sign_info: Dictionary) -> void:
+	_spawn_speech_bubble("%s\n%s" % [String(sign_info.get("title", "Sign")), String(sign_info.get("text", ""))], _cell_center_position(cell))
+
 func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	if city_layer.tile_set == null:
 		_hide_hover_tooltip()
@@ -8419,6 +8586,15 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 	var hovered_npc := _npc_state_near_mouse(mouse_position)
 	if hovered_npc.is_empty():
 		hovered_npc = _npc_state_at_cell(hovered_cell)
+	# A sign under the cursor floats its text above the board instead of
+	# the regular tile tooltip (a villager on the stoop still wins).
+	if hovered_npc.is_empty():
+		var sign_info := _sign_text_for_cell(hovered_cell)
+		if not sign_info.is_empty():
+			_show_sign_hover_label(hovered_cell, sign_info)
+			tile_hover_tooltip.visible = false
+			return
+	_clear_sign_hover_label()
 	var hovered_npc_name := String((hovered_npc.get("identity", {}) as Dictionary).get("name", ""))
 	if tile_hover_tooltip.visible and hovered_cell == _hover_tooltip_cell and hovered_layer == _hover_tooltip_layer and hovered_npc_name == _hover_tooltip_npc:
 		_place_hover_tooltip(mouse_position + Vector2(16, 16))
@@ -8477,6 +8653,7 @@ func _npc_state_near_mouse(mouse_position: Vector2) -> Dictionary:
 	return best
 
 func _hide_hover_tooltip() -> void:
+	_clear_sign_hover_label()
 	tile_hover_tooltip.visible = false
 	_hover_tooltip_cell = Vector2i(2147483647, 2147483647)
 	_hover_tooltip_layer = null

@@ -561,6 +561,10 @@ const TOWN_TILE_ATLAS := {
 	# branch debris. It is placed deliberately at lane junctions, never in
 	# the natural scatter pools.
 	"direction_post": Vector2i(5, 16),
+	# (6,16) is a free-standing carved notice board on two legs. It stands
+	# by shop entrances (with the establishment's name) and on the market
+	# rim (with village notices) — placed deliberately, never scattered.
+	"signboard": Vector2i(6, 16),
 	# The village well: a 2x2 composition — stone basin pair below, roofed
 	# crank pair above. The base cells block movement, the roof halves are
 	# passable visual caps (same convention as the *_top furniture keys).
