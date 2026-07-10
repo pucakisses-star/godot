@@ -263,9 +263,6 @@ var _light_overlay_sprite: Sprite2D
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
-# Art-free flowing-water animation, color-keyed to blue water pixels, applied
-# to the whole terrain layer so only water animates (land passes through).
-const WATER_FLOW_SHADER := preload("res://shaders/water_flow.gdshader")
 var _reflection_sprite: Sprite2D
 var _reflection_mask_texture: ImageTexture
 var _reflection_rect_cells := Rect2i()
@@ -1593,9 +1590,19 @@ func _configure_tile_layer() -> void:
 			tile_data.set_collision_polygons_count(0, 1)
 			tile_data.set_collision_polygon_points(0, 0, collision_polygon)
 
+	# Frame-based water animation: each water tile cycles through the frames
+	# painted beside it at atlas build, pixel-art style (no shader waves).
+	for water_key: String in TILE_ATLAS_DEFS.town_water_animated_keys():
+		var water_coords := TILE_ATLAS.get(water_key, Vector2i(-1, -1)) as Vector2i
+		if water_coords.x < 0 or atlas.get_tile_data(water_coords, 0) == null:
+			continue
+		atlas.set_tile_animation_columns(water_coords, 0)
+		atlas.set_tile_animation_frames_count(water_coords, TILE_ATLAS_DEFS.TOWN_WATER_ANIMATION_FRAMES)
+		for frame_index: int in range(TILE_ATLAS_DEFS.TOWN_WATER_ANIMATION_FRAMES):
+			atlas.set_tile_animation_frame_duration(water_coords, frame_index, 0.32)
+
 	city_layer.tile_set = tile_set
 	decor_layer.tile_set = tile_set
-	_apply_water_flow_material()
 
 ## Builds the town/surface atlas texture: the shipped tilesheet with extra
 ## 32px rows appended at the bottom, holding procedurally painted tiles the
@@ -1627,8 +1634,74 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 		_paint_snow_tile(augmented, snow_coords[variant_index], variant_index)
 	_paint_path_fringe_tiles(augmented)
 	_harmonize_demo_grass_tiles(augmented)
+	# Water frames must exist before the fringe pass samples them as the
+	# "under" terrain of the shoreline pieces.
+	_paint_water_frames(augmented)
 	_paint_terrain_fringe_tiles(augmented)
 	return ImageTexture.create_from_image(augmented)
+
+## The shipped sheet's flat water cells that seed the animation palette.
+const SHEET_WATER_SOURCE := Vector2i(0, 23)
+const SHEET_WATER_CALM_SOURCE := Vector2i(1, 23)
+
+## Paints the looping pixel-art water animation: for each of the two water
+## bases, TOWN_WATER_ANIMATION_FRAMES tiles side by side. Every frame is the
+## sheet's own water palette with drifting caustic dapples — pale rounded
+## patches that slide and morph, Stardew style — plus a few deeper shadows.
+## All sine terms use whole periods across the 16-block tile and a phase of
+## one full turn across the frame loop, so tiles butt seamlessly against
+## their neighbors and frame 3 flows back into frame 0.
+func _paint_water_frames(image: Image) -> void:
+	var blocks := 16
+	var frame_count := TILE_ATLAS_DEFS.TOWN_WATER_ANIMATION_FRAMES
+	for base_variant: Array in [["water", SHEET_WATER_SOURCE, false], ["water_calm", SHEET_WATER_CALM_SOURCE, true]]:
+		var target_base := TILE_ATLAS.get(String(base_variant[0]), Vector2i(-1, -1)) as Vector2i
+		if target_base.x < 0:
+			continue
+		var source := base_variant[1] as Vector2i
+		var calm := bool(base_variant[2])
+		# The body color: the shipped tile's average, so shore rims, the
+		# reflection quad's color keying and the minimap all keep reading it
+		# as the same water.
+		var sum := Vector3.ZERO
+		for ty: int in range(tile_size.y):
+			for tx: int in range(tile_size.x):
+				var pixel := image.get_pixel(source.x * tile_size.x + tx, source.y * tile_size.y + ty)
+				sum += Vector3(pixel.r, pixel.g, pixel.b)
+		var base_color := Color(sum.x / 1024.0, sum.y / 1024.0, sum.z / 1024.0, 1.0)
+		var dapple := Color(minf(base_color.r * 1.34 + 0.10, 1.0), minf(base_color.g * 1.30 + 0.09, 1.0), minf(base_color.b * 1.16 + 0.05, 1.0), 1.0)
+		var dapple_soft := base_color.lerp(dapple, 0.45)
+		var deep := Color(base_color.r * 0.88, base_color.g * 0.90, base_color.b * 0.96, 1.0)
+		for frame_index: int in range(frame_count):
+			var phase := TAU * float(frame_index) / float(frame_count)
+			var origin := Vector2i((target_base.x + frame_index) * tile_size.x, target_base.y * tile_size.y)
+			for by: int in range(blocks):
+				for bx: int in range(blocks):
+					# One dominant low-frequency lobe field (large connected
+					# caustic patches, reference style) nudged by a faster
+					# counter-drifting ripple; whole periods per tile.
+					var u := TAU * float(bx) / float(blocks)
+					var v := TAU * float(by) / float(blocks)
+					# Asymmetric spatial phases keep features off the tile's
+					# center/corners; per-block hash jitter rags the blob
+					# edges so the pattern reads organic, not gridded.
+					var swell := sin(u + 0.7 + phase) * sin(v + 2.3 - phase) * 1.25 \
+						+ sin(u + v * 2.0 + 1.1 + phase) * 0.45 \
+						+ sin(u * 2.0 - v + 4.2 + phase * 2.0) * 0.3 \
+						+ float(absi(hash(Vector2i(bx * 7 + 3, by * 5 + 1))) % 100) * 0.007 - 0.35
+					# Static per-block grain so the body is not one flat tone.
+					var grain := float(absi(hash(Vector2i(bx, by)) * 31) % 7 - 3) * 0.006
+					var tone := Color(clampf(base_color.r + grain, 0.0, 1.0), clampf(base_color.g + grain, 0.0, 1.0), clampf(base_color.b + grain, 0.0, 1.0), 1.0)
+					var dapple_cut := 1.15 if calm else 0.82
+					if swell > dapple_cut + 0.34:
+						tone = dapple
+					elif swell > dapple_cut:
+						tone = dapple_soft
+					elif not calm and swell < -1.28:
+						tone = deep
+					for py: int in range(2):
+						for px: int in range(2):
+							image.set_pixel(origin.x + bx * 2 + px, origin.y + by * 2 + py, tone)
 
 ## The sheet's grass-demo region (dark patches, tufts, mottled blends) sits
 ## on its own mid-green (140,169,66), while the game's plain grass tile is
@@ -1770,11 +1843,17 @@ func _paint_terrain_fringe_tiles(image: Image) -> void:
 		var under := TILE_ATLAS.get(String(recipe.get("under", "grass")), Vector2i.ZERO) as Vector2i
 		var over := TILE_ATLAS.get(String(recipe.get("over", "grass")), Vector2i.ZERO) as Vector2i
 		var rim := bool(recipe.get("rim", false))
+		# Water-under families animate: one fringe piece per water frame,
+		# sampling that frame's water as the under terrain. The scallop mask
+		# is frame-independent, so the shore keeps its shape while the water
+		# inside it moves in lockstep with the open-water tiles.
+		var frame_count := TILE_ATLAS_DEFS.TOWN_WATER_ANIMATION_FRAMES if String(recipe.get("under", "")) == "water" else 1
 		for suffix: String in TILE_ATLAS_DEFS.TOWN_FRINGE_SUFFIXES:
 			var target := TILE_ATLAS.get("%s_%s" % [family_key, suffix], Vector2i(-1, -1)) as Vector2i
 			if target.x < 0:
 				continue
-			_paint_fringe_piece(image, target, under, over, suffix, family_key, rim)
+			for frame_index: int in range(frame_count):
+				_paint_fringe_piece(image, target + Vector2i(frame_index, 0), under + Vector2i(frame_index, 0), over, suffix, family_key, rim)
 
 ## Paints one synthesized fringe piece: the under tile everywhere, the over
 ## tile across a scalloped band along each open side (union), with an
@@ -1890,19 +1969,6 @@ func _paint_snow_tile(image: Image, cell_coords: Vector2i, variant: int) -> void
 		var sx := rng.randi_range(0, width - 1)
 		var sy := rng.randi_range(0, height - 1)
 		image.set_pixel(origin.x + sx, origin.y + sy, Color(1.0, 1.0, 1.0, 1.0))
-
-## Gives the terrain layer an animated flowing-water shader. It is
-## color-keyed to blue water pixels, so grass/paths/roofs/stone render
-## unchanged while the walkable water (town interior + streamed surface)
-## shimmers as one continuous body. The reflection quad still draws on top.
-func _apply_water_flow_material() -> void:
-	if city_layer.material is ShaderMaterial and (city_layer.material as ShaderMaterial).shader == WATER_FLOW_SHADER:
-		return
-	var flow_material := ShaderMaterial.new()
-	flow_material.shader = WATER_FLOW_SHADER
-	flow_material.set_shader_parameter("flow_speed", 0.6)
-	flow_material.set_shader_parameter("flow_strength", 1.0)
-	city_layer.material = flow_material
 
 func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 	if _passable_atlas_set.is_empty():
