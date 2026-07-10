@@ -416,6 +416,13 @@ const PROFESSION_BY_BUILDING := {
 
 const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
 const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
+const DWARFHOLD_SCENE_NAME_KEY := "dwarfhold_scene_name"
+const DWARFHOLD_SCENE_FALL_KEY := "dwarfhold_scene_fall_text"
+
+## Identity carried in from the overworld chronicle: the hold's name and,
+## for abandoned ruins, the fall summary ("Fell to <beast>, year <y>").
+var _hold_name := ""
+var _hold_fall_text := ""
 
 const CHEST_LOOT_TABLE := [
 	{"name": "Iron Ingot", "min": 1, "max": 5},
@@ -1447,6 +1454,8 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 		return
 	var settings: Dictionary = game_session.call("get_world_settings")
 	var scene_seed := _hold_state.apply_world_settings(settings, DWARFHOLD_SCENE_SEED_KEY, DWARFHOLD_SCENE_POPULATION_KEY)
+	_hold_name = String(settings.get(DWARFHOLD_SCENE_NAME_KEY, ""))
+	_hold_fall_text = String(settings.get(DWARFHOLD_SCENE_FALL_KEY, ""))
 	var chronology := settings.get("chronology", {}) as Dictionary
 	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
 	_underdeep_sites = []
@@ -3694,6 +3703,13 @@ func _assign_settlement_factions() -> void:
 	_settlement_factions = SettlementFactionService.generate_factions(
 		"dwarf", _hold_state.selected_hold_population, building_cells_by_type, _rng
 	)
+	## Chronicle grudges (a neighbor hold that fell, a beast still below)
+	## redirect one lodge's agenda toward the hold's real history.
+	SettlementFactionService.apply_history_agenda(
+		_settlement_factions,
+		WorldChronicleService.history_agenda_goals(_world_settings_snapshot(), _hold_name),
+		_rng
+	)
 	SettlementFactionService.assign_members(_settlement_factions, _npc_states, Callable(self, "_is_npc_walkable_cell"), _rng)
 	_update_factions_panel()
 
@@ -3754,8 +3770,11 @@ func _show_npc_dialogue(state: Dictionary) -> void:
 	else:
 		# World news travels even underground: sometimes the gossip is
 		# about far-off wars and caravans instead of the local deeps.
+		# History runs deepest — chronicle rumors recall the recorded past.
 		var rumor := ""
-		if _rng.randf() < 0.4:
+		if _rng.randf() < 0.35:
+			rumor = WorldChronicleService.history_rumor(_world_settings_snapshot(), _hold_name, _rng)
+		if rumor.is_empty() and _rng.randf() < 0.4:
 			rumor = WorldEventsService.rumor_from_events(_world_settings_snapshot(), _game_day, _rng)
 		if rumor.is_empty():
 			rumor = SettlementEconomyService.rumor_from_labels(
@@ -5378,6 +5397,12 @@ func _update_summary(grid: Dictionary, seed_text: String) -> void:
 		)
 		city_summary.text += "\nHold Population: %d (target residents in-scene: %d at 10:1)" % [_hold_state.selected_hold_population, expected_npcs]
 		city_summary.text += "\nBeds this level: %d (level resident target: %d)" % [_latest_bed_count, level_npc_target]
+	elif not _hold_fall_text.is_empty():
+		## Silent ruin: surface the chronicle's fall event on entry.
+		var fall_line := _hold_fall_text
+		if not _hold_name.is_empty():
+			fall_line = "%s — %s" % [_hold_name, _hold_fall_text]
+		city_summary.text += "\n%s" % fall_line
 	if not building_subtype_summary.is_empty():
 		city_summary.text += "\nBuilding Types: %s" % building_subtype_summary
 

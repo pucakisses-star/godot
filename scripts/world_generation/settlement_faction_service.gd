@@ -235,6 +235,23 @@ static func generate_factions(kind: String, population: int, building_cells_by_t
 			picked_secret = true
 	return factions
 
+## A settlement that remembers the chronicle — a battle lost, a hold that
+## fell nearby, a beast still at large — turns one open faction's agenda
+## toward that grudge ("to see the green dragon Vorgash slain"). Goals come
+## from WorldChronicleService.history_agenda_goals via the world settings.
+static func apply_history_agenda(factions: Array[Dictionary], history_goals: Array[String], rng: RandomNumberGenerator) -> void:
+	if factions.is_empty() or history_goals.is_empty():
+		return
+	var open_indices: Array[int] = []
+	for faction_index: int in factions.size():
+		if not bool(factions[faction_index].get("secret", false)):
+			open_indices.append(faction_index)
+	if open_indices.is_empty():
+		return
+	var target_index := open_indices[rng.randi_range(0, open_indices.size() - 1)]
+	factions[target_index]["goal"] = history_goals[rng.randi_range(0, history_goals.size() - 1)]
+	factions[target_index]["historic_goal"] = true
+
 static func _pick_meeting_cell(archetype: Dictionary, building_cells_by_type: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
 	for type_variant: Variant in (archetype.get("meeting_types", []) as Array):
 		var cells := building_cells_by_type.get(String(type_variant), []) as Array

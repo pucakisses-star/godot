@@ -744,6 +744,11 @@ var _overlay_dirty := {
 }
 var _hovered_tile := Vector2i(-999, -999)
 var _context_menu_tile := Vector2i(-1, -1)
+## The simulated chronicle of the age (WorldChronicleService.simulate output).
+var _world_chronicle: Dictionary = {}
+var _world_chronicle_button: Button
+var _world_chronicle_dialog: AcceptDialog
+var _world_chronicle_label: RichTextLabel
 
 const CONTEXT_MENU_BEGIN_JOURNEY_ID := 0
 const CONTEXT_MENU_MORE_INFORMATION_ID := 1
@@ -752,6 +757,9 @@ const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
 const DWARFHOLD_SCENE_TILE_KEY := "dwarfhold_scene_tile"
 const DWARFHOLD_SCENE_NAME_KEY := "dwarfhold_scene_name"
 const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
+## Fall summary for abandoned holds ("Fell to <beast>, year <y>") so the
+## ruin's scene can show why its halls are silent.
+const DWARFHOLD_SCENE_FALL_KEY := "dwarfhold_scene_fall_text"
 const TOWN_GENERATION_SCENE_PATH := "res://scenes/town_generation.tscn"
 const TOWN_SCENE_SEED_KEY := "town_scene_seed"
 const TOWN_SCENE_TILE_KEY := "town_scene_tile"
@@ -878,6 +886,7 @@ func _ready() -> void:
 	_update_labels_overlay_visibility()
 	call_deferred("_cache_more_info_image_paths")
 	_configure_structure_context_menu()
+	_setup_world_chronicle_ui()
 
 func _on_overworld_camera_zoom_changed(_zoom_level: float) -> void:
 	_refresh_scale_bar()
@@ -1366,6 +1375,7 @@ func _store_selected_dwarfhold_scene_context(seed_text: String, tile_coord: Vect
 	settings[DWARFHOLD_SCENE_TILE_KEY] = {"x": tile_coord.x, "y": tile_coord.y}
 	settings[DWARFHOLD_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
 	settings[DWARFHOLD_SCENE_POPULATION_KEY] = maxi(0, int(details.get("population", 0)))
+	settings[DWARFHOLD_SCENE_FALL_KEY] = String(details.get("fall_summary", ""))
 	settings["underdeep_sites"] = _build_underdeep_sites(tile_coord)
 	game_session.call("set_world_settings", settings)
 
@@ -1599,15 +1609,22 @@ func _show_structure_details_modal(tile_coord: Vector2i, details: Dictionary) ->
 		founded_years_ago = maxi(1, int(round(float(founded_value))))
 		founded_text = "%s years ago" % str(founded_years_ago)
 
-	var history_timeline := _build_settlement_history_timeline(
-		details,
-		settlement_name,
-		founded_years_ago
-	)
+	## The chronicle is real simulated history; the legacy flavor timeline
+	## only backs up sites the simulation never covered.
+	var chronicle_events := details.get("chronicle_events", []) as Array
+	var history_timeline := ""
+	if not chronicle_events.is_empty():
+		history_timeline = WorldChronicleService.settlement_events_bbcode(chronicle_events, _chronology_year)
+	if history_timeline.is_empty():
+		history_timeline = _build_settlement_history_timeline(
+			details,
+			settlement_name,
+			founded_years_ago
+		)
 
 	_set_details_tab_text(
 		structure_details_history_label,
-		"[b]Settlement:[/b] %s\n[b]Type:[/b] %s\n[b]Founded:[/b] %s\n[b]Location:[/b] %s\n[b]Biome:[/b] %s\n\n[b]Chronological Timeline[/b]\n%s" % [
+		"[b]Settlement:[/b] %s\n[b]Type:[/b] %s\n[b]Founded:[/b] %s\n[b]Location:[/b] %s\n[b]Biome:[/b] %s\n\n[b]Chronicle[/b]\n%s" % [
 			settlement_name,
 			settlement_type,
 			founded_text,
@@ -2201,13 +2218,19 @@ func _generate_map() -> void:
 	_build_routes_overlay_from_settlements()
 	_log_generation_stage("routes overlay", generation_started_ms)
 	generation_started_ms = Time.get_ticks_msec()
-	_rebuild_labels_overlay()
-	_log_generation_stage("labels overlay", generation_started_ms)
-	generation_started_ms = Time.get_ticks_msec()
 	_set_loading_progress(80.0, "Weaving cultures and drawing borders...")
 	await _yield_generation_wave()
 	_assign_cultural_groups(biome_map, temperature_map, moisture_map, height_map, rng)
 	_log_generation_stage("cultural groups", generation_started_ms)
+	generation_started_ms = Time.get_ticks_msec()
+	_set_loading_progress(82.0, "Chronicling the ages...")
+	_simulate_world_chronicle()
+	_log_generation_stage("world chronicle", generation_started_ms)
+	# Labels render AFTER the chronicle so razed sites are already renamed
+	# ("Ruins of X") and the overlay is only ever built once.
+	generation_started_ms = Time.get_ticks_msec()
+	_rebuild_labels_overlay()
+	_log_generation_stage("labels overlay", generation_started_ms)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "settlements and culture")
 	_set_loading_progress(84.0, "Drawing the cartographer's overlays...")
 	await _yield_generation_wave()
@@ -2321,7 +2344,190 @@ func _persist_world_sites() -> void:
 		"settlements": roster_settlements,
 		"factions": faction_names
 	}
+	## The chronicle rides along compactly so town/dwarfhold scenes can read
+	## local history (rumors, grudges, fall summaries) without the overworld.
+	settings[WorldChronicleService.SETTINGS_KEY] = _world_chronicle
 	game_session.call("set_world_settings", settings)
+
+## Runs the seeded history simulation (year 1 to the embark year) over the
+## placed settlements and the political states the culture flood assigned,
+## then rewrites the map's flavor data as OUTPUTS of that chronicle.
+func _simulate_world_chronicle() -> void:
+	var chronicle_started_usec := Time.get_ticks_usec()
+	## The placement passes already collected every settlement coordinate;
+	## walking them beats re-scanning the whole tile dictionary.
+	var coords: Array[Vector2i] = []
+	coords.append_array(_town_points)
+	coords.append_array(_dwarfhold_points)
+	coords.append_array(_grove_points)
+	coords.append_array(_lizardmen_city_points)
+	coords.append_array(_desert_city_points)
+	## Deterministic actor order regardless of placement history.
+	coords.sort_custom(func(left: Vector2i, right: Vector2i) -> bool:
+		if left.y != right.y:
+			return left.y < right.y
+		return left.x < right.x
+	)
+	var actors: Array[Dictionary] = []
+	for coord: Vector2i in coords:
+		var details := _tile_data.get(coord, {}) as Dictionary
+		if not details.has("settlement_type"):
+			continue
+		actors.append({
+			"key": "%d,%d" % [coord.x, coord.y],
+			"x": coord.x,
+			"y": coord.y,
+			"name": _tile_region_name(coord, details),
+			"type": String(details.get("settlement_type", "town")),
+			"class_key": String(details.get("settlement_classification_key", "")),
+			"population": maxi(0, int(details.get("population", 0))),
+			"is_hamlet": bool(details.get("is_hamlet", false)),
+			"state": String(details.get("political_state", "")),
+			"ruler_name": String(details.get("ruler_name", "")),
+			"ruler_title": String(details.get("ruler_title", ""))
+		})
+	_world_chronicle = WorldChronicleService.simulate(actors, _chronology_year, int(map_seed))
+	var simulate_usec := Time.get_ticks_usec() - chronicle_started_usec
+	_apply_world_chronicle()
+	var world_event_count := (_world_chronicle.get("world_events", []) as Array).size()
+	print("[OverworldMap] world chronicle: %d settlements, %d world events, %d wars in %d us (sim %d us, apply %d us)" % [
+		actors.size(),
+		world_event_count,
+		(_world_chronicle.get("wars", []) as Array).size(),
+		Time.get_ticks_usec() - chronicle_started_usec,
+		simulate_usec,
+		Time.get_ticks_usec() - chronicle_started_usec - simulate_usec
+	])
+
+## Feeds the chronicle back into the tile data: founding years, reshaped
+## population timelines, per-settlement event lists, hold falls (including
+## conversions of living holds the sim toppled) and razed ruins.
+func _apply_world_chronicle() -> void:
+	var settlements := _world_chronicle.get("settlements", {}) as Dictionary
+	if settlements.is_empty():
+		return
+	var converted_holds := _world_chronicle.get("converted_holds", []) as Array
+	var razed_settlements := _world_chronicle.get("razed_settlements", []) as Array
+	for entry_key_variant: Variant in settlements.keys():
+		var entry_key := String(entry_key_variant)
+		var entry := settlements[entry_key] as Dictionary
+		var key_parts := entry_key.split(",")
+		if key_parts.size() != 2:
+			continue
+		var coord := Vector2i(int(key_parts[0]), int(key_parts[1]))
+		if not _tile_data.has(coord):
+			continue
+		var details := _tile_data[coord] as Dictionary
+		var founded_year := int(entry.get("founded_year", 1))
+		details["founded_years_ago"] = maxi(1, _chronology_year - founded_year)
+		details["chronicle_events"] = entry.get("events", [])
+		# Renames from conversions and razings are picked up by the labels
+		# overlay, which the pipeline builds after this stage.
+		if converted_holds.has(entry_key):
+			_convert_hold_to_abandoned(coord, details, entry)
+		if razed_settlements.has(entry_key):
+			_apply_settlement_razing(coord, details, entry)
+		var fell_year := int(entry.get("fell_year", 0))
+		if fell_year > 0:
+			details["fall_year"] = fell_year
+			details["fall_summary"] = String(entry.get("fall_text", ""))
+		## Notable settlements inherit their lineage's sitting ruler.
+		var chronicle_ruler := String(entry.get("ruler_name", "")).strip_edges()
+		if not chronicle_ruler.is_empty() and String(details.get("ruler_name", "")).strip_edges().is_empty():
+			details["ruler_name"] = chronicle_ruler
+			details["ruler_title"] = String(entry.get("ruler_title", ""))
+		## The population chart replays the chronicle: dips at plague and
+		## siege years, booms in golden ages, zero after a fall.
+		var timeline_rng := RandomNumberGenerator.new()
+		timeline_rng.seed = int(hash("%d|chronicle_timeline|%s" % [map_seed, entry_key]))
+		var timeline := WorldChronicleService.build_population_timeline(
+			founded_year,
+			_chronology_year,
+			maxi(0, int(details.get("population", 0))),
+			maxi(0, int(entry.get("peak_population", 0))),
+			fell_year,
+			entry.get("marks", []) as Array,
+			timeline_rng
+		)
+		if not timeline.is_empty():
+			details["population_timeline"] = timeline
+		_tile_data[coord] = details
+
+## A living hold the chronicle toppled becomes an abandoned ruin on the
+## map: tile art, classification and details all follow the fall event.
+func _convert_hold_to_abandoned(coord: Vector2i, details: Dictionary, entry: Dictionary) -> void:
+	if settlement_layer != null:
+		settlement_layer.set_cell(coord, _atlas_source_id, ABANDONED_DWARFHOLD_TILE)
+	else:
+		map_layer.set_cell(coord, _atlas_source_id, ABANDONED_DWARFHOLD_TILE)
+	details["settlement_classification"] = "Abandoned Dwarfhold"
+	details["settlement_classification_key"] = "abandoned"
+	details["dwarfhold_access"] = "Closed"
+	details["population"] = 0
+	details["ruler_title"] = ""
+	details["ruler_name"] = ""
+	details["prominent_clan"] = ""
+	details["major_clans"] = []
+	details["major_guilds"] = []
+	details["major_exports"] = []
+	if not DWARFHOLD_ABANDONED_HALLMARKS.is_empty():
+		var hallmark_index := absi(int(hash("%d,%d|fall" % [coord.x, coord.y]))) % DWARFHOLD_ABANDONED_HALLMARKS.size()
+		details["hallmark"] = DWARFHOLD_ABANDONED_HALLMARKS[hallmark_index]
+	details["description"] = String(entry.get("fall_text", "Dust and silence fill the abandoned chambers."))
+	## The scene seed keyed population; the ruin re-derives it at 0.
+	details.erase(DWARFHOLD_SCENE_SEED_KEY)
+	details[DWARFHOLD_SCENE_SEED_KEY] = _dwarfhold_scene_seed_for_tile(coord, details)
+
+## A razed town keeps its tile (the atlas offers no human-ruin art) but is
+## renamed "Ruins of X" with population 0; its history explains the rest.
+func _apply_settlement_razing(coord: Vector2i, details: Dictionary, entry: Dictionary) -> void:
+	var original_name := String(entry.get("name", _tile_region_name(coord, details)))
+	_tile_region_names[coord] = "Ruins of %s" % original_name
+	details["razed"] = true
+	details["population"] = 0
+	details["settlement_classification"] = "Ruins"
+	details["ruler_title"] = ""
+	details["ruler_name"] = ""
+	details["description"] = String(entry.get("fall_text", "Only ruins remain."))
+
+## --- World Chronicle view ----------------------------------------------------
+
+## A read-only "World Chronicle" dialog beside the map-mode buttons: the
+## 15-25 loudest events of the age plus the named beasts' fates.
+func _setup_world_chronicle_ui() -> void:
+	var top_bar := get_node_or_null("MapUi/TopBar/TopBarLayout")
+	var map_ui := get_node_or_null("MapUi")
+	if top_bar == null or map_ui == null:
+		return
+	_world_chronicle_button = Button.new()
+	_world_chronicle_button.name = "WorldChronicleButton"
+	_world_chronicle_button.text = "World Chronicle"
+	_world_chronicle_button.tooltip_text = "The recorded history of the age"
+	_world_chronicle_button.pressed.connect(_on_world_chronicle_pressed)
+	top_bar.add_child(_world_chronicle_button)
+	_world_chronicle_dialog = AcceptDialog.new()
+	_world_chronicle_dialog.name = "WorldChronicleDialog"
+	_world_chronicle_dialog.title = "World Chronicle"
+	_world_chronicle_dialog.ok_button_text = "Close"
+	var chronicle_margin := MarginContainer.new()
+	chronicle_margin.add_theme_constant_override("margin_left", 12)
+	chronicle_margin.add_theme_constant_override("margin_right", 12)
+	chronicle_margin.add_theme_constant_override("margin_top", 8)
+	chronicle_margin.add_theme_constant_override("margin_bottom", 8)
+	_world_chronicle_label = RichTextLabel.new()
+	_world_chronicle_label.bbcode_enabled = true
+	_world_chronicle_label.scroll_active = true
+	_world_chronicle_label.fit_content = false
+	_world_chronicle_label.custom_minimum_size = Vector2(600.0, 440.0)
+	chronicle_margin.add_child(_world_chronicle_label)
+	_world_chronicle_dialog.add_child(chronicle_margin)
+	map_ui.add_child(_world_chronicle_dialog)
+
+func _on_world_chronicle_pressed() -> void:
+	if _world_chronicle_dialog == null or _world_chronicle_label == null:
+		return
+	_world_chronicle_label.text = WorldChronicleService.overview_bbcode(_world_chronicle)
+	_world_chronicle_dialog.popup_centered(Vector2i(660, 520))
 
 ## Resolves a non-enterable ambient structure tile into a gazetteer site
 ## (overworld-atlas art + name) or returns {} when the tile carries no
@@ -5425,12 +5631,13 @@ func _register_town_settlement(
 		population_options = [TOWN_POPULATION_RACE_OPTIONS[0]]
 	var majority_key := String((population_options[0] as Dictionary).get("key", ""))
 	var population_breakdown := _generate_population_breakdown_from_options(population_options, population, rng, majority_key)
-	var population_timeline := _generate_population_timeline(population, rng, founded_years_ago)
 	tile_info["population"] = population
 	tile_info["population_label"] = "Population"
 	tile_info["population_descriptor"] = "residents"
 	tile_info["population_breakdown"] = population_breakdown
-	tile_info["population_timeline"] = population_timeline
+	# The world chronicle rewrites every settlement's timeline from real
+	# events after nations exist; rolling a placeholder here is pure waste.
+	tile_info["population_timeline"] = []
 	var labels := _labels_from_population_breakdown(population_breakdown)
 	_tile_population_groups[coord] = {
 		"major_population_groups": labels.get("major", ["Humans"]),
@@ -5770,12 +5977,12 @@ func _register_scored_settlement(
 	if not population_options.is_empty():
 		var majority_key := String((population_options[0] as Dictionary).get("key", ""))
 		var population_breakdown := _generate_population_breakdown_from_options(population_options, population, rng, majority_key)
-		var population_timeline := _generate_population_timeline(population, rng, founded_years_ago)
 		tile_info["population"] = population
 		tile_info["population_label"] = "Population"
 		tile_info["population_descriptor"] = "residents"
 		tile_info["population_breakdown"] = population_breakdown
-		tile_info["population_timeline"] = population_timeline
+		# Rewritten from chronicle events after the history simulation.
+		tile_info["population_timeline"] = []
 		var labels := _labels_from_population_breakdown(population_breakdown)
 		_tile_population_groups[coord] = {
 			"major_population_groups": labels.get("major", [civilization_label]),
@@ -7856,50 +8063,6 @@ func _generate_dwarfhold_population_breakdown(
 		})
 	return results
 
-func _generate_population_timeline(
-	population: int,
-	rng: RandomNumberGenerator,
-	founded_years_ago: int
-) -> Array[Dictionary]:
-	var resolved_population := maxi(0, population)
-	if resolved_population <= 0:
-		return []
-	var resolved_founded_years_ago := maxi(0, founded_years_ago)
-
-	var points: Array[Dictionary] = []
-	var total_points := resolved_founded_years_ago + 1
-	var base_start := maxf(20.0, float(resolved_population) * rng.randf_range(0.18, 0.48))
-	var current_value := base_start
-
-	for year_since_founding in range(total_points):
-		if year_since_founding == total_points - 1:
-			current_value = float(resolved_population)
-		else:
-			var timeline_ratio := 0.0
-			if total_points > 1:
-				timeline_ratio = float(year_since_founding) / float(total_points - 1)
-			var target_value := lerpf(base_start, float(resolved_population), timeline_ratio)
-			var drift := (target_value - current_value) * 0.16
-			var noise_strength := lerpf(0.075, 0.03, timeline_ratio)
-			var noise := rng.randf_range(-1.0, 1.0) * maxf(8.0, current_value * noise_strength)
-			current_value = clampf(
-				current_value + drift + noise,
-				10.0,
-				float(resolved_population) * 1.75
-			)
-
-		var years_ago := resolved_founded_years_ago - year_since_founding
-		points.append({
-			"label": "Founding" if year_since_founding == 0 else ("Current" if years_ago == 0 else "Year %d" % year_since_founding),
-			"year": year_since_founding,
-			"population": int(round(current_value)),
-			"years_ago": years_ago
-		})
-
-	if points.size() > 1:
-		points[points.size() - 1]["population"] = resolved_population
-	return points
-
 func _dwarfhold_classification_for_tile(tile: Vector2i) -> Dictionary:
 	if tile == GREAT_DWARFHOLD_TILE:
 		return {
@@ -8018,15 +8181,14 @@ func _generate_dwarfhold_details(
 		has_nearby_human_settlement,
 		rng
 	)
-	var founded_years_ago := int(details.get("founded_years_ago", 0))
-	var population_timeline := _generate_population_timeline(population, rng, founded_years_ago)
 	if is_dark:
 		for entry in population_breakdown:
 			if String(entry.get("key", "")) == "dwarves":
 				entry["label"] = "Dark Dwarves"
 				entry["color"] = Color("#3b2a3d")
 	details["population_breakdown"] = population_breakdown
-	details["population_timeline"] = population_timeline
+	# Rewritten from chronicle events after the history simulation.
+	details["population_timeline"] = []
 	return details
 
 func _set_tooltip_label(label: Label, text: String, should_show: bool) -> void:
