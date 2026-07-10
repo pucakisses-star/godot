@@ -221,6 +221,22 @@ var _minimap: WorldMinimapScript
 var _minimap_refresh_timer := 0.0
 var _minimap_last_player_cell := Vector2i(2147483647, 2147483647)
 const MINIMAP_REFRESH_SECONDS := 0.2
+## Fog-of-war exploration: every cell the walker has actually seen (a disc
+## of EXPLORE_RADIUS around each cell stood on), stored per 32x32 chunk of
+## shared WORLD space (scene cell + _surface_world_origin) as a bitmask so
+## the expanded map can black out ground never visited.
+const EXPLORE_RADIUS := 14
+const EXPLORE_CHUNK_SHIFT := 5
+const EXPLORE_CHUNK_SIZE := 1 << EXPLORE_CHUNK_SHIFT
+const EXPLORE_CHUNK_BYTES := (EXPLORE_CHUNK_SIZE * EXPLORE_CHUNK_SIZE) >> 3
+const EXPLORE_PERSIST_SECONDS := 3.0
+## Vector2i world-chunk -> PackedByteArray(EXPLORE_CHUNK_BYTES) bitmask.
+var _explored_chunks: Dictionary = {}
+var _explored_last_cell := Vector2i(2147483647, 2147483647)
+var _explored_dirty := false
+var _explored_persist_timer := 0.0
+## The circular stamp of offsets marked around the player, built once.
+var _explore_disc_offsets: Array[Vector2i] = []
 const SURFACE_CREATURE_TEXTURE := preload("res://resources/images/npc/creature_characters.png")
 const BOAT_SPRITE_TEXTURE := preload("res://resources/images/npc/boat_sprite.png")
 var _player_attack_timer := 0.0
@@ -788,6 +804,7 @@ func _process(delta: float) -> void:
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
 	_update_weather_frame(delta)
+	_update_exploration(delta)
 	_update_minimap(delta)
 
 func _advance_game_clock(delta: float) -> void:
@@ -1165,6 +1182,9 @@ func _exit_tree() -> void:
 ## Pushes the live clock/HP/satiety into the session. Runs on scene exit
 ## AND whenever SaveGameService writes a slot, so saves capture now.
 func flush_session_state() -> void:
+	# The explored mask rides the same flush: scene exits and slot saves
+	# both capture the freshest fog-of-war state.
+	_flush_exploration()
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return
@@ -1237,6 +1257,116 @@ func _update_minimap(delta: float) -> void:
 		return
 	_minimap_refresh_timer = MINIMAP_REFRESH_SECONDS
 	_minimap.refresh()
+
+## --- fog-of-war exploration ---------------------------------------------
+## The expanded map (M) only shows land the walker has actually seen: the
+## corridor walked plus a view disc around it. Tracking is hot-path cheap -
+## work happens only on the frame the player crosses into a new cell - and
+## the mask persists through world settings like the homestead does.
+
+## Marks the view disc when the player enters a new cell, then banks dirty
+## bits into the session settings on a slow throttle.
+func _update_exploration(delta: float) -> void:
+	if _player_sprite == null or _is_underground_level():
+		return
+	if _player_cell != _explored_last_cell:
+		_explored_last_cell = _player_cell
+		_mark_explored_around(_player_cell)
+	if not _explored_dirty:
+		return
+	_explored_persist_timer -= delta
+	if _explored_persist_timer <= 0.0:
+		_persist_exploration()
+
+## Sets the explored bit for every cell of the circular view disc around a
+## scene cell. Offsets run row-major so consecutive cells usually share a
+## chunk: the chunk's mask is fetched once and written back only on change
+## (PackedByteArray copies on write, so the write-back is required).
+func _mark_explored_around(center_cell: Vector2i) -> void:
+	if _explore_disc_offsets.is_empty():
+		for disc_dy: int in range(-EXPLORE_RADIUS, EXPLORE_RADIUS + 1):
+			for disc_dx: int in range(-EXPLORE_RADIUS, EXPLORE_RADIUS + 1):
+				if disc_dx * disc_dx + disc_dy * disc_dy <= EXPLORE_RADIUS * EXPLORE_RADIUS:
+					_explore_disc_offsets.append(Vector2i(disc_dx, disc_dy))
+	var world_center := center_cell + _surface_world_origin
+	var cached_chunk := Vector2i(2147483647, 2147483647)
+	var mask := PackedByteArray()
+	var mask_changed := false
+	for offset: Vector2i in _explore_disc_offsets:
+		var world_cell := world_center + offset
+		var chunk := Vector2i(world_cell.x >> EXPLORE_CHUNK_SHIFT, world_cell.y >> EXPLORE_CHUNK_SHIFT)
+		if chunk != cached_chunk:
+			if mask_changed:
+				_explored_chunks[cached_chunk] = mask
+			var mask_variant: Variant = _explored_chunks.get(chunk)
+			if mask_variant is PackedByteArray:
+				mask = mask_variant as PackedByteArray
+			else:
+				mask = PackedByteArray()
+				mask.resize(EXPLORE_CHUNK_BYTES)
+			cached_chunk = chunk
+			mask_changed = false
+		var local_index := (world_cell.y & (EXPLORE_CHUNK_SIZE - 1)) * EXPLORE_CHUNK_SIZE + (world_cell.x & (EXPLORE_CHUNK_SIZE - 1))
+		var byte_index := local_index >> 3
+		var bit := 1 << (local_index & 7)
+		if (mask[byte_index] & bit) == 0:
+			mask[byte_index] = mask[byte_index] | bit
+			mask_changed = true
+			_explored_dirty = true
+	if mask_changed:
+		_explored_chunks[cached_chunk] = mask
+
+## Settings key for this settlement's explored mask: world seed plus the
+## scene's overworld tile, so each settlement keeps its own mask and a
+## fresh world seed starts fully unexplored (no bleed between worlds).
+func _explored_store_key() -> String:
+	return "town_explored|%s|%d,%d" % [_surface_world_seed_text, _surface_own_tile.x, _surface_own_tile.y]
+
+## Packs the per-chunk bitmasks into JSON-safe base64 strings under "x,y"
+## chunk keys (the same convention hold_diffs/homestead cells use) and
+## stores them in the shared world settings.
+func _persist_exploration() -> void:
+	_explored_dirty = false
+	_explored_persist_timer = EXPLORE_PERSIST_SECONDS
+	if _surface_world_seed_text.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var stored: Dictionary = {}
+	for chunk_variant: Variant in _explored_chunks.keys():
+		var chunk := chunk_variant as Vector2i
+		stored["%d,%d" % [chunk.x, chunk.y]] = Marshalls.raw_to_base64(_explored_chunks[chunk_variant] as PackedByteArray)
+	settings[_explored_store_key()] = stored
+	_store_world_settings(settings)
+
+## Banks any unsaved exploration; runs before the surface world (and with
+## it the store key) rebuilds, and whenever the scene flushes session state.
+func _flush_exploration() -> void:
+	if _explored_dirty:
+		_persist_exploration()
+
+## Restores this settlement's explored mask. Runs after _setup_surface_world
+## stamps the seed and tile, so a newly generated world reads a fresh key
+## and comes back empty while re-entering the same settlement restores it.
+func _restore_exploration(settings: Dictionary) -> void:
+	_explored_chunks.clear()
+	_explored_last_cell = Vector2i(2147483647, 2147483647)
+	_explored_dirty = false
+	_explored_persist_timer = 0.0
+	var stored_variant: Variant = settings.get(_explored_store_key())
+	if not (stored_variant is Dictionary):
+		return
+	var stored := stored_variant as Dictionary
+	for key_variant: Variant in stored.keys():
+		var parts := String(key_variant).split(",")
+		if parts.size() != 2:
+			continue
+		var encoded_variant: Variant = stored[key_variant]
+		if not (encoded_variant is String):
+			continue
+		var mask := Marshalls.base64_to_raw(encoded_variant as String)
+		if mask.size() != EXPLORE_CHUNK_BYTES:
+			continue
+		_explored_chunks[Vector2i(int(parts[0]), int(parts[1]))] = mask
 
 func _update_hp_label() -> void:
 	if _hp_label == null:
@@ -5243,6 +5373,9 @@ const SURFACE_SITE_REACH_TILES := 20
 const SURFACE_ROAD_MAX_CELLS := 14 * WORLD_CELLS_PER_OVERWORLD_TILE
 
 func _setup_surface_world(grid: Dictionary) -> void:
+	# The exploration store key changes with the seed/tile stamped below:
+	# bank any unsaved exploration under the old key before the rebuild.
+	_flush_exploration()
 	for gate_label: Label in _surface_gate_labels:
 		if is_instance_valid(gate_label):
 			gate_label.queue_free()
@@ -5346,6 +5479,7 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	_surface_anchor_cells.append(bbox_center)
 	_refresh_surface_site_window(own_tile)
 	_restore_homestead(settings)
+	_restore_exploration(settings)
 
 ## The overworld tile a wilds cell stands on, in shared world space.
 func _overworld_tile_for_cell(cell: Vector2i) -> Vector2i:
