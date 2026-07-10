@@ -15,16 +15,20 @@ func apply_world_settings(settings: Dictionary, seed_key: String, population_key
 	target_resident_npcs = int(ceil(float(selected_hold_population) / 10.0))
 	return scene_seed
 
-## How many underground levels a hold of this population digs: roughly one
-## level per 120 residents, so a 50-resident hold is a single cozy level
+## How many underground levels a settlement of this population digs: roughly
+## one level per 120 residents, so a 50-resident hold is a single cozy level
 ## while a great hold spans the maximum depth. Returns 0 when there is no
 ## population data so callers can fall back to a random roll.
 func population_scaled_level_count(max_levels: int) -> int:
 	if target_resident_npcs <= 0:
 		return 0
-	# Every hold pierces the full strata - soil, stone, the cavern and
-	# the starmetal deep - population digs it deeper still.
-	return clampi(2 + int(ceil(float(target_resident_npcs) / 120.0)), 4, maxi(4, max_levels))
+	# Every dwarfhold pierces the full strata - soil, stone, the cavern and
+	# the starmetal deep - population digs it deeper still. But the SCENE's
+	# configured maximum always wins: the old hard floor of 4 forced surface
+	# towns (whose range caps at 2) to dig four phantom cellar levels, so the
+	# floor is capped at the scene's own maximum instead.
+	var minimum_levels := mini(4, maxi(1, max_levels))
+	return clampi(2 + int(ceil(float(target_resident_npcs) / 120.0)), minimum_levels, maxi(minimum_levels, max_levels))
 
 func target_npcs_for_level(level_index: int, level_count: int) -> int:
 	if target_resident_npcs <= 0:

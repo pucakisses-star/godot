@@ -554,10 +554,13 @@ const TOWN_TILE_ATLAS := {
 	"fence_cap_s": Vector2i(8, 6),
 	"fence_cap_e": Vector2i(9, 9),
 	"fence_cap_w": Vector2i(11, 9),
-	# Green-ground scatter: cut stumps, a fallen branch (passable litter).
+	# Green-ground scatter: cut stumps (passable litter).
 	"stump": Vector2i(0, 13),
 	"stump_alt": Vector2i(2, 13),
-	"branch": Vector2i(5, 16),
+	# (5,16) is a wooden direction post with pointing arms — not fallen-
+	# branch debris. It is placed deliberately at lane junctions, never in
+	# the natural scatter pools.
+	"direction_post": Vector2i(5, 16),
 	# The village well: a 2x2 composition — stone basin pair below, roofed
 	# crank pair above. The base cells block movement, the roof halves are
 	# passable visual caps (same convention as the *_top furniture keys).
@@ -617,7 +620,19 @@ const TOWN_TILE_ATLAS := {
 	"crop_beetroot_2": Vector2i(8, 23),
 	"crop_tomato_0": Vector2i(9, 23),
 	"crop_tomato_1": Vector2i(10, 23),
-	"crop_tomato_2": Vector2i(11, 23)
+	"crop_tomato_2": Vector2i(11, 23),
+	# Cellar stairways and the solid-earth fill around dug cellar rooms.
+	# The shipped sheet has no stair/hatch or underground-rock art (verified
+	# by full-sheet inventory: the closest pieces are plank BRIDGES at cols
+	# 22-27, rows 11-16), so all three are painted into appended row 45 at
+	# atlas build time (town_generation._paint_stair_tiles /
+	# _paint_cellar_rock_tile). "stairway_down" is a wooden cellar hatch with
+	# descending treads, "stairway_up" a stone flight rising into light;
+	# both keys mirror DWARFHOLD_TILE_ATLAS so the shared stair-walking code
+	# resolves them.
+	"stairway_down": Vector2i(0, 45),
+	"stairway_up": Vector2i(1, 45),
+	"cellar_rock": Vector2i(2, 45)
 }
 ## The full fringe-piece vocabulary, one atlas column per suffix (in this
 ## order) for every synthesized transition family. edge_* pieces carry the
@@ -714,8 +729,8 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	"tilled_edge_ns", "tilled_edge_we", "tilled_tip_n", "tilled_tip_s",
 	"tilled_tip_w", "tilled_tip_e", "tilled_island",
 	"plaza", "plaza_alt", "plaza_c", "plaza_d",
-	# A fallen branch is ground litter, not a barrier.
-	"branch",
+	# A direction post is a slim marker beside the lane, not a barrier.
+	"direction_post",
 	"floor", "door", "rug",
 	"bed_top", "bed_alt_top", "wardrobe_top", "dresser_top", "shelf_top",
 	"forge_top", "oven_top", "well_roof_left", "well_roof_right",
@@ -723,7 +738,10 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	"tilled_soil",
 	"crop_carrot_0", "crop_carrot_1", "crop_carrot_2",
 	"crop_beetroot_0", "crop_beetroot_1", "crop_beetroot_2",
-	"crop_tomato_0", "crop_tomato_1", "crop_tomato_2"
+	"crop_tomato_0", "crop_tomato_1", "crop_tomato_2",
+	# Stairways carry walkers between levels; "cellar_rock" is deliberately
+	# absent (undug earth blocks movement, like the dwarfhold's stone).
+	"stairway_down", "stairway_up"
 ]
 
 static func validate_atlas_no_duplicates(atlas_name: String, atlas: Dictionary) -> bool:

@@ -392,10 +392,10 @@ static func _pick_green_scatter_tile(grid: Dictionary, x: int, y: int, rng: Rand
 		return "hedge" if rng.randf() < 0.5 else "hedge_alt"
 	if roll < 0.11:
 		return _pick_flower_tile(rng)
-	if roll < 0.122:
-		return "stump" if rng.randf() < 0.6 else "stump_alt"
+	# The old "branch" entry here was actually the direction-post art;
+	# posts are placed at lane junctions now, never as meadow litter.
 	if roll < 0.132:
-		return "branch"
+		return "stump" if rng.randf() < 0.6 else "stump_alt"
 	return ""
 
 static func _pick_flower_tile(rng: RandomNumberGenerator) -> String:

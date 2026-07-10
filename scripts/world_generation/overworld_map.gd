@@ -790,6 +790,10 @@ const NEIGHBOR_OPPOSITES_8: Array[int] = [7, 6, 5, 4, 3, 2, 1, 0]
 ## south of 0.5. latitude = 1 - normalizedY (north = top of the map).
 const SNOW_LATITUDE_START := 0.5
 const SNOW_LATITUDE_FULL := 0.86
+## Minimum Chebyshev distance (tiles) kept clear between desert sand and
+## tundra; the belt in between stays grassland so the climates never
+## touch, and noise fades the belt out over four more tiles beyond it.
+const DESERT_SNOW_BUFFER_RADIUS := 6
 
 ## Browser marsh model (main.js:21671-21673).
 const MARSH_BASE_THRESHOLD := 0.65
@@ -3273,10 +3277,11 @@ func _evaluate_desert_cell(x: int, y: int, height: float) -> bool:
 		_desert_suitability_buffer[idx] = suitability
 		_desert_heat_buffer[idx] = heat
 	# Raised acceptance floors keep deserts to genuine arid pockets rather
-	# than sheeting across every warm lowland.
-	if suitability <= 0.62:
+	# than sheeting across every warm lowland; raised again (0.62->0.66,
+	# 0.70->0.74) to roughly halve desert coverage per player feedback.
+	if suitability <= 0.66:
 		return false
-	if suitability <= lerpf(0.70, 0.62, equatorial):
+	if suitability <= lerpf(0.74, 0.66, equatorial):
 		return false
 	var desert_noise := 0.5
 	if _desert_detail_noise != null:
@@ -4346,9 +4351,13 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 				continue
 			var local_density := (float(neighbor_desert) / float(neighbor_count)) if neighbor_count > 0 else float(desert_mask[idx])
 			# Lower local-density weight and stricter acceptance stop the
-			# refine pass from bleeding deserts across their neighbours.
+			# refine pass from bleeding deserts across their neighbours;
+			# the add rule tightened again (0.73->0.76, 0.6->0.64) to help
+			# halve desert coverage per player feedback, while the remove
+			# rule stays put so seeds with already-sparse deserts keep
+			# their few arid pockets.
 			var combined := base_suitability * 0.55 + float(blur_current[idx]) * 0.45 + local_density * 0.08
-			if combined > 0.73 and base_suitability > 0.6:
+			if combined > 0.76 and base_suitability > 0.64:
 				updated_mask[idx] = 1
 			elif combined < 0.55 or base_suitability < 0.5:
 				updated_mask[idx] = 0
@@ -4384,9 +4393,39 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 			if not has_desert_neighbor:
 				desert_mask[idx] = 0
 
+	# Desert-snow clearing buffer (main.js:22721-22762, widened from the
+	# browser's 2 tiles): sand butting against tundra reads as a jarring
+	# climate seam, so a broad grassland belt separates the two. The belt
+	# is guaranteed inside DESERT_SNOW_BUFFER_RADIUS and fades out with
+	# noise over four more tiles, so its outer edge stays organic instead
+	# of tracing the square Chebyshev dilation. Runs before badlands
+	# seeding so the badlands mask never grows into the belt.
+	var snow_buffer := _dilate_mask(snow_mask, DESERT_SNOW_BUFFER_RADIUS)
+	var snow_fringe := _dilate_mask(snow_mask, DESERT_SNOW_BUFFER_RADIUS + 4)
+	var belt_seed := map_seed + 0x51ed270b
+	for y: int in range(rows):
+		var row := y * width
+		for x: int in range(width):
+			var idx := row + x
+			if desert_mask[idx] == 0 or snow_mask[idx] == 1:
+				continue
+			var clear_cell := snow_buffer[idx] == 1
+			if not clear_cell and snow_fringe[idx] == 1:
+				clear_cell = _value_noise(float(x) * 0.17, float(y) * 0.17, belt_seed) < 0.5
+			if clear_cell:
+				desert_mask[idx] = 0
+				grass_mask[idx] = 1
+
 	# Badlands cores (main.js:22539-22719): only inside deserts where
-	# heat > 0.58 and dryness > 0.5, never touching water, always touching
-	# sand. Assigned live in scan order like the browser.
+	# heat > 0.62 and dryness > 0.55. Deviation from the browser: its
+	# "every badlands cell must touch bare sand" rule made solid interiors
+	# illegal, so the revert pass carved axis-aligned sand stripes through
+	# any mass thicker than two cells, and the saturated likelihood field
+	# sheeted the mask straight to the desert rim - together reading as
+	# blocky rectangles crossed by sand corridors. Instead the mask stays
+	# one cell inside the desert (inheriting the desert's organic, noise
+	# grown boundary, and never touching water) and gets a noise-eroded
+	# ragged edge below.
 	var badlands_mask := PackedByteArray()
 	badlands_mask.resize(cell_count)
 	var badlands_seed := map_seed + 0x7f4a7c15
@@ -4403,9 +4442,7 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 			var likelihood := clampf((heat - 0.62) * 1.15 + (dryness - 0.55) * 0.75, 0.0, 1.0)
 			if _value_noise(float(x) * 0.11, float(y) * 0.11, badlands_seed) >= likelihood:
 				continue
-			if _mask_has_neighbor(water_mask, x, y):
-				continue
-			if not _has_adjacent_sand(desert_mask, badlands_mask, x, y):
+			if not _is_desert_interior(desert_mask, x, y):
 				continue
 			badlands_mask[idx] = 1
 
@@ -4419,7 +4456,9 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 				var idx := row + x
 				if desert_mask[idx] == 0 or badlands_mask[idx] == 1:
 					continue
-				if _mask_has_neighbor(water_mask, x, y):
+				# Interior-of-desert also guarantees no water contact, since
+				# water is never part of the desert mask.
+				if not _is_desert_interior(desert_mask, x, y):
 					continue
 				var neighbor_count := 0
 				var has_left := false
@@ -4448,66 +4487,134 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 						elif dy > 0:
 							has_down = true
 				var has_bridge := (has_left and has_right) or (has_up and has_down) or ((has_left or has_right) and (has_up or has_down) and neighbor_count >= 3)
-				if neighbor_count >= 2 and has_bridge and _has_adjacent_sand(desert_mask, badlands_mask, x, y):
+				if neighbor_count >= 2 and has_bridge:
 					additions.append(idx)
 		if additions.is_empty():
 			break
-		var addition_set: Dictionary = {}
+		# The desert mask never changes here, so the interior test each
+		# addition already passed cannot be invalidated by other additions;
+		# apply the whole batch.
 		for addition_idx: int in additions:
-			addition_set[addition_idx] = true
-		var applied_any := false
-		for addition_idx: int in additions:
-			var ax := addition_idx % width
-			var ay := int(addition_idx / float(width))
-			if _has_adjacent_sand(desert_mask, badlands_mask, ax, ay, addition_set):
-				badlands_mask[addition_idx] = 1
-				applied_any = true
-		if not applied_any:
-			break
+			badlands_mask[addition_idx] = 1
 
-	# Revert violators (main.js:22658-22680).
-	for y in range(rows):
+	# Noise-driven edge shaping: one grow pass then two erosion passes so
+	# badlands borders undulate like the other biomes instead of tracing
+	# the saturated likelihood iso-line, which runs straight for long
+	# stretches along coasts and heat bands. The grow pass offsets the
+	# area the erosion takes, keeping overall badlands coverage near its
+	# tuned level. Distinct seed per pass; deterministic per map seed.
+	var growth: Array[int] = []
+	for y: int in range(rows):
 		var row := y * width
-		for x in range(width):
-			var idx := row + x
-			if badlands_mask[idx] == 0:
-				continue
-			if _mask_has_neighbor(water_mask, x, y) or not _has_adjacent_sand(desert_mask, badlands_mask, x, y):
-				badlands_mask[idx] = 0
-
-	# Sand fully enclosed by badlands converts (main.js:22682-22719).
-	var enclosed: Array[int] = []
-	for y in range(rows):
-		var row := y * width
-		for x in range(width):
+		for x: int in range(width):
 			var idx := row + x
 			if desert_mask[idx] == 0 or badlands_mask[idx] == 1:
 				continue
-			var has_neighbor := false
-			var all_badlands := true
+			if not _is_desert_interior(desert_mask, x, y):
+				continue
+			var touching := 0
 			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
 				var nx := x + offset.x
 				var ny := y + offset.y
 				if nx < 0 or ny < 0 or nx >= width or ny >= rows:
-					all_badlands = false
 					continue
-				has_neighbor = true
-				if badlands_mask[ny * width + nx] == 0:
-					all_badlands = false
-					break
-			if has_neighbor and all_badlands:
-				enclosed.append(idx)
-	for enclosed_idx: int in enclosed:
-		badlands_mask[enclosed_idx] = 1
-		desert_mask[enclosed_idx] = 1
+				touching += badlands_mask[ny * width + nx]
+			if touching >= 2 and _value_noise(float(x) * 0.29, float(y) * 0.29, badlands_seed + 977) >= 0.4:
+				growth.append(idx)
+	for growth_idx: int in growth:
+		badlands_mask[growth_idx] = 1
+	for erosion_pass: int in range(2):
+		var eroded: Array[int] = []
+		for y: int in range(rows):
+			var row := y * width
+			for x: int in range(width):
+				var idx := row + x
+				if badlands_mask[idx] == 0:
+					continue
+				var exposed := false
+				for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+					var nx := x + offset.x
+					var ny := y + offset.y
+					if nx < 0 or ny < 0 or nx >= width or ny >= rows or badlands_mask[ny * width + nx] == 0:
+						exposed = true
+						break
+				if not exposed:
+					continue
+				# The second pass bites more gently so the ragging does
+				# not eat too far into the tuned badlands area.
+				var erosion_threshold := 0.4 - 0.1 * float(erosion_pass)
+				if _value_noise(float(x) * 0.29, float(y) * 0.29, badlands_seed + 977 * (erosion_pass + 2)) < erosion_threshold:
+					eroded.append(idx)
+		for eroded_idx: int in eroded:
+			badlands_mask[eroded_idx] = 0
 
-	# 2-tile sand-snow clearing buffer (main.js:22721-22762).
-	var snow_buffer := _dilate_mask(snow_mask, 2)
-	for idx in range(cell_count):
-		if desert_mask[idx] == 1 and snow_buffer[idx] == 1 and snow_mask[idx] == 0:
-			desert_mask[idx] = 0
-			badlands_mask[idx] = 0
-			grass_mask[idx] = 1
+	# Whatever flat boundary segments survive the noise erosion (typically
+	# where the desert's own edge is straight) still read as stamped
+	# rectangle sides, so notch them apart deterministically.
+	_break_straight_badlands_runs(badlands_mask, badlands_seed + 0x3d1f29)
+
+	# Erosion can strand slivers; a cell holding onto the mass by fewer
+	# than two neighbours reads as a stray chip, so drop it.
+	for _cleanup_pass: int in range(2):
+		var stray: Array[int] = []
+		for y: int in range(rows):
+			var row := y * width
+			for x: int in range(width):
+				var idx := row + x
+				if badlands_mask[idx] == 0:
+					continue
+				var linked := 0
+				for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+					var nx := x + offset.x
+					var ny := y + offset.y
+					if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+						continue
+					linked += badlands_mask[ny * width + nx]
+				if linked < 2:
+					stray.append(idx)
+		if stray.is_empty():
+			break
+		for stray_idx: int in stray:
+			badlands_mask[stray_idx] = 0
+
+	# Solid interior (main.js:22682-22719, strengthened): flood the outside
+	# world through non-badlands cells - seeded from every non-desert cell
+	# and the map border - then convert any sand the flood cannot reach.
+	# The old per-cell "all 8 neighbours badlands" test missed multi-cell
+	# pockets, leaving sand corridors inside the badlands body.
+	var outside_reach := PackedByteArray()
+	outside_reach.resize(cell_count)
+	var flood_stack := PackedInt32Array()
+	for y: int in range(rows):
+		var row := y * width
+		for x: int in range(width):
+			var idx := row + x
+			if badlands_mask[idx] == 1 or outside_reach[idx] == 1:
+				continue
+			if desert_mask[idx] == 1 and x > 0 and y > 0 and x < width - 1 and y < rows - 1:
+				continue
+			outside_reach[idx] = 1
+			flood_stack.append(idx)
+	while not flood_stack.is_empty():
+		var flood_idx := int(flood_stack[flood_stack.size() - 1])
+		flood_stack.resize(flood_stack.size() - 1)
+		var fx := flood_idx % width
+		var fy := int(flood_idx / float(width))
+		# 4-connectivity: a diagonal-only sand thread still reads as a
+		# pocket inside the mass, so it should convert too.
+		for offset: Vector2i in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0)]:
+			var nx := fx + offset.x
+			var ny := fy + offset.y
+			if nx < 0 or ny < 0 or nx >= width or ny >= rows:
+				continue
+			var n_idx := ny * width + nx
+			if badlands_mask[n_idx] == 1 or outside_reach[n_idx] == 1:
+				continue
+			outside_reach[n_idx] = 1
+			flood_stack.append(n_idx)
+	for idx: int in range(cell_count):
+		if desert_mask[idx] == 1 and badlands_mask[idx] == 0 and outside_reach[idx] == 0:
+			badlands_mask[idx] = 1
 
 	# Sand<->grass edge smoothing (main.js:22764-22820): cardinal-complete
 	# lone tiles flip to match their surroundings.
@@ -4562,34 +4669,69 @@ func _refine_desert_biomes(base_biome_map: Dictionary) -> void:
 				base_biome_map[coord] = BIOME_GRASSLAND
 
 
-## True when any 8-neighbor is set in `mask`.
-func _mask_has_neighbor(mask: PackedByteArray, x: int, y: int) -> bool:
+## True when the cell and all 8 neighbours sit on the desert mask (desert
+## or badlands). Badlands only grow here, so the mask always keeps at
+## least one desert cell between badlands and grass/water/snow - that rim
+## follows the desert's noise-grown outline, keeping badlands borders
+## organic without the browser's per-cell touching-sand rule.
+func _is_desert_interior(desert_mask: PackedByteArray, x: int, y: int) -> bool:
 	var width := map_size.x
 	var rows := map_size.y
+	if desert_mask[y * width + x] == 0:
+		return false
 	for offset: Vector2i in NEIGHBOR_OFFSETS_8:
 		var nx := x + offset.x
 		var ny := y + offset.y
 		if nx < 0 or ny < 0 or nx >= width or ny >= rows:
-			continue
-		if mask[ny * width + nx] == 1:
-			return true
-	return false
+			return false
+		if desert_mask[ny * width + nx] == 0:
+			return false
+	return true
 
 
-## True when any 8-neighbor is bare sand (desert but not badlands). Indices
-## in `exclusions` are treated as badlands-to-be (browser hasAdjacentSand).
-func _has_adjacent_sand(desert_mask: PackedByteArray, badlands_mask: PackedByteArray, x: int, y: int, exclusions: Dictionary = {}) -> bool:
+## Scans the badlands boundary in all four exposure directions for
+## segments that run straight for more than six cells and erodes periodic
+## notches out of them. Straight boundaries that long are what made the
+## old badlands read as stamped rectangles; noise erosion alone can leave
+## them intact where the underlying desert edge is itself straight.
+func _break_straight_badlands_runs(badlands_mask: PackedByteArray, break_seed: int) -> void:
 	var width := map_size.x
 	var rows := map_size.y
-	for offset: Vector2i in NEIGHBOR_OFFSETS_8:
-		var nx := x + offset.x
-		var ny := y + offset.y
-		if nx < 0 or ny < 0 or nx >= width or ny >= rows:
-			continue
-		var n_idx := ny * width + nx
-		if desert_mask[n_idx] == 1 and badlands_mask[n_idx] == 0 and not exclusions.has(n_idx):
-			return true
-	return false
+	# For vertical exposures the run follows x; for horizontal ones, y.
+	var exposures: Array[Vector2i] = [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]
+	var to_erode: Dictionary = {}
+	for exposure: Vector2i in exposures:
+		var outer_limit := width if exposure.y == 0 else rows
+		var inner_limit := rows if exposure.y == 0 else width
+		for outer: int in range(outer_limit):
+			var run_cells: Array[int] = []
+			for inner: int in range(inner_limit):
+				var x := outer if exposure.y == 0 else inner
+				var y := inner if exposure.y == 0 else outer
+				var idx := y * width + x
+				var nx := x + exposure.x
+				var ny := y + exposure.y
+				var neighbor_open := nx < 0 or ny < 0 or nx >= width or ny >= rows or badlands_mask[ny * width + nx] == 0
+				if badlands_mask[idx] == 1 and neighbor_open:
+					run_cells.append(idx)
+				else:
+					_mark_straight_run_notches(run_cells, break_seed, to_erode)
+					run_cells = []
+			_mark_straight_run_notches(run_cells, break_seed, to_erode)
+	for erode_variant: Variant in to_erode.keys():
+		badlands_mask[int(erode_variant)] = 0
+
+
+## Marks every fifth cell of a straight boundary run longer than six for
+## erosion, phased per run from the seeded hash, capping any surviving
+## straight stretch at four cells.
+func _mark_straight_run_notches(run_cells: Array[int], break_seed: int, to_erode: Dictionary) -> void:
+	if run_cells.size() <= 6:
+		return
+	var phase := int(_hash_coords(run_cells[0], run_cells.size(), break_seed) * 4.99)
+	for i: int in range(run_cells.size()):
+		if i % 5 == phase:
+			to_erode[run_cells[i]] = true
 
 
 ## Browser marsh cellular automaton (main.js:22920-23062): two grow/decay

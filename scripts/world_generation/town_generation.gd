@@ -18,7 +18,10 @@ extends SettlementSceneBase
 @export var tavern_npc_count := 5
 @export var tavern_npc_speed_range := Vector2(38.0, 62.0)
 @export var enable_fog_of_war := false
-@export var underground_level_count_range := Vector2i(1, 1)
+## Towns keep MODEST cellars: the surface village plus at most one storage
+## cellar level. The shared population clamp respects this maximum, so towns
+## never dig the dwarfhold's 4+ strata.
+@export var underground_level_count_range := Vector2i(1, 2)
 ## Real minutes for one full in-game day.
 # 24 real minutes per game day = one game-minute per real second.
 @export var minutes_per_game_day := 24.0
@@ -189,6 +192,9 @@ var _surface_landmark_blocked_cells: Dictionary = {}
 var _surface_world_seed_text := ""
 var _surface_arrival_lock := false
 var _surface_road_paths: Array[Array] = []
+## Grass cells beside lane junctions that host a wooden direction post,
+## planned by the lane tracer and rendered through _pick_decor_tile.
+var _direction_post_cells: Dictionary = {}
 var _surface_anchor_cells: Array[Vector2i] = []
 var _surface_creatures: Array[Dictionary] = []
 var _surface_spawn_timer := 0.0
@@ -407,7 +413,7 @@ const DESERT_BASE_SWAP := {
 const DESERT_SKIPPED_DECOR: Array[String] = [
 	"tree", "tree_dark", "hedge", "hedge_alt",
 	"flowers_white", "flowers_yellow", "flowers_pink", "flowers_pink_alt",
-	"stump", "stump_alt", "branch"
+	"stump", "stump_alt"
 ]
 ## Tundra towns sit on snow: the grass-family ground tiles swap to the
 ## painted-in snow tiles (mirrors DESERT_BASE_SWAP), and grassland greenery
@@ -1648,10 +1654,16 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 		_paint_snow_tile(augmented, snow_coords[variant_index], variant_index)
 	_paint_path_fringe_tiles(augmented)
 	_harmonize_demo_grass_tiles(augmented)
+	_repaint_hedge_decor_tiles(augmented)
 	# Water frames must exist before the fringe pass samples them as the
 	# "under" terrain of the shoreline pieces.
 	_paint_water_frames(augmented)
 	_paint_terrain_fringe_tiles(augmented)
+	# Cellar art the sheet doesn't ship: the stairway pair that links the
+	# surface to its storage cellar, and the solid-earth fill around dug
+	# cellar rooms.
+	_paint_stair_tiles(augmented)
+	_paint_cellar_rock_tile(augmented)
 	return ImageTexture.create_from_image(augmented)
 
 ## The shipped sheet's flat water cells that seed the animation palette.
@@ -1745,6 +1757,33 @@ func _harmonize_demo_grass_tiles(image: Image) -> void:
 				var pixel := image.get_pixel(coords.x * tile_size.x + tx, coords.y * tile_size.y + ty)
 				if pixel.r8 == 140 and pixel.g8 == 169 and pixel.b8 == 66:
 					image.set_pixel(coords.x * tile_size.x + tx, coords.y * tile_size.y + ty, plain_color)
+
+## The sheet's lone standalone bush: a rounded shrub with a transparent
+## surround and its own ground shadow, sitting unmapped next to the fence
+## family. It becomes the single-cell hedge decor art below.
+const SHEET_HEDGE_BUSH_SOURCE := Vector2i(14, 9)
+
+## The mapped "hedge"/"hedge_alt" cells (15,7)/(16,7) are interior slabs of
+## the sheet's big multi-tile hedge blob: opaque edge to edge, and mostly the
+## flat demo dark-grass ground (106,164,65) the demo scene sat on.
+## Stamped as single-cell decor they render as wrong-colored green squares
+## over the real ground instead of bushes. Color-keying that backing away
+## leaves only ragged edge scraps (the bush art itself lives in other cells),
+## so instead both cells are repainted with the sheet's own standalone bush
+## - mirrored for the alt so the pair still reads as two variants. The decor
+## layer draws over the ground tile, so the transparent surround is correct.
+func _repaint_hedge_decor_tiles(image: Image) -> void:
+	var source := SHEET_HEDGE_BUSH_SOURCE * tile_size
+	for hedge_variant: Array in [["hedge", false], ["hedge_alt", true]]:
+		var coords := TILE_ATLAS.get(String(hedge_variant[0]), Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var mirrored := bool(hedge_variant[1])
+		for ty: int in range(tile_size.y):
+			for tx: int in range(tile_size.x):
+				var source_x := (tile_size.x - 1 - tx) if mirrored else tx
+				var pixel := image.get_pixel(source.x + source_x, source.y + ty)
+				image.set_pixel(coords.x * tile_size.x + tx, coords.y * tile_size.y + ty, pixel)
 
 ## A pixel of the path-fringe art counts as vegetation when green clearly
 ## leads red (leaf greens) OR clearly leads blue (the olive tuft speckles:
@@ -1984,6 +2023,131 @@ func _paint_snow_tile(image: Image, cell_coords: Vector2i, variant: int) -> void
 		var sy := rng.randi_range(0, height - 1)
 		image.set_pixel(origin.x + sx, origin.y + sy, Color(1.0, 1.0, 1.0, 1.0))
 
+## Deterministic per-pixel wood/stone grain for the painted cellar tiles,
+## the same hash TownTileService uses for ground variety.
+func _cellar_grain(x: int, y: int) -> int:
+	var value := x * 73856093 ^ y * 19349663
+	if value < 0:
+		value = -value
+	return value % 5 - 2
+
+## Paints the two stairway tiles into appended atlas row 45 (the sheet ships
+## no stair or hatch art). "stairway_down" is a wooden cellar hatch seen from
+## above: a plank frame around a dark shaft with four treads stepping down
+## into blackness. "stairway_up" is a stone flight rising to a warm lit
+## opening at the tile's top. Both are designed to read at 32px: high tread
+## contrast, one strong direction cue each (darkening descent vs. light at
+## the top of the climb).
+func _paint_stair_tiles(image: Image) -> void:
+	var down_coords := TILE_ATLAS.get("stairway_down", Vector2i(-1, -1)) as Vector2i
+	var up_coords := TILE_ATLAS.get("stairway_up", Vector2i(-1, -1)) as Vector2i
+	if down_coords.x >= 0:
+		_paint_hatch_down_tile(image, down_coords * tile_size)
+	if up_coords.x >= 0:
+		_paint_steps_up_tile(image, up_coords * tile_size)
+
+func _paint_hatch_down_tile(image: Image, origin: Vector2i) -> void:
+	var frame := Color8(126, 104, 72)
+	var frame_light := Color8(150, 126, 88)
+	var frame_dark := Color8(96, 78, 52)
+	# Plank frame ring with wood grain across the whole tile first.
+	for ty: int in range(tile_size.y):
+		for tx: int in range(tile_size.x):
+			var grain := float(_cellar_grain(tx, ty)) * 0.014
+			image.set_pixel(origin.x + tx, origin.y + ty, Color(frame.r + grain, frame.g + grain, frame.b + grain, 1.0))
+	# The open shaft: near-black so the hole reads as a hole.
+	var open_lo := 4
+	var open_hi := tile_size.x - 5
+	for ty: int in range(open_lo, open_hi + 1):
+		for tx: int in range(open_lo, open_hi + 1):
+			image.set_pixel(origin.x + tx, origin.y + ty, Color8(20, 14, 10))
+	# Four treads descending from the shaft's top edge, each inset 2px more
+	# and darker than the last, with a lit front edge — the narrowing,
+	# darkening run is the "down" cue.
+	var tread_colors: Array[Color] = [
+		Color8(168, 138, 92), Color8(128, 102, 66), Color8(92, 72, 46), Color8(60, 46, 30)
+	]
+	for tread_index: int in range(tread_colors.size()):
+		var tread := tread_colors[tread_index]
+		var inset := tread_index * 2
+		var band_top := open_lo + tread_index * 5
+		for ty: int in range(band_top, band_top + 4):
+			for tx: int in range(open_lo + inset, open_hi - inset + 1):
+				var grain := float(_cellar_grain(tx, ty)) * 0.010
+				var tone := Color(tread.r + grain, tread.g + grain, tread.b + grain, 1.0)
+				if ty == band_top:
+					tone = Color(minf(tread.r + 0.16, 1.0), minf(tread.g + 0.13, 1.0), minf(tread.b + 0.09, 1.0), 1.0)
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+	# Frame bevel (lit top-left, shaded bottom-right) plus a shadow rim under
+	# the frame's inner lip so the opening pops off the floor tile below it.
+	for tx: int in range(tile_size.x):
+		image.set_pixel(origin.x + tx, origin.y, frame_light)
+		image.set_pixel(origin.x + tx, origin.y + tile_size.y - 1, frame_dark)
+	for ty: int in range(tile_size.y):
+		image.set_pixel(origin.x, origin.y + ty, frame_light)
+		image.set_pixel(origin.x + tile_size.x - 1, origin.y + ty, frame_dark)
+	for tx: int in range(open_lo - 1, open_hi + 2):
+		image.set_pixel(origin.x + tx, origin.y + open_lo - 1, Color8(54, 42, 30))
+		image.set_pixel(origin.x + tx, origin.y + open_hi + 1, Color8(140, 116, 80))
+	for ty: int in range(open_lo - 1, open_hi + 2):
+		image.set_pixel(origin.x + open_lo - 1, origin.y + ty, Color8(54, 42, 30))
+		image.set_pixel(origin.x + open_hi + 1, origin.y + ty, Color8(140, 116, 80))
+
+func _paint_steps_up_tile(image: Image, origin: Vector2i) -> void:
+	# Dark stonework surround: the stairwell's side walls.
+	for ty: int in range(tile_size.y):
+		for tx: int in range(tile_size.x):
+			var grain := float(_cellar_grain(tx + 7, ty + 3)) * 0.012
+			image.set_pixel(origin.x + tx, origin.y + ty, Color(0.165 + grain, 0.15 + grain, 0.14 + grain, 1.0))
+	# Six stone treads climbing toward the top of the tile, brightest at the
+	# top — the rising gradient plus the lit opening are the "up" cue.
+	var flight_lo := 6
+	var flight_hi := tile_size.x - 7
+	var tread_count := 6
+	for tread_index: int in range(tread_count):
+		var band_top := 2 + tread_index * 5
+		var depth := float(tread_index) / float(tread_count - 1)
+		var lum := 0.78 - depth * 0.45
+		var tread := Color(lum, lum * 0.92, lum * 0.78, 1.0)
+		for ty: int in range(band_top, mini(band_top + 5, tile_size.y - 1)):
+			for tx: int in range(flight_lo, flight_hi + 1):
+				var grain := float(_cellar_grain(tx, ty)) * 0.012
+				var tone := Color(tread.r + grain, tread.g + grain, tread.b + grain, 1.0)
+				if ty == band_top:
+					tone = Color(minf(tread.r + 0.14, 1.0), minf(tread.g + 0.13, 1.0), minf(tread.b + 0.10, 1.0), 1.0)
+				elif ty == band_top + 4:
+					tone = Color(maxf(tread.r - 0.17, 0.0), maxf(tread.g - 0.16, 0.0), maxf(tread.b - 0.14, 0.0), 1.0)
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+	# Warm daylight spilling in from the surface at the top of the flight.
+	for ty: int in range(2):
+		for tx: int in range(flight_lo, flight_hi + 1):
+			image.set_pixel(origin.x + tx, origin.y + ty, Color8(255, 232, 170))
+	# Hard shadow lines where the flight meets the side walls.
+	for ty: int in range(tile_size.y):
+		image.set_pixel(origin.x + flight_lo - 1, origin.y + ty, Color8(22, 18, 14))
+		image.set_pixel(origin.x + flight_hi + 1, origin.y + ty, Color8(22, 18, 14))
+
+## The solid undug earth that surrounds a cellar's rooms: dark packed soil
+## with faint stone flecks, kept low-contrast so the dug rooms read as the
+## bright figure against it (the town-side equivalent of the dwarfhold's
+## "stone" fill).
+func _paint_cellar_rock_tile(image: Image) -> void:
+	var coords := TILE_ATLAS.get("cellar_rock", Vector2i(-1, -1)) as Vector2i
+	if coords.x < 0:
+		return
+	var origin := coords * tile_size
+	for ty: int in range(tile_size.y):
+		for tx: int in range(tile_size.x):
+			var grain := float(_cellar_grain(tx + 13, ty + 29)) * 0.010
+			var tone := Color(0.14 + grain, 0.115 + grain, 0.095 + grain, 1.0)
+			# Sparse embedded-stone flecks, hash-placed so tiling stays quiet.
+			var fleck := (tx * 73856093 ^ ty * 19349663) & 0x7fffffff
+			if fleck % 53 == 0:
+				tone = Color(0.24, 0.21, 0.19, 1.0)
+			elif fleck % 67 == 1:
+				tone = Color(0.075, 0.06, 0.05, 1.0)
+			image.set_pixel(origin.x + tx, origin.y + ty, tone)
+
 func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 	if _passable_atlas_set.is_empty():
 		for tile_key: String in PASSABLE_TILE_KEYS:
@@ -2208,7 +2372,7 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 		village_yards = _plan_house_yards(grid, level_door_cells)
 		well_cell = _pick_village_well_cell(grid)
 		var village_civic_buildings := _compute_civic_buildings_by_id(grid)
-		var village_stairs := _pick_level_stair_cells(grid, level_index, level_count)
+		var village_stairs := _pick_level_stair_cells(grid, level_index, level_count, level_door_cells)
 		_repair_town_level_connectivity(grid, level_door_cells, village_stairs, level_index)
 		return {
 			"grid": grid,
@@ -2329,7 +2493,10 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 	requested_zone_counts["houses"] = residences_placed
 
 	for i in requested_building_count:
-		var civic_type := _pick_civic_building_type()
+		## Cellars are the town's storage: every underground building is a
+		## warehouse (crates/sacks/chest decor, storeroom back rooms) instead
+		## of a random shopfront that makes no sense below a village.
+		var civic_type := "warehouse" if is_additional_layer else _pick_civic_building_type()
 		var civic_definition := CIVIC_BUILDING_TYPES[civic_type] as Dictionary
 		var civic_footprint := _roll_civic_footprint(civic_definition)
 		var prefers_hall_arteries := _civic_prefers_hall_arteries(civic_definition)
@@ -2351,13 +2518,13 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 
 	_ensure_walkable_connectivity(grid)
 	## Multi-room interiors replace the old one-door-per-rectangle pass:
-	## cellar shops get partition walls, internal doors and room roles just
-	## like the surface lots.
-	level_door_cells = _plan_town_building_interiors(grid)
+	## cellar storerooms get partition walls, internal doors and room roles
+	## just like the surface lots (doors face dug halls, never solid earth).
+	level_door_cells = _plan_town_building_interiors(grid, level_index == 0)
 	var civic_buildings_by_id := _compute_civic_buildings_by_id(grid)
 	var civic_building_type_map := _build_civic_building_type_lookup(civic_buildings_by_id)
 	var zone_counts := _count_zone_components(grid)
-	var stair_cells := _pick_level_stair_cells(grid, level_index, level_count)
+	var stair_cells := _pick_level_stair_cells(grid, level_index, level_count, level_door_cells)
 	## The non-negotiable pass: at tile passability (the same rules movement
 	## uses), every walkable cell must reach every other.
 	_repair_town_level_connectivity(grid, level_door_cells, stair_cells, level_index)
@@ -2380,7 +2547,10 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 ## town's own room-role deals (taproom + kitchen + bedrooms; showroom +
 ## storeroom; smithy + forge annex). Demolished nooks return to open grass,
 ## and grass-facing walls host doors because the lawn itself is walkable.
-func _plan_town_building_interiors(grid: Dictionary) -> Dictionary:
+## Cellar levels pass doors_on_open_ground=false: down there the implicit
+## ground is solid earth, so exterior doors must face dug halls or they
+## would open straight into rock.
+func _plan_town_building_interiors(grid: Dictionary, doors_on_open_ground: bool = true) -> Dictionary:
 	return SettlementArchitectureService.plan_building_interiors(grid, {
 		"rng": _rng,
 		"civic_type_map": _latest_civic_building_type_map,
@@ -2389,7 +2559,7 @@ func _plan_town_building_interiors(grid: Dictionary) -> Dictionary:
 		"default_back_role": "storeroom",
 		"open_plan_types": TOWN_OPEN_PLAN_BUILDING_TYPES,
 		"demolish_zone": CELL_ROCK,
-		"door_on_open_ground": true
+		"door_on_open_ground": doors_on_open_ground
 	})
 
 ## Tile passability at generation time, mirroring TownTileService's render
@@ -2397,12 +2567,18 @@ func _plan_town_building_interiors(grid: Dictionary) -> Dictionary:
 ## walk only on floor and doors; partitions open only at doors. Bounded to
 ## the settled grid so the BFS cannot leak across the infinite implicit
 ## grass outside town.
-func _town_generation_passable(grid: Dictionary, door_cells: Dictionary, bounds: Rect2i, cell: Vector2i) -> bool:
+func _town_generation_passable(grid: Dictionary, door_cells: Dictionary, bounds: Rect2i, cell: Vector2i, rock_is_open: bool = true) -> bool:
 	if not bounds.has_point(cell):
 		return false
 	var zone := int(grid.get(cell, CELL_ROCK))
 	match zone:
-		CELL_ROCK, CELL_HALL, CELL_PLAZA:
+		CELL_ROCK:
+			## Above ground the implicit green is open terrain; in a cellar
+			## the undug earth is solid, so movement (and the repair pass)
+			## must route through dug halls — mirroring the render rules,
+			## where "cellar_rock" blocks like the dwarfhold's stone.
+			return rock_is_open
+		CELL_HALL, CELL_PLAZA:
 			return true
 		CELL_WALL:
 			return door_cells.has(cell)
@@ -2414,8 +2590,10 @@ func _town_generation_passable(grid: Dictionary, door_cells: Dictionary, bounds:
 
 func _repair_town_level_connectivity(grid: Dictionary, door_cells: Dictionary, stair_cells: Dictionary, level_index: int) -> void:
 	var bounds := _find_bounds(grid).grow(1)
+	# Cellars route through dug halls only; the surface walks its lawns too.
+	var rock_is_open := level_index == 0
 	var is_passable := func(cell: Vector2i) -> bool:
-		return _town_generation_passable(grid, door_cells, bounds, cell)
+		return _town_generation_passable(grid, door_cells, bounds, cell, rock_is_open)
 	SettlementArchitectureService.repair_level_connectivity(grid, door_cells, stair_cells, level_index, is_passable, "Town")
 
 ## Free-standing village lot: a rectangular plot dropped on open grass
@@ -2489,6 +2667,41 @@ func _trace_village_lanes(grid: Dictionary, door_cells: Dictionary) -> void:
 				best_distance = candidate_distance
 				target = spine_cell
 		_carve_winding_lane(grid, entry, target, spine)
+	_plan_direction_posts(grid)
+
+## Wooden direction posts stand beside a handful of lane junctions (hall
+## cells where three or more lane arms meet), on the grass just off the
+## lane, so crossroads read as signed crossroads. Deterministic per seed
+## and sparse: a hash gate plus a hard cap keeps it to a few per town.
+func _plan_direction_posts(grid: Dictionary) -> void:
+	_direction_post_cells.clear()
+	var junctions: Array[Vector2i] = []
+	for key_variant: Variant in grid.keys():
+		var cell := key_variant as Vector2i
+		if int(grid[cell]) != CELL_HALL:
+			continue
+		var arms := 0
+		for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			var neighbor_zone := int(grid.get(cell + direction, CELL_ROCK))
+			if neighbor_zone == CELL_HALL or neighbor_zone == CELL_PLAZA:
+				arms += 1
+		if arms >= 3 and absi(cell.x * 92821 ^ cell.y * 68917) % 9 == 0:
+			junctions.append(cell)
+	junctions.sort_custom(func(cell_a: Vector2i, cell_b: Vector2i) -> bool:
+		return cell_a < cell_b
+	)
+	for junction: Vector2i in junctions:
+		if _direction_post_cells.size() >= 6:
+			break
+		for direction: Vector2i in [Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.DOWN]:
+			var post_cell := junction + direction
+			# The post wants open grass beside the lane, clear of other posts.
+			if int(grid.get(post_cell, CELL_ROCK)) != CELL_ROCK:
+				continue
+			if _direction_post_cells.has(post_cell):
+				continue
+			_direction_post_cells[post_cell] = true
+			break
 
 func _carve_winding_lane(grid: Dictionary, from_cell: Vector2i, to_cell: Vector2i, spine: Array[Vector2i]) -> void:
 	## Most lanes are 2 tiles wide; roughly a third widen to 3.
@@ -2666,6 +2879,21 @@ func _pick_village_well_cell(grid: Dictionary) -> Vector2i:
 				return anchor
 	return DwarfHoldStateModel.INVALID_CELL
 
+## Whether the level currently on display is a cellar. Every surface-only
+## system (wilds streaming, gates, weather, farms, animals, caravans) keys
+## off this so cellars render as sealed underground interiors.
+func _is_underground_level() -> bool:
+	return _hold_state.current_level_index > 0
+
+## Towns sleep everyone above ground: the 10:1 resident target applies to
+## the surface level IN FULL, and the storage cellar draws no share. The
+## base class's even split across levels quartered the street population
+## when the old clamp bug forced towns to four levels.
+func _target_npcs_for_level(level_index: int, _level_count: int) -> int:
+	if level_index > 0:
+		return 0
+	return _hold_state.target_resident_npcs
+
 func _show_level(target_level_index: int) -> void:
 	if _hold_state.generated_levels.is_empty():
 		depth_down_button.disabled = true
@@ -2700,6 +2928,12 @@ func _show_level(target_level_index: int) -> void:
 	_shop_stocks.clear()
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
+	# _restore_homestead (via _setup_surface_world above) stamps saved builds
+	# before _render_city clears both layers and repaints the town rect plus
+	# its one-cell border ring; a build hugging the town edge sits on that
+	# ring, so the repaint wiped its art while _player_built_cells kept
+	# blocking the cell (and a ring chest stopped answering clicks).
+	_restamp_player_builds()
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
 	_furnish_interiors(grid)
@@ -2782,7 +3016,9 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 			else:
 				_place_tile(city_layer, render_cell, base_tile)
 			var decor_tile := _pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides)
-			if cell == CELL_ROCK and decor_tile.is_empty():
+			# Cellar rock is solid earth, not a lawn: keep it out of the
+			# green-cell pool that feeds farms, animals and NPC idling.
+			if cell == CELL_ROCK and decor_tile.is_empty() and not _is_underground_level():
 				_green_cells.append(render_cell)
 			if not decor_tile.is_empty():
 				_place_tile(decor_layer, render_cell, decor_tile)
@@ -2801,6 +3037,17 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		_place_tile(city_layer, stair_cell, "stairway_up" if stair_key == "up" else "stairway_down")
 		decor_layer.erase_cell(stair_cell)
 		_actor_passable_cache.erase(stair_cell)
+		# The hatch may have displaced two-tile-tall furniture (indoor stair
+		# cells are floor cells); its cap above would hang orphaned, so
+		# clear any *_top piece whose base this stair just replaced.
+		var cap_cell := stair_cell + Vector2i.UP
+		if decor_layer.get_cell_source_id(cap_cell) >= 0:
+			var cap_atlas := decor_layer.get_cell_atlas_coords(cap_cell)
+			for top_key_variant: Variant in TALL_DECOR_TOPS.values():
+				if cap_atlas == TILE_ATLAS.get(String(top_key_variant), Vector2i(-1000, -1000)) as Vector2i:
+					decor_layer.erase_cell(cap_cell)
+					_actor_passable_cache.erase(cap_cell)
+					break
 	_stamp_village_well(stair_cells)
 	_stamp_village_yards()
 	_reset_view(bounds)
@@ -2892,7 +3139,7 @@ func _fence_tile_for_line(fence_line: Dictionary, cell: Vector2i) -> String:
 		cell.x, cell.y
 	)
 
-func _pick_level_stair_cells(grid: Dictionary, level_index: int, level_count: int) -> Dictionary:
+func _pick_level_stair_cells(grid: Dictionary, level_index: int, level_count: int, door_cells: Dictionary = {}) -> Dictionary:
 	var result := {}
 	if level_count <= 1:
 		return result
@@ -2907,13 +3154,71 @@ func _pick_level_stair_cells(grid: Dictionary, level_index: int, level_count: in
 			result["up"] = up_cell
 
 	if requires_down_stair:
-		var down_cell := _pick_required_stair_cell(grid)
-		if down_cell == up_cell:
-			down_cell = _pick_required_stair_cell(grid, up_cell)
+		## The surface cellar hatch lives INDOORS: a back-room floor cell of
+		## a house or shop, like a real cellar entrance. The floor cell is
+		## already passable at the connectivity pass's rules, and the repair
+		## pass roots its BFS at the stairs, so reachability stays guaranteed.
+		var down_cell := Vector2i(2147483647, 2147483647)
+		if level_index == 0:
+			down_cell = _pick_indoor_stair_cell(grid, door_cells, up_cell)
+		if down_cell.x == 2147483647:
+			down_cell = _pick_required_stair_cell(grid)
+			if down_cell == up_cell:
+				down_cell = _pick_required_stair_cell(grid, up_cell)
 		if down_cell.x != 2147483647:
 			result["down"] = down_cell
 
 	return result
+
+## An interior floor cell for the surface down-stair, biased toward BACK
+## rooms (rooms without their own exterior door — the hatch belongs in a
+## pantry, not the shopfront). Rooms are zone components (partition walls
+## sever them); a room owning a ring door keeps its zone on the door cell,
+## so door_cells membership marks entrance rooms. Falls back to any interior
+## floor cell, and to the sentinel when the level has no buildings at all.
+func _pick_indoor_stair_cell(grid: Dictionary, door_cells: Dictionary, excluded_cell: Vector2i) -> Vector2i:
+	var visited: Dictionary = {}
+	var back_room_candidates: Array[Vector2i] = []
+	var any_candidates: Array[Vector2i] = []
+	for key_variant: Variant in grid.keys():
+		var origin := key_variant as Vector2i
+		if visited.has(origin):
+			continue
+		var zone := int(grid[key_variant])
+		if zone != CELL_BUILDING and zone != CELL_HOUSE:
+			continue
+		var queue: Array[Vector2i] = [origin]
+		visited[origin] = true
+		var room_cells: Array[Vector2i] = []
+		var has_exterior_door := false
+		var head := 0
+		while head < queue.size():
+			var current: Vector2i = queue[head]
+			head += 1
+			room_cells.append(current)
+			if door_cells.has(current):
+				has_exterior_door = true
+			for direction: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+				var neighbor: Vector2i = current + direction
+				if visited.has(neighbor):
+					continue
+				if int(grid.get(neighbor, CELL_ROCK)) != zone:
+					continue
+				visited[neighbor] = true
+				queue.append(neighbor)
+		for room_cell: Vector2i in room_cells:
+			if room_cell == excluded_cell or door_cells.has(room_cell):
+				continue
+			if TownTileService.wall_or_floor_tile(grid, room_cell.x, room_cell.y, zone, door_cells) != "floor":
+				continue
+			any_candidates.append(room_cell)
+			if not has_exterior_door:
+				back_room_candidates.append(room_cell)
+	var pool := back_room_candidates if not back_room_candidates.is_empty() else any_candidates
+	if pool.is_empty():
+		return Vector2i(2147483647, 2147483647)
+	_seeded_shuffle(pool)
+	return pool[0]
 
 func _pick_required_stair_cell(grid: Dictionary, excluded_cell: Vector2i = Vector2i(2147483647, 2147483647)) -> Vector2i:
 	var stair_candidates := _stair_candidates_for_level(grid)
@@ -3141,8 +3446,14 @@ func _furnish_interiors(grid: Dictionary) -> void:
 	# The wilds have no interiors to dress; the clearing stays open ground.
 	if actor_layer == null or _wild_mode:
 		return
+	## Stairways live on the CITY layer (no decor), so the decor probe alone
+	## reads them as free floor — a prop dropped there would hide the cellar
+	## hatch and block the only way downstairs.
+	var stair_lookup: Dictionary = {}
+	for stair_variant: Variant in _hold_state.active_level_stairs.values():
+		stair_lookup[stair_variant as Vector2i] = true
 	var is_occupied := func(cell: Vector2i) -> bool:
-		return decor_layer.get_cell_source_id(cell) >= 0
+		return stair_lookup.has(cell) or decor_layer.get_cell_source_id(cell) >= 0
 	# Houses get home comforts.
 	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_HOUSE):
 		var component: Array[Vector2i] = []
@@ -3282,7 +3593,8 @@ func _build_farmsteads() -> void:
 	_windmill_sails.clear()
 	_actor_passable_cache.clear()
 	# No farms in the untamed wilds - the clearing has no settlement to feed.
-	if actor_layer == null or _wild_mode or _town_theme == "desert" or _green_cells.is_empty():
+	# And none in the cellars: farmsteads are surface dressing.
+	if actor_layer == null or _wild_mode or _is_underground_level() or _town_theme == "desert" or _green_cells.is_empty():
 		return
 	var farm_target := clampi(_green_cells.size() / 260, 1, 3)
 	var origins: Array[Vector2i] = []
@@ -3326,7 +3638,7 @@ func _build_farmsteads() -> void:
 func _farmstead_site_fits(origin: Vector2i) -> bool:
 	var removable: Array[Vector2i] = []
 	for key: String in ["tree", "tree_dark", "hedge", "hedge_alt", "flowers_white",
-			"flowers_yellow", "flowers_pink", "flowers_pink_alt", "stump", "stump_alt", "branch"]:
+			"flowers_yellow", "flowers_pink", "flowers_pink_alt", "stump", "stump_alt"]:
 		removable.append(TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i)
 	for y in range(FARMSTEAD_SITE.y):
 		for x in range(FARMSTEAD_SITE.x):
@@ -3455,7 +3767,8 @@ func _update_windmill_sails(delta: float) -> void:
 ## Desert-city dressing: cacti, bleached bones, dry roots and half-buried
 ## statues scattered over the sand where a green town would grow trees.
 func _scatter_desert_decor() -> void:
-	if _town_theme != "desert" or actor_layer == null or _green_cells.is_empty():
+	# Surface-only dressing: no sun-bleached bones in an underground cellar.
+	if _town_theme != "desert" or actor_layer == null or _is_underground_level() or _green_cells.is_empty():
 		return
 	var decor_count := clampi(_green_cells.size() / 36, 8, 30)
 	var used_cells: Dictionary = {}
@@ -3490,6 +3803,10 @@ func _spawn_farm_animals() -> void:
 			old_sprite.queue_free()
 	_farm_animals.clear()
 	if actor_layer == null:
+		return
+	# Cellars keep no livestock at all — not even the player's own animals
+	# follow them underground (they're restored on the next surface render).
+	if _is_underground_level():
 		return
 	# Owned animals are the player's property, not town dressing: restore
 	# them first so wild and desert scenes (where crates still release)
@@ -4064,8 +4381,9 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 		_hold_state.current_level_index,
 		maxi(_hold_state.generated_levels.size(), 1)
 	)
-	# The wilds hold no residents: the player (and companion) spawn, nobody else.
-	var npc_spawn_count := 0 if _wild_mode else maxi(tavern_npc_count, mini(level_npc_target, 250))
+	# The wilds hold no residents, and neither does a storage cellar: the
+	# tavern_npc_count floor only pads the SURFACE of population-less towns.
+	var npc_spawn_count := 0 if _wild_mode or _is_underground_level() else maxi(tavern_npc_count, mini(level_npc_target, 250))
 	var result := DwarfHoldTavernService.spawn_tavern_characters(
 		actor_layer, city_layer, _npc_states, _rng, _walkable_cells,
 		_tavern_character_texture, _pending_player_spawn_cell,
@@ -4297,7 +4615,13 @@ func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 	if target_cell == _player_cell:
 		_player_move_path.clear()
 		return
-	if _latest_grid.is_empty() or not _latest_grid.has(target_cell):
+	if _latest_grid.is_empty():
+		return
+	# A target outside the generated grid is the streamed wilds (in wild and
+	# ocean embarks the grid is only the 11x11 clearing): accept it whenever
+	# the keyboard step's passability would, so "click to walk / click to
+	# row" works beyond the clearing. Grid targets keep the town logic.
+	if not _latest_grid.has(target_cell) and not _is_walkable_cell(target_cell):
 		return
 
 	# Mid-glide the walker belongs to the tile it is arriving at, not the
@@ -4400,8 +4724,11 @@ func _build_player_path(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2
 	return result
 
 func _can_step_to_cell(from_cell: Vector2i, to_cell: Vector2i, goal_cell: Vector2i) -> bool:
-	if not _latest_grid.has(to_cell):
-		return false
+	# No grid-membership gate: off-grid cells are the streamed wilds, where
+	# the same actor passability the keyboard consults decides the step, so
+	# click paths may leave the embark clearing. Grid cells resolve through
+	# the identical walkability check, unchanged. The path BFS keeps its
+	# 8000-cell flood cap, so unreachable wilds clicks stay bounded.
 	if not _is_walkable_cell(to_cell):
 		return false
 	if to_cell != goal_cell and _is_cell_occupied_by_npc(to_cell):
@@ -4598,6 +4925,20 @@ func _setup_surface_world(grid: Dictionary) -> void:
 			if traveler_sprite != null:
 				traveler_sprite.queue_free()
 			_npc_states.remove_at(state_index)
+	## Cellars are sealed underground interiors. The teardown above still
+	## ran (gates, creatures, caravans and travelers never survive the
+	## descent), but no wilds belong down here: clearing the noise set is
+	## the master off-switch — _stream_surface_chunks, _check_surface_arrival
+	## (via the emptied gate list) and _update_surface_life all early-out on
+	## it. Homestead builds and farm plots are surface-anchored, so they are
+	## dropped too or they'd restamp into the cellar at the same coordinates.
+	if _is_underground_level():
+		_surface_noise = {}
+		_surface_protect_rect = Rect2i()
+		_player_built_cells.clear()
+		_farm_plots.clear()
+		_wall_damage.clear()
+		return
 	var seed_text := seed_input.text.strip_edges()
 	var settings: Dictionary = {}
 	var game_session := get_node_or_null("/root/GameSession")
@@ -5523,7 +5864,7 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			if decor_key == "tree" or decor_key == "tree_dark":
 				var world_cell: Vector2i = cell + _surface_world_origin
 				if not _is_tree_anchor_cell(world_cell):
-					decor_key = _understory_decor_key(world_cell, base_key)
+					decor_key = _understory_decor_key(world_cell, base_key, danger)
 			# Roads cut through everything and stay clear of trees; a road cell
 			# is never a barrier, so a trail carves a pass through crags.
 			if _surface_road_cells.has(cell):
@@ -5564,21 +5905,43 @@ func _is_tree_anchor_cell(world_cell: Vector2i) -> bool:
 	return posmod(world_cell.x + row_jog, 2) == 0
 
 ## What grows where a too-crowded tree was thinned out: mostly open ground,
-## with occasional bushes, stumps and fallen branches so the forest floor
-## keeps its clutter. Bushes stay off snow and sand (leafy green reads
-## wrong there); stumps and branches suit any ground.
-func _understory_decor_key(world_cell: Vector2i, base_key: String) -> String:
+## with occasional bushes and stumps so the forest floor keeps its clutter.
+## Bushes stay off snow and sand (leafy green reads wrong there); stumps
+## suit any ground. Nothing grows under a neighboring tree's crown: the
+## overhanging canopy art would be overdrawn by decor placed there.
+func _understory_decor_key(world_cell: Vector2i, base_key: String, danger: float) -> String:
 	var cell_hash := absi(world_cell.x * 73856093 ^ world_cell.y * 19349663)
 	var roll := cell_hash % 12
+	if roll > 3:
+		return ""
+	if _cell_under_tree_crown(world_cell, danger):
+		return ""
 	if roll <= 1:
 		if base_key.begins_with("snow") or base_key.begins_with("sand"):
 			return ""
 		return "hedge" if roll == 0 else "hedge_alt"
-	if roll == 2:
-		return "stump" if cell_hash % 5 != 0 else "stump_alt"
-	if roll == 3:
-		return "branch"
-	return ""
+	return "stump" if cell_hash % 5 != 0 else "stump_alt"
+
+## Whether a nearby lattice anchor holds a tree whose 3-cell-wide crown
+## (up to two rows above the anchor) visually covers this cell. Only the
+## few candidate anchors in the crown window are tested, with the same
+## deterministic terrain field the chunk painter uses, so the verdict is
+## stable across streaming and re-streaming.
+func _cell_under_tree_crown(world_cell: Vector2i, danger: float) -> bool:
+	for anchor_y: int in range(world_cell.y, world_cell.y + 3):
+		for anchor_x: int in range(world_cell.x - 2, world_cell.x + 1):
+			var anchor := Vector2i(anchor_x, anchor_y)
+			if anchor == world_cell or not _is_tree_anchor_cell(anchor):
+				continue
+			var scene_cell := anchor - _surface_world_origin
+			# Cells the town rendered or a road claimed never get a tree.
+			if _latest_grid.has(scene_cell) or _surface_road_cells.has(scene_cell):
+				continue
+			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(anchor, _surface_noise, danger, _surface_biome_ctx)
+			var decor := String(terrain.get("decor", ""))
+			if decor == "tree" or decor == "tree_dark":
+				return true
+	return false
 
 ## Wilds road tile with the same grass-fringed autotiling the village lanes
 ## use: a side is "open" when its neighbor is grassy non-road ground, so
@@ -6754,6 +7117,21 @@ func _stamp_player_build(cell: Vector2i, tile_key: String) -> void:
 		_place_tile(decor_layer, cell, tile_key)
 	_actor_passable_cache.erase(cell)
 
+## Re-stamps every owned build and field whose cell _render_city overpainted:
+## only cells the city pass tiled (the town rect plus its grow(1) border
+## ring) have ground here, so this is a no-op for builds out in streamed-
+## chunk territory - their cells are still untiled and _ensure_surface_chunk
+## re-stamps them when their chunk paints.
+func _restamp_player_builds() -> void:
+	for cell_variant: Variant in _player_built_cells.keys():
+		var cell := cell_variant as Vector2i
+		if city_layer.get_cell_source_id(cell) >= 0:
+			_stamp_player_build(cell, String(_player_built_cells[cell_variant]))
+	for plot_variant: Variant in _farm_plots.keys():
+		var plot_cell := plot_variant as Vector2i
+		if city_layer.get_cell_source_id(plot_cell) >= 0:
+			_stamp_farm_plot(plot_cell)
+
 func _remove_player_build(cell: Vector2i) -> void:
 	var tile_key := String(_player_built_cells.get(cell, ""))
 	_player_built_cells.erase(cell)
@@ -7622,6 +8000,18 @@ func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 	# is dropped straight onto the ocean.
 	if _wild_water and cell == CELL_ROCK:
 		return "water"
+	## Cellar levels are dug out of solid earth: undug cells render as the
+	## painted rock fill (blocking, like dwarfhold stone), and lane/plaza
+	## tiles drop their grass-fringed edges — there is no lawn underground
+	## for a path to scallop into. Biome swaps are skipped too; a cellar
+	## looks the same under a snowfield or a desert.
+	if _is_underground_level():
+		if cell == CELL_ROCK:
+			return "cellar_rock"
+		var cellar_key := TownTileService.pick_base_tile(grid, x, y, cell, _door_cells, Rect2i())
+		if cellar_key.begins_with("road_edge") or cellar_key.begins_with("road_in"):
+			return TownTileService.pick_path_interior_tile(x, y, cell == CELL_PLAZA)
+		return cellar_key
 	var tile_key := TownTileService.pick_base_tile(grid, x, y, cell, _door_cells, _dark_grass_rect)
 	if _town_theme == "desert":
 		# The whole dark-grass patch family flattens to the sand variant:
@@ -7646,6 +8036,10 @@ func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 ## panel behind the layers. Grass suits the common grassy building plot;
 ## desert towns swap it for sand to match their terrain.
 func _wall_ground_fill_tile() -> String:
+	# Cellar building shells stand in solid earth, so their frame cut-outs
+	# blend into the rock fill instead of a phantom green lawn.
+	if _is_underground_level():
+		return "cellar_rock"
 	if _town_theme == "desert" and DESERT_BASE_SWAP.has("grass"):
 		return String(DESERT_BASE_SWAP["grass"])
 	if _town_ground_biome == TILE_ATLAS_DEFS.BIOME_TUNDRA and SNOW_BASE_SWAP.has("grass"):
@@ -7658,6 +8052,13 @@ func _building_type_for_cell(cell: Vector2i) -> String:
 func _pick_decor_tile(grid: Dictionary, x: int, y: int, cell: int, base_tile: String, house_decor_overrides: Dictionary) -> String:
 	# No shrubs or grass tufts sprout on the open sea.
 	if _wild_water and (base_tile == "water" or base_tile == "water_calm"):
+		return ""
+	# Direction posts stand where the lane tracer marked a junction.
+	if _direction_post_cells.has(Vector2i(x, y)):
+		return "direction_post"
+	# Nothing grows in the cellar's solid earth: no trees, hedges or blooms
+	# scattered over undug rock (interior furniture still places normally).
+	if _is_underground_level() and cell == CELL_ROCK:
 		return ""
 	var decor_key := TownTileService.pick_decor_tile(grid, x, y, cell, base_tile, house_decor_overrides, _latest_civic_building_type_map, CIVIC_BUILDING_TYPES, _rng, _door_cells)
 	# The desert has no greenery: cacti and bones are scattered as sprites instead.
