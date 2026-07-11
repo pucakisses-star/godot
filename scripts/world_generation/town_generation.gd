@@ -781,6 +781,8 @@ func _ready() -> void:
 	_update_day_night_tint()
 	_update_clock_label()
 	_generate_city()
+	## The "Strike the earth!" greeting, once, on a new walker's first embark.
+	EmbarkIntroScreen.maybe_present(self)
 
 func _process(delta: float) -> void:
 	_advance_game_clock(delta)
