@@ -588,6 +588,7 @@ var _region_cache_stamp := 0
 var _is_generating := false
 @onready var tooltip_title: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipTitle")
 @onready var tooltip_biome: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipBiome")
+@onready var tooltip_realm: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipRealm")
 @onready var tooltip_climate: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipClimate")
 @onready var tooltip_resources: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipResources")
 @onready var tooltip_major_population_groups: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipMajorPopulationGroups")
@@ -8640,6 +8641,13 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		tooltip_biome,
 		biome_label,
 		not biome_label.is_empty()
+	)
+	# Which nation claims this tile (blank on unclaimed wilds and open sea).
+	var realm_name := String(data.get("political_state", "")).strip_edges()
+	_set_tooltip_label(
+		tooltip_realm,
+		realm_name,
+		not realm_name.is_empty()
 	)
 	# The volcanic-warmth qualifier now travels inside describe_climate's
 	# unified qualifier list (browser main.js:14241-14271).
