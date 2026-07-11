@@ -92,6 +92,21 @@ static func _normalize_descriptor(value: String) -> String:
 static func importance_for_category(category: String) -> int:
 	return int(IMPORTANCE_BY_CATEGORY.get(category, 1))
 
+## Slack around the measured glyphs so the outline and antialiasing never
+## touch the clip edge — a too-tight box clips the first and last letters.
+const LABEL_HORIZONTAL_PADDING := 7.0
+
+## The real pixel box a name needs at a given size. Measured from the font
+## the labels actually draw with (no font override → the fallback font),
+## not guessed from character count, so long names are never clipped.
+static func label_box_size(text: String, font_size: int) -> Vector2:
+	var font := ThemeDB.fallback_font
+	var measured := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size)
+	return Vector2(
+		maxf(22.0, measured.x + LABEL_HORIZONTAL_PADDING * 2.0),
+		maxf(measured.y, float(font_size) * 1.2)
+	)
+
 ## Browser fonts run 14-22px on canvas; the Godot map labels keep their
 ## established smaller range, scaled 11-16 by importance tier.
 static func font_size_for_importance(importance: int) -> int:
