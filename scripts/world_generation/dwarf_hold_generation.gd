@@ -1051,6 +1051,8 @@ func _ready() -> void:
 	lighting_layer.add_child(_player_glow)
 	_player_glow.visible = false
 	_generate_city()
+	## The "Strike the earth!" greeting, once, on a new walker's first embark.
+	EmbarkIntroScreen.maybe_present(self)
 
 func _setup_inventory_label() -> void:
 	var controls := get_node_or_null("Margin/Layout/Controls")

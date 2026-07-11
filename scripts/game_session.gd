@@ -60,6 +60,17 @@ func get_player_character() -> Dictionary:
 func has_player_character() -> bool:
 	return not player_character.is_empty()
 
+## The "Strike the earth!" embark story shows once per character: true only
+## for a freshly created (or reborn) walker who has not yet seen it. The
+## flag rides on the character sheet, so it saves/loads with them and a
+## same-world successor — a genuinely new character — is greeted afresh.
+func should_show_embark_intro() -> bool:
+	return not player_character.is_empty() and not bool(player_character.get("embark_intro_shown", false))
+
+func mark_embark_intro_shown() -> void:
+	if not player_character.is_empty():
+		player_character["embark_intro_shown"] = true
+
 func set_pending_same_world_rebirth(pending: bool) -> void:
 	pending_same_world_rebirth = pending
 

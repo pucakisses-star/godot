@@ -193,6 +193,8 @@ func _ready() -> void:
 	_generate_dungeon()
 	_update_hp_label()
 	_update_coins_label()
+	## The "Strike the earth!" greeting, once, on a new walker's first embark.
+	EmbarkIntroScreen.maybe_present(self)
 
 func _process(delta: float) -> void:
 	_player_attack_timer = maxf(_player_attack_timer - delta, 0.0)
