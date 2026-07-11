@@ -3752,7 +3752,20 @@ func _resolve_ruler_record() -> Dictionary:
 	var entry := WorldChronicleService.settlement_entry_by_name(chronicle, _hold_name)
 	if not entry.is_empty() and int(entry.get("fell_year", 0)) <= 0 \
 			and not String(entry.get("ruler_name", "")).strip_edges().is_empty():
-		return entry
+		var record := entry.duplicate(true)
+		## Chronicles minted before the dynasty graphs (or fabricated by
+		## tests) carry a lineage but no family — grow one, seed-stable.
+		var family_variant: Variant = record.get("family", {})
+		if not (family_variant is Dictionary) or (family_variant as Dictionary).is_empty():
+			var family_rng := RandomNumberGenerator.new()
+			family_rng.seed = hash("%s|%s|ruler_family" % [seed_input.text.strip_edges(), _hold_name])
+			record["family"] = WorldChronicleService.build_family_for_lineage(
+				record.get("lineage", []) as Array,
+				String(record.get("clan", "")),
+				_calendar_start_year,
+				family_rng
+			)
+		return record
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash("%s|hold_ruler" % seed_input.text.strip_edges())
 	var ruler_gender := NpcIdentityService.roll_dwarf_gender(rng)
@@ -3761,20 +3774,22 @@ func _resolve_ruler_record() -> Dictionary:
 	var title := NpcIdentityService.dwarf_ruler_title(rng, ruler_gender, false)
 	var since := maxi(1, _calendar_start_year - rng.randi_range(4, 30))
 	var full_name := "%s %s" % [first_name, clan]
+	var lineage: Array = [{
+		"name": full_name,
+		"title": title,
+		"gender": ruler_gender,
+		"start": since,
+		"end": 0,
+		"violent_end": false,
+		"sitting": true
+	}]
 	return {
 		"ruler_name": full_name,
 		"ruler_title": title,
 		"ruler_gender": ruler_gender,
 		"ruler_since": since,
-		"lineage": [{
-			"name": full_name,
-			"title": title,
-			"gender": ruler_gender,
-			"start": since,
-			"end": 0,
-			"violent_end": false,
-			"sitting": true
-		}]
+		"lineage": lineage,
+		"family": WorldChronicleService.build_family_for_lineage(lineage, clan, _calendar_start_year, rng)
 	}
 
 ## Where the ruler holds court: walkable floor of the palace when the
@@ -3878,12 +3893,17 @@ func _apply_ruler_identity() -> void:
 	state["ruler_title"] = ruler_title
 	state["ruler_since"] = since
 	state["ruler_lineage"] = (_ruler_record.get("lineage", []) as Array).duplicate(true)
+	state["ruler_family"] = (_ruler_record.get("family", {}) as Dictionary).duplicate(true)
 	state["ruler_hold_name"] = _hold_name
 	if not old_name.is_empty() and old_name != ruler_name:
 		_repair_kin_references(old_name, ruler_name)
+	## The dynasty graph is authoritative for royal kin names: the roster
+	## spouse and children the family pass minted are renamed to match.
+	_reconcile_kin_with_family(state, identity)
 	state["ruler_kin"] = _ruler_kin_payload(identity)
-	print("[%s] ruler: %s %s seated (lineage %d)" % [
-		name, ruler_title, ruler_name, (state.get("ruler_lineage", []) as Array).size()])
+	print("[%s] ruler: %s %s seated (lineage %d, family %d)" % [
+		name, ruler_title, ruler_name, (state.get("ruler_lineage", []) as Array).size(),
+		((state.get("ruler_family", {}) as Dictionary).get("people", {}) as Dictionary).size()])
 
 ## Spouse/parents/children references are by name; a rename walks the
 ## whole roster so no link dangles on the old one.
@@ -3908,6 +3928,113 @@ func _rename_in_kin_list(identity: Dictionary, list_key: String, old_name: Strin
 	for entry_index: int in range(entries.size()):
 		if String(entries[entry_index]) == old_name:
 			entries[entry_index] = new_name
+
+## The roster's royal family renamed onto the dynasty graph: the ruler's
+## roster spouse takes the graph consort's name (and age), roster
+## children pair up with the graph's children of the sitting ruler by
+## birth order, and any roster child beyond the graph's brood is quietly
+## detached from the royal couple. Renames run through a two-phase
+## placeholder pass so swapped names never collide mid-walk.
+func _reconcile_kin_with_family(state: Dictionary, identity: Dictionary) -> void:
+	var family := state.get("ruler_family", {}) as Dictionary
+	var people := family.get("people", {}) as Dictionary
+	var sitting_id := String(family.get("sitting", ""))
+	if people.is_empty() or not people.has(sitting_id):
+		return
+	var sitting := people[sitting_id] as Dictionary
+	var renames: Array[Dictionary] = []
+	## The consort.
+	var spouse_id := String(sitting.get("spouse", ""))
+	var roster_spouse := String(identity.get("spouse", ""))
+	if not roster_spouse.is_empty() and people.has(spouse_id):
+		var graph_spouse := people[spouse_id] as Dictionary
+		var spouse_age := clampi(_calendar_start_year - int(graph_spouse.get("birth", 0)), 60, 320)
+		renames.append({"old": roster_spouse, "new": String(graph_spouse.get("name", "")), "age": spouse_age})
+	## The children, graph brood sorted by birth.
+	var graph_children: Array[Dictionary] = []
+	for child_variant: Variant in (sitting.get("children", []) as Array):
+		var child_id := String(child_variant)
+		if people.has(child_id):
+			graph_children.append(people[child_id] as Dictionary)
+	graph_children.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+		if int(left.get("birth", 0)) != int(right.get("birth", 0)):
+			return int(left.get("birth", 0)) < int(right.get("birth", 0))
+		return String(left.get("id", "")) < String(right.get("id", ""))
+	)
+	var roster_children: Array[String] = []
+	for child_name_variant: Variant in (identity.get("children", []) as Array):
+		roster_children.append(String(child_name_variant))
+	for child_index: int in range(roster_children.size()):
+		if child_index < graph_children.size():
+			var graph_child := graph_children[child_index]
+			var child_age := clampi(_calendar_start_year - int(graph_child.get("birth", 0)), 6, 49)
+			renames.append({"old": roster_children[child_index], "new": String(graph_child.get("name", "")), "age": child_age})
+		else:
+			_detach_roster_child(roster_children[child_index], identity)
+	## Phase 1: park every renamed kin on a placeholder so a swap between
+	## two royal names cannot dangle; phase 2: land the graph names.
+	for rename_index: int in range(renames.size()):
+		var rename := renames[rename_index]
+		if String(rename.get("old", "")) == String(rename.get("new", "")):
+			continue
+		_rename_roster_npc(String(rename.get("old", "")), "«royal kin %d»" % rename_index, -1)
+	for rename_index: int in range(renames.size()):
+		var rename := renames[rename_index]
+		if String(rename.get("old", "")) == String(rename.get("new", "")):
+			continue
+		_rename_roster_npc("«royal kin %d»" % rename_index, String(rename.get("new", "")), int(rename.get("age", -1)))
+
+## Renames one roster NPC (identity + npc_name + everyone's kin lists);
+## a citizen already wearing the new name steps aside as "the Younger".
+func _rename_roster_npc(old_name: String, new_name: String, new_age: int) -> void:
+	if old_name.is_empty() or new_name.is_empty() or old_name == new_name:
+		return
+	var target_state: Dictionary = {}
+	for state_variant: Variant in _npc_states:
+		var candidate := state_variant as Dictionary
+		if String(candidate.get("npc_name", "")) == old_name:
+			target_state = candidate
+			break
+	if target_state.is_empty():
+		return
+	for state_variant: Variant in _npc_states:
+		var other := state_variant as Dictionary
+		if other == target_state or String(other.get("npc_name", "")) != new_name:
+			continue
+		var other_identity := other.get("identity", {}) as Dictionary
+		var stepped_aside := "%s the Younger" % new_name
+		_repair_kin_references(new_name, stepped_aside)
+		other_identity["name"] = stepped_aside
+		other["npc_name"] = stepped_aside
+	var identity := target_state.get("identity", {}) as Dictionary
+	identity["name"] = new_name
+	identity["first_name"] = new_name.get_slice(" ", 0)
+	if new_name.contains(" ") and not new_name.begins_with("«"):
+		identity["clan"] = new_name.get_slice(" ", 1)
+	if new_age > 0:
+		identity["age"] = new_age
+	target_state["npc_name"] = new_name
+	_repair_kin_references(old_name, new_name)
+
+## Unlinks one roster child from the royal couple when the dynasty graph
+## records fewer children than the family pass placed under their roof.
+func _detach_roster_child(child_name: String, ruler_identity: Dictionary) -> void:
+	if child_name.is_empty():
+		return
+	var ruler_name := String(ruler_identity.get("name", ""))
+	var ruler_children := ruler_identity.get("children", []) as Array
+	ruler_children.erase(child_name)
+	var spouse_name := String(ruler_identity.get("spouse", ""))
+	for state_variant: Variant in _npc_states:
+		var other := state_variant as Dictionary
+		var other_identity := other.get("identity", {}) as Dictionary
+		var other_name := String(other_identity.get("name", ""))
+		if other_name == spouse_name:
+			(other_identity.get("children", []) as Array).erase(child_name)
+		elif other_name == child_name:
+			var child_parents := other_identity.get("parents", []) as Array
+			child_parents.erase(ruler_name)
+			child_parents.erase(spouse_name)
 
 ## The ruler's living kin as portrait-ready stubs (name/clan/age/race),
 ## looked up from the roster for the dynasty tree's spouse+children row.

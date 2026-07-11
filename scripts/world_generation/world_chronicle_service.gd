@@ -799,6 +799,11 @@ static func _simulate_ruler_lines(
 			"sitting": true
 		})
 		record["lineage"] = lineage
+		## Dwarfholds grow the succession line into a full dynasty graph —
+		## spouses, siblings, aunts, uncles and cousins — for the family
+		## tree tab. The flat lineage stays authoritative for dialogue.
+		if settlement_type == "dwarfhold":
+			record["family"] = build_family_for_lineage(lineage, dynasty_clan, current_year, rng)
 		var existing_ruler := String(record.get("ruler_name", "")).strip_edges()
 		if settlement_type == "dwarfhold" or existing_ruler.is_empty():
 			record["ruler_name"] = String(ruler.get("name", ""))
@@ -839,6 +844,421 @@ static func _roll_lineage_ruler(
 		"gender": gender,
 		"full": "%s %s" % [title, full_name]
 	}
+
+## --- Dynasty family graphs ----------------------------------------------------
+## A dwarfhold's succession line expanded into a small genealogy: every
+## included ruler gains a married-in spouse and children (the heir among
+## them); occasionally the seat passes to a sibling or a nephew instead.
+## Non-heir kin of the most recent generations get spouses and children
+## of their own — the sitting ruler's aunts, uncles and cousins. The
+## graph is JSON-safe (String/int/bool/Array/Dictionary), deterministic
+## from the rng handed in, and bounded by FAMILY_HARD_CAP people.
+
+const FAMILY_HARD_CAP := 50
+## How many rulers of a long chain the graph includes; the lineage array
+## itself keeps the full line for dialogue and the history tab.
+const FAMILY_RULER_WINDOW := 9
+## The most recent generations whose non-heir children get spouses and
+## children of their own (the cousins). Older generations stay slim.
+const FAMILY_RICH_GENERATIONS := 3
+const FAMILY_SIBLING_SUCCESSION_CHANCE := 0.12
+const FAMILY_NEPHEW_SUCCESSION_CHANCE := 0.12
+const FAMILY_KIN_SPOUSE_CHANCE := 0.6
+
+## Builds the family graph for one succession line. Returns {"people":
+## {id: person}, "order": [ids], "roots": [ids], "sitting": id, "year":
+## int}. Person fields: name/gender/clan/race, birth/death (0 = alive),
+## title + reign_start/reign_end + ruler_index for rulers, sitting,
+## violent_end (their reign closed in blood), violent_takeover (they
+## TOOK the seat in blood), married_in, parents/spouse/children ids,
+## generation (tree row, 0 = oldest).
+static func build_family_for_lineage(
+	lineage: Array,
+	dynasty_clan: String,
+	current_year: int,
+	rng: RandomNumberGenerator
+) -> Dictionary:
+	if lineage.is_empty():
+		return {}
+	var people: Dictionary = {}
+	var id_order: Array = []
+	var used_first: Dictionary = {}
+	for member_variant: Variant in lineage:
+		used_first[String((member_variant as Dictionary).get("name", "")).get_slice(" ", 0)] = true
+	var clan := dynasty_clan
+	if clan.is_empty():
+		var founder_name := String((lineage[0] as Dictionary).get("name", ""))
+		clan = founder_name.get_slice(" ", 1) if founder_name.contains(" ") else "Stonefist"
+	var window_start := maxi(0, lineage.size() - FAMILY_RULER_WINDOW)
+
+	## The oldest included ruler roots the tree.
+	var root_entry := lineage[window_start] as Dictionary
+	var root_fields := _family_ruler_fields(root_entry, window_start, clan)
+	root_fields["birth"] = int(root_entry.get("start", 1)) - rng.randi_range(55, 105)
+	if window_start > 0:
+		root_fields["violent_takeover"] = bool((lineage[window_start - 1] as Dictionary).get("violent_end", false))
+	var current_id := _family_add(people, id_order, root_fields)
+
+	## The chain: each succession places the next ruler as a child,
+	## sibling or nephew/niece of the one before.
+	for chain_index: int in range(window_start, lineage.size() - 1):
+		current_id = _family_place_successor(
+			people, id_order, current_id,
+			lineage[chain_index] as Dictionary, lineage[chain_index + 1] as Dictionary,
+			chain_index + 1, clan, used_first, rng
+		)
+	var sitting_id := current_id
+	var sitting := people[sitting_id] as Dictionary
+	sitting["sitting"] = true
+	## The sitting ruler always has a consort recorded.
+	if String(sitting["spouse"]).is_empty():
+		_family_create_spouse(people, id_order, sitting_id, clan, used_first, rng, true)
+	var max_generation := int(sitting["generation"])
+
+	## Children for the recent ruler couples (the heir is already among
+	## them); older rulers keep only the heir so the graph stays bounded.
+	var ruler_ids: Array[String] = []
+	for person_id_variant: Variant in id_order:
+		var person_id := String(person_id_variant)
+		if int((people[person_id] as Dictionary)["ruler_index"]) >= 0:
+			ruler_ids.append(person_id)
+	for ruler_person_id: String in ruler_ids:
+		var ruler_person := people[ruler_person_id] as Dictionary
+		if int(ruler_person["generation"]) < max_generation - (FAMILY_RICH_GENERATIONS - 1):
+			continue
+		if String(ruler_person["spouse"]).is_empty():
+			_family_create_spouse(people, id_order, ruler_person_id, clan, used_first, rng, true)
+		var reign_end := int(ruler_person["reign_end"])
+		if reign_end <= 0:
+			reign_end = current_year
+		var target_children := rng.randi_range(1, 3) if bool(ruler_person["sitting"]) else rng.randi_range(2, 4)
+		while (ruler_person["children"] as Array).size() < target_children:
+			var child_id := _family_add_child(
+				people, id_order, ruler_person_id,
+				int(ruler_person["reign_start"]) + 1, reign_end - 2,
+				clan, used_first, rng
+			)
+			if child_id.is_empty():
+				break
+
+	## Spouses and children (the cousins) for the recent non-heir kin:
+	## the sitting ruler's aunts and uncles first, then their siblings.
+	var kin_ids: Array[String] = []
+	for person_id_variant: Variant in id_order:
+		var person_id := String(person_id_variant)
+		var person := people[person_id] as Dictionary
+		if int(person["ruler_index"]) >= 0 or bool(person["married_in"]):
+			continue
+		if (person["parents"] as Array).is_empty():
+			continue
+		if int(person["generation"]) < max_generation - 1 or int(person["generation"]) > max_generation:
+			continue
+		kin_ids.append(person_id)
+	var cousin_guaranteed := false
+	for kin_id: String in kin_ids:
+		var kin := people[kin_id] as Dictionary
+		var is_parent_generation := int(kin["generation"]) == max_generation - 1
+		var wants_spouse := (is_parent_generation and not cousin_guaranteed) or rng.randf() < FAMILY_KIN_SPOUSE_CHANCE
+		var partner_id := ""
+		if wants_spouse and String(kin["spouse"]).is_empty():
+			partner_id = _family_create_spouse(people, id_order, kin_id, clan, used_first, rng, false)
+		var child_count := rng.randi_range(0, 3)
+		if is_parent_generation and not partner_id.is_empty() and not cousin_guaranteed:
+			child_count = maxi(child_count, 1)
+		for _child_slot: int in range(child_count):
+			var child_id := _family_add_child(
+				people, id_order, kin_id,
+				int(kin["birth"]) + 20, mini(int(kin["birth"]) + 48, current_year - 1),
+				clan, used_first, rng
+			)
+			if child_id.is_empty():
+				break
+			if is_parent_generation:
+				cousin_guaranteed = true
+
+	## Deaths: slain rulers fall with their reign, retired ones linger,
+	## and long dwarf lifespans let some grandparents overlap the present.
+	for person_id_variant: Variant in id_order:
+		var person_id := String(person_id_variant)
+		var person := people[person_id] as Dictionary
+		var death := 0
+		if bool(person["sitting"]):
+			death = 0
+		elif int(person["ruler_index"]) >= 0:
+			death = int(person["reign_end"]) + (0 if bool(person["violent_end"]) else rng.randi_range(4, 60))
+		else:
+			death = int(person["birth"]) + rng.randi_range(150, 250)
+		if death >= current_year:
+			death = 0
+		if death > 0 and death <= int(person["birth"]):
+			death = int(person["birth"]) + 1
+		person["death"] = death
+	## The sitting couple is alive by definition.
+	var sitting_spouse_id := String(sitting["spouse"])
+	if not sitting_spouse_id.is_empty():
+		(people[sitting_spouse_id] as Dictionary)["death"] = 0
+
+	var roots: Array = []
+	for person_id_variant: Variant in id_order:
+		var person_id := String(person_id_variant)
+		var person := people[person_id] as Dictionary
+		if (person["parents"] as Array).is_empty() and not bool(person["married_in"]):
+			roots.append(person_id)
+	return {"people": people, "order": id_order, "roots": roots, "sitting": sitting_id, "year": current_year}
+
+## Seats lineage member heir_entry in the graph relative to the ruler it
+## succeeds: usually their child, sometimes a sibling or a nephew/niece
+## (which reads especially well under a violent succession). Returns the
+## new ruler's person id.
+static func _family_place_successor(
+	people: Dictionary,
+	id_order: Array,
+	ruler_id: String,
+	ruler_entry: Dictionary,
+	heir_entry: Dictionary,
+	heir_index: int,
+	clan: String,
+	used_first: Dictionary,
+	rng: RandomNumberGenerator
+) -> String:
+	var ruler := people[ruler_id] as Dictionary
+	var ruler_parents := ruler["parents"] as Array
+	var relation := "child"
+	var roll := rng.randf()
+	if not ruler_parents.is_empty():
+		if roll < FAMILY_SIBLING_SUCCESSION_CHANCE:
+			relation = "sibling"
+		elif roll < FAMILY_SIBLING_SUCCESSION_CHANCE + FAMILY_NEPHEW_SUCCESSION_CHANCE:
+			relation = "nephew"
+	var fields := _family_ruler_fields(heir_entry, heir_index, clan)
+	fields["violent_takeover"] = bool(ruler_entry.get("violent_end", false))
+	var parent_ids: Array[String] = []
+	if relation == "sibling":
+		for parent_variant: Variant in ruler_parents:
+			parent_ids.append(String(parent_variant))
+		fields["generation"] = int(ruler["generation"])
+		## A younger sibling, but born before they took the seat.
+		fields["birth"] = clampi(
+			int(ruler["birth"]) + rng.randi_range(2, 16),
+			int(ruler["birth"]) + 1,
+			int(fields["reign_start"]) - 2
+		)
+	elif relation == "nephew":
+		var sibling_id := _family_find_or_create_sibling(people, id_order, ruler_id, clan, used_first, rng)
+		if sibling_id.is_empty():
+			relation = "child"
+		else:
+			var sibling := people[sibling_id] as Dictionary
+			var partner_id := String(sibling["spouse"])
+			if partner_id.is_empty():
+				partner_id = _family_create_spouse(people, id_order, sibling_id, clan, used_first, rng, true)
+			parent_ids.append(sibling_id)
+			if not partner_id.is_empty():
+				parent_ids.append(partner_id)
+			fields["generation"] = int(sibling["generation"]) + 1
+			var nephew_hi := int(ruler["reign_end"]) - 2
+			var nephew_lo := mini(maxi(int(sibling["birth"]) + 16, int(ruler["reign_start"]) - 8), nephew_hi)
+			nephew_lo = maxi(nephew_lo, int(sibling["birth"]) + 1)
+			fields["birth"] = rng.randi_range(nephew_lo, maxi(nephew_lo, nephew_hi))
+	if relation == "child":
+		var spouse_id := String(ruler["spouse"])
+		if spouse_id.is_empty():
+			spouse_id = _family_create_spouse(people, id_order, ruler_id, clan, used_first, rng, true)
+		parent_ids.append(ruler_id)
+		if not spouse_id.is_empty():
+			parent_ids.append(spouse_id)
+		fields["generation"] = int(ruler["generation"]) + 1
+		var oldest_parent_birth := int(ruler["birth"])
+		if not spouse_id.is_empty():
+			oldest_parent_birth = maxi(oldest_parent_birth, int((people[spouse_id] as Dictionary)["birth"]))
+		## Born inside the parent's reign; the reign window wins over the
+		## generation-gap wish so nobody is born after their own accession.
+		var child_hi := int(ruler["reign_end"]) - 2
+		var child_lo := mini(maxi(int(ruler["reign_start"]) + 1, oldest_parent_birth + 16), child_hi)
+		fields["birth"] = rng.randi_range(child_lo, maxi(child_lo, child_hi))
+	var heir_id := _family_add(people, id_order, fields)
+	_family_link_child(people, parent_ids, heir_id)
+	return heir_id
+
+## An existing non-ruler sibling of ruler_id, or a freshly rolled one
+## under the same parents ("" when the graph is full or rootless).
+static func _family_find_or_create_sibling(
+	people: Dictionary,
+	id_order: Array,
+	ruler_id: String,
+	clan: String,
+	used_first: Dictionary,
+	rng: RandomNumberGenerator
+) -> String:
+	var ruler := people[ruler_id] as Dictionary
+	var ruler_parents := ruler["parents"] as Array
+	if ruler_parents.is_empty():
+		return ""
+	var parent := people[String(ruler_parents[0])] as Dictionary
+	for child_variant: Variant in (parent["children"] as Array):
+		var child_id := String(child_variant)
+		if child_id != ruler_id and int((people[child_id] as Dictionary)["ruler_index"]) < 0:
+			return child_id
+	if people.size() + 2 > FAMILY_HARD_CAP:
+		return ""
+	var gender := "female" if rng.randf() < 0.5 else "male"
+	var birth := clampi(
+		int(ruler["birth"]) + rng.randi_range(-10, 10),
+		int(parent["birth"]) + 16,
+		int(ruler["reign_start"]) - 2
+	)
+	var fields := _family_person_fields("%s %s" % [_family_first_name(gender, used_first, rng), clan], gender, clan, birth)
+	fields["generation"] = int(ruler["generation"])
+	var sibling_id := _family_add(people, id_order, fields)
+	var parent_ids: Array[String] = []
+	for parent_variant: Variant in ruler_parents:
+		parent_ids.append(String(parent_variant))
+	_family_link_child(people, parent_ids, sibling_id)
+	return sibling_id
+
+## A married-in spouse for partner_id: a different clan, a name from the
+## matching gendered pool, gender opposite (always for dynasty parents,
+## nearly always otherwise). Returns "" when the graph is full.
+static func _family_create_spouse(
+	people: Dictionary,
+	id_order: Array,
+	partner_id: String,
+	dynasty_clan: String,
+	used_first: Dictionary,
+	rng: RandomNumberGenerator,
+	force_opposite: bool
+) -> String:
+	if people.size() >= FAMILY_HARD_CAP:
+		return ""
+	var partner := people[partner_id] as Dictionary
+	var partner_gender := String(partner["gender"])
+	var gender := "female" if partner_gender == "male" else "male"
+	if not force_opposite and rng.randf() < 0.08:
+		gender = partner_gender
+	var spouse_clan := dynasty_clan
+	for _reroll: int in range(6):
+		spouse_clan = NpcIdentityService.DWARF_CLAN_NAMES[rng.randi_range(0, NpcIdentityService.DWARF_CLAN_NAMES.size() - 1)]
+		if spouse_clan != dynasty_clan:
+			break
+	var fields := _family_person_fields(
+		"%s %s" % [_family_first_name(gender, used_first, rng), spouse_clan],
+		gender, spouse_clan,
+		int(partner["birth"]) + rng.randi_range(-14, 14)
+	)
+	fields["married_in"] = true
+	fields["generation"] = int(partner["generation"])
+	var spouse_id := _family_add(people, id_order, fields)
+	partner["spouse"] = spouse_id
+	(people[spouse_id] as Dictionary)["spouse"] = partner_id
+	return spouse_id
+
+## One child of parent_id (and their spouse when wed), born inside
+## [birth_lo, birth_hi] and after both parents. "" when impossible.
+static func _family_add_child(
+	people: Dictionary,
+	id_order: Array,
+	parent_id: String,
+	birth_lo: int,
+	birth_hi: int,
+	clan: String,
+	used_first: Dictionary,
+	rng: RandomNumberGenerator
+) -> String:
+	if people.size() >= FAMILY_HARD_CAP:
+		return ""
+	var parent := people[parent_id] as Dictionary
+	var parent_ids: Array[String] = [parent_id]
+	var lo := maxi(birth_lo, int(parent["birth"]) + 16)
+	var spouse_id := String(parent["spouse"])
+	if not spouse_id.is_empty():
+		parent_ids.append(spouse_id)
+		lo = maxi(lo, int((people[spouse_id] as Dictionary)["birth"]) + 16)
+	if birth_hi < lo:
+		return ""
+	var gender := "female" if rng.randf() < 0.5 else "male"
+	var fields := _family_person_fields(
+		"%s %s" % [_family_first_name(gender, used_first, rng), clan],
+		gender, clan, rng.randi_range(lo, birth_hi)
+	)
+	fields["generation"] = int(parent["generation"]) + 1
+	var child_id := _family_add(people, id_order, fields)
+	_family_link_child(people, parent_ids, child_id)
+	return child_id
+
+## Person skeleton with every key present, so readers can index without
+## existence checks. All values JSON-safe.
+static func _family_person_fields(person_name: String, gender: String, person_clan: String, birth: int) -> Dictionary:
+	return {
+		"id": "",
+		"name": person_name,
+		"gender": gender,
+		"clan": person_clan,
+		"race": "Dwarf",
+		"birth": birth,
+		"death": 0,
+		"title": "",
+		"reign_start": 0,
+		"reign_end": 0,
+		"sitting": false,
+		"violent_end": false,
+		"violent_takeover": false,
+		"married_in": false,
+		"ruler_index": -1,
+		"parents": [],
+		"spouse": "",
+		"children": [],
+		"generation": 0
+	}
+
+## Person fields for one lineage ruler (name, title, reign, flags).
+static func _family_ruler_fields(entry: Dictionary, lineage_index: int, clan: String) -> Dictionary:
+	var fields := _family_person_fields(String(entry.get("name", "")), String(entry.get("gender", "")), clan, 0)
+	fields["title"] = String(entry.get("title", ""))
+	fields["reign_start"] = int(entry.get("start", 0))
+	fields["reign_end"] = int(entry.get("end", 0))
+	fields["sitting"] = bool(entry.get("sitting", false))
+	fields["violent_end"] = bool(entry.get("violent_end", false))
+	fields["ruler_index"] = lineage_index
+	return fields
+
+static func _family_add(people: Dictionary, id_order: Array, fields: Dictionary) -> String:
+	var person_id := "p%d" % id_order.size()
+	fields["id"] = person_id
+	people[person_id] = fields
+	id_order.append(person_id)
+	return person_id
+
+## Wires child_id under every id in parent_ids, both directions.
+static func _family_link_child(people: Dictionary, parent_ids: Array[String], child_id: String) -> void:
+	var child := people[child_id] as Dictionary
+	var child_parents := child["parents"] as Array
+	for parent_id: String in parent_ids:
+		if parent_id.is_empty() or child_parents.has(parent_id) or not people.has(parent_id):
+			continue
+		child_parents.append(parent_id)
+		var parent := people[parent_id] as Dictionary
+		var parent_children := parent["children"] as Array
+		if not parent_children.has(child_id):
+			parent_children.append(child_id)
+
+## A first name from the gendered dwarf pools, avoiding names the graph
+## already uses when it can (the pools are finite; a long dynasty may
+## repeat a first name under a different clan).
+static func _family_first_name(gender: String, used_first: Dictionary, rng: RandomNumberGenerator) -> String:
+	var pool: Array[String] = []
+	if gender == "female":
+		pool.append_array(NpcIdentityService.DWARF_FIRST_NAMES_FEMALE)
+		pool.append_array(NpcIdentityService.DWARF_RULER_FIRST_NAMES_FEMALE)
+	else:
+		pool.append_array(NpcIdentityService.DWARF_FIRST_NAMES_MALE)
+		pool.append_array(NpcIdentityService.DWARF_RULER_FIRST_NAMES_MALE)
+	var first := pool[rng.randi_range(0, pool.size() - 1)]
+	for _reroll: int in range(12):
+		if not used_first.has(first):
+			break
+		first = pool[rng.randi_range(0, pool.size() - 1)]
+	used_first[first] = true
+	return first
 
 ## Sorts, caps and cross-links each settlement's story: neighbor ruins
 ## feed rumors and grudges so a town gossips about the fallen hold nearby.
