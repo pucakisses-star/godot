@@ -2397,6 +2397,9 @@ func _simulate_world_chronicle() -> void:
 	if game_session != null and game_session.has_method("get_world_settings"):
 		var kill_settings: Dictionary = game_session.call("get_world_settings")
 		WorldChronicleService.apply_player_kills(_world_chronicle, WorldChronicleService.player_kills(kill_settings))
+		## Dead player characters are history too: their graves re-apply to
+		## a regenerated chronicle exactly like the beast kills do.
+		WorldChronicleService.apply_player_deaths(_world_chronicle, WorldChronicleService.player_deaths(kill_settings))
 	_apply_world_chronicle()
 	_apply_beast_lair_surfacing()
 	var world_event_count := (_world_chronicle.get("world_events", []) as Array).size()

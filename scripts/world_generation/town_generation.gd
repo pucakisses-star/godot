@@ -112,6 +112,7 @@ var _trade_leash_cell := Vector2i(2147483647, 2147483647)
 var _shop_stocks: Dictionary = {}
 var _active_speech_bubble: PanelContainer
 var _escape_menu: EscapeMenu
+var _game_over: GameOverScreen
 var _latest_zone_counts := {
 	"halls": 0,
 	"houses": 0,
@@ -1182,6 +1183,11 @@ func _exit_tree() -> void:
 ## Pushes the live clock/HP/satiety into the session. Runs on scene exit
 ## AND whenever SaveGameService writes a slot, so saves capture now.
 func flush_session_state() -> void:
+	# Once the game-over modal owns the session, the death-moment flush has
+	# already run; the dying scene must not smear its zeroed state over a
+	# freshly loaded save or a stripped successor session as it exits.
+	if _game_over != null and is_instance_valid(_game_over):
+		return
 	# The explored mask rides the same flush: scene exits and slot saves
 	# both capture the freshest fog-of-war state.
 	_flush_exploration()
@@ -1387,26 +1393,44 @@ func _damage_player(damage: int, source_name: String = "the wilds") -> void:
 	if _player_hp <= 0.0:
 		_handle_player_death(source_name)
 
-## Death in the wilds is a walk of shame, not a game over: you wake back
-## at your town doorstep with your wounds bound.
+## Death is final: no respawn. The grave goes into the world chronicle,
+## the session state flushes as it stood at the last breath, and the
+## game-over screen offers a save, a successor, or the main menu.
 func _handle_player_death(source_name: String) -> void:
-	_player_hp = _player_max_hp
+	if _game_over != null and is_instance_valid(_game_over):
+		return
+	_player_hp = 0.0
 	_update_hp_label()
 	_player_move_path.clear()
 	_player_is_moving = false
-	# You wake ashore and afoot, whatever you were riding when it ended.
-	if _player_boating:
-		_set_boating(false)
-	if _player_mounted:
-		_player_mounted = false
-		if _mount_sprite != null:
-			_mount_sprite.visible = false
-	if _player_sprite != null:
-		_player_cell = _player_home_cell
-		_actor_sprite_to_cell(_player_sprite, _player_home_cell)
-		_center_view_on_cell(_player_home_cell)
 	_save_player_hp()
-	_set_save_status("Slain by %s — you wake back in town." % source_name, Color(0.95, 0.5, 0.5, 1.0))
+	var place := _town_name if not _town_name.is_empty() else "the wilds"
+	_record_death_and_show_game_over(source_name, place)
+
+## Writes the death into the persistent chronicle register (so it survives
+## regeneration like the beast kills), flushes the session at the death
+## date, and raises the game-over modal. The tree pauses beneath it.
+func _record_death_and_show_game_over(source_name: String, place_name: String) -> void:
+	var player_name := "A wanderer"
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_player_character"):
+		var character: Dictionary = game_session.call("get_player_character")
+		var character_name := String(character.get("name", "")).strip_edges()
+		if not character_name.is_empty():
+			player_name = character_name
+	var death_year := GameCalendar.year_for_day(_game_day - 1, _calendar_start_year)
+	var settings: Dictionary = _world_settings_snapshot()
+	WorldChronicleService.record_player_death(settings, player_name, place_name, death_year, source_name)
+	_store_world_settings(settings)
+	flush_session_state()
+	if _escape_menu != null and _escape_menu.is_open():
+		_escape_menu.close()
+	_game_over = GameOverScreen.new()
+	_game_over.character_name = player_name
+	_game_over.place_name = place_name
+	_game_over.date_line = GameCalendar.date_text(_game_day - 1, _calendar_start_year)
+	_game_over.cause_name = source_name
+	add_child(_game_over)
 
 func _flash_sprite(sprite: Sprite2D, flash_color: Color) -> void:
 	sprite.modulate = flash_color

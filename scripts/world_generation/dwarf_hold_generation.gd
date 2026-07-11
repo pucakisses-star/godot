@@ -113,6 +113,7 @@ var _shop_stocks: Dictionary = {}
 var _active_speech_bubble: PanelContainer
 var _build_selection := -1
 var _escape_menu: EscapeMenu
+var _game_over: GameOverScreen
 var _torch_sprites: Dictionary = {}
 ## Streamed wild chunks currently resident, chunk coords -> true. The
 ## city core never appears here and is never evicted.
@@ -4640,8 +4641,13 @@ func _damage_player(amount: int, source_name: String) -> void:
 	if _player_hp <= 0.0:
 		_handle_player_death(source_name)
 
+## Death is final: no waking back in the Great Hall. Half the purse spills
+## where the walker fell (the drop stays with the world), the grave goes
+## into the chronicle, and the game-over screen takes over.
 func _handle_player_death(source_name: String) -> void:
-	_player_hp = _player_max_hp
+	if _game_over != null and is_instance_valid(_game_over):
+		return
+	_player_hp = 0.0
 	var lost_coins := _player_coins / 2
 	if lost_coins > 0:
 		_adjust_coins(-lost_coins)
@@ -4651,13 +4657,33 @@ func _handle_player_death(source_name: String) -> void:
 	_update_hp_label()
 	_player_move_path.clear()
 	_player_is_moving = false
-	if _latest_district_labels.is_empty():
-		# Deep levels have no Great Hall to wake in - climb the walker
-		# back to the city level instead of reviving them mid-melee.
-		call_deferred("_show_level", 0)
-	else:
-		_relocate_player_to_city_heart(_latest_grid)
-	_set_save_status("Slain by %s — you wake back in the hold" % source_name, Color(0.95, 0.5, 0.5, 1.0))
+	var place := _hold_name if not _hold_name.is_empty() else "a dwarfhold"
+	_record_death_and_show_game_over(source_name, place)
+
+## Writes the death into the persistent chronicle register (so it survives
+## regeneration like the beast kills), flushes the session at the death
+## date, and raises the game-over modal. The tree pauses beneath it.
+func _record_death_and_show_game_over(source_name: String, place_name: String) -> void:
+	var player_name := "A wanderer"
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_player_character"):
+		var character: Dictionary = game_session.call("get_player_character")
+		var character_name := String(character.get("name", "")).strip_edges()
+		if not character_name.is_empty():
+			player_name = character_name
+	var death_year := GameCalendar.year_for_day(_game_day - 1, _calendar_start_year)
+	var settings: Dictionary = _world_settings_snapshot()
+	WorldChronicleService.record_player_death(settings, player_name, place_name, death_year, source_name)
+	_store_world_settings(settings)
+	flush_session_state()
+	if _escape_menu != null and _escape_menu.is_open():
+		_escape_menu.close()
+	_game_over = GameOverScreen.new()
+	_game_over.character_name = player_name
+	_game_over.place_name = place_name
+	_game_over.date_line = GameCalendar.date_text(_game_day - 1, _calendar_start_year)
+	_game_over.cause_name = source_name
+	add_child(_game_over)
 
 ## The hold is home: standing on city ground slowly mends your wounds -
 ## as long as there's food in your belly.
@@ -4681,8 +4707,9 @@ func _advance_hunger(delta_hours: float) -> void:
 		_player_hp = maxf(_player_hp - delta_hours * PlayerStatsService.STARVATION_DAMAGE_PER_GAME_HOUR, 0.0)
 		_update_hp_label()
 		if _player_hp <= 0.0:
+			# Death is final now: no satiety refill for a respawn that
+			# no longer happens.
 			_handle_player_death("starvation")
-			_player_satiety = PlayerStatsService.SATIETY_MAX * 0.3
 	_update_hunger_label()
 
 func _setup_hp_label() -> void:
@@ -4943,6 +4970,11 @@ func _load_persistent_player_state() -> void:
 		_game_day = maxi(1, int(clock.get("day", _game_day)))
 
 func _save_persistent_player_state() -> void:
+	# Once the game-over modal owns the session, the death-moment flush has
+	# already run; the dying scene must not smear its zeroed state over a
+	# freshly loaded save or a stripped successor session as it exits.
+	if _game_over != null and is_instance_valid(_game_over):
+		return
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return

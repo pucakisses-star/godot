@@ -22,6 +22,13 @@ const SETTINGS_KEY := "world_chronicle"
 ## beast name -> {"year": int, "by": String, "place": String}.
 const KILLS_KEY := "world_beast_kills"
 
+## Player-made tragedy: the characters who DIED in this world, kept beside
+## the beast-kill register so a re-generated overworld (same seed, fresh
+## simulation) re-applies the deaths to its chronicle exactly like the
+## kills. Array of {"year": int, "name": String, "place": String,
+## "cause": String}.
+const DEATHS_KEY := "world_player_deaths"
+
 const OVERWORLD_CONTENT := preload("res://scripts/world_generation/overworld_content.gd")
 
 ## Beast archetypes reuse creature concepts the world already knows: the
@@ -1192,6 +1199,71 @@ static func record_player_beast_kill(settings: Dictionary, beast_name: String, p
 	settings[KILLS_KEY] = kills
 	var chronicle := chronicle_from_settings(settings)
 	apply_player_kills(chronicle, kills)
+
+## --- Player deaths -------------------------------------------------------------
+
+static func player_deaths(settings: Dictionary) -> Array:
+	var stored: Variant = settings.get(DEATHS_KEY, [])
+	if stored is Array:
+		return stored as Array
+	return []
+
+## One chronicle line for a recorded death.
+static func _death_event_text(death: Dictionary) -> String:
+	var who := String(death.get("name", "A wanderer"))
+	var place := String(death.get("place", "the wilds"))
+	var cause := String(death.get("cause", "")).strip_edges()
+	if cause == "starvation":
+		return "%s starved to death at %s." % [who, place]
+	if cause.is_empty():
+		return "%s perished at %s." % [who, place]
+	return "%s perished at %s, slain by %s." % [who, place, cause]
+
+## Patches a (freshly simulated or stored) chronicle with the deaths of
+## player characters: each becomes a world event (and a tavern rumor)
+## once, the same mechanism the beast-kill register rides.
+static func apply_player_deaths(chronicle: Dictionary, deaths: Array) -> void:
+	if chronicle.is_empty() or deaths.is_empty():
+		return
+	var world_events := chronicle.get("world_events", []) as Array
+	var world_rumors := chronicle.get("world_rumors", []) as Array
+	for death_variant: Variant in deaths:
+		if not (death_variant is Dictionary):
+			continue
+		var death := death_variant as Dictionary
+		var event_text := _death_event_text(death)
+		var already_recorded := false
+		for event_variant: Variant in world_events:
+			if String((event_variant as Dictionary).get("text", "")) == event_text:
+				already_recorded = true
+				break
+		if already_recorded:
+			continue
+		world_events.append({"year": maxi(1, int(death.get("year", 0))), "type": "player_death", "text": event_text})
+		world_rumors.append("They say %s A grim business." % event_text)
+	chronicle["world_events"] = world_events
+	chronicle["world_rumors"] = world_rumors
+
+## Records a player character's death: the persistent register and the
+## stored chronicle in the SAME settings dictionary are both updated, so
+## the grave survives scene changes, saves, and world regeneration.
+## Callers persist the settings.
+static func record_player_death(settings: Dictionary, player_name: String, place_name: String, death_year: int, cause: String) -> void:
+	var who := player_name.strip_edges()
+	if who.is_empty():
+		who = "A wanderer"
+	var place := place_name.strip_edges()
+	if place.is_empty():
+		place = "the wilds"
+	var deaths := player_deaths(settings).duplicate()
+	deaths.append({
+		"year": maxi(1, death_year),
+		"name": who,
+		"place": place,
+		"cause": cause.strip_edges()
+	})
+	settings[DEATHS_KEY] = deaths
+	apply_player_deaths(chronicle_from_settings(settings), deaths)
 
 ## The still-living beast laired at this overworld tile, or {} when the
 ## tile hosts no lair (or its beast is already dead).

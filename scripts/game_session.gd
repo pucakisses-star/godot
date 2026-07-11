@@ -5,10 +5,32 @@ const WorldSettings = preload("res://scripts/world_generation/world_settings.gd"
 const SAVE_FILE_PATH := "user://save_game.json"
 const SAVE_FORMAT_VERSION := 1
 
+## Settings keys that belong to the CHARACTER, not the world: they die
+## with the walker so a successor rolled into the same world starts
+## fresh. Everything else (seed, diffs, explored masks, homestead,
+## chronicle, clock...) is world history and survives the death.
+const CHARACTER_SETTINGS_KEYS: Array[String] = [
+	"player_hp",
+	"player_satiety",
+	"player_inventory",
+	"player_coins",
+	"player_gear",
+	"player_equipment",
+	"player_enchants",
+	"player_buffs",
+	"player_hotbar",
+	"starmetal_blade",
+	"starmetal_plate"
+]
+
 var world_settings: Dictionary = {}
 var player_character: Dictionary = {}
 ## The slot this session was last saved to or loaded from ("" = none).
 var current_slot_id: String = ""
+## Set when a dead character's player chooses "New Character, Same World":
+## the character creator then routes straight back into the inherited
+## overworld instead of forging a new world.
+var pending_same_world_rebirth := false
 
 func set_current_slot(slot_id: String) -> void:
 	current_slot_id = slot_id
@@ -37,6 +59,35 @@ func get_player_character() -> Dictionary:
 
 func has_player_character() -> bool:
 	return not player_character.is_empty()
+
+func set_pending_same_world_rebirth(pending: bool) -> void:
+	pending_same_world_rebirth = pending
+
+## Reads AND clears the rebirth flag, so it can never leak into a later
+## ordinary new-game flow.
+func consume_same_world_rebirth() -> bool:
+	var pending := pending_same_world_rebirth
+	pending_same_world_rebirth = false
+	return pending
+
+## "New Character, Same World": strips exactly the character-scoped keys
+## out of the world settings while every world-scoped key stays put -
+## including game_clock, so the successor's story starts on the death
+## date. The session character clears and the next save claims a new slot.
+func begin_new_character_in_world() -> void:
+	for key: String in CHARACTER_SETTINGS_KEYS:
+		world_settings.erase(key)
+	world_settings["last_scene"] = "res://scenes/overworld.tscn"
+	player_character = {}
+	current_slot_id = ""
+	pending_same_world_rebirth = true
+
+## "Abandon World": back to the main menu with nothing carried over.
+func abandon_world() -> void:
+	world_settings = {}
+	player_character = {}
+	current_slot_id = ""
+	pending_same_world_rebirth = false
 
 func has_save_file(path: String = SAVE_FILE_PATH) -> bool:
 	return FileAccess.file_exists(path)

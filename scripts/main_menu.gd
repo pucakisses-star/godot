@@ -27,6 +27,11 @@ var _title_time := 0.0
 
 func _ready() -> void:
 	SaveGameService.migrate_legacy_save()
+	# Reaching the menu cancels any half-finished "new character, same
+	# world" rebirth, so a later ordinary new game forges its own world.
+	var session := get_node_or_null("/root/GameSession")
+	if session != null and session.has_method("set_pending_same_world_rebirth"):
+		session.call("set_pending_same_world_rebirth", false)
 	_refresh_load_button()
 	get_viewport().size_changed.connect(_layout_background_panes)
 	_layout_background_panes()
