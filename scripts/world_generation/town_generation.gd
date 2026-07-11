@@ -1800,6 +1800,13 @@ func _configure_tile_layer() -> void:
 
 	city_layer.tile_set = tile_set
 	decor_layer.tile_set = tile_set
+	# Full trees are multi-cell tiles whose art overhangs their anchor cell.
+	# TileMapLayer batches tiles into rendering quadrants and clips each
+	# quadrant to its cells' bounds, which shears the overhanging bottom off
+	# some trees. A 1-cell quadrant gives every tile its own canvas item
+	# sized to its own texture, so no tree is ever clipped. The decor layer
+	# is sparse (trees, tufts, the odd prop), so the lost batching is cheap.
+	decor_layer.rendering_quadrant_size = 1
 
 ## Builds the town/surface atlas texture: the shipped tilesheet with extra
 ## 32px rows appended at the bottom, holding procedurally painted tiles the
