@@ -1644,7 +1644,7 @@ func _show_structure_details_modal(tile_coord: Vector2i, details: Dictionary) ->
 			hallmark
 		]
 	)
-	_set_structure_details_random_image()
+	_set_structure_details_image(tile_coord, details)
 
 	var population_timeline: Array = []
 	for entry: Variant in details.get("population_timeline", []):
@@ -1701,7 +1701,12 @@ func _cache_more_info_image_paths() -> void:
 	directory.list_dir_end()
 	_more_info_cache_initialized = true
 
-func _set_structure_details_random_image() -> void:
+## Chooses the illustration that best fits the tile — matching the settlement
+## kind first (dwarfhold, tower, keep, dungeon, village…) then the surrounding
+## biome (forest, mountain, hills, coast, marsh, plains) — and picks it
+## deterministically from the tile's coordinate, so the same place always shows
+## the same fitting picture instead of a random one that re-rolls each open.
+func _set_structure_details_image(tile_coord: Vector2i, details: Dictionary) -> void:
 	if structure_details_main_image == null:
 		return
 	if _more_info_image_paths.is_empty() and not _more_info_cache_initialized:
@@ -1711,14 +1716,82 @@ func _set_structure_details_random_image() -> void:
 		structure_details_main_image.texture = null
 		return
 
-	var random_index := randi_range(0, _more_info_image_paths.size() - 1)
-	var random_path := _more_info_image_paths[random_index]
-	var random_texture := _more_info_texture_cache.get(random_path, null) as Texture2D
-	if random_texture == null:
-		random_texture = load(random_path) as Texture2D
-		if random_texture != null:
-			_more_info_texture_cache[random_path] = random_texture
-	structure_details_main_image.texture = random_texture
+	var chosen_path := ""
+	for keyword: String in _more_info_keywords_for(tile_coord, details):
+		var matches: Array[String] = []
+		for path: String in _more_info_image_paths:
+			if path.get_file().to_lower().contains(keyword):
+				matches.append(path)
+		if not matches.is_empty():
+			matches.sort()
+			chosen_path = matches[_stable_more_info_index(tile_coord, matches.size())]
+			break
+	if chosen_path.is_empty():
+		# Nothing matched (e.g. a desert with no themed art): still stable, just
+		# picked from the whole pool by coordinate.
+		var all_paths := _more_info_image_paths.duplicate()
+		all_paths.sort()
+		chosen_path = all_paths[_stable_more_info_index(tile_coord, all_paths.size())]
+
+	var texture := _more_info_texture_cache.get(chosen_path, null) as Texture2D
+	if texture == null:
+		texture = load(chosen_path) as Texture2D
+		if texture != null:
+			_more_info_texture_cache[chosen_path] = texture
+	structure_details_main_image.texture = texture
+
+## A stable pick within a sorted list, keyed on the tile so the illustration
+## never changes between openings of the same place.
+func _stable_more_info_index(tile_coord: Vector2i, count: int) -> int:
+	if count <= 1:
+		return 0
+	return absi(hash(tile_coord)) % count
+
+## Ordered filename substrings to try, best fit first: the settlement kind, then
+## biome fallbacks. The first keyword with any matching image wins.
+func _more_info_keywords_for(tile_coord: Vector2i, details: Dictionary) -> Array[String]:
+	var type_text := "%s %s" % [
+		String(details.get("settlement_classification", "")),
+		String(details.get("settlement_type", ""))
+	]
+	type_text = type_text.to_lower()
+	var biome := _patch_biome_label_for_tile(tile_coord).to_lower()
+	var abandoned := type_text.contains("abandon") or type_text.contains("lost")
+	var keywords: Array[String] = []
+	if _is_dwarfhold_structure(details):
+		if abandoned:
+			keywords.append("abandoned_dwarfhold")
+		if biome.contains("hill"):
+			keywords.append("hill-hold")
+		keywords.append("dwarfhold")
+	elif type_text.contains("tower") or type_text.contains("wizard") or type_text.contains("mage"):
+		keywords.append("wizard_tower")
+	elif type_text.contains("castle") or type_text.contains("keep") or type_text.contains("fort") or type_text.contains("citadel"):
+		keywords.append("ruined_castle")
+	elif type_text.contains("outpost") or type_text.contains("camp"):
+		keywords.append("outpost")
+	elif type_text.contains("dungeon") or type_text.contains("lair") or type_text.contains("cave") or type_text.contains("crypt") or type_text.contains("ruin"):
+		keywords.append("dungeon")
+	elif type_text.contains("town") or type_text.contains("village") or type_text.contains("city") or type_text.contains("hamlet") or type_text.contains("settle"):
+		keywords.append("village")
+	keywords.append_array(_biome_more_info_keywords(biome))
+	return keywords
+
+## Biome-themed filename substrings for the wild-surroundings fallback.
+func _biome_more_info_keywords(biome: String) -> Array[String]:
+	if biome.contains("forest") or biome.contains("jungle") or biome.contains("wood"):
+		return ["forest"]
+	if biome.contains("mountain"):
+		return ["mountain"]
+	if biome.contains("hill"):
+		return ["hills"]
+	if biome.contains("coast") or biome.contains("beach") or biome.contains("shore") or biome.contains("ocean") or biome.contains("sea") or biome.contains("water"):
+		return ["coast"]
+	if biome.contains("marsh") or biome.contains("swamp") or biome.contains("bog"):
+		return ["marsh"]
+	if biome.contains("plain") or biome.contains("grass") or biome.contains("steppe") or biome.contains("meadow") or biome.contains("savanna"):
+		return ["plains"]
+	return []
 
 func _set_details_tab_text(target: RichTextLabel, text: String) -> void:
 	if target == null:

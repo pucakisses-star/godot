@@ -72,7 +72,7 @@ corner_radius_bottom_left = 8
 shadow_color = Color(0.03, 0.16, 0.35, 0.4)
 shadow_size = 10
 
-[node name="CharacterCreator" type="Control" unique_id=416902352 node_paths=PackedStringArray("target_render", "character_name", "profession_choice", "clan_name", "female_button", "male_button", "return_button", "create_button", "animated_background", "skin_color", "clothing_color", "hair_color", "hair_style", "beard_style", "beardless_reminder", "dark_dwarf_reminder", "grey_dwarf_reminder", "banker_reminder", "attribute_tooltip_backdrop", "attribute_tooltip_panel", "attribute_reminder_title", "attribute_reminder_text")]
+[node name="CharacterCreator" type="Control" unique_id=416902352 node_paths=PackedStringArray("target_render", "character_name", "profession_choice", "clan_name", "female_button", "male_button", "return_button", "create_button", "animated_background", "skin_color", "clothing_color", "hair_color", "hair_style", "beard_style", "beard_color", "beardless_reminder", "dark_dwarf_reminder", "grey_dwarf_reminder", "banker_reminder", "attribute_tooltip_backdrop", "attribute_tooltip_panel", "attribute_reminder_title", "attribute_reminder_text")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -99,6 +99,7 @@ clothing_color = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxCont
 hair_color = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer3/CenterContainer/HSlider")
 hair_style = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer4/CenterContainer/HSlider")
 beard_style = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer5/CenterContainer/HSlider")
+beard_color = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer6/CenterContainer/HSlider")
 beardless_reminder = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/BeardlessEntry")
 dark_dwarf_reminder = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/DarkDwarfEntry")
 grey_dwarf_reminder = NodePath("PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/AttributeReminderEntries/Entries/GreyDwarfEntry")
@@ -331,6 +332,33 @@ layout_mode = 2
 max_value = 8.0
 
 [node name="Button2" type="Button" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer5" unique_id=413500451]
+layout_mode = 2
+icon = ExtResource("12_mdm0h")
+flat = true
+
+[node name="Label5" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=113500452]
+layout_mode = 2
+theme = ExtResource("3_0yffs")
+text = "Beard Color"
+
+[node name="HBoxContainer6" type="HBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=150094810]
+layout_mode = 2
+
+[node name="Button" type="Button" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer6" unique_id=274511203]
+layout_mode = 2
+icon = ExtResource("11_pma8t")
+flat = true
+
+[node name="CenterContainer" type="CenterContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer6" unique_id=213500452]
+layout_mode = 2
+
+[node name="HSlider" type="HSlider" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer6/CenterContainer" unique_id=313500452]
+custom_minimum_size = Vector2(100, 0)
+layout_mode = 2
+max_value = 1.0
+step = 0.01
+
+[node name="Button2" type="Button" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid/HBoxContainer6" unique_id=413500452]
 layout_mode = 2
 icon = ExtResource("12_mdm0h")
 flat = true
