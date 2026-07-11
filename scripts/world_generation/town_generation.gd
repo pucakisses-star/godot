@@ -788,6 +788,18 @@ func _ready() -> void:
 	## The "Strike the earth!" greeting, once, on a new walker's first embark.
 	EmbarkIntroScreen.maybe_present(self)
 
+## The embark screen reads this to tailor its greeting: an ocean embark, a
+## wild embark coloured by the biome at the spawn, or an arrival in a town.
+func _embark_place() -> Dictionary:
+	if _wild_water:
+		return {"kind": "ocean"}
+	if _wild_mode:
+		var biome := ""
+		if not _surface_biome_ctx.is_empty():
+			biome = SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, _player_cell + _surface_world_origin)
+		return {"kind": "wild", "biome": biome}
+	return {"kind": "town", "name": _town_name}
+
 func _process(delta: float) -> void:
 	_advance_game_clock(delta)
 	_player_attack_timer = maxf(_player_attack_timer - delta, 0.0)

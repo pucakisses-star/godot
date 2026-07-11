@@ -196,6 +196,10 @@ func _ready() -> void:
 	## The "Strike the earth!" greeting, once, on a new walker's first embark.
 	EmbarkIntroScreen.maybe_present(self)
 
+## The embark screen reads this to tailor its greeting to the start place.
+func _embark_place() -> Dictionary:
+	return {"kind": "dungeon", "name": _dungeon_name}
+
 func _process(delta: float) -> void:
 	_player_attack_timer = maxf(_player_attack_timer - delta, 0.0)
 	_update_player_movement(delta)
