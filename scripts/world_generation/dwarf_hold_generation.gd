@@ -5483,7 +5483,7 @@ func _open_npc_inspection(npc_state: Dictionary) -> void:
 	if not npc_state.has("identity"):
 		npc_state["identity"] = NpcIdentityService.generate(_rng, role_title, "dwarf")
 		npc_state["npc_name"] = String((npc_state["identity"] as Dictionary).get("name", "A dwarf"))
-	_npc_inspection_card.open(npc_state, role_title, hash(seed_input.text.strip_edges()))
+	_npc_inspection_card.open(npc_state, role_title, hash(seed_input.text.strip_edges()), _calendar_start_year)
 
 func _handle_player_click_action(mouse_position: Vector2) -> void:
 	# Any left-click on the map is a click-away for an open inspection.
