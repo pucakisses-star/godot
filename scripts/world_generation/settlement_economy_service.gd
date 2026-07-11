@@ -385,7 +385,13 @@ static func caravan_pay(distance_cells: int, recent_world_events: Array) -> int:
 			return int(round(float(pay) * CARAVAN_DANGER_PAY_SCALE))
 	return pay
 
+## What a named beast's trophy fetches: a hero's proof is worth a small
+## fortune next to ordinary spoils (sell price is half of this).
+const BEAST_TROPHY_VALUE := 300
+
 static func item_value(item_name: String) -> int:
+	if not ITEM_VALUES.has(item_name) and not ItemDefsService.beast_trophy_kind(item_name).is_empty():
+		return BEAST_TROPHY_VALUE
 	return int(ITEM_VALUES.get(item_name, DEFAULT_ITEM_VALUE))
 
 static func sell_price(item_name: String) -> int:

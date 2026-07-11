@@ -2388,7 +2388,17 @@ func _simulate_world_chronicle() -> void:
 		})
 	_world_chronicle = WorldChronicleService.simulate(actors, _chronology_year, int(map_seed))
 	var simulate_usec := Time.get_ticks_usec() - chronicle_started_usec
+	## Lairs are assigned from the pristine simulation (deterministic per
+	## seed); the player's recorded kills are patched on afterwards so a
+	## re-generated overworld remembers the deed without shifting any
+	## surviving beast's den.
+	_assign_beast_lairs()
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_world_settings"):
+		var kill_settings: Dictionary = game_session.call("get_world_settings")
+		WorldChronicleService.apply_player_kills(_world_chronicle, WorldChronicleService.player_kills(kill_settings))
 	_apply_world_chronicle()
+	_apply_beast_lair_surfacing()
 	var world_event_count := (_world_chronicle.get("world_events", []) as Array).size()
 	print("[OverworldMap] world chronicle: %d settlements, %d world events, %d wars in %d us (sim %d us, apply %d us)" % [
 		actors.size(),
@@ -2489,6 +2499,138 @@ func _apply_settlement_razing(coord: Vector2i, details: Dictionary, entry: Dicti
 	details["ruler_title"] = ""
 	details["ruler_name"] = ""
 	details["description"] = String(entry.get("fall_text", "Only ruins remain."))
+
+## --- Beast lairs ---------------------------------------------------------------
+
+## Ambient structure ids that can host a beast's den, by preference tier.
+## Dragons perch where the culture map already drew dragons; the walking
+## kinds den in caves, mounds and dens. Every candidate is an ambient
+## gazetteer site, so the streamed wilds can raise the lair (and its boss)
+## as a real place.
+const BEAST_LAIR_DRAGON_STRUCTURES: Array[String] = ["sleeping_dragon", "green_dragon"]
+const BEAST_LAIR_DEN_STRUCTURES: Array[String] = ["cave", "troll_mound", "ogre_den", "gnoll_den"]
+
+## Gives every still-living chronicle beast a physical lair, recorded in
+## the chronicle payload. A beast that felled a dwarfhold nests in that
+## abandoned hold (matching the "still nests where the hold fell" rumors);
+## the rest den at a fitting map site. Deterministic from map seed + beast
+## name, independent of player history.
+func _assign_beast_lairs() -> void:
+	var beasts := _world_chronicle.get("beasts", []) as Array
+	if beasts.is_empty():
+		return
+	var settlements := _world_chronicle.get("settlements", {}) as Dictionary
+	var settlement_keys: Array[String] = []
+	for key_variant: Variant in settlements.keys():
+		settlement_keys.append(String(key_variant))
+	settlement_keys.sort()
+	## Candidate site tiles, gathered in sorted coordinate order so the
+	## same seed always yields the same pools.
+	var sorted_coords: Array[Vector2i] = []
+	for coord_variant: Variant in _tile_data.keys():
+		sorted_coords.append(coord_variant as Vector2i)
+	sorted_coords.sort_custom(func(left: Vector2i, right: Vector2i) -> bool:
+		if left.y != right.y:
+			return left.y < right.y
+		return left.x < right.x
+	)
+	var perch_pool: Array[Vector2i] = []
+	var den_pool: Array[Vector2i] = []
+	for coord: Vector2i in sorted_coords:
+		var details := _tile_data[coord] as Dictionary
+		if details.has("settlement_type"):
+			continue
+		var structure_id := String(details.get("structure", "")).strip_edges()
+		if structure_id.is_empty():
+			continue
+		if BEAST_LAIR_DRAGON_STRUCTURES.has(structure_id):
+			perch_pool.append(coord)
+		elif BEAST_LAIR_DEN_STRUCTURES.has(structure_id):
+			den_pool.append(coord)
+	var used_tiles: Dictionary = {}
+	for beast_variant: Variant in beasts:
+		var beast := beast_variant as Dictionary
+		if String(beast.get("status", "alive")) != "alive":
+			continue
+		var beast_name := String(beast.get("name", ""))
+		## A hold-feller dens in the (most recently) toppled hold.
+		var hold_key := ""
+		var hold_fell_year := -1
+		for settlement_key: String in settlement_keys:
+			var record := settlements[settlement_key] as Dictionary
+			if String(record.get("fall_beast", "")) != beast_name:
+				continue
+			if int(record.get("fell_year", 0)) > hold_fell_year:
+				hold_fell_year = int(record.get("fell_year", 0))
+				hold_key = settlement_key
+		if not hold_key.is_empty():
+			var record := settlements[hold_key] as Dictionary
+			beast["lair_site"] = {"x": int(record.get("x", 0)), "y": int(record.get("y", 0))}
+			beast["lair_kind"] = "hold"
+			beast["lair_name"] = String(record.get("name", "a fallen hold"))
+			used_tiles[Vector2i(int(record.get("x", 0)), int(record.get("y", 0)))] = true
+			continue
+		var is_dragon := String(beast.get("kind", "")) == "dragon" or String(beast.get("kind", "")) == "green_dragon"
+		var pools: Array = [perch_pool, den_pool] if is_dragon else [den_pool, perch_pool]
+		var lair_rng := RandomNumberGenerator.new()
+		lair_rng.seed = int(hash("%d|beast_lair|%s" % [map_seed, beast_name]))
+		var chosen := Vector2i(2147483647, 2147483647)
+		for pool_variant: Variant in pools:
+			var pool := pool_variant as Array
+			if pool.is_empty():
+				continue
+			var start_index := lair_rng.randi_range(0, pool.size() - 1)
+			for probe: int in range(pool.size()):
+				var candidate := pool[(start_index + probe) % pool.size()] as Vector2i
+				if not used_tiles.has(candidate):
+					chosen = candidate
+					break
+			if chosen.x != 2147483647:
+				break
+		if chosen.x == 2147483647:
+			continue
+		used_tiles[chosen] = true
+		var details := _tile_data.get(chosen, {}) as Dictionary
+		var site_name := _tile_region_name(chosen, details)
+		if site_name.is_empty():
+			site_name = String(details.get("structure", "a wild place")).capitalize()
+		beast["lair_site"] = {"x": chosen.x, "y": chosen.y}
+		beast["lair_kind"] = "site"
+		beast["lair_name"] = site_name
+
+## Surfaces the lairs of beasts still alive AFTER the player's kills were
+## patched on: abandoned-hold lairs carry the warning in their hallmark
+## (tooltip + details modal), ambient lair sites gain "— Lair of <beast>"
+## in their region name (map label, hover title, wilds landmark label).
+## A slain beast's lair keeps only its ordinary description — the
+## labeling drops with the kill.
+func _apply_beast_lair_surfacing() -> void:
+	for beast_variant: Variant in (_world_chronicle.get("beasts", []) as Array):
+		var beast := beast_variant as Dictionary
+		if String(beast.get("status", "alive")) != "alive":
+			continue
+		var lair_site: Variant = beast.get("lair_site", {})
+		if not (lair_site is Dictionary) or (lair_site as Dictionary).is_empty():
+			continue
+		var site := lair_site as Dictionary
+		var coord := Vector2i(int(site.get("x", 0)), int(site.get("y", 0)))
+		if not _tile_data.has(coord):
+			continue
+		var details := _tile_data[coord] as Dictionary
+		var display := String(beast.get("display", "a nameless beast"))
+		details["lair_beast"] = String(beast.get("name", ""))
+		details["lair_beast_display"] = display
+		if String(beast.get("lair_kind", "")) == "hold":
+			details["hallmark"] = "Lair of %s — the beast that brought these halls down still nests in the deep." % display
+		else:
+			var base_name := _tile_region_name(coord, details)
+			var lair_label := "Lair of %s" % String(beast.get("name", "the beast"))
+			if base_name.is_empty():
+				_tile_region_names[coord] = lair_label
+			elif not base_name.contains(lair_label):
+				_tile_region_names[coord] = "%s — %s" % [base_name, lair_label]
+			details["description"] = "Something vast dens here. This is the lair of %s." % display
+		_tile_data[coord] = details
 
 ## --- World Chronicle view ----------------------------------------------------
 

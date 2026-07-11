@@ -100,10 +100,11 @@ static func update_creatures(
 		var target_position := sprite.position
 		if distance <= 1:
 			if float(state.get("attack_timer", 0.0)) <= 0.0:
-				state["attack_timer"] = 1.4
+				# Named-beast bosses carry their own bite and cooldown.
+				state["attack_timer"] = float(state.get("cooldown_override", 1.4))
 				CreatureCombatService.set_creature_anim(state, "attack")
-				on_player_hit.call(int(def.get("damage", 1)))
-		elif distance <= CREATURE_CHASE_RANGE:
+				on_player_hit.call(int(state.get("damage_override", int(def.get("damage", 1)))))
+		elif distance <= int(state.get("aggro_override", CREATURE_CHASE_RANGE)):
 			if float(state.get("wander_timer", 0.0)) <= 0.0:
 				state["wander_timer"] = 0.28
 				var step: Vector2i = CreatureCombatService.step_toward(cell, player_cell, is_walkable)
@@ -129,7 +130,7 @@ static func update_creatures(
 			# step heads back toward the fire instead of drifting off.
 			if state.has("home_cell"):
 				var home := state.get("home_cell", cell) as Vector2i
-				if maxi(absi(cell.x - home.x), absi(cell.y - home.y)) > CREATURE_HOME_LEASH:
+				if maxi(absi(cell.x - home.x), absi(cell.y - home.y)) > int(state.get("leash_override", CREATURE_HOME_LEASH)):
 					var homeward: Vector2i = CreatureCombatService.step_toward(cell, home, is_walkable)
 					if homeward != Vector2i.ZERO:
 						wander = homeward
@@ -138,7 +139,7 @@ static func update_creatures(
 				state["facing_dir"] = wander
 				CreatureCombatService.set_creature_anim(state, "walk")
 		target_position = cell_center_position.call(state.get("cell", cell) as Vector2i)
-		sprite.position = sprite.position.move_toward(target_position, CREATURE_SPEED * delta)
+		sprite.position = sprite.position.move_toward(target_position, float(state.get("speed_override", CREATURE_SPEED)) * delta)
 		if sprite.position.distance_to(target_position) < 0.5 and String(state.get("anim", "")) == "walk":
 			CreatureCombatService.set_creature_anim(state, "idle")
 		state["anim_time"] = float(state.get("anim_time", 0.0)) + delta

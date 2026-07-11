@@ -86,6 +86,78 @@ const CREATURE_DEFS: Array[Dictionary] = [
 	}
 ]
 
+## Named-beast bosses (the world chronicle's still-living beasts, met at
+## their lairs). Each reuses an existing creature def's art and AI but
+## scaled up, tinted per beast kind, and boss-statted: HP ~8-12x the
+## Orc Warlord's 20 and damage ~2x its 4, tuned against a player of
+## ~20-50 max HP and ~4-9 attack with mid-tier gear — deadly toe-to-toe,
+## beatable with food, potions and reach.
+const BEAST_BOSS_SPECS := {
+	"green_dragon": {
+		"def_index": 5, "scale": 2.0, "tint": Color(0.55, 1.0, 0.5, 1.0),
+		"max_hp": 200, "damage": 8, "aggro_range": 12, "attack_cooldown": 1.5,
+		"speed": 90.0, "coins_min": 150, "coins_max": 230
+	},
+	"dragon": {
+		"def_index": 5, "scale": 2.0, "tint": Color(1.0, 0.52, 0.4, 1.0),
+		"max_hp": 220, "damage": 9, "aggro_range": 12, "attack_cooldown": 1.5,
+		"speed": 90.0, "coins_min": 160, "coins_max": 250
+	},
+	"giant": {
+		"def_index": 7, "scale": 2.0, "tint": Color(0.98, 0.9, 0.72, 1.0),
+		"max_hp": 200, "damage": 9, "aggro_range": 11, "attack_cooldown": 1.8,
+		"speed": 70.0, "coins_min": 130, "coins_max": 210
+	},
+	"troll": {
+		"def_index": 7, "scale": 1.8, "tint": Color(0.6, 0.92, 0.55, 1.0),
+		"max_hp": 170, "damage": 7, "aggro_range": 11, "attack_cooldown": 1.2,
+		"speed": 85.0, "coins_min": 120, "coins_max": 200
+	},
+	"thing_below": {
+		"def_index": 2, "scale": 1.9, "tint": Color(0.82, 0.58, 1.0, 1.0),
+		"max_hp": 240, "damage": 8, "aggro_range": 12, "attack_cooldown": 1.6,
+		"speed": 60.0, "coins_min": 170, "coins_max": 260
+	}
+}
+
+static func boss_spec_for_kind(kind: String) -> Dictionary:
+	return BEAST_BOSS_SPECS.get(kind, BEAST_BOSS_SPECS["dragon"]) as Dictionary
+
+## Grows and tints a freshly created creature sprite into the named boss
+## and hangs its name label overhead (the wilds-landmark label look).
+## self_modulate keeps the tint off the label; the label's inverse scale
+## keeps the text at UI size regardless of the boss sprite's growth.
+static func apply_boss_visuals(sprite: Sprite2D, spec: Dictionary, display_name: String) -> void:
+	if sprite == null:
+		return
+	sprite.scale *= float(spec.get("scale", 1.8))
+	sprite.self_modulate = spec.get("tint", Color.WHITE) as Color
+	var label := Label.new()
+	label.name = "BossNameLabel"
+	label.text = display_name
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 14)
+	label.add_theme_color_override("font_color", Color(1.0, 0.82, 0.55, 1.0))
+	label.add_theme_color_override("font_outline_color", Color(0.12, 0.06, 0.05, 0.95))
+	label.add_theme_constant_override("outline_size", 5)
+	label.z_index = 30
+	var inverse := Vector2(
+		1.0 / maxf(absf(sprite.scale.x), 0.001),
+		1.0 / maxf(absf(sprite.scale.y), 0.001)
+	)
+	label.scale = inverse
+	var estimated_width := maxf(60.0, float(display_name.length()) * 8.5)
+	label.size = Vector2(estimated_width, 20.0)
+	var frame_height := 32.0
+	if sprite.texture != null:
+		frame_height = sprite.texture.get_size().y / float(SHEET_ROWS)
+	label.position = Vector2(
+		-estimated_width * 0.5 * inverse.x,
+		-frame_height * 0.5 - 24.0 * inverse.y
+	)
+	sprite.add_child(label)
+
 ## Animation layout of creature_characters.png: 8 slot blocks in a 4x2
 ## grid, each block 17 columns x 4 facing rows (down, right, left, up).
 ## Columns per block: walk 3 | idle 3 | attack 4 | hurt 3 | death 4,

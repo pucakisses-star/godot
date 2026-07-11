@@ -415,6 +415,7 @@ const PROFESSION_BY_BUILDING := {
 }
 
 const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
+const DWARFHOLD_SCENE_TILE_KEY := "dwarfhold_scene_tile"
 const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
 const DWARFHOLD_SCENE_NAME_KEY := "dwarfhold_scene_name"
 const DWARFHOLD_SCENE_FALL_KEY := "dwarfhold_scene_fall_text"
@@ -423,6 +424,11 @@ const DWARFHOLD_SCENE_FALL_KEY := "dwarfhold_scene_fall_text"
 ## for abandoned ruins, the fall summary ("Fell to <beast>, year <y>").
 var _hold_name := ""
 var _hold_fall_text := ""
+## The hold's overworld tile and, when a still-living chronicle beast
+## lairs in these halls, the beast itself — its boss guards the deepest
+## level. Empty once the beast is dead (by hero or by the player).
+var _hold_tile := Vector2i(2147483647, 2147483647)
+var _lair_beast: Dictionary = {}
 
 const CHEST_LOOT_TABLE := [
 	{"name": "Iron Ingot", "min": 1, "max": 5},
@@ -1456,6 +1462,15 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 	var scene_seed := _hold_state.apply_world_settings(settings, DWARFHOLD_SCENE_SEED_KEY, DWARFHOLD_SCENE_POPULATION_KEY)
 	_hold_name = String(settings.get(DWARFHOLD_SCENE_NAME_KEY, ""))
 	_hold_fall_text = String(settings.get(DWARFHOLD_SCENE_FALL_KEY, ""))
+	_hold_tile = Vector2i(2147483647, 2147483647)
+	_lair_beast = {}
+	var tile_variant: Variant = settings.get(DWARFHOLD_SCENE_TILE_KEY, null)
+	if tile_variant is Dictionary:
+		var tile_dict := tile_variant as Dictionary
+		_hold_tile = Vector2i(int(tile_dict.get("x", 2147483647)), int(tile_dict.get("y", 2147483647)))
+		## The chronicle's still-living beast laired in THIS hold; slain
+		## beasts (by sim hero or player) never come back.
+		_lair_beast = WorldChronicleService.lair_beast_for_tile(settings, _hold_tile)
 	var chronology := settings.get("chronology", {}) as Dictionary
 	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
 	_underdeep_sites = []
@@ -1923,6 +1938,7 @@ func _show_level(target_level_index: int) -> void:
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
 	_update_depth_controls()
+	_maybe_spawn_lair_boss()
 
 func _update_depth_controls() -> void:
 	var level_count := _hold_state.generated_levels.size()
@@ -4306,6 +4322,112 @@ func _populate_stratum_creatures(stratum: Dictionary) -> void:
 		if _is_walkable_cell(guard_cell):
 			_spawn_creature_at(guard_cell, int(slots[slots.size() - 1]))
 
+## --- The named beast's lair ----------------------------------------------
+## When the chronicle laired a still-living beast in this hold, its boss
+## waits on the DEEPEST level: an existing creature def grown and tinted
+## into the named beast, run by the same AI pipeline with boss stats.
+
+func _maybe_spawn_lair_boss() -> void:
+	if _lair_beast.is_empty() or _hold_state.generated_levels.is_empty():
+		return
+	if _hold_state.current_level_index != _hold_state.generated_levels.size() - 1:
+		return
+	## Re-check the register: the beast may have died this very visit.
+	if WorldChronicleService.is_beast_slain(_world_settings_snapshot(), String(_lair_beast.get("name", ""))):
+		_lair_beast = {}
+		return
+	for state: Dictionary in _creature_states:
+		if bool(state.get("boss", false)):
+			return
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in _latest_grid.keys():
+		if int(_latest_grid[cell_variant]) == CELL_HALL:
+			hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	## The beast holds the far end of the level: the hall cell farthest
+	## from wherever the player came in.
+	var boss_cell := hall_cells[0]
+	var best_distance := -1.0
+	for cell: Vector2i in hall_cells:
+		var distance := Vector2(cell - _player_cell).length()
+		if distance > best_distance:
+			best_distance = distance
+			boss_cell = cell
+	_spawn_lair_boss_at(boss_cell)
+
+func _spawn_lair_boss_at(cell: Vector2i) -> void:
+	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(_lair_beast.get("kind", "dragon")))
+	var def_index := int(spec.get("def_index", 7))
+	if def_index < 0 or def_index >= UndergroundCreatureService.CREATURE_DEFS.size():
+		return
+	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[def_index]
+	var display := String(_lair_beast.get("display", "a nameless beast"))
+	var sprite: Sprite2D = UndergroundCreatureService.create_creature_sprite(_creature_texture, int(def.get("slot", 0)), tile_size)
+	UndergroundCreatureService.apply_boss_visuals(sprite, spec, WorldChronicleService._capitalize_first(display))
+	sprite.position = _cell_center_position(cell)
+	sprite.z_index = 13
+	actor_layer.add_child(sprite)
+	_creature_states.append({
+		"def_index": def_index,
+		"hp": int(spec.get("max_hp", 200)),
+		"cell": cell,
+		"sprite": sprite,
+		"moving": false,
+		"dying": false,
+		"anim": "idle",
+		"wander_timer": _rng.randf_range(0.5, 2.0),
+		"attack_timer": 0.0,
+		"anim_time": _rng.randf_range(0.0, 1.0),
+		"facing_dir": Vector2i(0, 1),
+		"boss": true,
+		"beast_name": String(_lair_beast.get("name", "")),
+		"beast_display": display,
+		"beast_kind": String(_lair_beast.get("kind", "dragon")),
+		"damage_override": int(spec.get("damage", 8)),
+		"aggro_override": int(spec.get("aggro_range", 12)),
+		"cooldown_override": float(spec.get("attack_cooldown", 1.5)),
+		"speed_override": float(spec.get("speed", 80.0))
+	})
+	_set_save_status("The deep stirs — %s nests here." % display, Color(1.0, 0.55, 0.45, 1.0))
+
+## Big coins, the beast's unique trophy, and a world that remembers: the
+## kill is written to the persistent register and the stored chronicle,
+## so rumors flip, the World Chronicle updates, and the beast never
+## respawns — here or anywhere.
+func _award_lair_boss_kill(state: Dictionary) -> void:
+	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(state.get("beast_kind", "dragon")))
+	var coins := _rng.randi_range(int(spec.get("coins_min", 120)), int(spec.get("coins_max", 200)))
+	_adjust_coins(coins)
+	var trophy := WorldChronicleService.beast_trophy_name({
+		"name": String(state.get("beast_name", "Beast")),
+		"kind": String(state.get("beast_kind", "dragon"))
+	})
+	_add_to_inventory(trophy, 1)
+	GameAudioService.play_sfx(self, "coin")
+	var player_name := "A wanderer"
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_player_character"):
+		var character: Dictionary = game_session.call("get_player_character")
+		var character_name := String(character.get("name", "")).strip_edges()
+		if not character_name.is_empty():
+			player_name = character_name
+	var place := _hold_name if not _hold_name.is_empty() else "a fallen hold"
+	var kill_year := GameCalendar.year_for_day(_game_day - 1, _calendar_start_year)
+	var settings: Dictionary = _world_settings_snapshot()
+	WorldChronicleService.record_player_beast_kill(settings, String(state.get("beast_name", "")), player_name, place, kill_year)
+	_store_world_settings(settings)
+	_lair_beast = {}
+	var sprite := state.get("sprite") as Sprite2D
+	if sprite != null:
+		_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
+	_set_save_status(
+		"%s is slain! You claim %s and %d coins — the world will remember this." % [
+			WorldChronicleService._capitalize_first(String(state.get("beast_display", "the beast"))), trophy, coins
+		],
+		Color(1.0, 0.85, 0.45, 1.0)
+	)
+
 func _update_creatures(delta: float) -> void:
 	if _creature_states.is_empty():
 		return
@@ -4328,7 +4450,9 @@ func _update_creatures(delta: float) -> void:
 			continue
 		var cell := state.get("cell", Vector2i.ZERO) as Vector2i
 		var player_distance := maxi(absi(cell.x - _player_cell.x), absi(cell.y - _player_cell.y))
-		if player_distance > CREATURE_DESPAWN_DISTANCE:
+		# The named beast guards its lair from wherever the player enters;
+		# only ordinary prowlers vanish with distance.
+		if player_distance > CREATURE_DESPAWN_DISTANCE and not bool(state.get("boss", false)):
 			sprite.queue_free()
 			removals.append(index)
 			continue
@@ -4339,7 +4463,7 @@ func _update_creatures(delta: float) -> void:
 			_set_creature_anim(state, "idle")
 		if bool(state.get("moving", false)):
 			var target := state.get("move_target", sprite.position) as Vector2
-			sprite.position = sprite.position.move_toward(target, float(def.get("speed", 60.0)) * delta)
+			sprite.position = sprite.position.move_toward(target, float(state.get("speed_override", float(def.get("speed", 60.0)))) * delta)
 			if sprite.position.distance_to(target) <= 0.5:
 				sprite.position = target
 				state["cell"] = state.get("move_cell", cell) as Vector2i
@@ -4347,12 +4471,13 @@ func _update_creatures(delta: float) -> void:
 		elif player_distance <= 1 and _player_sprite != null and _player_control_enabled:
 			state["facing_dir"] = _direction_between_cells(cell, _player_cell)
 			if float(state.get("attack_timer", 0.0)) <= 0.0:
-				state["attack_timer"] = float(def.get("attack_cooldown", 1.3))
+				state["attack_timer"] = float(state.get("cooldown_override", float(def.get("attack_cooldown", 1.3))))
 				_set_creature_anim(state, "attack")
-				_damage_player(int(def.get("damage", 1)), String(def.get("name", "creature")))
+				var source_name := String(state.get("beast_display", def.get("name", "creature")))
+				_damage_player(int(state.get("damage_override", int(def.get("damage", 1)))), source_name)
 		else:
 			var step := Vector2i.ZERO
-			if player_distance <= int(def.get("aggro_range", 6)) and not _latest_district_cell_map.has(_player_cell):
+			if player_distance <= int(state.get("aggro_override", int(def.get("aggro_range", 6)))) and not _latest_district_cell_map.has(_player_cell):
 				step = _creature_step_toward(cell, _player_cell)
 			else:
 				state["wander_timer"] = float(state.get("wander_timer", 0.0)) - delta
@@ -4428,6 +4553,9 @@ func _hurt_creature(creature_index: int, damage: int) -> void:
 	if not loot_parts.is_empty():
 		message += " — " + ", ".join(loot_parts)
 	_set_save_status(message, Color(0.85, 0.95, 0.7, 1.0))
+	# A named beast's fall echoes further: trophy, hoard, and history.
+	if bool(state.get("boss", false)):
+		_award_lair_boss_kill(state)
 
 ## Reaching weapons. The staff bursts over a knot of beasts on its own
 ## cooldown; the bow spends an arrow a shot. Melee stays king up close.

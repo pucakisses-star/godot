@@ -16,6 +16,12 @@ class_name WorldChronicleService
 
 const SETTINGS_KEY := "world_chronicle"
 
+## Player-made history: beasts the PLAYER has slain, kept separately from
+## the simulated chronicle so a re-generated overworld (same seed, fresh
+## simulation) can re-apply the kills instead of resurrecting the beast.
+## beast name -> {"year": int, "by": String, "place": String}.
+const KILLS_KEY := "world_beast_kills"
+
 const OVERWORLD_CONTENT := preload("res://scripts/world_generation/overworld_content.gd")
 
 ## Beast archetypes reuse creature concepts the world already knows: the
@@ -35,6 +41,17 @@ const BEAST_NAME_PREFIXES: Array[String] = [
 const BEAST_NAME_SUFFIXES: Array[String] = [
 	"azhul", "gash", "thrax", "goth", "duum", "ymir", "khaz", "roth", "moth", "grimm", "ulk", "vex"
 ]
+
+## The unique trophy a slain beast yields ("Skarthrax's Fang" style),
+## keyed by beast kind. ItemDefsService resolves the icon/flavor and
+## SettlementEconomyService the (high) sell value from the suffix.
+const BEAST_TROPHY_SUFFIXES := {
+	"green_dragon": "Fang",
+	"dragon": "Fang",
+	"giant": "Knucklebone",
+	"troll": "Crown",
+	"thing_below": "Eye"
+}
 
 const TOWN_RULER_TITLES: Array[String] = [
 	"Mayor", "Lord", "Lady", "Reeve", "Alderman", "Baron", "Baroness"
@@ -217,7 +234,14 @@ static func _spawn_beasts(rng: RandomNumberGenerator) -> Array:
 			"status": "alive",
 			"slain_year": 0,
 			"slain_by": "",
-			"lair": ""
+			"slain_by_player": false,
+			"lair": "",
+			## Physical lair, assigned by the overworld after simulation:
+			## the map tile the still-living beast dens at, its site kind
+			## ("hold" or "site") and the site's display name.
+			"lair_site": {},
+			"lair_kind": "",
+			"lair_name": ""
 		})
 	return beasts
 
@@ -1042,6 +1066,8 @@ static func settlement_entry_by_name(chronicle: Dictionary, settlement_name: Str
 
 ## History-flavored rumor for a settlement's NPCs: local memory first,
 ## world-scale echoes as the fallback. Empty when no chronicle exists.
+## Beasts the player slew flip the talk: stale "still nests" lines drop
+## and the taverns celebrate the deed instead.
 static func history_rumor(settings: Dictionary, settlement_name: String, rng: RandomNumberGenerator) -> String:
 	var chronicle := chronicle_from_settings(settings)
 	if chronicle.is_empty():
@@ -1053,9 +1079,145 @@ static func history_rumor(settings: Dictionary, settlement_name: String, rng: Ra
 	if pool.is_empty() or rng.randf() < 0.35:
 		for rumor_variant: Variant in (chronicle.get("world_rumors", []) as Array):
 			pool.append(String(rumor_variant))
+	var celebration := player_kill_rumors(settings)
+	if not celebration.is_empty():
+		var kills := player_kills(settings)
+		var slain_displays: Array[String] = []
+		for beast_variant: Variant in (chronicle.get("beasts", []) as Array):
+			var beast := beast_variant as Dictionary
+			if kills.has(String(beast.get("name", ""))):
+				slain_displays.append(String(beast.get("display", "")))
+		# Baked lines still fearing the dead beast ("still nests", "will
+		# come back") read wrong once the player has done the deed.
+		var filtered: Array[String] = []
+		for line: String in pool:
+			var mentions_slain := false
+			for display: String in slain_displays:
+				if not display.is_empty() and line.contains(display):
+					mentions_slain = true
+					break
+			if not mentions_slain:
+				filtered.append(line)
+		pool = filtered
+		pool.append_array(celebration)
 	if pool.is_empty():
 		return ""
 	return pool[rng.randi_range(0, pool.size() - 1)]
+
+## Celebration lines for beasts the player personally slew.
+static func player_kill_rumors(settings: Dictionary) -> Array[String]:
+	var chronicle := chronicle_from_settings(settings)
+	var kills := player_kills(settings)
+	var lines: Array[String] = []
+	if chronicle.is_empty() or kills.is_empty():
+		return lines
+	for beast_variant: Variant in (chronicle.get("beasts", []) as Array):
+		var beast := beast_variant as Dictionary
+		var beast_name := String(beast.get("name", ""))
+		if not kills.has(beast_name):
+			continue
+		var kill := kills[beast_name] as Dictionary
+		var slayer := String(kill.get("by", "a wanderer"))
+		var display := String(beast.get("display", "the beast"))
+		lines.append("Have you heard? %s slew %s! The taverns have not stopped toasting the deed." % [slayer, display])
+		lines.append("They say %s walked out of %s carrying proof %s is dead. What a time to be alive." % [
+			slayer, String(kill.get("place", "the lair")), display
+		])
+	return lines
+
+## --- Player-made beast history -------------------------------------------------
+
+static func player_kills(settings: Dictionary) -> Dictionary:
+	var stored: Variant = settings.get(KILLS_KEY, {})
+	if stored is Dictionary:
+		return stored as Dictionary
+	return {}
+
+## True when the beast is dead — slain by a hero in the simulation or by
+## the player afterwards. Spawn paths check this so a dead beast never
+## walks again.
+static func is_beast_slain(settings: Dictionary, beast_name: String) -> bool:
+	if beast_name.is_empty():
+		return true
+	if player_kills(settings).has(beast_name):
+		return true
+	var beast := _beast_by_name(chronicle_from_settings(settings).get("beasts", []) as Array, beast_name)
+	return not beast.is_empty() and String(beast.get("status", "alive")) == "slain"
+
+## Patches a (freshly simulated or stored) chronicle with the player's
+## kills: the beast's fate flips to slain and the world chronicle gains
+## the "was slain by <player> at <place>" event once.
+static func apply_player_kills(chronicle: Dictionary, kills: Dictionary) -> void:
+	if chronicle.is_empty() or kills.is_empty():
+		return
+	var world_events := chronicle.get("world_events", []) as Array
+	for beast_variant: Variant in (chronicle.get("beasts", []) as Array):
+		var beast := beast_variant as Dictionary
+		var beast_name := String(beast.get("name", ""))
+		if not kills.has(beast_name):
+			continue
+		var kill := kills[beast_name] as Dictionary
+		beast["status"] = "slain"
+		beast["slain_year"] = int(kill.get("year", 0))
+		beast["slain_by"] = String(kill.get("by", "a wanderer"))
+		beast["slain_by_player"] = true
+		var event_text := "%s was slain by %s at %s." % [
+			_capitalize_first(String(beast.get("display", "the beast"))),
+			String(kill.get("by", "a wanderer")),
+			String(kill.get("place", "its lair"))
+		]
+		var already_recorded := false
+		for event_variant: Variant in world_events:
+			if String((event_variant as Dictionary).get("text", "")) == event_text:
+				already_recorded = true
+				break
+		if not already_recorded:
+			world_events.append({"year": int(kill.get("year", 0)), "type": "beast_slain", "text": event_text})
+	chronicle["world_events"] = world_events
+
+## Records the player slaying a beast: the kill register and the stored
+## chronicle in the SAME settings dictionary are both updated, so the
+## deed survives scene changes and saves. Callers persist the settings.
+static func record_player_beast_kill(settings: Dictionary, beast_name: String, player_name: String, place_name: String, kill_year: int) -> void:
+	if beast_name.is_empty():
+		return
+	var slayer := player_name.strip_edges()
+	if slayer.is_empty():
+		slayer = "A wanderer"
+	var place := place_name.strip_edges()
+	if place.is_empty():
+		place = "its lair"
+	var kills := player_kills(settings).duplicate()
+	kills[beast_name] = {"year": maxi(1, kill_year), "by": slayer, "place": place}
+	settings[KILLS_KEY] = kills
+	var chronicle := chronicle_from_settings(settings)
+	apply_player_kills(chronicle, kills)
+
+## The still-living beast laired at this overworld tile, or {} when the
+## tile hosts no lair (or its beast is already dead).
+static func lair_beast_for_tile(settings: Dictionary, tile: Vector2i) -> Dictionary:
+	var chronicle := chronicle_from_settings(settings)
+	if chronicle.is_empty():
+		return {}
+	for beast_variant: Variant in (chronicle.get("beasts", []) as Array):
+		var beast := beast_variant as Dictionary
+		if String(beast.get("status", "alive")) != "alive":
+			continue
+		var lair_site: Variant = beast.get("lair_site", {})
+		if not (lair_site is Dictionary) or (lair_site as Dictionary).is_empty():
+			continue
+		var site := lair_site as Dictionary
+		if int(site.get("x", 2147483647)) != tile.x or int(site.get("y", 2147483647)) != tile.y:
+			continue
+		if is_beast_slain(settings, String(beast.get("name", ""))):
+			continue
+		return beast.duplicate(true)
+	return {}
+
+## "Skarthrax's Fang" — the beast's unique trophy item name.
+static func beast_trophy_name(beast: Dictionary) -> String:
+	var suffix := String(BEAST_TROPHY_SUFFIXES.get(String(beast.get("kind", "dragon")), "Fang"))
+	return "%s's %s" % [String(beast.get("name", "Beast")), suffix]
 
 ## Chronicle-born faction goals ("to see the green dragon Vorgash slain").
 static func history_agenda_goals(settings: Dictionary, settlement_name: String) -> Array[String]:
@@ -1104,8 +1266,10 @@ static func overview_bbcode(chronicle: Dictionary) -> String:
 		var status_text := "still at large"
 		if status == "slain":
 			status_text = "slain by %s, year %d" % [String(beast.get("slain_by", "a hero")), int(beast.get("slain_year", 0))]
-		elif not String(beast.get("lair", "")).is_empty():
-			status_text = "nests in the ruins of %s" % String(beast.get("lair", ""))
+		elif String(beast.get("lair_kind", "")) == "hold" or not String(beast.get("lair", "")).is_empty():
+			status_text = "nests in the ruins of %s" % String(beast.get("lair_name", beast.get("lair", "")))
+		elif not String(beast.get("lair_name", "")).is_empty():
+			status_text = "lairs at %s" % String(beast.get("lair_name", ""))
 		beast_rows.append("• %s — [i]%s[/i]" % [_capitalize_first(String(beast.get("display", "a beast"))), status_text])
 	if not beast_rows.is_empty():
 		rows.append("")

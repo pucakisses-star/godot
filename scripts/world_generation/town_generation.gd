@@ -5961,6 +5961,15 @@ func _maybe_spawn_landmark_inhabitants(landmark: Dictionary, plan: Dictionary, c
 	if not chunk_rect.has_point(anchor):
 		return
 	var structure_id := String(landmark.get("structure", ""))
+	# A chronicle beast's lair outranks any camp or keeper roster: the
+	# named boss spawns with the site's chunk, exactly like a garrison.
+	var lair_beast: Dictionary = WorldChronicleService.lair_beast_for_tile(
+		_world_settings_snapshot(), landmark.get("tile", Vector2i.ZERO) as Vector2i
+	)
+	if not lair_beast.is_empty():
+		landmark["inhabited"] = true
+		_spawn_surface_lair_boss(landmark, plan, lair_beast)
+		return
 	if AMBIENT_CAMP_HOSTILES.has(structure_id):
 		landmark["inhabited"] = true
 		if not _camp_cleared_sites.has(String(landmark.get("key", ""))):
@@ -6016,6 +6025,90 @@ func _spawn_camp_hostiles(landmark: Dictionary, plan: Dictionary, structure_id: 
 			var creature := _surface_creatures[_surface_creatures.size() - 1]
 			creature["site_key"] = site_key
 			creature["home_cell"] = anchor
+
+## The named beast at its surface lair (a sleeping-dragon perch, a cave
+## mouth, a den): one boss-statted creature from the same surface pipeline,
+## grown and tinted into the chronicle's beast, name overhead, leashed to
+## the lair like a camp garrison. Never spawns once the beast is dead.
+func _spawn_surface_lair_boss(landmark: Dictionary, plan: Dictionary, lair_beast: Dictionary) -> void:
+	var site_key := String(landmark.get("key", ""))
+	var tile := landmark.get("tile", Vector2i.ZERO) as Vector2i
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s|lair|%d,%d" % [_surface_world_seed_text, tile.x, tile.y])
+	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(lair_beast.get("kind", "dragon")))
+	var anchor := plan.get("anchor", Vector2i.ZERO) as Vector2i
+	var cells: Array[Vector2i] = _landmark_spawn_cells(plan, rng, 1)
+	var boss_cell := anchor + Vector2i(0, 2)
+	if not cells.is_empty():
+		boss_cell = cells[0]
+	else:
+		# Icon-plan lairs have no planned ground; take the nearest open
+		# cell beside the lair art instead.
+		for probe_offset: Vector2i in [
+			Vector2i(0, 2), Vector2i(2, 0), Vector2i(-2, 0), Vector2i(0, -2),
+			Vector2i(2, 2), Vector2i(-2, 2), Vector2i(2, -2), Vector2i(-2, -2), Vector2i(0, 3)
+		]:
+			if _is_walkable_cell(anchor + probe_offset) and not _is_cell_occupied_by_npc(anchor + probe_offset):
+				boss_cell = anchor + probe_offset
+				break
+	var size_before := _surface_creatures.size()
+	SurfaceLifeService.spawn_creature(
+		_surface_creatures, SURFACE_CREATURE_TEXTURE, int(spec.get("def_index", 7)),
+		boss_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, rng, true
+	)
+	if _surface_creatures.size() <= size_before:
+		return
+	var boss := _surface_creatures[_surface_creatures.size() - 1]
+	var display := String(lair_beast.get("display", "a nameless beast"))
+	boss["site_key"] = site_key
+	boss["home_cell"] = anchor
+	boss["boss"] = true
+	boss["beast_name"] = String(lair_beast.get("name", ""))
+	boss["beast_display"] = display
+	boss["beast_kind"] = String(lair_beast.get("kind", "dragon"))
+	boss["lair_name"] = String(lair_beast.get("lair_name", ""))
+	boss["hp"] = int(spec.get("max_hp", 200))
+	boss["damage_override"] = int(spec.get("damage", 8))
+	boss["aggro_override"] = int(spec.get("aggro_range", 12))
+	boss["cooldown_override"] = float(spec.get("attack_cooldown", 1.5))
+	boss["leash_override"] = 6
+	var sprite := boss.get("sprite") as Sprite2D
+	if sprite != null:
+		UndergroundCreatureService.apply_boss_visuals(sprite, spec, WorldChronicleService._capitalize_first(display))
+	_set_save_status("Something vast stirs at its lair — %s is here." % display, Color(1.0, 0.55, 0.45, 1.0))
+
+## The world remembers a surface kill exactly like a hold kill: trophy,
+## hoard, the persistent register, and the stored chronicle's new event.
+func _award_surface_lair_kill(state: Dictionary) -> void:
+	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(state.get("beast_kind", "dragon")))
+	var coins := _rng.randi_range(int(spec.get("coins_min", 120)), int(spec.get("coins_max", 200)))
+	_adjust_coins(coins)
+	var trophy := WorldChronicleService.beast_trophy_name({
+		"name": String(state.get("beast_name", "Beast")),
+		"kind": String(state.get("beast_kind", "dragon"))
+	})
+	_add_to_inventory(trophy, 1)
+	GameAudioService.play_sfx(self, "coin")
+	var player_name := "A wanderer"
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_player_character"):
+		var character: Dictionary = game_session.call("get_player_character")
+		var character_name := String(character.get("name", "")).strip_edges()
+		if not character_name.is_empty():
+			player_name = character_name
+	var place := String(state.get("lair_name", "")).strip_edges()
+	if place.is_empty():
+		place = "its lair"
+	var kill_year := GameCalendar.year_for_day(_game_day - 1, _calendar_start_year)
+	var settings: Dictionary = _world_settings_snapshot()
+	WorldChronicleService.record_player_beast_kill(settings, String(state.get("beast_name", "")), player_name, place, kill_year)
+	_store_world_settings(settings)
+	_set_save_status(
+		"%s is slain! You claim %s and %d coins — the world will remember this." % [
+			WorldChronicleService._capitalize_first(String(state.get("beast_display", "the beast"))), trophy, coins
+		],
+		Color(1.0, 0.85, 0.45, 1.0)
+	)
 
 ## A friendly building's keeper(s): named, composed townsfolk sprites with
 ## identities seeded from world seed + site tile, so the same hermit greets
@@ -6483,8 +6576,12 @@ func _plan_landmark_icon(landmark: Dictionary) -> Dictionary:
 		{"type": "icon", "cell": anchor, "atlas": atlas_coords, "scale": 1.5},
 		{"type": "label", "cell": anchor + Vector2i(-2, -3)}
 	]
+	# Icon landmarks carry their anchor too: a chronicle beast laired at a
+	# bare-icon site (sleeping dragon, cave mouth) spawns with its chunk
+	# exactly like a camp garrison. Camps/keepers are unaffected — their
+	# structure ids never resolve to icon plans.
 	return {
-		"ok": true, "kind": "icon",
+		"ok": true, "kind": "icon", "anchor": anchor,
 		"ground": {}, "decor": {}, "blocked": blocked,
 		"sprites": sprites, "bounds": Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7))
 	}
@@ -7307,7 +7404,13 @@ func _strike_surface_creature(creature_index: int, damage: int) -> void:
 		_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
 		sprite.queue_free()
 	var fallen_site_key := String(state.get("site_key", ""))
+	var is_boss := bool(state.get("boss", false))
 	_surface_creatures.remove_at(creature_index)
+	if is_boss:
+		# A named beast, not a camp band: trophy, hoard, and recorded
+		# history instead of tent plunder.
+		_award_surface_lair_kill(state)
+		return
 	_set_save_status("The %s falls — %d coins scavenged." % [creature_name, coins], Color(0.85, 0.95, 0.7, 1.0))
 	# The last of a camp's garrison marks the site cleared (with plunder).
 	if not fallen_site_key.is_empty():
