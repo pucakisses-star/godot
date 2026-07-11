@@ -6783,12 +6783,15 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 	_stamp_gates_in_rect(rect)
 	_stamp_landmarks_in_chunk(chunk, rect)
 
-## Trees may only root where both axes hit the 2-cell lattice (with a
-## deterministic per-row jog so the woods don't grid up): a 3-cell-wide
-## canopy can then never be flush against a neighbor's trunk column, so no
-## tree is ever reduced to a 1-cell vertical strip.
+## Trees may only root on a lattice spaced 2 cells across and 3 cells down
+## (with a deterministic per-row jog so the woods don't grid up). The
+## horizontal 2 keeps a 3-cell-wide canopy off a neighbor's trunk column;
+## the vertical 3 keeps the tall dark-tree canopy — which reaches two rows
+## ABOVE its trunk — from being drawn over the trunk of the tree above it
+## (which read as trees with no base). Both together stop trunks vanishing
+## and stop tree crowns being carved into vertical strips.
 func _is_tree_anchor_cell(world_cell: Vector2i) -> bool:
-	if posmod(world_cell.y, 2) != 0:
+	if posmod(world_cell.y, 3) != 0:
 		return false
 	var row_jog := absi(world_cell.y * 40503 >> 4) % 2
 	return posmod(world_cell.x + row_jog, 2) == 0
@@ -6811,14 +6814,16 @@ func _understory_decor_key(world_cell: Vector2i, base_key: String, danger: float
 		return "hedge" if roll == 0 else "hedge_alt"
 	return "stump" if cell_hash % 5 != 0 else "stump_alt"
 
-## Whether a nearby lattice anchor holds a tree whose 3-cell-wide crown
-## (up to two rows above the anchor) visually covers this cell. Only the
-## few candidate anchors in the crown window are tested, with the same
-## deterministic terrain field the chunk painter uses, so the verdict is
-## stable across streaming and re-streaming.
+## Whether a nearby lattice anchor holds a tree whose crown visually covers
+## this cell. A trunk's canopy is centered on its column (reaching one cell
+## left and right) and rises up to two rows above it, so the covering
+## anchors of cell (x,y) sit at columns x-1..x+1 and rows y..y+2 (an anchor
+## at or below the cell, its crown climbing up onto it). Only those few
+## candidates are tested, with the same deterministic terrain field the
+## chunk painter uses, so the verdict is stable across (re-)streaming.
 func _cell_under_tree_crown(world_cell: Vector2i, danger: float) -> bool:
 	for anchor_y: int in range(world_cell.y, world_cell.y + 3):
-		for anchor_x: int in range(world_cell.x - 2, world_cell.x + 1):
+		for anchor_x: int in range(world_cell.x - 1, world_cell.x + 2):
 			var anchor := Vector2i(anchor_x, anchor_y)
 			if anchor == world_cell or not _is_tree_anchor_cell(anchor):
 				continue
