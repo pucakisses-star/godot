@@ -318,6 +318,10 @@ var _reflection_rect_cells := Rect2i()
 var _reflection_rebuild_timer := 0.0
 var _passable_atlas_set: Dictionary = {}
 var _actor_passable_cache: Dictionary = {}
+## Atlas coords of the full-tree and understory decor tiles, filled once and
+## used by the post-paint pass that clears stumps/bushes out from under trees.
+var _tree_decor_set: Dictionary = {}
+var _understory_decor_set: Dictionary = {}
 var _last_clock_stamp := -1
 var _applied_day_night_tint := Color(-1.0, -1.0, -1.0, -1.0)
 var _player_satiety := PlayerStatsService.SATIETY_MAX
@@ -783,6 +787,18 @@ func _ready() -> void:
 	_generate_city()
 	## The "Strike the earth!" greeting, once, on a new walker's first embark.
 	EmbarkIntroScreen.maybe_present(self)
+
+## The embark screen reads this to tailor its greeting: an ocean embark, a
+## wild embark coloured by the biome at the spawn, or an arrival in a town.
+func _embark_place() -> Dictionary:
+	if _wild_water:
+		return {"kind": "ocean"}
+	if _wild_mode:
+		var biome := ""
+		if not _surface_biome_ctx.is_empty():
+			biome = SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, _player_cell + _surface_world_origin)
+		return {"kind": "wild", "biome": biome}
+	return {"kind": "town", "name": _town_name}
 
 func _process(delta: float) -> void:
 	_advance_game_clock(delta)
@@ -1796,6 +1812,13 @@ func _configure_tile_layer() -> void:
 
 	city_layer.tile_set = tile_set
 	decor_layer.tile_set = tile_set
+	# Full trees are multi-cell tiles whose art overhangs their anchor cell.
+	# TileMapLayer batches tiles into rendering quadrants and clips each
+	# quadrant to its cells' bounds, which shears the overhanging bottom off
+	# some trees. A 1-cell quadrant gives every tile its own canvas item
+	# sized to its own texture, so no tree is ever clipped. The decor layer
+	# is sparse (trees, tufts, the odd prop), so the lost batching is cheap.
+	decor_layer.rendering_quadrant_size = 1
 
 ## Builds the town/surface atlas texture: the shipped tilesheet with extra
 ## 32px rows appended at the bottom, holding procedurally painted tiles the
@@ -6749,7 +6772,7 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 			if decor_key == "tree" or decor_key == "tree_dark":
 				var world_cell: Vector2i = cell + _surface_world_origin
 				if not _is_tree_anchor_cell(world_cell):
-					decor_key = _understory_decor_key(world_cell, base_key, danger)
+					decor_key = _understory_decor_key(world_cell, base_key)
 				elif base_key.begins_with("snow"):
 					# Snow-covered pines on tundra ground. The swap happens at
 					# placement only - the terrain field keeps answering
@@ -6788,6 +6811,45 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 	_surface_chunks[chunk] = painted
 	_stamp_gates_in_rect(rect)
 	_stamp_landmarks_in_chunk(chunk, rect)
+	_clear_understory_under_trees(rect)
+
+## Ground-truth guarantee that no cut-stump or bush is left drawn on top of
+## a tree: after a chunk (and its landmarks) are painted, scan it — grown by
+## the footprint margin so cross-chunk seams are covered either way a pair
+## streams in — and erase any understory tile that actually sits under a
+## placed tree tile. A tree's art hangs downward and one cell to each side
+## of its anchor, so a cell is covered by an anchor at columns x-1..x+1 and
+## rows y-2..y. Reads the real placed tiles, so it does not depend on
+## re-deriving terrain or on the paint order.
+func _clear_understory_under_trees(rect: Rect2i) -> void:
+	if _tree_decor_set.is_empty():
+		for key: String in ["tree", "tree_dark", "tree_snowy", "tree_dark_snowy"]:
+			_tree_decor_set[TILE_ATLAS.get(key, Vector2i(-1, -1))] = true
+		for key: String in ["stump", "stump_alt", "hedge", "hedge_alt"]:
+			_understory_decor_set[TILE_ATLAS.get(key, Vector2i(-1, -1))] = true
+	var scan := rect.grow(2)
+	for y in range(scan.position.y, scan.end.y):
+		for x in range(scan.position.x, scan.end.x):
+			var cell := Vector2i(x, y)
+			if decor_layer.get_cell_source_id(cell) < 0:
+				continue
+			if not _understory_decor_set.has(decor_layer.get_cell_atlas_coords(cell)):
+				continue
+			if _tree_tile_covers_cell(cell):
+				decor_layer.erase_cell(cell)
+				_actor_passable_cache.erase(cell)
+
+func _tree_tile_covers_cell(cell: Vector2i) -> bool:
+	for dy: int in range(-2, 1):
+		for dx: int in range(-1, 2):
+			if dx == 0 and dy == 0:
+				continue
+			var anchor := cell + Vector2i(dx, dy)
+			if decor_layer.get_cell_source_id(anchor) < 0:
+				continue
+			if _tree_decor_set.has(decor_layer.get_cell_atlas_coords(anchor)):
+				return true
+	return false
 
 ## Trees may only root on a lattice spaced 2 cells across and 3 cells down
 ## (with a deterministic per-row jog so the woods don't grid up). The
@@ -6807,12 +6869,12 @@ func _is_tree_anchor_cell(world_cell: Vector2i) -> bool:
 ## Bushes stay off snow and sand (leafy green reads wrong there); stumps
 ## suit any ground. Nothing grows under a neighboring tree's crown: the
 ## overhanging canopy art would be overdrawn by decor placed there.
-func _understory_decor_key(world_cell: Vector2i, base_key: String, danger: float) -> String:
+func _understory_decor_key(world_cell: Vector2i, base_key: String) -> String:
 	var cell_hash := absi(world_cell.x * 73856093 ^ world_cell.y * 19349663)
 	var roll := cell_hash % 12
 	if roll > 3:
 		return ""
-	if _cell_under_tree_crown(world_cell, danger):
+	if _cell_under_tree_crown(world_cell):
 		return ""
 	if roll <= 1:
 		if base_key.begins_with("snow") or base_key.begins_with("sand"):
@@ -6820,15 +6882,17 @@ func _understory_decor_key(world_cell: Vector2i, base_key: String, danger: float
 		return "hedge" if roll == 0 else "hedge_alt"
 	return "stump" if cell_hash % 5 != 0 else "stump_alt"
 
-## Whether a nearby lattice anchor holds a tree whose crown visually covers
-## this cell. A trunk's canopy is centered on its column (reaching one cell
-## left and right) and rises up to two rows above it, so the covering
-## anchors of cell (x,y) sit at columns x-1..x+1 and rows y..y+2 (an anchor
-## at or below the cell, its crown climbing up onto it). Only those few
-## candidates are tested, with the same deterministic terrain field the
-## chunk painter uses, so the verdict is stable across (re-)streaming.
-func _cell_under_tree_crown(world_cell: Vector2i, danger: float) -> bool:
-	for anchor_y: int in range(world_cell.y, world_cell.y + 3):
+## Whether a nearby lattice anchor holds a tree whose art visually covers
+## this cell. Measured footprint: a tree's art is centered on its anchor
+## column (one cell left and right) and hangs DOWNWARD from the anchor
+## row — the crown on the anchor row, the trunk up to two rows below it.
+## So the anchors that could cover cell (x,y) sit at columns x-1..x+1 and
+## rows y-2..y (an anchor at or ABOVE the cell, its art draping down onto
+## it). Only those few candidates are tested, with the same deterministic
+## terrain field the chunk painter uses, so the verdict is stable across
+## (re-)streaming.
+func _cell_under_tree_crown(world_cell: Vector2i) -> bool:
+	for anchor_y: int in range(world_cell.y - 2, world_cell.y + 1):
 		for anchor_x: int in range(world_cell.x - 1, world_cell.x + 2):
 			var anchor := Vector2i(anchor_x, anchor_y)
 			if anchor == world_cell or not _is_tree_anchor_cell(anchor):
@@ -6837,7 +6901,11 @@ func _cell_under_tree_crown(world_cell: Vector2i, danger: float) -> bool:
 			# Cells the town rendered or a road claimed never get a tree.
 			if _latest_grid.has(scene_cell) or _surface_road_cells.has(scene_cell):
 				continue
-			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(anchor, _surface_noise, danger, _surface_biome_ctx)
+			# Recompute the anchor's OWN danger: it shifts the forest
+			# threshold, so borrowing the query cell's danger can misjudge
+			# whether the anchor really grew a tree and leak a stump under it.
+			var anchor_danger := SurfaceLifeService.danger_for_cell(anchor, _surface_anchor_cells)
+			var terrain: Dictionary = SurfaceWorldService.terrain_for_cell(anchor, _surface_noise, anchor_danger, _surface_biome_ctx)
 			var decor := String(terrain.get("decor", ""))
 			if decor == "tree" or decor == "tree_dark":
 				return true

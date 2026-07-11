@@ -64,33 +64,135 @@ const FLAVOR_BY_CLASS := {
 	"rogue": "You have a trader's eye and a light step. Coin, craft and quiet cunning are your tools, and a canny hold needs them as sorely as any axe."
 }
 
-## Returns {"title": String, "body": String (BBCode)}.
-static func compose(character: Dictionary, world_name: String, year: int) -> Dictionary:
+## Returns {"title": String, "body": String (BBCode)}. `place` describes
+## where the character embarks — {kind: "dwarfhold"|"town"|"dungeon"|"ocean"|
+## "wild", name: String, biome: String} — so the arrival, the situation and
+## the closing call all fit the start location (a mountain hold reads nothing
+## like waking adrift at sea or under a forest canopy).
+static func compose(character: Dictionary, world_name: String, year: int, place: Dictionary = {}) -> Dictionary:
 	var profession := String(character.get("profession", "")).strip_edges()
 	var character_name := String(character.get("name", "")).strip_edges()
 	var title := "A Dwarven %s" % profession if not profession.is_empty() else "A Dwarven Expedition"
-
 	var trade := profession.to_lower() if not profession.is_empty() else "wanderer"
-	var awakening := ""
-	if character_name.is_empty():
-		awakening = "The long dark lifts and you wake to thin mountain air and the weight of purpose in your hands. Whatever you were before has gone to ash and echo. Today you are %s %s, and the mountainhomes have need of you." % [_article(trade), trade]
-	else:
-		awakening = "The long dark lifts and you wake to thin mountain air, a name already on your lips: %s. Whatever you were before has gone to ash and echo. Today you are %s %s, and the mountainhomes have need of you." % [character_name, _article(trade), trade]
+	var key := _place_key(place)
+	var place_name := String(place.get("name", "")).strip_edges()
 
+	var awakening := _arrival(key, character_name, trade, place_name)
 	var flavor := _flavor_for(profession)
+	var situation := _situation(key)
 
-	var hardship := "Your small band has trekked in from the forbidding wilderness beyond to raise a new hold for the glory of all dwarfkind. There are almost no supplies left, but stout labor brings sustenance. A caravan is promised before winter shuts the passes — time enough, if you are quick, to delve secure lodgings ere the hungry things below take notice."
-
+	var chronicle := "your tale" if key != "dwarfhold" else "dwarven history"
 	var closing := ""
 	if not world_name.strip_edges().is_empty():
-		closing = "A new chapter of dwarven history begins here, in %s, in the year %d." % [world_name.strip_edges(), maxi(year, 1)]
+		closing = "A new chapter of %s begins here, in %s, in the year %d." % [chronicle, world_name.strip_edges(), maxi(year, 1)]
 	else:
-		closing = "A new chapter of dwarven history begins here, in this place, in the year %d." % maxi(year, 1)
+		closing = "A new chapter of %s begins here, in the year %d." % [chronicle, maxi(year, 1)]
 
-	var body := "[b]%s[/b]\n\n%s\n\n%s\n\n%s\n\n%s\n[color=#8fdf7f][b]Strike the earth![/b][/color]" % [
-		OPENING_LINE, awakening, flavor, hardship, closing
+	var call_line := _call(key)
+	var body := "[b]%s[/b]\n\n%s\n\n%s\n\n%s\n\n%s\n[color=#8fdf7f][b]%s[/b][/color]" % [
+		OPENING_LINE, awakening, flavor, situation, closing, call_line
 	]
-	return {"title": title, "body": body}
+	return {"title": title, "body": body, "call": call_line}
+
+## Collapses a place descriptor to one of the framing keys below.
+static func _place_key(place: Dictionary) -> String:
+	var kind := String(place.get("kind", "")).strip_edges().to_lower()
+	if kind == "dwarfhold" or kind == "town" or kind == "dungeon" or kind == "ocean":
+		return kind
+	if kind == "wild":
+		match String(place.get("biome", "")).strip_edges().to_lower():
+			"water":
+				return "ocean"
+			"forest":
+				return "forest"
+			"jungle":
+				return "jungle"
+			"desert":
+				return "desert"
+			"badlands":
+				return "badlands"
+			"tundra":
+				return "tundra"
+			"hills":
+				return "hills"
+			"mountain":
+				return "mountain"
+			"marsh":
+				return "marsh"
+			"grassland":
+				return "grassland"
+	return "wilderness"
+
+## The waking paragraph: how the world greets the character, coloured by the
+## start location, then "today you are a <trade>" and a place-fit purpose.
+static func _arrival(key: String, character_name: String, trade: String, place_name: String) -> String:
+	var you := "%s %s" % [_article(trade), trade]
+	var named := ", %s," % character_name if not character_name.is_empty() else ""
+	match key:
+		"dwarfhold":
+			return "The long trek from the wilderness ends at the gates of %s, a hold of your own kind carved into the mountain's roots. You wake%s to lamplit stone and the deep hum of the mountainhome. Today you are %s, and your people have need of you." % [_named(place_name, "a dwarven hold"), named, you]
+		"town":
+			return "The road brings you at last to %s, a town of men where a dwarf draws curious stares. You wake%s to woodsmoke and the clamour of the market. Today you are %s, and there is a living to be made among strangers." % [_named(place_name, "a walled town"), named, you]
+		"dungeon":
+			return "You wake%s in the cold dark of %s, old stone pressing close and the air still as a tomb. Whatever you were before has gone to ash and echo. Today you are %s, and the only ways from here are down, or out." % [named, _named(place_name, "a forgotten dungeon"), you]
+		"ocean":
+			return "You wake%s adrift on cold open water, the shore a pale smudge at the edge of sight and the swell rocking beneath you. Whatever you were before has gone to ash and echo. Today you are %s, and the sea is your only road." % [named, you]
+		"forest":
+			return "You wake%s beneath a green canopy, the deep forest breathing all around you. Whatever you were before has gone to ash and echo. Today you are %s, and the woods will keep you — if what moves in them doesn't find you first." % [named, you]
+		"jungle":
+			return "You wake%s in steaming green shadow, the jungle thick and close and loud with unseen life. Whatever you were before has gone to ash and echo. Today you are %s, a long way from any hall of stone." % [named, you]
+		"desert":
+			return "You wake%s to blistering sun and dunes to every horizon — the deep desert, far from any mountainhome. Whatever you were before has gone to ash and echo. Today you are %s, and here water and shade are life itself." % [named, you]
+		"badlands":
+			return "You wake%s among cracked red rock and blowing dust, the badlands stretching harsh and bare. Whatever you were before has gone to ash and echo. Today you are %s, and this is hard country to wring a living from." % [named, you]
+		"tundra":
+			return "You wake%s to biting wind and snow to the horizon, the frozen waste white and silent. Whatever you were before has gone to ash and echo. Today you are %s, and warmth is the first battle here." % [named, you]
+		"grassland":
+			return "You wake%s on open grassland under a wide, pale sky, far from any hall of stone. Whatever you were before has gone to ash and echo. Today you are %s, with the whole plain before you." % [named, you]
+		"hills":
+			return "You wake%s on windswept green hills, the land rolling away in folds toward distant peaks. Whatever you were before has gone to ash and echo. Today you are %s." % [named, you]
+		"mountain":
+			return "You wake%s high among cold crags, the wind thin and the grey peaks close overhead. Whatever you were before has gone to ash and echo. Today you are %s, in the high stone your kind has always loved." % [named, you]
+		"marsh":
+			return "You wake%s among wet reeds and standing water, the marsh grey and croaking on every side. Whatever you were before has gone to ash and echo. Today you are %s, and the footing here is treacherous." % [named, you]
+		_:
+			return "You wake%s in open, nameless wilderness, far from any hall or road. Whatever you were before has gone to ash and echo. Today you are %s, with only your own two hands to rely on." % [named, you]
+
+## The situation paragraph: what the character faces now, per location.
+static func _situation(key: String) -> String:
+	match key:
+		"dwarfhold":
+			return "A new hold rises here for the glory of all dwarfkind. There are almost no supplies left, but stout labor brings sustenance, and a caravan is promised before winter shuts the passes — time enough, if you are quick, to delve secure lodgings ere the hungry things below take notice."
+		"town":
+			return "You arrive with little more than the clothes you stand in, but a town rewards useful hands. Find work, earn coin, and carve out a place for yourself among folk who are not your own."
+		"dungeon":
+			return "There is no caravan here and no help coming — only old dark and whatever emptied these halls. Take what light and iron you can carry, watch every shadow, and do not linger."
+		"ocean":
+			return "There is no land in easy reach and no telling how you came to the water. Ration what little you have, keep your head above the swell, and make for any shore you can find."
+		"desert", "badlands":
+			return "You carry almost nothing, and the nearest roof is a long way off across the burning waste. Find water, keep out of the worst of the sun, and reach shelter before the heat or the cold of night turns against you."
+		"tundra", "mountain":
+			return "You carry almost nothing, and the nearest roof is a long way off through the cold. Find fuel and shelter fast — out here the weather kills quicker than anything with teeth."
+		_:
+			return "You carry almost nothing, and the nearest roof is a long way off. Live off the land, keep your wits about you, and reach shelter before the weather or the dark turns against you."
+
+## The closing exclamation, coloured green in the panel.
+static func _call(key: String) -> String:
+	match key:
+		"dwarfhold":
+			return "Strike the earth!"
+		"town":
+			return "Make your name."
+		"dungeon":
+			return "Delve, and live."
+		"ocean":
+			return "Stay afloat."
+		_:
+			return "Survive, and endure."
+
+## place_name when it has one, else a generic stand-in.
+static func _named(place_name: String, fallback: String) -> String:
+	return place_name if not place_name.is_empty() else fallback
 
 static func _flavor_for(profession: String) -> String:
 	var key := profession.strip_edges().to_lower()

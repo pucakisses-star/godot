@@ -1054,6 +1054,10 @@ func _ready() -> void:
 	## The "Strike the earth!" greeting, once, on a new walker's first embark.
 	EmbarkIntroScreen.maybe_present(self)
 
+## The embark screen reads this to tailor its greeting to the start place.
+func _embark_place() -> Dictionary:
+	return {"kind": "dwarfhold", "name": _hold_name}
+
 func _setup_inventory_label() -> void:
 	var controls := get_node_or_null("Margin/Layout/Controls")
 	if controls == null:

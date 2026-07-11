@@ -15,12 +15,15 @@ class_name EmbarkIntroScreen
 var character: Dictionary = {}
 var world_name := ""
 var year := 1
+var place: Dictionary = {}
 
 ## Shows the embark story once, the first time a freshly created (or reborn)
 ## character enters a playable game scene — a settlement, the wilds, or a
 ## dungeon. Every entry point just calls EmbarkIntroScreen.maybe_present(self)
 ## from its _ready; the character-scoped flag makes it a no-op on save-loads
-## and on later scene changes. Reads the world name and year from the session.
+## and on later scene changes. Reads the world name and year from the session,
+## and the START LOCATION from the host's _embark_place() (so the message fits
+## a hold vs a town vs the open sea vs a forest).
 static func maybe_present(host: Node) -> void:
 	if host == null:
 		return
@@ -39,6 +42,8 @@ static func maybe_present(host: Node) -> void:
 	intro.character = session.call("get_player_character") as Dictionary
 	intro.world_name = String(settings.get("world_name", ""))
 	intro.year = resolved_year
+	if host.has_method("_embark_place"):
+		intro.place = host.call("_embark_place") as Dictionary
 	host.add_child(intro)
 
 func _ready() -> void:
@@ -69,7 +74,7 @@ func _ready() -> void:
 	panel.add_theme_stylebox_override("panel", panel_style)
 	center.add_child(panel)
 
-	var story := EmbarkIntroService.compose(character, world_name, year)
+	var story := EmbarkIntroService.compose(character, world_name, year, place)
 
 	var layout := VBoxContainer.new()
 	layout.add_theme_constant_override("separation", 14)
@@ -98,7 +103,7 @@ func _ready() -> void:
 	button_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	layout.add_child(button_row)
 	var okay := Button.new()
-	okay.text = "Strike the earth!"
+	okay.text = String(story.get("call", "Strike the earth!"))
 	okay.custom_minimum_size = Vector2(200.0, 38.0)
 	okay.pressed.connect(_dismiss)
 	button_row.add_child(okay)
