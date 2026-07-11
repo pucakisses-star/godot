@@ -1121,6 +1121,13 @@ func _on_return_button_pressed() -> void:
 
 func _on_create_button_pressed() -> void:
 	_persist_character_to_session()
+	## A successor character (born from the game-over screen) inherits the
+	## dead walker's world: skip the world forge and land straight on the
+	## existing overworld, where Begin Journey embarks anywhere afresh.
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("consume_same_world_rebirth") and bool(game_session.call("consume_same_world_rebirth")):
+		get_tree().change_scene_to_file("res://scenes/overworld.tscn")
+		return
 	get_tree().change_scene_to_file("res://scenes/world_generation_display.tscn")
 
 func _persist_character_to_session() -> void:

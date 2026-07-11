@@ -169,6 +169,7 @@ var _trap_damage_timers: Dictionary = {}
 
 var _zoom_level := 2.4
 var _escape_menu: EscapeMenu
+var _game_over: GameOverScreen
 
 var _fire_traps: Array[Dictionary] = []
 var _saw_traps: Array[Dictionary] = []
@@ -255,6 +256,11 @@ func _load_player_inventory() -> void:
 	_player_hp = clampf(float(settings.get("player_hp", _player_max_hp)), 1.0, _player_max_hp)
 
 func _save_player_inventory() -> void:
+	# Once the game-over modal owns the session, the death-moment save has
+	# already run; the dying scene must not smear its zeroed state over a
+	# freshly loaded save or a stripped successor session as it exits.
+	if _game_over != null and is_instance_valid(_game_over):
+		return
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return
@@ -1359,8 +1365,13 @@ func _damage_player(amount: int, source_name: String) -> void:
 	if _player_hp <= 0.0:
 		_handle_player_death(source_name)
 
+## Death is final: no crawling back to the entrance. Half the purse stays
+## lost in the dark, the grave goes into the world chronicle, and the
+## game-over screen takes over.
 func _handle_player_death(source_name: String) -> void:
-	_player_hp = _player_max_hp
+	if _game_over != null and is_instance_valid(_game_over):
+		return
+	_player_hp = 0.0
 	var lost_coins := _player_coins / 2
 	if lost_coins > 0:
 		_player_coins -= lost_coins
@@ -1370,12 +1381,43 @@ func _handle_player_death(source_name: String) -> void:
 	_update_hp_label()
 	_player_move_path.clear()
 	_player_is_moving = false
-	_player_cell = _spawn_cell
-	_player_sprite.position = _cell_center(_player_cell)
-	# Keys held at the moment of death must not march the fresh corpse
-	# straight onto the entrance stairs; walk again after releasing.
-	_respawn_move_lock = true
-	_set_status("Felled by %s — you crawl back to the entrance" % source_name, Color(0.95, 0.5, 0.5, 1.0))
+	_record_death_and_show_game_over(source_name)
+
+## The dungeon has no clock of its own: the death date reads the shared
+## session clock and world chronology instead, then the death is written
+## into the persistent chronicle register like a beast kill.
+func _record_death_and_show_game_over(source_name: String) -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	var player_name := "A wanderer"
+	if game_session.has_method("get_player_character"):
+		var character: Dictionary = game_session.call("get_player_character")
+		var character_name := String(character.get("name", "")).strip_edges()
+		if not character_name.is_empty():
+			player_name = character_name
+	var game_day := 1
+	var clock_variant: Variant = settings.get("game_clock")
+	if clock_variant is Dictionary:
+		game_day = maxi(1, int((clock_variant as Dictionary).get("day", 1)))
+	var start_year := 250
+	var chronology_variant: Variant = settings.get("chronology")
+	if chronology_variant is Dictionary:
+		start_year = int((chronology_variant as Dictionary).get("year", 250))
+	var place := _dungeon_name if not _dungeon_name.is_empty() else "a forgotten dungeon"
+	var death_year := GameCalendar.year_for_day(game_day - 1, start_year)
+	WorldChronicleService.record_player_death(settings, player_name, place, death_year, source_name)
+	if game_session.has_method("set_world_settings"):
+		game_session.call("set_world_settings", settings)
+	if _escape_menu != null and _escape_menu.is_open():
+		_escape_menu.close()
+	_game_over = GameOverScreen.new()
+	_game_over.character_name = player_name
+	_game_over.place_name = place
+	_game_over.date_line = GameCalendar.date_text(game_day - 1, start_year)
+	_game_over.cause_name = source_name
+	add_child(_game_over)
 
 ## --- Loot --------------------------------------------------------------------
 

@@ -113,6 +113,7 @@ var _shop_stocks: Dictionary = {}
 var _active_speech_bubble: PanelContainer
 var _build_selection := -1
 var _escape_menu: EscapeMenu
+var _game_over: GameOverScreen
 var _torch_sprites: Dictionary = {}
 ## Streamed wild chunks currently resident, chunk coords -> true. The
 ## city core never appears here and is never evicted.
@@ -415,6 +416,7 @@ const PROFESSION_BY_BUILDING := {
 }
 
 const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
+const DWARFHOLD_SCENE_TILE_KEY := "dwarfhold_scene_tile"
 const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
 const DWARFHOLD_SCENE_NAME_KEY := "dwarfhold_scene_name"
 const DWARFHOLD_SCENE_FALL_KEY := "dwarfhold_scene_fall_text"
@@ -423,6 +425,17 @@ const DWARFHOLD_SCENE_FALL_KEY := "dwarfhold_scene_fall_text"
 ## for abandoned ruins, the fall summary ("Fell to <beast>, year <y>").
 var _hold_name := ""
 var _hold_fall_text := ""
+## The hold's overworld tile and, when a still-living chronicle beast
+## lairs in these halls, the beast itself — its boss guards the deepest
+## level. Empty once the beast is dead (by hero or by the player).
+var _hold_tile := Vector2i(2147483647, 2147483647)
+var _lair_beast: Dictionary = {}
+
+## The sitting ruler, chronicle-authoritative: the settlement's lineage
+## entry (or a seeded fallback for standalone runs) and the index of the
+## resident NPC crowned with it on the city level.
+var _ruler_record: Dictionary = {}
+var _ruler_npc_index := -1
 
 const CHEST_LOOT_TABLE := [
 	{"name": "Iron Ingot", "min": 1, "max": 5},
@@ -1456,6 +1469,15 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 	var scene_seed := _hold_state.apply_world_settings(settings, DWARFHOLD_SCENE_SEED_KEY, DWARFHOLD_SCENE_POPULATION_KEY)
 	_hold_name = String(settings.get(DWARFHOLD_SCENE_NAME_KEY, ""))
 	_hold_fall_text = String(settings.get(DWARFHOLD_SCENE_FALL_KEY, ""))
+	_hold_tile = Vector2i(2147483647, 2147483647)
+	_lair_beast = {}
+	var tile_variant: Variant = settings.get(DWARFHOLD_SCENE_TILE_KEY, null)
+	if tile_variant is Dictionary:
+		var tile_dict := tile_variant as Dictionary
+		_hold_tile = Vector2i(int(tile_dict.get("x", 2147483647)), int(tile_dict.get("y", 2147483647)))
+		## The chronicle's still-living beast laired in THIS hold; slain
+		## beasts (by sim hero or player) never come back.
+		_lair_beast = WorldChronicleService.lair_beast_for_tile(settings, _hold_tile)
 	var chronology := settings.get("chronology", {}) as Dictionary
 	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
 	_underdeep_sites = []
@@ -1923,6 +1945,7 @@ func _show_level(target_level_index: int) -> void:
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
 	_update_depth_controls()
+	_maybe_spawn_lair_boss()
 
 func _update_depth_controls() -> void:
 	var level_count := _hold_state.generated_levels.size()
@@ -2510,6 +2533,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_assign_npc_daily_lives(grid)
 	_assign_npc_identities()
 	_assign_npc_families()
+	_apply_ruler_identity()
 	_assign_settlement_factions()
 	SettlementAfflictionService.seed_afflictions(_npc_states, _rng)
 	_apply_affliction_visuals()
@@ -2591,6 +2615,10 @@ func _assign_npc_daily_lives(grid: Dictionary) -> void:
 			{"role": ROLE_HOLD_ELDER, "count": maxi(1, npc_count / 12)}
 		]
 	})
+	## The seat is claimed BEFORE staffing: the flag keeps the staffing
+	## pass from ever posting the sitting ruler behind a counter, while
+	## the palace still hires its own Steward of the Hall.
+	_designate_hold_ruler()
 	## Role quotas cover the classic trades but leave any building type
 	## outside every role's workplace list (barber shop, tannery, ...)
 	## forever empty; the building-first pass guarantees each civic
@@ -2660,6 +2688,10 @@ func _staff_civic_buildings() -> void:
 		group_of_npc[npc_index] = ""
 		var state := _npc_states[npc_index]
 		if bool(state.get("is_guard", false)):
+			continue
+		## The ruler holds court in the palace but is not its keeper: the
+		## seat never counts as staff, so the hall still hires a steward.
+		if bool(state.get("is_ruler", false)):
 			continue
 		var anchor := state.get("work_anchor", Vector2i(2147483647, 2147483647)) as Vector2i
 		var anchor_room := String(room_of_cell.get(anchor, ""))
@@ -2822,6 +2854,9 @@ func _pick_staffing_candidate(building_type: String, workers_by_group: Dictionar
 		for npc_index in _npc_states.size():
 			var state := _npc_states[npc_index]
 			if bool(state.get("is_guard", false)):
+				continue
+			## The sitting ruler is never pulled behind a shop counter.
+			if bool(state.get("is_ruler", false)):
 				continue
 			if state.has("staffed_building_type"):
 				continue
@@ -3645,9 +3680,15 @@ func _apply_identity_appearances() -> void:
 		if sprite == null:
 			continue
 		var layers := NpcIdentityService.appearance_for_identity(identity, "dwarf")
-		var cache_key := str(layers)
+		## The sitting ruler's composed sprite wears a small gold circlet.
+		var is_crowned := bool(state.get("is_ruler", false))
+		var cache_key := "%s|crown:%s" % [str(layers), str(is_crowned)]
 		if not texture_cache.has(cache_key):
-			texture_cache[cache_key] = DwarfSpriteComposer.compose(layers)
+			texture_cache[cache_key] = (
+				DwarfSpriteComposer.compose_crowned(layers)
+				if is_crowned
+				else DwarfSpriteComposer.compose(layers)
+			)
 		sprite.texture = texture_cache[cache_key]
 		sprite.region_enabled = false
 		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
@@ -3657,9 +3698,13 @@ func _apply_identity_appearances() -> void:
 		) * float(layers.get("body_scale", 1.0))
 		state["composed"] = true
 
-## The trade on a dwarf's card: a posted keeper wears their building's
-## profession ("Barber"), everyone else their spritesheet role title.
+## The trade on a dwarf's card: the sitting ruler wears their throne
+## title, a posted keeper wears their building's profession ("Barber"),
+## everyone else their spritesheet role title.
 func _npc_role_title(state: Dictionary) -> String:
+	var throne_title := String(state.get("ruler_title", ""))
+	if not throne_title.is_empty():
+		return throne_title
 	var staffed_title := String(state.get("staffed_profession", ""))
 	if not staffed_title.is_empty():
 		return staffed_title
@@ -3691,6 +3736,231 @@ func _assign_npc_identities() -> void:
 func _assign_npc_families() -> void:
 	var family_stats := SettlementFamilyService.build_families(_npc_states, "dwarf", _rng)
 	print("[%s] families: %d couples, %d children" % [name, int(family_stats.get("couples", 0)), int(family_stats.get("children_placed", 0))])
+
+## --- The sitting ruler --------------------------------------------------
+## The chronicle's succession line ends in a real dwarf: the settlement's
+## sitting ruler walks the city level as a named NPC, holds court at the
+## High King's Palace (or the guild hall, or the largest civic building),
+## wears a pixel circlet, and answers with rank-appropriate lines. The
+## dynasty behind them feeds the inspection card's family-tree tab.
+
+## Chronicle entry for this hold (ruler name/title/lineage). Standalone
+## runs without an overworld chronicle crown a seeded fallback so tests
+## and direct scene boots still seat somebody.
+func _resolve_ruler_record() -> Dictionary:
+	var chronicle := WorldChronicleService.chronicle_from_settings(_world_settings_snapshot())
+	var entry := WorldChronicleService.settlement_entry_by_name(chronicle, _hold_name)
+	if not entry.is_empty() and int(entry.get("fell_year", 0)) <= 0 \
+			and not String(entry.get("ruler_name", "")).strip_edges().is_empty():
+		return entry
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s|hold_ruler" % seed_input.text.strip_edges())
+	var ruler_gender := NpcIdentityService.roll_dwarf_gender(rng)
+	var first_name := NpcIdentityService.dwarf_ruler_first_name(rng, ruler_gender)
+	var clan := NpcIdentityService.DWARF_CLAN_NAMES[rng.randi_range(0, NpcIdentityService.DWARF_CLAN_NAMES.size() - 1)]
+	var title := NpcIdentityService.dwarf_ruler_title(rng, ruler_gender, false)
+	var since := maxi(1, _calendar_start_year - rng.randi_range(4, 30))
+	var full_name := "%s %s" % [first_name, clan]
+	return {
+		"ruler_name": full_name,
+		"ruler_title": title,
+		"ruler_gender": ruler_gender,
+		"ruler_since": since,
+		"lineage": [{
+			"name": full_name,
+			"title": title,
+			"gender": ruler_gender,
+			"start": since,
+			"end": 0,
+			"violent_end": false,
+			"sitting": true
+		}]
+	}
+
+## Where the ruler holds court: walkable floor of the palace when the
+## level raised one, else the guild hall, else the roomiest civic
+## building. Sorted room ids and cells keep the choice seed-stable.
+func _ruler_station_cells() -> Array[Vector2i]:
+	var best_cells: Array[Vector2i] = []
+	var best_rank := 3
+	var best_size := 0
+	var room_ids: Array[String] = []
+	for room_id_variant: Variant in _latest_civic_buildings_by_id.keys():
+		room_ids.append(String(room_id_variant))
+	room_ids.sort()
+	for room_id: String in room_ids:
+		var payload := _latest_civic_buildings_by_id[room_id] as Dictionary
+		var building_type := String(payload.get("type", ""))
+		var rank := 2
+		if building_type == "high_kings_palace":
+			rank = 0
+		elif building_type == "guild_hall":
+			rank = 1
+		if rank > best_rank:
+			continue
+		var walkable: Array[Vector2i] = []
+		for cell_variant: Variant in (payload.get("cells", []) as Array):
+			var cell := cell_variant as Vector2i
+			if _is_walkable_cell(cell):
+				walkable.append(cell)
+		if walkable.is_empty():
+			continue
+		walkable.sort()
+		if rank < best_rank or walkable.size() > best_size:
+			best_rank = rank
+			best_size = walkable.size()
+			best_cells = walkable
+	return best_cells
+
+## Crowns one resident on the city level BEFORE the staffing pass, so
+## the is_ruler flag excludes them from every shopkeeper pull while the
+## palace still hires its own steward.
+func _designate_hold_ruler() -> void:
+	_ruler_npc_index = -1
+	_ruler_record = {}
+	if _npc_states.is_empty() or _hold_state.current_level_index != 0:
+		return
+	## Fallen holds keep no court: nobody sits a throne in silent halls.
+	if not _hold_fall_text.is_empty():
+		return
+	var station_cells := _ruler_station_cells()
+	if station_cells.is_empty():
+		return
+	_ruler_record = _resolve_ruler_record()
+	if String(_ruler_record.get("ruler_name", "")).strip_edges().is_empty():
+		return
+	var candidates: Array[int] = []
+	for npc_index: int in range(_npc_states.size()):
+		if not bool(_npc_states[npc_index].get("is_guard", false)):
+			candidates.append(npc_index)
+	if candidates.is_empty():
+		return
+	_ruler_npc_index = candidates[_rng.randi_range(0, candidates.size() - 1)]
+	var state := _npc_states[_ruler_npc_index]
+	state["is_ruler"] = true
+	state["work_anchor"] = station_cells[_rng.randi_range(0, station_cells.size() - 1)]
+
+## The crowned NPC becomes the actual ruler AFTER the family pass, so no
+## later surname adoption can undo the royal name; kin links minted under
+## the pre-coronation name follow the crown.
+func _apply_ruler_identity() -> void:
+	if _ruler_npc_index < 0 or _ruler_npc_index >= _npc_states.size():
+		return
+	var state := _npc_states[_ruler_npc_index]
+	var identity := state.get("identity", {}) as Dictionary
+	if identity.is_empty():
+		return
+	var old_name := String(identity.get("name", ""))
+	var ruler_name := String(_ruler_record.get("ruler_name", ""))
+	var ruler_title := String(_ruler_record.get("ruler_title", "Thane"))
+	## A citizen already wearing the royal name steps aside first.
+	for other_index: int in range(_npc_states.size()):
+		if other_index == _ruler_npc_index:
+			continue
+		var other_identity := _npc_states[other_index].get("identity", {}) as Dictionary
+		if String(other_identity.get("name", "")) != ruler_name:
+			continue
+		var stepped_aside_name := "%s the Younger" % ruler_name
+		_repair_kin_references(String(other_identity.get("name", "")), stepped_aside_name)
+		other_identity["name"] = stepped_aside_name
+		_npc_states[other_index]["npc_name"] = stepped_aside_name
+	identity["name"] = ruler_name
+	identity["first_name"] = ruler_name.get_slice(" ", 0)
+	identity["clan"] = ruler_name.get_slice(" ", 1)
+	identity["race"] = "Dwarf"
+	identity["profession"] = ruler_title
+	identity["gender"] = String(_ruler_record.get("ruler_gender", ""))
+	## Rulers are elders: the reign must fit inside one dwarven life.
+	var since := int(_ruler_record.get("ruler_since", _calendar_start_year))
+	var reign_years := maxi(0, _calendar_start_year - since)
+	identity["age"] = clampi(maxi(int(identity.get("age", 120)), reign_years + 60), 60, 320)
+	state["npc_name"] = ruler_name
+	state["ruler_title"] = ruler_title
+	state["ruler_since"] = since
+	state["ruler_lineage"] = (_ruler_record.get("lineage", []) as Array).duplicate(true)
+	state["ruler_hold_name"] = _hold_name
+	if not old_name.is_empty() and old_name != ruler_name:
+		_repair_kin_references(old_name, ruler_name)
+	state["ruler_kin"] = _ruler_kin_payload(identity)
+	print("[%s] ruler: %s %s seated (lineage %d)" % [
+		name, ruler_title, ruler_name, (state.get("ruler_lineage", []) as Array).size()])
+
+## Spouse/parents/children references are by name; a rename walks the
+## whole roster so no link dangles on the old one.
+func _repair_kin_references(old_name: String, new_name: String) -> void:
+	if old_name.is_empty() or old_name == new_name:
+		return
+	for other_variant: Variant in _npc_states:
+		var other := other_variant as Dictionary
+		var other_identity := other.get("identity", {}) as Dictionary
+		if other_identity.is_empty():
+			continue
+		if String(other_identity.get("spouse", "")) == old_name:
+			other_identity["spouse"] = new_name
+		_rename_in_kin_list(other_identity, "parents", old_name, new_name)
+		_rename_in_kin_list(other_identity, "children", old_name, new_name)
+
+func _rename_in_kin_list(identity: Dictionary, list_key: String, old_name: String, new_name: String) -> void:
+	var entries_variant: Variant = identity.get(list_key)
+	if not (entries_variant is Array):
+		return
+	var entries := entries_variant as Array
+	for entry_index: int in range(entries.size()):
+		if String(entries[entry_index]) == old_name:
+			entries[entry_index] = new_name
+
+## The ruler's living kin as portrait-ready stubs (name/clan/age/race),
+## looked up from the roster for the dynasty tree's spouse+children row.
+func _ruler_kin_payload(identity: Dictionary) -> Dictionary:
+	var payload := {"spouse": {}, "children": []}
+	var spouse_name := String(identity.get("spouse", ""))
+	var child_names: Array[String] = []
+	for child_variant: Variant in (identity.get("children", []) as Array):
+		child_names.append(String(child_variant))
+	for other_variant: Variant in _npc_states:
+		var other := other_variant as Dictionary
+		var other_identity := other.get("identity", {}) as Dictionary
+		var other_name := String(other_identity.get("name", ""))
+		if other_name.is_empty():
+			continue
+		var stub := {
+			"name": other_name,
+			"clan": String(other_identity.get("clan", "")),
+			"age": int(other_identity.get("age", 100)),
+			"race": String(other_identity.get("race", "Dwarf"))
+		}
+		if other_name == spouse_name and not spouse_name.is_empty():
+			payload["spouse"] = stub
+		elif child_names.has(other_name):
+			(payload["children"] as Array).append(stub)
+	return payload
+
+## What the sitting ruler says: their hold, their line, their grudges.
+func _ruler_dialogue_line(state: Dictionary) -> String:
+	var hold_label := _hold_name if not _hold_name.is_empty() else "this hold"
+	var throne_title := String(state.get("ruler_title", "Thane"))
+	var since := int(state.get("ruler_since", _calendar_start_year))
+	var pool: Array[String] = [
+		"I am %s of %s. Speak plainly; the stone listens." % [throne_title, hold_label],
+		"Every gate and gallery of %s answers to this seat. Keep its peace." % hold_label,
+		"I have ruled %s since the year %d. It has cost me more than gold." % [hold_label, since]
+	]
+	var lineage := state.get("ruler_lineage", []) as Array
+	if lineage.size() > 1:
+		var predecessor := lineage[lineage.size() - 2] as Dictionary
+		pool.append("Before me, %s %s held this seat. I mean to be remembered longer." % [
+			String(predecessor.get("title", "")), String(predecessor.get("name", ""))])
+		var line_founder := lineage[0] as Dictionary
+		pool.append("My line runs back to %s %s, year %d. %d rulers, one mountain." % [
+			String(line_founder.get("title", "")), String(line_founder.get("name", "")),
+			int(line_founder.get("start", 1)), lineage.size()])
+	for member_variant: Variant in lineage:
+		if bool((member_variant as Dictionary).get("violent_end", false)):
+			pool.append("The seat of %s has been taken in blood before. Not while I draw breath." % hold_label)
+			break
+	for goal: String in WorldChronicleService.history_agenda_goals(_world_settings_snapshot(), _hold_name):
+		pool.append("While I rule, this hold does not forget: %s." % goal)
+	return pool[_rng.randi_range(0, pool.size() - 1)]
 
 func _assign_settlement_factions() -> void:
 	_faction_event_stamps.clear()
@@ -3758,7 +4028,10 @@ func _show_npc_dialogue(state: Dictionary) -> void:
 	# guilds, and everyone still has personal news and map rumors.
 	var line: String
 	var faction_roll := _rng.randf()
-	if int(state.get("role", 0)) == ROLE_GOLDSMITH and _rng.randf() < 0.4:
+	if bool(state.get("is_ruler", false)):
+		# The seat speaks for itself: hold, lineage, and old grudges.
+		line = _ruler_dialogue_line(state)
+	elif int(state.get("role", 0)) == ROLE_GOLDSMITH and _rng.randf() < 0.4:
 		# The hold's traders talk shop: what goes cheap here, what pays.
 		line = SettlementEconomyService.dialogue_line(role_title, SettlementEconomyService.merchant_market_line(_hold_market, _rng), _rng)
 	elif state.has("faction_name") and faction_roll < 0.35:
@@ -4306,6 +4579,112 @@ func _populate_stratum_creatures(stratum: Dictionary) -> void:
 		if _is_walkable_cell(guard_cell):
 			_spawn_creature_at(guard_cell, int(slots[slots.size() - 1]))
 
+## --- The named beast's lair ----------------------------------------------
+## When the chronicle laired a still-living beast in this hold, its boss
+## waits on the DEEPEST level: an existing creature def grown and tinted
+## into the named beast, run by the same AI pipeline with boss stats.
+
+func _maybe_spawn_lair_boss() -> void:
+	if _lair_beast.is_empty() or _hold_state.generated_levels.is_empty():
+		return
+	if _hold_state.current_level_index != _hold_state.generated_levels.size() - 1:
+		return
+	## Re-check the register: the beast may have died this very visit.
+	if WorldChronicleService.is_beast_slain(_world_settings_snapshot(), String(_lair_beast.get("name", ""))):
+		_lair_beast = {}
+		return
+	for state: Dictionary in _creature_states:
+		if bool(state.get("boss", false)):
+			return
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in _latest_grid.keys():
+		if int(_latest_grid[cell_variant]) == CELL_HALL:
+			hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	## The beast holds the far end of the level: the hall cell farthest
+	## from wherever the player came in.
+	var boss_cell := hall_cells[0]
+	var best_distance := -1.0
+	for cell: Vector2i in hall_cells:
+		var distance := Vector2(cell - _player_cell).length()
+		if distance > best_distance:
+			best_distance = distance
+			boss_cell = cell
+	_spawn_lair_boss_at(boss_cell)
+
+func _spawn_lair_boss_at(cell: Vector2i) -> void:
+	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(_lair_beast.get("kind", "dragon")))
+	var def_index := int(spec.get("def_index", 7))
+	if def_index < 0 or def_index >= UndergroundCreatureService.CREATURE_DEFS.size():
+		return
+	var def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[def_index]
+	var display := String(_lair_beast.get("display", "a nameless beast"))
+	var sprite: Sprite2D = UndergroundCreatureService.create_creature_sprite(_creature_texture, int(def.get("slot", 0)), tile_size)
+	UndergroundCreatureService.apply_boss_visuals(sprite, spec, WorldChronicleService._capitalize_first(display))
+	sprite.position = _cell_center_position(cell)
+	sprite.z_index = 13
+	actor_layer.add_child(sprite)
+	_creature_states.append({
+		"def_index": def_index,
+		"hp": int(spec.get("max_hp", 200)),
+		"cell": cell,
+		"sprite": sprite,
+		"moving": false,
+		"dying": false,
+		"anim": "idle",
+		"wander_timer": _rng.randf_range(0.5, 2.0),
+		"attack_timer": 0.0,
+		"anim_time": _rng.randf_range(0.0, 1.0),
+		"facing_dir": Vector2i(0, 1),
+		"boss": true,
+		"beast_name": String(_lair_beast.get("name", "")),
+		"beast_display": display,
+		"beast_kind": String(_lair_beast.get("kind", "dragon")),
+		"damage_override": int(spec.get("damage", 8)),
+		"aggro_override": int(spec.get("aggro_range", 12)),
+		"cooldown_override": float(spec.get("attack_cooldown", 1.5)),
+		"speed_override": float(spec.get("speed", 80.0))
+	})
+	_set_save_status("The deep stirs — %s nests here." % display, Color(1.0, 0.55, 0.45, 1.0))
+
+## Big coins, the beast's unique trophy, and a world that remembers: the
+## kill is written to the persistent register and the stored chronicle,
+## so rumors flip, the World Chronicle updates, and the beast never
+## respawns — here or anywhere.
+func _award_lair_boss_kill(state: Dictionary) -> void:
+	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(state.get("beast_kind", "dragon")))
+	var coins := _rng.randi_range(int(spec.get("coins_min", 120)), int(spec.get("coins_max", 200)))
+	_adjust_coins(coins)
+	var trophy := WorldChronicleService.beast_trophy_name({
+		"name": String(state.get("beast_name", "Beast")),
+		"kind": String(state.get("beast_kind", "dragon"))
+	})
+	_add_to_inventory(trophy, 1)
+	GameAudioService.play_sfx(self, "coin")
+	var player_name := "A wanderer"
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_player_character"):
+		var character: Dictionary = game_session.call("get_player_character")
+		var character_name := String(character.get("name", "")).strip_edges()
+		if not character_name.is_empty():
+			player_name = character_name
+	var place := _hold_name if not _hold_name.is_empty() else "a fallen hold"
+	var kill_year := GameCalendar.year_for_day(_game_day - 1, _calendar_start_year)
+	var settings: Dictionary = _world_settings_snapshot()
+	WorldChronicleService.record_player_beast_kill(settings, String(state.get("beast_name", "")), player_name, place, kill_year)
+	_store_world_settings(settings)
+	_lair_beast = {}
+	var sprite := state.get("sprite") as Sprite2D
+	if sprite != null:
+		_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
+	_set_save_status(
+		"%s is slain! You claim %s and %d coins — the world will remember this." % [
+			WorldChronicleService._capitalize_first(String(state.get("beast_display", "the beast"))), trophy, coins
+		],
+		Color(1.0, 0.85, 0.45, 1.0)
+	)
+
 func _update_creatures(delta: float) -> void:
 	if _creature_states.is_empty():
 		return
@@ -4328,7 +4707,9 @@ func _update_creatures(delta: float) -> void:
 			continue
 		var cell := state.get("cell", Vector2i.ZERO) as Vector2i
 		var player_distance := maxi(absi(cell.x - _player_cell.x), absi(cell.y - _player_cell.y))
-		if player_distance > CREATURE_DESPAWN_DISTANCE:
+		# The named beast guards its lair from wherever the player enters;
+		# only ordinary prowlers vanish with distance.
+		if player_distance > CREATURE_DESPAWN_DISTANCE and not bool(state.get("boss", false)):
 			sprite.queue_free()
 			removals.append(index)
 			continue
@@ -4339,7 +4720,7 @@ func _update_creatures(delta: float) -> void:
 			_set_creature_anim(state, "idle")
 		if bool(state.get("moving", false)):
 			var target := state.get("move_target", sprite.position) as Vector2
-			sprite.position = sprite.position.move_toward(target, float(def.get("speed", 60.0)) * delta)
+			sprite.position = sprite.position.move_toward(target, float(state.get("speed_override", float(def.get("speed", 60.0)))) * delta)
 			if sprite.position.distance_to(target) <= 0.5:
 				sprite.position = target
 				state["cell"] = state.get("move_cell", cell) as Vector2i
@@ -4347,12 +4728,13 @@ func _update_creatures(delta: float) -> void:
 		elif player_distance <= 1 and _player_sprite != null and _player_control_enabled:
 			state["facing_dir"] = _direction_between_cells(cell, _player_cell)
 			if float(state.get("attack_timer", 0.0)) <= 0.0:
-				state["attack_timer"] = float(def.get("attack_cooldown", 1.3))
+				state["attack_timer"] = float(state.get("cooldown_override", float(def.get("attack_cooldown", 1.3))))
 				_set_creature_anim(state, "attack")
-				_damage_player(int(def.get("damage", 1)), String(def.get("name", "creature")))
+				var source_name := String(state.get("beast_display", def.get("name", "creature")))
+				_damage_player(int(state.get("damage_override", int(def.get("damage", 1)))), source_name)
 		else:
 			var step := Vector2i.ZERO
-			if player_distance <= int(def.get("aggro_range", 6)) and not _latest_district_cell_map.has(_player_cell):
+			if player_distance <= int(state.get("aggro_override", int(def.get("aggro_range", 6)))) and not _latest_district_cell_map.has(_player_cell):
 				step = _creature_step_toward(cell, _player_cell)
 			else:
 				state["wander_timer"] = float(state.get("wander_timer", 0.0)) - delta
@@ -4428,6 +4810,9 @@ func _hurt_creature(creature_index: int, damage: int) -> void:
 	if not loot_parts.is_empty():
 		message += " — " + ", ".join(loot_parts)
 	_set_save_status(message, Color(0.85, 0.95, 0.7, 1.0))
+	# A named beast's fall echoes further: trophy, hoard, and history.
+	if bool(state.get("boss", false)):
+		_award_lair_boss_kill(state)
 
 ## Reaching weapons. The staff bursts over a knot of beasts on its own
 ## cooldown; the bow spends an arrow a shot. Melee stays king up close.
@@ -4512,8 +4897,13 @@ func _damage_player(amount: int, source_name: String) -> void:
 	if _player_hp <= 0.0:
 		_handle_player_death(source_name)
 
+## Death is final: no waking back in the Great Hall. Half the purse spills
+## where the walker fell (the drop stays with the world), the grave goes
+## into the chronicle, and the game-over screen takes over.
 func _handle_player_death(source_name: String) -> void:
-	_player_hp = _player_max_hp
+	if _game_over != null and is_instance_valid(_game_over):
+		return
+	_player_hp = 0.0
 	var lost_coins := _player_coins / 2
 	if lost_coins > 0:
 		_adjust_coins(-lost_coins)
@@ -4523,13 +4913,33 @@ func _handle_player_death(source_name: String) -> void:
 	_update_hp_label()
 	_player_move_path.clear()
 	_player_is_moving = false
-	if _latest_district_labels.is_empty():
-		# Deep levels have no Great Hall to wake in - climb the walker
-		# back to the city level instead of reviving them mid-melee.
-		call_deferred("_show_level", 0)
-	else:
-		_relocate_player_to_city_heart(_latest_grid)
-	_set_save_status("Slain by %s — you wake back in the hold" % source_name, Color(0.95, 0.5, 0.5, 1.0))
+	var place := _hold_name if not _hold_name.is_empty() else "a dwarfhold"
+	_record_death_and_show_game_over(source_name, place)
+
+## Writes the death into the persistent chronicle register (so it survives
+## regeneration like the beast kills), flushes the session at the death
+## date, and raises the game-over modal. The tree pauses beneath it.
+func _record_death_and_show_game_over(source_name: String, place_name: String) -> void:
+	var player_name := "A wanderer"
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_player_character"):
+		var character: Dictionary = game_session.call("get_player_character")
+		var character_name := String(character.get("name", "")).strip_edges()
+		if not character_name.is_empty():
+			player_name = character_name
+	var death_year := GameCalendar.year_for_day(_game_day - 1, _calendar_start_year)
+	var settings: Dictionary = _world_settings_snapshot()
+	WorldChronicleService.record_player_death(settings, player_name, place_name, death_year, source_name)
+	_store_world_settings(settings)
+	flush_session_state()
+	if _escape_menu != null and _escape_menu.is_open():
+		_escape_menu.close()
+	_game_over = GameOverScreen.new()
+	_game_over.character_name = player_name
+	_game_over.place_name = place_name
+	_game_over.date_line = GameCalendar.date_text(_game_day - 1, _calendar_start_year)
+	_game_over.cause_name = source_name
+	add_child(_game_over)
 
 ## The hold is home: standing on city ground slowly mends your wounds -
 ## as long as there's food in your belly.
@@ -4553,8 +4963,9 @@ func _advance_hunger(delta_hours: float) -> void:
 		_player_hp = maxf(_player_hp - delta_hours * PlayerStatsService.STARVATION_DAMAGE_PER_GAME_HOUR, 0.0)
 		_update_hp_label()
 		if _player_hp <= 0.0:
+			# Death is final now: no satiety refill for a respawn that
+			# no longer happens.
 			_handle_player_death("starvation")
-			_player_satiety = PlayerStatsService.SATIETY_MAX * 0.3
 	_update_hunger_label()
 
 func _setup_hp_label() -> void:
@@ -4815,6 +5226,11 @@ func _load_persistent_player_state() -> void:
 		_game_day = maxi(1, int(clock.get("day", _game_day)))
 
 func _save_persistent_player_state() -> void:
+	# Once the game-over modal owns the session, the death-moment flush has
+	# already run; the dying scene must not smear its zeroed state over a
+	# freshly loaded save or a stripped successor session as it exits.
+	if _game_over != null and is_instance_valid(_game_over):
+		return
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
 		return

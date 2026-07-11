@@ -600,19 +600,50 @@ const FOOD_DEFS := {
 
 static var _texture_cache: Dictionary = {}
 
+## Named-beast trophies ("Skarthrax's Fang") are generated from the world
+## chronicle's beasts, so they can't sit in the static catalog. Each
+## trophy suffix borrows a fitting existing icon; the flavor line and the
+## high sell value come from the pattern itself.
+const BEAST_TROPHY_ICON_ALIASES := {
+	"Fang": "Fossil Claw",
+	"Knucklebone": "Old Bone",
+	"Crown": "Gold Trinket",
+	"Eye": "Amber"
+}
+
+## The trophy suffix ("Fang") when the item is a beast trophy, else "".
+static func beast_trophy_kind(item_name: String) -> String:
+	var marker := item_name.rfind("'s ")
+	if marker <= 0:
+		return ""
+	var suffix := item_name.substr(marker + 3)
+	if BEAST_TROPHY_ICON_ALIASES.has(suffix):
+		return suffix
+	return ""
+
 static func has_icon(item_name: String) -> bool:
-	return ITEM_DEFS.has(item_name)
+	return ITEM_DEFS.has(item_name) or not beast_trophy_kind(item_name).is_empty()
 
 static func flavor_text(item_name: String) -> String:
+	if not ITEM_DEFS.has(item_name):
+		var trophy_kind := beast_trophy_kind(item_name)
+		if not trophy_kind.is_empty():
+			return "Proof of a named beast's death. Collectors and chroniclers pay dearly."
 	var def := ITEM_DEFS.get(item_name, {}) as Dictionary
 	return String(def.get("flavor", ""))
 
 static func icon_texture(item_name: String) -> Texture2D:
-	if not ITEM_DEFS.has(item_name):
-		return null
+	var lookup_name := item_name
+	if not ITEM_DEFS.has(lookup_name):
+		var trophy_kind := beast_trophy_kind(lookup_name)
+		if trophy_kind.is_empty():
+			return null
+		lookup_name = String(BEAST_TROPHY_ICON_ALIASES.get(trophy_kind, "Old Bone"))
+		if not ITEM_DEFS.has(lookup_name):
+			return null
 	if _texture_cache.has(item_name):
 		return _texture_cache[item_name] as Texture2D
-	var item_def := ITEM_DEFS[item_name] as Dictionary
+	var item_def := ITEM_DEFS[lookup_name] as Dictionary
 	var icon_index := int(item_def.get("icon", 0))
 	var atlas := AtlasTexture.new()
 	match int(item_def.get("sheet", 1)):

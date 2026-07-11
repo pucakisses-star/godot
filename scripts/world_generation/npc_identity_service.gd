@@ -18,6 +18,50 @@ const DWARF_CLAN_NAMES: Array[String] = [
 	"Steeltoe", "Marblebrow", "Gemcutter", "Coalbrand", "Hammerfall",
 	"Orehand", "Mithrilheart", "Basaltback", "Flintbeard", "Bronzebelly"
 ]
+## DWARF_FIRST_NAMES split by gender, so rulers, heirs and chronicle
+## lineages can pair a gendered title with a matching name. The union
+## list above stays for ungendered citizen rolls.
+const DWARF_FIRST_NAMES_MALE: Array[String] = [
+	"Urist", "Dolgrim", "Thorgar", "Brokk", "Kazrik", "Snorri", "Durin",
+	"Balin", "Bofur", "Nali", "Kili", "Grimbold", "Hardek", "Morgrym",
+	"Ovek", "Rurik", "Torvald"
+]
+const DWARF_FIRST_NAMES_FEMALE: Array[String] = [
+	"Gimra", "Helga", "Sigrun", "Astrid", "Brunhild", "Katla", "Oddny",
+	"Thyra", "Vigdis", "Dagny", "Ingrid", "Skadi", "Ulfhild"
+]
+## Throne-worthy first names for hold rulers and their succession lines.
+const DWARF_RULER_FIRST_NAMES_MALE: Array[String] = [
+	"Urist", "Thrain", "Borin", "Durin", "Gimli", "Khazad", "Rurik",
+	"Dwalin", "Oin", "Fundin", "Balin", "Kili", "Thorin", "Nori"
+]
+const DWARF_RULER_FIRST_NAMES_FEMALE: Array[String] = [
+	"Dis", "Sigrid", "Brynja", "Thora", "Eydis", "Runa", "Katla",
+	"Astrid", "Helga", "Frida", "Vigdis", "Hreda"
+]
+## Dwarfhold ruler titles, gendered the way town_details_generator genders
+## its mayors: a rolled ruler's gender picks the name pool AND the title
+## set, so a Queen is never called Thorin. Titles that read the same on
+## any ruler (Thane, High Thane, Shieldthane) sit in both gendered lists;
+## the neutral set can crown either gender.
+const DWARF_RULER_TITLES_MALE: Array[String] = [
+	"King", "High King", "King-Under-The-Mountain", "Baron", "Manorlord",
+	"Thane", "High Thane", "Forge-Lord", "Shieldthane"
+]
+const DWARF_RULER_TITLES_FEMALE: Array[String] = [
+	"Queen", "Queen Regent", "High Queen", "Baroness",
+	"Thane", "High Thane", "Shieldthane"
+]
+const DWARF_RULER_TITLES_NEUTRAL: Array[String] = [
+	"Administrator", "Elder", "Clan Master", "Prophet",
+	"Highmaster Hammerdwarf", "Deepwarden", "Runesmith", "Iron Regent"
+]
+## Dark holds keep their own style of throne; the dark titles read the
+## same on any ruler, so the set is ungendered.
+const DWARF_DARK_RULER_TITLES: Array[String] = [
+	"Sorcerer-Prophet", "Ash Lord", "Obsidian Warden", "Flame Regent", "Deep Ember"
+]
+const DWARF_RULER_NEUTRAL_TITLE_CHANCE := 0.3
 const TOWNSFOLK_FIRST_NAMES: Array[String] = [
 	"Aldric", "Bertram", "Cedric", "Duncan", "Edwin", "Gareth", "Harold",
 	"Osric", "Percival", "Rowan", "Tobias", "Wallace", "Agnes", "Beatrice",
@@ -99,6 +143,34 @@ const KOBOLD_SURNAMES: Array[String] = [
 	"Emberclaw", "Tunnelborn", "Scaleflint", "Deepsnout", "Wyrmkin",
 	"Ashscale", "Cavewhisper", "Gravelhiss"
 ]
+
+## --- Dwarf ruler gendering ---------------------------------------------------
+## One source of truth for the gender-consistent ruler rolls: overworld
+## details, chronicle lineages and the hold's fallback ruler all pull
+## from these pools, so a title always matches its bearer's name pool.
+
+static func roll_dwarf_gender(rng: RandomNumberGenerator) -> String:
+	return "female" if rng.randf() < 0.5 else "male"
+
+static func dwarf_ruler_first_name(rng: RandomNumberGenerator, gender: String) -> String:
+	var pool := DWARF_RULER_FIRST_NAMES_FEMALE if gender == "female" else DWARF_RULER_FIRST_NAMES_MALE
+	return pool[rng.randi_range(0, pool.size() - 1)]
+
+static func dwarf_ruler_title(rng: RandomNumberGenerator, gender: String, is_dark: bool) -> String:
+	if is_dark:
+		return DWARF_DARK_RULER_TITLES[rng.randi_range(0, DWARF_DARK_RULER_TITLES.size() - 1)]
+	if rng.randf() < DWARF_RULER_NEUTRAL_TITLE_CHANCE:
+		return DWARF_RULER_TITLES_NEUTRAL[rng.randi_range(0, DWARF_RULER_TITLES_NEUTRAL.size() - 1)]
+	var pool := DWARF_RULER_TITLES_FEMALE if gender == "female" else DWARF_RULER_TITLES_MALE
+	return pool[rng.randi_range(0, pool.size() - 1)]
+
+## Gender of a dwarf first name by pool membership ("" when unknown).
+static func dwarf_name_gender(first_name: String) -> String:
+	if DWARF_FIRST_NAMES_FEMALE.has(first_name) or DWARF_RULER_FIRST_NAMES_FEMALE.has(first_name):
+		return "female"
+	if DWARF_FIRST_NAMES_MALE.has(first_name) or DWARF_RULER_FIRST_NAMES_MALE.has(first_name):
+		return "male"
+	return ""
 
 static func roll_race(rng: RandomNumberGenerator, kind: String) -> String:
 	var pool := RACES_BY_KIND.get(kind, RACES_BY_KIND["townsfolk"]) as Array

@@ -362,11 +362,24 @@ static func _fill_district(grid: Dictionary, district: Dictionary, building_type
 	var center := district.get("center", Vector2i.ZERO) as Vector2i
 	var radius := roundi(float(int(district.get("radius", 10))) * 1.35) + 2
 
-	# The High King's Palace anchors the Great Hall of a major hold.
+	# The High King's Palace anchors the Great Hall of a major hold. The
+	# old fixed spot straddled the plaza core (CELL_PLAZA, never CELL_HALL)
+	# so the stamp could not land and no hold ever raised its palace; the
+	# palace now may claim plaza floor and walks candidate spots around
+	# the core rim until one fits.
 	if bool(district.get("has_palace", false)):
-		var palace_center := center + Vector2i(-radius / 2, 0)
-		if _stamp_structure(grid, palace_center, Vector2i(6, 4), CELL_BUILDING, radius, center):
-			_record_footprint(building_type_map, palace_center, Vector2i(6, 4), "high_kings_palace")
+		var palace_footprint := Vector2i(6, 4)
+		var palace_spots: Array[Vector2i] = [center + Vector2i(-radius / 2, 0)]
+		for _spot in range(60):
+			palace_spots.append(_random_cell_in_district(center, radius, rng))
+		for palace_center: Vector2i in palace_spots:
+			## Keep clear of the plaza middle: the palace fronts the Great
+			## Hall, it does not swallow it.
+			if maxi(absi(palace_center.x - center.x), absi(palace_center.y - center.y)) < radius / 2:
+				continue
+			if _stamp_palace(grid, palace_center, palace_footprint, radius, center):
+				_record_footprint(building_type_map, palace_center, palace_footprint, "high_kings_palace")
+				break
 
 	var recipe: Array = (DISTRICT_BUILDING_RECIPES.get(kind, []) as Array).duplicate()
 	recipe = recipe.slice(0, mini(recipe.size(), int(district.get("recipe_limit", 99))))
@@ -482,6 +495,35 @@ static func _stamp_structure(grid: Dictionary, center: Vector2i, footprint: Vect
 	for y in range(lo.y, hi.y + 1):
 		for x in range(lo.x, hi.x + 1):
 			grid[Vector2i(x, y)] = zone
+	return true
+
+## Palace stamp: unlike _stamp_structure the interior may claim plaza
+## floor AND carve into raw rock (dwarves build into the mountain), so
+## long as enough of the footprint touches dug floor to front the Great
+## Hall. Existing houses and buildings are never overwritten.
+static func _stamp_palace(grid: Dictionary, center: Vector2i, footprint: Vector2i, district_radius: int, district_center: Vector2i) -> bool:
+	var lo := center - footprint
+	var hi := center + footprint
+	if maxi(absi(center.x - district_center.x), absi(center.y - district_center.y)) > district_radius + 2:
+		return false
+	var dug_cells := 0
+	for y in range(lo.y - 1, hi.y + 2):
+		for x in range(lo.x - 1, hi.x + 2):
+			var cell := Vector2i(x, y)
+			var existing := int(grid.get(cell, CELL_ROCK))
+			var inside := x >= lo.x and x <= hi.x and y >= lo.y and y <= hi.y
+			if existing == CELL_HOUSE or existing == CELL_BUILDING:
+				return false
+			if inside and (existing == CELL_HALL or existing == CELL_PLAZA):
+				dug_cells += 1
+	## At least a quarter of the interior must already be open floor so
+	## the palace attaches to the hall rather than floating in rock.
+	var interior_cells := (footprint.x * 2 + 1) * (footprint.y * 2 + 1)
+	if dug_cells * 4 < interior_cells:
+		return false
+	for y in range(lo.y, hi.y + 1):
+		for x in range(lo.x, hi.x + 1):
+			grid[Vector2i(x, y)] = CELL_BUILDING
 	return true
 
 static func _record_footprint(type_map: Dictionary, center: Vector2i, footprint: Vector2i, type_name: String) -> void:
