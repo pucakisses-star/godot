@@ -422,38 +422,10 @@ const DWARFHOLD_CLANS: Array[String] = [
 	"Emberbrand",
 	"Blackhammer"
 ]
-const DWARFHOLD_RULER_TITLES: Array[String] = [
-	"Thane",
-	"High Thane",
-	"Forge-Lord",
-	"Shieldthane",
-	"Deepwarden",
-	"Runesmith",
-	"Iron Regent"
-]
-const DARK_DWARFHOLD_RULER_TITLES: Array[String] = [
-	"Sorcerer-Prophet",
-	"Ash Lord",
-	"Obsidian Warden",
-	"Flame Regent",
-	"Deep Ember"
-]
-const DWARFHOLD_RULER_NAMES: Array[String] = [
-	"Urist",
-	"Thrain",
-	"Borin",
-	"Durin",
-	"Gimli",
-	"Khazad",
-	"Rurik",
-	"Dwalin",
-	"Oin",
-	"Fundin",
-	"Balin",
-	"Kili",
-	"Thorin",
-	"Nori"
-]
+## Dwarfhold ruler titles and names now live in NpcIdentityService
+## (DWARF_RULER_TITLES_MALE/FEMALE/NEUTRAL, DWARF_DARK_RULER_TITLES and
+## the gendered ruler name pools) so the overworld roll, the chronicle's
+## succession lines and the hold's fallback ruler share one gendering.
 const DWARFHOLD_GUILDS: Array[String] = [
 	"Miners Guild",
 	"Smiths Guild",
@@ -2384,7 +2356,10 @@ func _simulate_world_chronicle() -> void:
 			"is_hamlet": bool(details.get("is_hamlet", false)),
 			"state": String(details.get("political_state", "")),
 			"ruler_name": String(details.get("ruler_name", "")),
-			"ruler_title": String(details.get("ruler_title", ""))
+			"ruler_title": String(details.get("ruler_title", "")),
+			## The hold's prominent clan, so a dwarven succession line can
+			## keep one dynasty surname from founder to sitting ruler.
+			"clan": String(details.get("prominent_clan", ""))
 		})
 	_world_chronicle = WorldChronicleService.simulate(actors, _chronology_year, int(map_seed))
 	var simulate_usec := Time.get_ticks_usec() - chronicle_started_usec
@@ -2444,11 +2419,19 @@ func _apply_world_chronicle() -> void:
 		if fell_year > 0:
 			details["fall_year"] = fell_year
 			details["fall_summary"] = String(entry.get("fall_text", ""))
-		## Notable settlements inherit their lineage's sitting ruler.
+		## Notable settlements inherit their lineage's sitting ruler. For
+		## dwarfholds the chronicle is AUTHORITATIVE: the succession line's
+		## last ruler replaces the placement roll, so the map tooltip, the
+		## entered hold and the dynasty tree all name the same ruler.
 		var chronicle_ruler := String(entry.get("ruler_name", "")).strip_edges()
-		if not chronicle_ruler.is_empty() and String(details.get("ruler_name", "")).strip_edges().is_empty():
-			details["ruler_name"] = chronicle_ruler
-			details["ruler_title"] = String(entry.get("ruler_title", ""))
+		if not chronicle_ruler.is_empty() and fell_year <= 0:
+			var chronicle_rules := String(entry.get("type", "")) == "dwarfhold"
+			if chronicle_rules or String(details.get("ruler_name", "")).strip_edges().is_empty():
+				details["ruler_name"] = chronicle_ruler
+				details["ruler_title"] = String(entry.get("ruler_title", ""))
+				var chronicle_ruler_gender := String(entry.get("ruler_gender", ""))
+				if not chronicle_ruler_gender.is_empty():
+					details["ruler_gender"] = chronicle_ruler_gender
 		## The population chart replays the chronicle: dips at plague and
 		## siege years, booms in golden ages, zero after a fall.
 		var timeline_rng := RandomNumberGenerator.new()
@@ -8288,16 +8271,16 @@ func _generate_dwarfhold_details(
 		DWARFHOLD_NEARBY_TOWN_RADIUS
 	)
 	var clan := _pick_random_entry(DWARFHOLD_CLANS, rng, "Stonebeard")
-	var ruler_first := _pick_random_entry(DWARFHOLD_RULER_NAMES, rng, "Urist")
 	var is_dark: bool = classification_key == "dark"
-	var ruler_title := (
-		_pick_random_entry(DARK_DWARFHOLD_RULER_TITLES, rng, "Sorcerer-Prophet")
-		if is_dark
-		else _pick_random_entry(DWARFHOLD_RULER_TITLES, rng, "Thane")
-	)
+	## Gender first, then a name and title from matching pools, so a
+	## Queen is never called Thorin (town_details_generator's pattern).
+	var ruler_gender := NpcIdentityService.roll_dwarf_gender(rng)
+	var ruler_first := NpcIdentityService.dwarf_ruler_first_name(rng, ruler_gender)
+	var ruler_title := NpcIdentityService.dwarf_ruler_title(rng, ruler_gender, is_dark)
 	details["population"] = population
 	details["ruler_title"] = ruler_title
 	details["ruler_name"] = "%s %s" % [ruler_first, clan]
+	details["ruler_gender"] = ruler_gender
 	details["founded_years_ago"] = rng.randi_range(60, 3200)
 	details["prominent_clan"] = clan
 	var major_clan_count := rng.randi_range(2, 4)

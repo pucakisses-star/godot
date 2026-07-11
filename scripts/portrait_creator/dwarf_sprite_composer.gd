@@ -79,6 +79,45 @@ static func _hair_sheet_for(layers: Dictionary) -> Texture2D:
 ## layers.skin_tint (html color string) multiplies the head layer, which
 ## is how goblin green and kobold rust come out of the same sheets.
 static func compose(layers: Dictionary) -> ImageTexture:
+	return ImageTexture.create_from_image(_compose_layers_image(layers))
+
+## The sitting ruler's sprite: the same composed dwarf with a thin gold
+## circlet stamped above the hairline — pixel writes, no new art assets.
+static func compose_crowned(layers: Dictionary) -> ImageTexture:
+	var image := _compose_layers_image(layers)
+	_stamp_crown(image)
+	return ImageTexture.create_from_image(image)
+
+## A tiny pixel crown: a gold band with three raised points and a ruby,
+## sat one row above the head's topmost opaque pixels.
+static func _stamp_crown(image: Image) -> void:
+	var top_y := -1
+	var min_x := TILE
+	var max_x := -1
+	for y: int in range(TILE):
+		for x: int in range(TILE):
+			if image.get_pixel(x, y).a > 0.0:
+				top_y = y
+				min_x = mini(min_x, x)
+				max_x = maxi(max_x, x)
+		if top_y >= 0:
+			break
+	if top_y < 0:
+		return
+	var center_x := (min_x + max_x) / 2
+	var band_y := maxi(0, top_y - 1)
+	var point_y := maxi(0, band_y - 1)
+	var gold := Color8(236, 197, 66)
+	var dark_gold := Color8(184, 142, 38)
+	for band_dx: int in range(-3, 4):
+		var band_x := clampi(center_x + band_dx, 0, TILE - 1)
+		image.set_pixel(band_x, band_y, gold if band_dx % 2 == 0 else dark_gold)
+	for point_dx: int in [-3, 0, 3]:
+		image.set_pixel(clampi(center_x + point_dx, 0, TILE - 1), point_y, gold)
+	## A ruby at the brow's middle.
+	image.set_pixel(clampi(center_x, 0, TILE - 1), band_y, Color8(203, 54, 66))
+
+static func _compose_layers_image(layers: Dictionary) -> Image:
 	var image := Image.create(TILE, TILE, false, Image.FORMAT_RGBA8)
 	var skin_tone := clampi(int(layers.get("skin_tone", 0)), 0, SKIN_TONE_ROWS.size() - 1)
 	var clothes_color := clampi(int(layers.get("clothes_color", 7)), 0, CLOTHES_COLOR_COUNT - 1)
@@ -96,7 +135,7 @@ static func compose(layers: Dictionary) -> ImageTexture:
 	if beard_style >= 0:
 		var beard_color := clampi(int(layers.get("beard_color", 4)), 0, COLOR_COLUMN_COUNT - 1)
 		_blit_tile(image, _hair_sheet_for(layers), FIRST_COLOR_COLUMN + beard_color, BEARD_STYLE_ROWS[clampi(beard_style, 0, BEARD_STYLE_ROWS.size() - 1)])
-	return ImageTexture.create_from_image(image)
+	return image
 
 static func _blit_tile(target: Image, sheet: Texture2D, column: int, row: int) -> void:
 	var source := sheet.get_image()

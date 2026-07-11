@@ -63,9 +63,6 @@ const BEAST_TROPHY_SUFFIXES := {
 const TOWN_RULER_TITLES: Array[String] = [
 	"Mayor", "Lord", "Lady", "Reeve", "Alderman", "Baron", "Baroness"
 ]
-const DWARF_RULER_TITLES: Array[String] = [
-	"Thane", "High Thane", "Forge-Lord", "Shieldthane", "Deepwarden"
-]
 const ELF_RULER_TITLES: Array[String] = [
 	"Warden", "Elder Warden", "Bough-Speaker"
 ]
@@ -132,6 +129,7 @@ static func simulate(actors: Array[Dictionary], chronology_year: int, seed_numbe
 			"state": String(actor.get("state", "")).strip_edges(),
 			"ruler_name": String(actor.get("ruler_name", "")),
 			"ruler_title": String(actor.get("ruler_title", "")),
+			"clan": String(actor.get("clan", "")),
 			"founded_year": 1,
 			"founded_by": "",
 			"fell_year": 0,
@@ -722,9 +720,12 @@ static func _simulate_local_calamities(
 				)
 				_push_mark(record, event_year, "golden_age", -rng.randf_range(0.15, 0.3))
 
-## Ruler lineages generated on demand for the notable settlements: reign
-## spans from founding to now, violent successions recorded as events, and
-## the line's last ruler becomes (or matches) the current one.
+## Ruler lineages generated for the notable settlements: reign spans from
+## founding to now, violent successions recorded as events, and the full
+## line stored (JSON-safe) on the record so the hold scene can draw the
+## dynasty tree. The line's last ruler becomes the sitting one — for
+## dwarfholds the lineage is AUTHORITATIVE and replaces the placement
+## roll; other settlements only fill an empty seat.
 static func _simulate_ruler_lines(
 	records: Dictionary,
 	order: Array[String],
@@ -748,33 +749,96 @@ static func _simulate_ruler_lines(
 				notable = false
 		if not notable:
 			continue
+		var is_dark := String(record.get("class_key", "")) == "dark"
+		var dynasty_clan := String(record.get("clan", ""))
 		var founded_year := int(record.get("founded_year", 1))
 		var settlement_name := String(record.get("name", ""))
 		var reign_start := founded_year
-		var ruler := _roll_person(settlement_type, rng)
+		var used_first_names: Dictionary = {}
+		var ruler := _roll_lineage_ruler(settlement_type, is_dark, dynasty_clan, used_first_names, rng)
+		var lineage: Array = []
 		var violent_recorded := 0
 		while true:
 			var reign_length := rng.randi_range(14, 38)
 			if reign_start + reign_length >= current_year:
 				break
-			reign_start += reign_length
-			var heir := _roll_person(settlement_type, rng)
-			if rng.randf() < 0.18 and violent_recorded < 2:
+			var reign_end := reign_start + reign_length
+			var heir := _roll_lineage_ruler(settlement_type, is_dark, dynasty_clan, used_first_names, rng)
+			## violent_end marks HOW this reign closed: the connector to the
+			## heir draws red in the dynasty tree when the seat was taken in
+			## blood. Only the first two feuds echo as chronicle events.
+			var violent := rng.randf() < 0.18
+			lineage.append({
+				"name": String(ruler.get("name", "")),
+				"title": String(ruler.get("title", "")),
+				"gender": String(ruler.get("gender", "")),
+				"start": reign_start,
+				"end": reign_end,
+				"violent_end": violent,
+				"sitting": false
+			})
+			if violent and violent_recorded < 2:
 				violent_recorded += 1
 				_push_event(
-					record, all_events, reign_start, "succession",
+					record, all_events, reign_end, "succession",
 					"%s %s was slain; %s %s took the seat amid dark whispers." % [
 						String(ruler.get("title", "")), String(ruler.get("name", "")),
 						String(heir.get("title", "")), String(heir.get("name", ""))
 					],
 					settlement_name
 				)
+			reign_start = reign_end
 			ruler = heir
+		lineage.append({
+			"name": String(ruler.get("name", "")),
+			"title": String(ruler.get("title", "")),
+			"gender": String(ruler.get("gender", "")),
+			"start": reign_start,
+			"end": 0,
+			"violent_end": false,
+			"sitting": true
+		})
+		record["lineage"] = lineage
 		var existing_ruler := String(record.get("ruler_name", "")).strip_edges()
-		if existing_ruler.is_empty():
+		if settlement_type == "dwarfhold" or existing_ruler.is_empty():
 			record["ruler_name"] = String(ruler.get("name", ""))
 			record["ruler_title"] = String(ruler.get("title", ""))
+			record["ruler_gender"] = String(ruler.get("gender", ""))
 		record["ruler_since"] = reign_start
+
+## One member of a succession line. Dwarfholds roll gender-consistent
+## name+title pairs from the shared NpcIdentityService pools and keep the
+## hold's dynasty clan; other races keep their ungendered pools. First
+## names are unique within one line so the tree reads person by person.
+static func _roll_lineage_ruler(
+	settlement_type: String,
+	is_dark: bool,
+	dynasty_clan: String,
+	used_first_names: Dictionary,
+	rng: RandomNumberGenerator
+) -> Dictionary:
+	if settlement_type != "dwarfhold":
+		var person := _roll_person(settlement_type, rng)
+		person["gender"] = ""
+		return person
+	var gender := NpcIdentityService.roll_dwarf_gender(rng)
+	var first := NpcIdentityService.dwarf_ruler_first_name(rng, gender)
+	for _reroll: int in range(6):
+		if not used_first_names.has(first):
+			break
+		first = NpcIdentityService.dwarf_ruler_first_name(rng, gender)
+	used_first_names[first] = true
+	var clan := dynasty_clan
+	if clan.is_empty():
+		clan = NpcIdentityService.DWARF_CLAN_NAMES[rng.randi_range(0, NpcIdentityService.DWARF_CLAN_NAMES.size() - 1)]
+	var title := NpcIdentityService.dwarf_ruler_title(rng, gender, is_dark)
+	var full_name := "%s %s" % [first, clan]
+	return {
+		"name": full_name,
+		"title": title,
+		"gender": gender,
+		"full": "%s %s" % [title, full_name]
+	}
 
 ## Sorts, caps and cross-links each settlement's story: neighbor ruins
 ## feed rumors and grudges so a town gossips about the fallen hold nearby.
@@ -938,9 +1002,17 @@ static func _roll_person(settlement_type: String, rng: RandomNumberGenerator) ->
 	var title := ""
 	match settlement_type:
 		"dwarfhold":
-			first = NpcIdentityService.DWARF_FIRST_NAMES[rng.randi_range(0, NpcIdentityService.DWARF_FIRST_NAMES.size() - 1)]
+			## Founders and heroes are gender-consistent like the ruler
+			## lines: gender first, then name and title from matching pools.
+			var gender := NpcIdentityService.roll_dwarf_gender(rng)
+			var first_pool := (
+				NpcIdentityService.DWARF_FIRST_NAMES_FEMALE
+				if gender == "female"
+				else NpcIdentityService.DWARF_FIRST_NAMES_MALE
+			)
+			first = first_pool[rng.randi_range(0, first_pool.size() - 1)]
 			last = NpcIdentityService.DWARF_CLAN_NAMES[rng.randi_range(0, NpcIdentityService.DWARF_CLAN_NAMES.size() - 1)]
-			title = DWARF_RULER_TITLES[rng.randi_range(0, DWARF_RULER_TITLES.size() - 1)]
+			title = NpcIdentityService.dwarf_ruler_title(rng, gender, false)
 		"woodElfGrove":
 			first = ELF_FIRST_NAMES[rng.randi_range(0, ELF_FIRST_NAMES.size() - 1)]
 			title = ELF_RULER_TITLES[rng.randi_range(0, ELF_RULER_TITLES.size() - 1)]

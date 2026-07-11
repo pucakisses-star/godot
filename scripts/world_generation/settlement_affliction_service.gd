@@ -62,7 +62,10 @@ static func seed_afflictions(npc_states: Array[Dictionary], rng: RandomNumberGen
 		return
 	if rng.randf() < PATIENT_ZERO_ZOMBIE_CHANCE:
 		var zombie := npc_states[rng.randi_range(0, npc_states.size() - 1)]
-		_turn_zombie(zombie)
+		## The sitting ruler never wakes as patient zero — the throne room
+		## audience and the dynasty tab both need them upright and talking.
+		if not bool(zombie.get("is_ruler", false)):
+			_turn_zombie(zombie)
 	if rng.randf() < HIDDEN_VAMPIRE_CHANCE:
 		for _attempt in 8:
 			var candidate := npc_states[rng.randi_range(0, npc_states.size() - 1)]
