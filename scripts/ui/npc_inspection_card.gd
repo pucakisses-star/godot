@@ -1,25 +1,35 @@
 class_name NpcInspectionCard
 extends PanelContainer
 
-## The right-click dossier: a citizen's name and trade over the slot
-## grid of what they carry, plus their purse. One card serves the whole
-## scene - inspecting another NPC repopulates it in place. Esc or a
-## click outside the panel closes it. Built entirely in code so both
-## the town and the hold can spawn one.
+## The right-click dossier: a citizen's profile — a composed portrait bust
+## beside their name, trade, race, age and clan and a few lines of kin and
+## temperament — over two tabs, their belongings and their family tree. One
+## card serves the whole scene: inspecting another NPC repopulates it in
+## place. Esc or a click outside the panel closes it. Built entirely in
+## code so both the town and the hold can spawn one.
 ##
-## Rulers get a second tab: the DYNASTY, a pixel-art family tree of the
-## chronicle's dynasty graph — generations in rows, couples under
-## marriage bars, siblings, aunts, uncles and cousins fanning out under
-## their own parents, relation labels relative to the sitting ruler,
-## violent successions in red, the dead desaturated. The tab only
-## exists for NPC states flagged is_ruler with a lineage.
+## EVERY NPC gets a family tab: a pixel-art family tree drawn from a
+## "family graph" — generations in rows, couples under marriage bars,
+## siblings, aunts, uncles and cousins fanning out under their own parents,
+## relation labels relative to the inspected person. A sitting ruler shows
+## their whole DYNASTY (the succession line, violent successions in red);
+## everyone else shows their own FAMILY (parents, grandparents, siblings,
+## aunts/uncles, cousins, spouse and children), built on demand and cached
+## on the state. The dead are desaturated; married-in kin sit on muted
+## plaques; the inspected person is highlighted and, for rulers, crowned.
 
 const SLOT_COUNT := 6
 const SLOT_COLUMNS := 3
 const SLOT_SIZE := Vector2(46, 46)
+const PORTRAIT_SIZE := 72.0
 
-var _header_label: Label
+var _portrait_rect: TextureRect
+var _name_label: Label
+var _subtitle_label: Label
+var _age_clan_label: Label
+var _detail_rows: VBoxContainer
 var _coins_label: Label
+var _seed_value := 0
 var _slot_panels: Array[PanelContainer] = []
 var _slot_icons: Array[TextureRect] = []
 var _slot_counts: Array[Label] = []
@@ -31,40 +41,73 @@ func _init() -> void:
 	_build_ui()
 	visible = false
 
-## Rolls (once) and shows the NPC's belongings. The roll is stored on
-## the state so later trade systems mutate the same kit the card shows.
-func open(npc_state: Dictionary, role_title: String, seed_value: int) -> void:
+## Rolls (once) and shows the NPC's profile and belongings. The roll is
+## stored on the state so later trade systems mutate the same kit the card
+## shows. present_year dates the family tree (birth/death years and the
+## ages the busts are composed at); 0 falls back to the ruler graph's own
+## year, then to 200.
+func open(npc_state: Dictionary, role_title: String, seed_value: int, present_year: int = 0) -> void:
+	_seed_value = seed_value
 	var identity := npc_state.get("identity", {}) as Dictionary
 	if not (npc_state.get("belongings") is Dictionary):
 		npc_state["belongings"] = SettlementEconomyService.npc_belongings(
 			identity, int(npc_state.get("role", 0)), seed_value)
 	var belongings := npc_state["belongings"] as Dictionary
-	var profession := String(identity.get("profession", role_title))
-	_header_label.text = "%s — %s" % [String(identity.get("name", "A stranger")), profession]
+	var year := present_year
+	if year <= 0:
+		var ruler_family := npc_state.get("ruler_family", {}) as Dictionary
+		year = int(ruler_family.get("year", 200)) if not ruler_family.is_empty() else 200
+	_populate_profile(npc_state, identity, role_title)
 	_populate_slots(belongings.get("items", []) as Array)
 	_coins_label.text = "🪙 %d coins" % int(belongings.get("coins", 0))
-	_populate_dynasty(npc_state)
+	_populate_family(npc_state, identity, year)
 	visible = true
 	reset_size()
 	_center_in_parent()
 
+## The profile block: a composed bust beside name, race + trade, age +
+## clan and the identity's kin/temperament detail lines.
+func _populate_profile(npc_state: Dictionary, identity: Dictionary, role_title: String) -> void:
+	var race := String(identity.get("race", "Dwarf"))
+	var profession := String(identity.get("profession", role_title))
+	var species := "human" if race == "Human" or race == "Gnome" else "dwarf"
+	var layers := NpcIdentityService.appearance_for_identity(identity, species)
+	var crowned := bool(npc_state.get("is_ruler", false))
+	_portrait_rect.texture = DwarfSpriteComposer.compose_crowned(layers) if crowned else DwarfSpriteComposer.compose(layers)
+	_name_label.text = String(identity.get("name", "A stranger"))
+	_subtitle_label.text = ("%s %s" % [race, profession]).strip_edges() if not race.is_empty() else profession
+	var age_clan := "Age %d" % int(identity.get("age", 0))
+	var clan := String(identity.get("clan", ""))
+	if not clan.is_empty():
+		age_clan += " • Clan %s" % clan
+	_age_clan_label.text = age_clan
+	for child: Node in _detail_rows.get_children():
+		child.queue_free()
+	for line: String in NpcIdentityService.detail_lines(identity):
+		var row := Label.new()
+		row.text = line
+		row.add_theme_font_size_override("font_size", 11)
+		row.add_theme_color_override("font_color", Color(0.72, 0.66, 0.54, 1.0))
+		row.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		row.custom_minimum_size = Vector2(220.0, 0.0)
+		_detail_rows.add_child(row)
+
 func close() -> void:
 	visible = false
 
-## Whether the open card offers the Dynasty tab (rulers only).
+## Whether the open card's family tab has anything to draw.
 func dynasty_tab_available() -> bool:
-	return _tabs.tabs_visible
+	return _tree_view.node_count() > 0
 
-## Lineage + kin nodes the tree draws; 0 when the tab is hidden.
+## People the family tree draws.
 func dynasty_node_count() -> int:
-	return _tree_view.node_count() if _tabs.tabs_visible else 0
+	return _tree_view.node_count()
 
 func show_dynasty_tab() -> void:
-	if _tabs.tabs_visible:
-		_tabs.current_tab = 1
-		call_deferred("_apply_dynasty_focus")
+	_tabs.current_tab = 1
+	call_deferred("_apply_dynasty_focus")
 
-## Scrolls the (now laid-out) Dynasty tab onto the sitting ruler; runs
+## Scrolls the (now laid-out) family tab onto the inspected person; runs
 ## deferred whenever the tab becomes the active page.
 func _apply_dynasty_focus() -> void:
 	if _tabs.current_tab != 1:
@@ -77,24 +120,51 @@ func _on_tab_changed(tab_index: int) -> void:
 	if tab_index == 1:
 		call_deferred("_apply_dynasty_focus")
 
-func _populate_dynasty(npc_state: Dictionary) -> void:
-	var lineage := npc_state.get("ruler_lineage", []) as Array
-	var is_ruler := bool(npc_state.get("is_ruler", false)) and not lineage.is_empty()
-	_tabs.tabs_visible = is_ruler
-	_tabs.set_tab_hidden(1, not is_ruler)
+## Loads the family tab. A sitting ruler shows their prebuilt dynasty
+## graph ("Dynasty"); everyone else gets an individual family graph, built
+## once from their identity and cached on the state, shown as "Family".
+func _populate_family(npc_state: Dictionary, identity: Dictionary, present_year: int) -> void:
+	var age := int(identity.get("age", 120))
 	_tabs.current_tab = 0
-	if is_ruler:
-		var identity := npc_state.get("identity", {}) as Dictionary
+	var ruler_family := npc_state.get("ruler_family", {}) as Dictionary
+	var ruler_people := ruler_family.get("people", {}) as Dictionary
+	if bool(npc_state.get("is_ruler", false)) and not ruler_people.is_empty():
+		_tabs.set_tab_title(1, "Dynasty")
 		_tree_view.set_dynasty(
-			lineage,
+			npc_state.get("ruler_lineage", []) as Array,
 			npc_state.get("ruler_kin", {}) as Dictionary,
-			int(identity.get("age", 120)),
-			npc_state.get("ruler_family", {}) as Dictionary
+			age,
+			ruler_family
 		)
-		_dynasty_scroll.custom_minimum_size = Vector2(420, 500)
 	else:
-		_tree_view.set_dynasty([], {}, 120)
-		_dynasty_scroll.custom_minimum_size = Vector2.ZERO
+		_tabs.set_tab_title(1, "Family")
+		_tree_view.set_dynasty([], {}, age, _individual_family(npc_state, identity, present_year))
+	_dynasty_scroll.custom_minimum_size = Vector2(420, 500)
+
+## The inspected NPC's own family graph, built on first inspection from
+## their identity (name/clan/gender/age/race and any roster kin) and cached
+## on the state so reopening the card reuses the exact same tree.
+func _individual_family(npc_state: Dictionary, identity: Dictionary, present_year: int) -> Dictionary:
+	var cached_variant: Variant = npc_state.get("family_graph")
+	if cached_variant is Dictionary and not (cached_variant as Dictionary).is_empty():
+		return cached_variant as Dictionary
+	var npc_name := String(identity.get("name", "A stranger"))
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s|npcfamily|%s" % [_seed_value, npc_name])
+	var focus := {
+		"name": npc_name,
+		"clan": String(identity.get("clan", "")),
+		"gender": String(identity.get("gender", "")),
+		"age": int(identity.get("age", 100)),
+		"race": String(identity.get("race", "Dwarf")),
+		"current_year": present_year,
+		"spouse": String(identity.get("spouse", "")),
+		"parents": identity.get("parents", []),
+		"children": identity.get("children", [])
+	}
+	var graph := WorldChronicleService.build_family_for_individual(focus, rng)
+	npc_state["family_graph"] = graph
+	return graph
 
 func _unhandled_input(event: InputEvent) -> void:
 	if not visible:
@@ -122,22 +192,57 @@ func _build_ui() -> void:
 	layout.add_theme_constant_override("separation", 8)
 	add_child(layout)
 
+	## The profile: a composed bust on a stone plaque beside the name,
+	## race + trade, age + clan and the kin/temperament detail rows, with
+	## the close button pinned to the top-right corner.
 	var header := HBoxContainer.new()
 	header.add_theme_constant_override("separation", 10)
 	layout.add_child(header)
-	_header_label = Label.new()
-	_header_label.add_theme_font_size_override("font_size", 15)
-	_header_label.add_theme_color_override("font_color", Color(0.95, 0.88, 0.72, 1.0))
-	_header_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(_header_label)
+
+	var portrait_frame := PanelContainer.new()
+	portrait_frame.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	var portrait_style := StyleBoxFlat.new()
+	portrait_style.bg_color = Color(0.23, 0.18, 0.14, 1.0)
+	portrait_style.border_color = Color(0.48, 0.39, 0.27, 1.0)
+	portrait_style.set_border_width_all(2)
+	portrait_style.set_corner_radius_all(4)
+	portrait_style.set_content_margin_all(4)
+	portrait_frame.add_theme_stylebox_override("panel", portrait_style)
+	header.add_child(portrait_frame)
+	_portrait_rect = TextureRect.new()
+	_portrait_rect.custom_minimum_size = Vector2(PORTRAIT_SIZE, PORTRAIT_SIZE)
+	_portrait_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_portrait_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	portrait_frame.add_child(_portrait_rect)
+
+	var details := VBoxContainer.new()
+	details.add_theme_constant_override("separation", 2)
+	details.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(details)
+	_name_label = Label.new()
+	_name_label.add_theme_font_size_override("font_size", 17)
+	_name_label.add_theme_color_override("font_color", Color(0.96, 0.9, 0.74, 1.0))
+	details.add_child(_name_label)
+	_subtitle_label = Label.new()
+	_subtitle_label.add_theme_font_size_override("font_size", 13)
+	_subtitle_label.add_theme_color_override("font_color", Color(0.82, 0.72, 0.52, 1.0))
+	details.add_child(_subtitle_label)
+	_age_clan_label = Label.new()
+	_age_clan_label.add_theme_font_size_override("font_size", 12)
+	_age_clan_label.add_theme_color_override("font_color", Color(0.78, 0.7, 0.56, 1.0))
+	details.add_child(_age_clan_label)
+	_detail_rows = VBoxContainer.new()
+	_detail_rows.add_theme_constant_override("separation", 1)
+	details.add_child(_detail_rows)
+
 	var close_button := Button.new()
 	close_button.text = "✕"
+	close_button.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	close_button.pressed.connect(close)
 	header.add_child(close_button)
 
-	## Two pages under one header: the pockets, and (for rulers) the line.
+	## Two pages under one profile: the pockets, and the family tree.
 	_tabs = TabContainer.new()
-	_tabs.tabs_visible = false
 	_tabs.tab_changed.connect(_on_tab_changed)
 	layout.add_child(_tabs)
 
@@ -189,7 +294,6 @@ func _build_ui() -> void:
 	_tree_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_tree_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_dynasty_scroll.add_child(_tree_view)
-	_tabs.set_tab_hidden(1, true)
 
 func _populate_slots(items: Array) -> void:
 	for slot_index in range(SLOT_COUNT):

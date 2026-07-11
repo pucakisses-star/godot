@@ -1006,6 +1006,306 @@ static func build_family_for_lineage(
 			roots.append(person_id)
 	return {"people": people, "order": id_order, "roots": roots, "sitting": sitting_id, "year": current_year}
 
+## Builds the family graph centered on one ordinary NPC (dwarf or human),
+## not a succession line: the focus is the sitting person (ruler_index -1,
+## no title), with their two parents, up to two grandparent couples, a
+## scatter of aunts/uncles and cousins, siblings, a spouse and children.
+## focus keys: name, clan, gender ("" to derive), age, race, current_year,
+## spouse (name or ""), parents (Array of names), children (Array of names).
+## Returns the same graph shape as build_family_for_lineage; deterministic
+## from rng and bounded by FAMILY_HARD_CAP.
+static func build_family_for_individual(focus: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
+	var people: Dictionary = {}
+	var id_order: Array = []
+	var used_first: Dictionary = {}
+
+	var focus_name := String(focus.get("name", "A stranger"))
+	var race := String(focus.get("race", "Dwarf"))
+	if race.is_empty():
+		race = "Dwarf"
+	var current_year := int(focus.get("current_year", 200))
+	var age := maxi(1, int(focus.get("age", 100)))
+	var focus_birth := current_year - age
+	var focus_clan := String(focus.get("clan", ""))
+	if focus_clan.is_empty():
+		focus_clan = focus_name.get_slice(" ", 1) if focus_name.contains(" ") else _family_surname(race, rng, "")
+	## The focus's own gender only steers their spouse's gender.
+	var focus_gender := String(focus.get("gender", ""))
+	if focus_gender.is_empty():
+		if race == "Dwarf":
+			focus_gender = NpcIdentityService.dwarf_name_gender(focus_name.get_slice(" ", 0))
+		if focus_gender.is_empty():
+			focus_gender = "female" if rng.randf() < 0.5 else "male"
+	used_first[focus_name.get_slice(" ", 0)] = true
+
+	## gen 2: the focus, the sitting person the tree centers on.
+	var focus_fields := _family_person_fields(focus_name, focus_gender, focus_clan, focus_birth, race)
+	focus_fields["sitting"] = true
+	focus_fields["generation"] = 2
+	var focus_id := _family_add(people, id_order, focus_fields)
+
+	## gen 1: two parents — a blood parent sharing the focus's clan and a
+	## married-in parent of another. Provided names fill them when given.
+	var provided_parents := focus.get("parents", []) as Array
+	var blood_name := ""
+	var married_name := ""
+	if provided_parents.size() >= 2:
+		var name_a := String(provided_parents[0])
+		var name_b := String(provided_parents[1])
+		if name_b.get_slice(" ", 1) == focus_clan and name_a.get_slice(" ", 1) != focus_clan:
+			blood_name = name_b
+			married_name = name_a
+		else:
+			blood_name = name_a
+			married_name = name_b
+	elif provided_parents.size() == 1:
+		blood_name = String(provided_parents[0])
+	var blood_gender := NpcIdentityService.dwarf_name_gender(blood_name.get_slice(" ", 0)) if (race == "Dwarf" and not blood_name.is_empty()) else ""
+	if blood_gender.is_empty():
+		blood_gender = "male" if rng.randf() < 0.5 else "female"
+	var married_gender := "female" if blood_gender == "male" else "male"
+	var blood_parent_birth := focus_birth - rng.randi_range(24, 45)
+	var married_parent_birth := focus_birth - rng.randi_range(24, 45)
+	var blood_parent_id := _individual_add(people, id_order, used_first, rng, blood_name, blood_gender, focus_clan, blood_parent_birth, race, false, 1)
+	var married_parent_clan := _family_surname(race, rng, focus_clan)
+	if not married_name.is_empty() and married_name.contains(" "):
+		married_parent_clan = married_name.get_slice(" ", 1)
+	var married_parent_id := _individual_add(people, id_order, used_first, rng, married_name, married_gender, married_parent_clan, married_parent_birth, race, true, 1)
+	var focus_parent_ids: Array[String] = []
+	if not blood_parent_id.is_empty():
+		focus_parent_ids.append(blood_parent_id)
+	if not married_parent_id.is_empty():
+		focus_parent_ids.append(married_parent_id)
+	_family_link_child(people, focus_parent_ids, focus_id)
+	_individual_wed(people, blood_parent_id, married_parent_id)
+
+	## gen 0: a grandparent couple over each parent (maternal side second,
+	## so it drops out first if the cap is reached).
+	var paternal_gp := _individual_grandparents(people, id_order, used_first, rng, blood_parent_id, focus_clan, race)
+	var maternal_gp := _individual_grandparents(people, id_order, used_first, rng, married_parent_id, married_parent_clan, race)
+
+	## gen 1 aunts/uncles under each grandparent couple, gen 2 cousins under
+	## the aunts/uncles that wed.
+	_individual_aunts(people, id_order, used_first, rng, paternal_gp, blood_parent_birth, focus_clan, race, current_year)
+	_individual_aunts(people, id_order, used_first, rng, maternal_gp, married_parent_birth, married_parent_clan, race, current_year)
+
+	## gen 2 siblings of the focus, sharing the same two parents.
+	var sibling_count := rng.randi_range(0, 3)
+	for _sibling_slot: int in range(sibling_count):
+		if people.size() >= FAMILY_HARD_CAP:
+			break
+		var sibling_gender := "male" if rng.randf() < 0.5 else "female"
+		var sibling_birth := maxi(focus_birth + rng.randi_range(-14, 14), blood_parent_birth + 16)
+		var sibling_id := _individual_add(people, id_order, used_first, rng, "", sibling_gender, focus_clan, sibling_birth, race, false, 2)
+		if sibling_id.is_empty():
+			break
+		_family_link_child(people, focus_parent_ids, sibling_id)
+
+	## gen 2 spouse (married-in): the given name, else a ~70% roll.
+	var focus_spouse_name := String(focus.get("spouse", ""))
+	var focus_spouse_id := ""
+	if (not focus_spouse_name.is_empty() or rng.randf() < 0.7) and people.size() < FAMILY_HARD_CAP:
+		var spouse_gender := "female" if focus_gender == "male" else "male"
+		if race == "Dwarf" and not focus_spouse_name.is_empty():
+			var derived := NpcIdentityService.dwarf_name_gender(focus_spouse_name.get_slice(" ", 0))
+			if not derived.is_empty():
+				spouse_gender = derived
+		var spouse_clan := _family_surname(race, rng, focus_clan)
+		if not focus_spouse_name.is_empty() and focus_spouse_name.contains(" "):
+			spouse_clan = focus_spouse_name.get_slice(" ", 1)
+		var spouse_birth := focus_birth + rng.randi_range(-10, 10)
+		focus_spouse_id = _individual_add(people, id_order, used_first, rng, focus_spouse_name, spouse_gender, spouse_clan, spouse_birth, race, true, 2)
+		_individual_wed(people, focus_id, focus_spouse_id)
+
+	## gen 3 children of the focus: named ones when given, else a small
+	## brood only when the focus has a spouse. Born after focus_birth + 16.
+	var child_parent_ids: Array[String] = [focus_id]
+	if not focus_spouse_id.is_empty():
+		child_parent_ids.append(focus_spouse_id)
+	var provided_children := focus.get("children", []) as Array
+	if not provided_children.is_empty():
+		for child_variant: Variant in provided_children:
+			if people.size() >= FAMILY_HARD_CAP:
+				break
+			var child_name := String(child_variant)
+			var child_gender := NpcIdentityService.dwarf_name_gender(child_name.get_slice(" ", 0)) if race == "Dwarf" else ""
+			var child_hi := current_year - 1
+			var child_lo := focus_birth + 16
+			if child_hi < child_lo:
+				break
+			var child_birth := clampi(focus_birth + rng.randi_range(16, maxi(17, age - 1)), child_lo, child_hi)
+			var child_id := _individual_add(people, id_order, used_first, rng, child_name, child_gender, focus_clan, child_birth, race, false, 3)
+			if child_id.is_empty():
+				break
+			_family_link_child(people, child_parent_ids, child_id)
+	elif not focus_spouse_id.is_empty():
+		var child_count := rng.randi_range(0, 3)
+		var child_hi := current_year - 1
+		var child_lo := focus_birth + 16
+		for _child_slot: int in range(child_count):
+			if people.size() >= FAMILY_HARD_CAP or child_hi < child_lo:
+				break
+			var child_gender := "male" if rng.randf() < 0.5 else "female"
+			var child_birth := rng.randi_range(child_lo, child_hi)
+			var child_id := _individual_add(people, id_order, used_first, rng, "", child_gender, focus_clan, child_birth, race, false, 3)
+			if child_id.is_empty():
+				break
+			_family_link_child(people, child_parent_ids, child_id)
+
+	## Deaths: the focus, their spouse and their children are alive by
+	## definition; everyone else dies of old age on their race's clock, and
+	## a death at or after the present year just means still living.
+	var always_alive: Dictionary = {focus_id: true}
+	if not focus_spouse_id.is_empty():
+		always_alive[focus_spouse_id] = true
+	for child_variant: Variant in ((people[focus_id] as Dictionary)["children"] as Array):
+		always_alive[String(child_variant)] = true
+	for person_id_variant: Variant in id_order:
+		var person_id := String(person_id_variant)
+		var person := people[person_id] as Dictionary
+		if always_alive.has(person_id):
+			person["death"] = 0
+			continue
+		var person_race := String(person["race"])
+		var birth := int(person["birth"])
+		var death := 0
+		if person_race == "Dwarf":
+			death = birth + rng.randi_range(150, 250)
+		else:
+			var life := int((NpcIdentityService.RACE_AGE_RANGES.get(person_race, [16, 78]) as Array)[1])
+			death = birth + rng.randi_range(int(life * 0.9), int(life * 1.15))
+		if death >= current_year:
+			death = 0
+		if death > 0 and death <= birth:
+			death = birth + 1
+		person["death"] = death
+
+	var roots: Array = []
+	for person_id_variant: Variant in id_order:
+		var person_id := String(person_id_variant)
+		var person := people[person_id] as Dictionary
+		if (person["parents"] as Array).is_empty() and not bool(person["married_in"]):
+			roots.append(person_id)
+	return {"people": people, "order": id_order, "roots": roots, "sitting": focus_id, "year": current_year}
+
+## Adds one ordinary (non-ruler) graph person: resolves a gender and a
+## race-aware name when none was supplied, stamps married_in/generation,
+## and returns its id ("" when the graph is already at the hard cap).
+static func _individual_add(
+	people: Dictionary,
+	id_order: Array,
+	used_first: Dictionary,
+	rng: RandomNumberGenerator,
+	person_name: String,
+	gender: String,
+	clan: String,
+	birth: int,
+	race: String,
+	married_in: bool,
+	generation: int
+) -> String:
+	if people.size() >= FAMILY_HARD_CAP:
+		return ""
+	var final_gender := gender
+	if final_gender.is_empty():
+		final_gender = "female" if rng.randf() < 0.5 else "male"
+	var final_name := person_name
+	if final_name.is_empty():
+		final_name = "%s %s" % [_family_first_name(final_gender, used_first, rng, race), clan]
+	else:
+		used_first[final_name.get_slice(" ", 0)] = true
+	var fields := _family_person_fields(final_name, final_gender, clan, birth, race)
+	fields["married_in"] = married_in
+	fields["generation"] = generation
+	return _family_add(people, id_order, fields)
+
+## Records a two-way marriage between two graph ids (no-op if either is "").
+static func _individual_wed(people: Dictionary, first_id: String, second_id: String) -> void:
+	if first_id.is_empty() or second_id.is_empty():
+		return
+	(people[first_id] as Dictionary)["spouse"] = second_id
+	(people[second_id] as Dictionary)["spouse"] = first_id
+
+## A grandparent couple (one blood sharing child_clan, one married-in of
+## another) over child_id. Returns the couple's ids, or [] when full.
+static func _individual_grandparents(
+	people: Dictionary,
+	id_order: Array,
+	used_first: Dictionary,
+	rng: RandomNumberGenerator,
+	child_id: String,
+	child_clan: String,
+	race: String
+) -> Array[String]:
+	if child_id.is_empty() or people.size() + 1 >= FAMILY_HARD_CAP:
+		return []
+	var child := people[child_id] as Dictionary
+	var child_birth := int(child["birth"])
+	var blood_gender := "male" if rng.randf() < 0.5 else "female"
+	var married_gender := "female" if blood_gender == "male" else "male"
+	var blood_birth := child_birth - rng.randi_range(24, 45)
+	var married_birth := child_birth - rng.randi_range(24, 45)
+	var blood_id := _individual_add(people, id_order, used_first, rng, "", blood_gender, child_clan, blood_birth, race, false, 0)
+	var married_clan := _family_surname(race, rng, child_clan)
+	var married_id := _individual_add(people, id_order, used_first, rng, "", married_gender, married_clan, married_birth, race, true, 0)
+	var gp_ids: Array[String] = []
+	if not blood_id.is_empty():
+		gp_ids.append(blood_id)
+	if not married_id.is_empty():
+		gp_ids.append(married_id)
+	_family_link_child(people, gp_ids, child_id)
+	_individual_wed(people, blood_id, married_id)
+	return gp_ids
+
+## 0-2 aunts/uncles (siblings of a parent) under a grandparent couple, and
+## 0-3 cousins under each aunt/uncle that takes a married-in spouse.
+static func _individual_aunts(
+	people: Dictionary,
+	id_order: Array,
+	used_first: Dictionary,
+	rng: RandomNumberGenerator,
+	grandparents: Array[String],
+	parent_birth: int,
+	clan: String,
+	race: String,
+	current_year: int
+) -> void:
+	if grandparents.size() < 2:
+		return
+	var grandparent_birth := int((people[grandparents[0]] as Dictionary)["birth"])
+	var aunt_count := rng.randi_range(0, 2)
+	for _aunt_slot: int in range(aunt_count):
+		if people.size() >= FAMILY_HARD_CAP:
+			break
+		var aunt_gender := "male" if rng.randf() < 0.5 else "female"
+		var aunt_birth := maxi(parent_birth + rng.randi_range(-12, 12), grandparent_birth + 16)
+		var aunt_id := _individual_add(people, id_order, used_first, rng, "", aunt_gender, clan, aunt_birth, race, false, 1)
+		if aunt_id.is_empty():
+			break
+		_family_link_child(people, grandparents, aunt_id)
+		if rng.randf() >= FAMILY_KIN_SPOUSE_CHANCE or people.size() >= FAMILY_HARD_CAP:
+			continue
+		var spouse_gender := "female" if aunt_gender == "male" else "male"
+		var spouse_clan := _family_surname(race, rng, clan)
+		var spouse_birth := aunt_birth + rng.randi_range(-10, 10)
+		var spouse_id := _individual_add(people, id_order, used_first, rng, "", spouse_gender, spouse_clan, spouse_birth, race, true, 1)
+		if spouse_id.is_empty():
+			continue
+		_individual_wed(people, aunt_id, spouse_id)
+		var cousin_parents: Array[String] = [aunt_id, spouse_id]
+		var cousin_count := rng.randi_range(0, 3)
+		for _cousin_slot: int in range(cousin_count):
+			if people.size() >= FAMILY_HARD_CAP:
+				break
+			var cousin_gender := "male" if rng.randf() < 0.5 else "female"
+			var cousin_birth := mini(aunt_birth + rng.randi_range(18, 40), current_year - 1)
+			if cousin_birth <= aunt_birth + 15:
+				continue
+			var cousin_id := _individual_add(people, id_order, used_first, rng, "", cousin_gender, clan, cousin_birth, race, false, 2)
+			if cousin_id.is_empty():
+				break
+			_family_link_child(people, cousin_parents, cousin_id)
+
 ## Seats lineage member heir_entry in the graph relative to the ruler it
 ## succeeds: usually their child, sometimes a sibling or a nephew/niece
 ## (which reads especially well under a violent succession). Returns the
@@ -1187,13 +1487,13 @@ static func _family_add_child(
 
 ## Person skeleton with every key present, so readers can index without
 ## existence checks. All values JSON-safe.
-static func _family_person_fields(person_name: String, gender: String, person_clan: String, birth: int) -> Dictionary:
+static func _family_person_fields(person_name: String, gender: String, person_clan: String, birth: int, race: String = "Dwarf") -> Dictionary:
 	return {
 		"id": "",
 		"name": person_name,
 		"gender": gender,
 		"clan": person_clan,
-		"race": "Dwarf",
+		"race": race,
 		"birth": birth,
 		"death": 0,
 		"title": "",
@@ -1244,9 +1544,12 @@ static func _family_link_child(people: Dictionary, parent_ids: Array[String], ch
 ## A first name from the gendered dwarf pools, avoiding names the graph
 ## already uses when it can (the pools are finite; a long dynasty may
 ## repeat a first name under a different clan).
-static func _family_first_name(gender: String, used_first: Dictionary, rng: RandomNumberGenerator) -> String:
+static func _family_first_name(gender: String, used_first: Dictionary, rng: RandomNumberGenerator, race: String = "Dwarf") -> String:
 	var pool: Array[String] = []
-	if gender == "female":
+	if race == "Human":
+		## Human name pools carry no gender split; ignore gender for them.
+		pool.append_array(NpcIdentityService.TOWNSFOLK_FIRST_NAMES)
+	elif gender == "female":
 		pool.append_array(NpcIdentityService.DWARF_FIRST_NAMES_FEMALE)
 		pool.append_array(NpcIdentityService.DWARF_RULER_FIRST_NAMES_FEMALE)
 	else:
@@ -1259,6 +1562,21 @@ static func _family_first_name(gender: String, used_first: Dictionary, rng: Rand
 		first = pool[rng.randi_range(0, pool.size() - 1)]
 	used_first[first] = true
 	return first
+
+## A surname for the given race (dwarf clans, human trade-names), rerolled
+## a few times so a married-in line differs from avoid_clan when it can.
+static func _family_surname(race: String, rng: RandomNumberGenerator, avoid_clan: String) -> String:
+	var pool: Array[String] = []
+	if race == "Human":
+		pool.append_array(NpcIdentityService.TOWNSFOLK_SURNAMES)
+	else:
+		pool.append_array(NpcIdentityService.DWARF_CLAN_NAMES)
+	var surname := pool[rng.randi_range(0, pool.size() - 1)]
+	for _reroll: int in range(6):
+		if surname != avoid_clan:
+			break
+		surname = pool[rng.randi_range(0, pool.size() - 1)]
+	return surname
 
 ## Sorts, caps and cross-links each settlement's story: neighbor ruins
 ## feed rumors and grudges so a town gossips about the fallen hold nearby.
