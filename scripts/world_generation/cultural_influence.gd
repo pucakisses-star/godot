@@ -63,7 +63,231 @@ const STATE_FORMS: Array[String] = [
 	"Imamah"
 ]
 
+## Dwarf realms get proper hold-names instead of "Horde of Dwarves". These
+## English-compound names read as complete realms and are used as-is.
+const DWARF_STANDALONE_REALMS: Array[String] = [
+	"Ironroot",
+	"Stonevein",
+	"Goldhollow",
+	"Anvildeep",
+	"Hammerfall",
+	"Blackforge",
+	"Embervault",
+	"Frostbeard Hold",
+	"Bronzebarrow",
+	"Deepmantle",
+	"Runebastion",
+	"Grimdelve",
+	"Kragmor",
+	"Oathstone",
+	"Grudgebound",
+	"Redhammer Realm",
+	"Ashenhold",
+	"Silverdelve",
+	"Granite Crown",
+	"The Underthrone",
+	"Drakevault",
+	"Stonehelm",
+	"Ironmarch",
+	"Coalgrip",
+	"The Seven Halls",
+	"The Copper Kings",
+	"Deepcrown",
+	"Molten Gate",
+	"Rimehammer",
+	"The Shattered Delve",
+	"High Anvil",
+	"The Vaulted Kingdom"
+]
+
+## Khuzdul-style names that read best fronted by a title ("Deep Kingdom of
+## Kardun-Varr", "Hold of Barak-Thorum").
+const DWARF_TITLED_NAMES: Array[String] = [
+	"Khazrund",
+	"Barak-Thorum",
+	"Dumgaraz",
+	"Kardun-Varr",
+	"Azrak-Khaz",
+	"Thalgrund",
+	"Durhazad",
+	"Thorek-Dun",
+	"Kazad-Grom",
+	"Varn-Kadrin",
+	"Dolgaz-Nur",
+	"Kragdum",
+	"Baldurak",
+	"Garn-Thalor",
+	"Kharak-Vuld",
+	"Tor-Dumaz",
+	"Old Kazadar",
+	"Karak-Dur",
+	"Grimvault",
+	"Mithrilgate"
+]
+
+## Dwarf-flavoured realm titles for the "{Title} of {Name}" form.
+const DWARF_REALM_TITLES: Array[String] = [
+	"Kingdom",
+	"High Kingdom",
+	"Empire",
+	"Hold",
+	"Great Hold",
+	"Mountainhold",
+	"Delve",
+	"Deep Kingdom",
+	"Underkingdom",
+	"Thanehold",
+	"Thanedom",
+	"Khanate",
+	"March",
+	"Freehold",
+	"Commonwealth",
+	"League",
+	"Confederation",
+	"Guild-State",
+	"Forge-Realm",
+	"Runedom",
+	"Stone-Crown",
+	"Vault-Kingdom",
+	"Hegemony",
+	"Dominion",
+	"Realm"
+]
+
+## Every other race gets themed realm names too, by archetype. Each pool
+## composes a place name from a prefix + suffix root (huge variety from small
+## banks), sometimes uses a hand-picked standalone name, and fronts/tails it
+## with a title fitting the culture — so no realm ever reads "Horde of Orcs".
+const ARCHETYPE_POOLS: Dictionary = {
+	"human": {
+		"pre": ["Ald", "Val", "Wes", "Ash", "Ever", "Grey", "High", "Rose", "Storm", "Black", "Wind", "Fair", "Nor", "East", "Oak", "Bright", "Stag", "Wolf"],
+		"suf": ["mont", "mere", "ford", "march", "wick", "gard", "holm", "shire", "bury", "crest", "vale", "haven", "fell", "wood", "reach", "watch", "field", "dale"],
+		"solo": ["Valemont", "Highgarden", "Stormhold", "Eastmarch", "Rosecrown", "Greywatch", "The Free Cities", "The Midlands"],
+		"titles": ["Kingdom", "Grand Duchy", "Duchy", "Principality", "Empire", "Realm", "Dominion", "Free State", "Commonwealth", "March", "Crownlands"]
+	},
+	"elf": {
+		"pre": ["Sil", "El", "Cael", "Aer", "Lith", "Gala", "Faer", "Ithil", "Lor", "Ael", "Yl", "Cel", "Mith", "Ela", "Thal", "Vae"],
+		"suf": ["andor", "wynn", "thalas", "mar", "oria", "endil", "aran", "wood", "reach", "mere", "thil", "ael", "loth", "riel", "dor", "wen"],
+		"solo": ["Silvanor", "Caelora", "Aelwynn", "Lothlainn", "Ithilmar", "The Everwood", "Elandor", "Faerloth"],
+		"titles": ["Realm", "Reach", "Kingdom", "Court", "Sylvan Court", "Woodland Realm", "Vale", "Dominion", "Conclave"]
+	},
+	"orc": {
+		"pre": ["Gor", "Grish", "Mor", "Uruk", "Krag", "Skar", "Gron", "Drak", "Grum", "Zog", "Kaz", "Bru", "Nar", "Vog"],
+		"suf": ["nak", "mash", "gul", "thak", "rak", "dush", "gor", "mok", "gash", "or", "zug", "dar"],
+		"solo": ["Bloodfang", "Skullcrag", "Ironjaw", "Bonegrind", "Ashfist", "Redmaw", "Grimtusk", "Gornak"],
+		"titles": ["Horde", "Warhorde", "Dominion", "War-Clans", "Warband", "Warlands", "Empire", "Reach"]
+	},
+	"beast": {
+		"pre": ["Blood", "Bone", "Snarl", "Claw", "Fang", "Grim", "Dark", "Gore", "Hide", "Rend", "Howl", "Dust"],
+		"suf": ["fang", "claw", "maw", "hide", "pack", "den", "waste", "mark", "run", "fen", "scar", "howl"],
+		"solo": ["The Snarling Wastes", "Bonepack", "Clawfen", "The Howling Reach", "Gorehide", "The Feral Marches"],
+		"titles": ["Packlands", "Warpack", "Dominion", "Wastes", "Reach", "Territories", "Clans", "Warband"]
+	},
+	"reptile": {
+		"pre": ["Ssa", "Xith", "Ssz", "Koss", "Ythe", "Zar", "Ssil", "Xul", "Ophi", "Ssk", "Naga", "Vess"],
+		"suf": ["thra", "zzik", "ess", "xoth", "ara", "ith", "assk", "tul", "raan", "zix", "oth", "ssara"],
+		"solo": ["Ssythra", "Xithoth", "The Sunken Coils", "Nagaxoth", "The Scaled Reach", "Ophidara"],
+		"titles": ["Empire", "Dominion", "Coils", "Reach", "Broodrealm", "Nest-Kingdom", "Marsh-Realm", "Dynasty"]
+	},
+	"giant": {
+		"pre": ["Grom", "Thund", "Storm", "Stone", "Frost", "Iron", "Bould", "Skul", "Craag", "Hrun", "Jot", "Gorm"],
+		"suf": ["gard", "heim", "holm", "crag", "fell", "spire", "reach", "hall", "peak", "throne", "hold", "maw"],
+		"solo": ["Jotungard", "Thunderpeak", "The Frostreach", "Stonefell", "Gormheim", "The Titan Halls"],
+		"titles": ["Jarldom", "Kingdom", "Reach", "Steading", "Dominion", "Realm", "Highhold", "Marches"]
+	},
+	"fae": {
+		"pre": ["Glim", "Thistle", "Moon", "Dusk", "Whisper", "Bramble", "Dew", "Fern", "Star", "Mist", "Hollow", "Willow"],
+		"suf": ["wood", "glade", "hollow", "reach", "court", "fen", "mere", "thorn", "light", "veil", "dell", "spring"],
+		"solo": ["The Moonlit Court", "Thistlehollow", "The Dusk Veil", "Brambledell", "Whisperwood", "The Seelie Reach"],
+		"titles": ["Court", "Seelie Court", "Unseelie Court", "Reach", "Glade-Realm", "Dominion", "Wilds", "Demesne"]
+	},
+	"demon": {
+		"pre": ["Mal", "Xar", "Grim", "Ash", "Bael", "Nyx", "Dis", "Vor", "Khar", "Mor", "Ur", "Zeth"],
+		"suf": ["goroth", "zeth", "vault", "pyre", "reth", "gast", "mire", "doom", "scar", "thul", "gia", "noth"],
+		"solo": ["Malgoroth", "The Ashen Pyre", "Baelreth", "The Scarred Vault", "Nyxgast", "The Nine Pits"],
+		"titles": ["Dominion", "Infernal Dominion", "Hegemony", "Pit-Realm", "Reach", "Legion", "Tyranny", "Empire"]
+	},
+	"dragon": {
+		"pre": ["Draco", "Wyrm", "Pyre", "Ember", "Scale", "Gold", "Sable", "Storm", "Ash", "Kaal", "Ver", "Ryn"],
+		"suf": ["mora", "theon", "spire", "vault", "reach", "hoard", "peak", "fang", "gard", "axia", "dun", "roost"],
+		"solo": ["Wyrmspire", "The Gilded Hoard", "Pyremora", "Sablepeak", "The Drakelands", "Vermtheon"],
+		"titles": ["Wyrmdom", "Dominion", "Empire", "Hoard-Realm", "Reach", "Tyranny", "Aerie", "Dominance"]
+	},
+	"desert": {
+		"pre": ["Zah", "Sar", "Ka", "Al", "Qa", "Rho", "Mek", "Tan", "Sha", "Zir", "Ha", "Nur"],
+		"suf": ["rakh", "dune", "zar", "mesh", "far", "kesh", "raan", "sib", "mun", "hara", "dar", "zeph"],
+		"solo": ["Zahrakh", "The Sundunes", "Al-Kesh", "Sarfar", "The Scorching Reach", "Qamun"],
+		"titles": ["Sultanate", "Caliphate", "Emirate", "Dominion", "Satrapy", "Kingdom", "Reach", "Sheikhdom"]
+	},
+	"sea": {
+		"pre": ["Coral", "Tide", "Mar", "Nau", "Pearl", "Deep", "Wave", "Brine", "Sal", "Thal", "Mer", "Reef"],
+		"suf": ["mar", "reef", "tide", "fathom", "haven", "cove", "depth", "shoal", "bay", "lagoon", "abyss", "spire"],
+		"solo": ["Coralmar", "The Sunken Reef", "Tidehaven", "Deepfathom", "The Pearl Throne", "Brineshoal"],
+		"titles": ["Dominion", "Kingdom", "Reach", "Depths", "Tideholds", "Merrealm", "Confederacy", "Reefdom"]
+	},
+	"sky": {
+		"pre": ["Aer", "Cloud", "Storm", "Wind", "Sky", "Zeph", "Cirr", "Gale", "High", "Feather", "Talon", "Sun"],
+		"suf": ["aerie", "reach", "spire", "roost", "crest", "haven", "peak", "wind", "perch", "vault", "gale", "loft"],
+		"solo": ["The Windward Aerie", "Cloudspire", "Stormroost", "Skyreach", "The High Perch", "Zephaerie"],
+		"titles": ["Aerie", "Skyrealm", "Dominion", "Reach", "Roost-Kingdom", "Confederacy", "Highlands", "Eyrie"]
+	},
+	"hearth": {
+		"pre": ["Green", "Apple", "Honey", "Bram", "Butter", "Tumble", "Cobble", "Merry", "Thistle", "Dun", "Copper", "Hollow"],
+		"suf": ["hollow", "bottom", "shire", "brook", "field", "dale", "barrow", "meadow", "ton", "borough", "down", "burrow"],
+		"solo": ["Greenbottom", "Appledale", "The Shire-lands", "Honeybrook", "Tumbledown", "Coppermeadow"],
+		"titles": ["Shire", "Commonwealth", "Free Shires", "Thanedom", "Realm", "Confederacy", "Burrows", "Reach"]
+	},
+	"default": {
+		"pre": ["Kar", "Vel", "Oth", "Mor", "Zan", "Tor", "Bel", "Nor", "Ser", "Vay", "Hal", "Dun"],
+		"suf": ["ador", "mere", "reach", "gard", "oria", "vale", "mark", "heim", "ath", "dun", "wick", "orn"],
+		"solo": ["Karador", "The Reach", "Velmark", "Othoria", "The Free Territories", "Serath"],
+		"titles": ["Realm", "Kingdom", "Dominion", "Reach", "Territories", "Federation", "Confederacy", "State"]
+	}
+}
+
+## Culture key -> archetype. Anything not listed falls back to "default".
+const RACE_ARCHETYPE: Dictionary = {
+	"humans": "human",
+	"desert_folk": "desert",
+	"wood_elves": "elf",
+	"half_elves": "elf",
+	"orc": "orc",
+	"half_orcs": "orc",
+	"hobgoblin": "orc",
+	"quilboar": "beast",
+	"beastmen": "beast",
+	"gnolls": "beast",
+	"centaurs": "beast",
+	"lizardmen": "reptile",
+	"snakemen": "reptile",
+	"giants": "giant",
+	"ogres": "giant",
+	"trolls": "giant",
+	"firbolg": "giant",
+	"braxat": "giant",
+	"fimir": "giant",
+	"fae": "fae",
+	"dryad": "fae",
+	"leshy": "fae",
+	"satyr": "fae",
+	"demons": "demon",
+	"dragons": "dragon",
+	"merfolks": "sea",
+	"locathah": "sea",
+	"karkinos": "sea",
+	"tuskar": "sea",
+	"hadozee": "sea",
+	"aarakocra": "sky",
+	"harpies": "sky",
+	"halflings": "hearth",
+	"gnomes": "hearth",
+	"pygmy": "hearth"
+}
+
 var _sources: Array[Dictionary] = []
+## Realm names already handed out this generation, so two dwarf holds never
+## share a name. Reset when political seeds are rebuilt.
+var _used_state_names: Dictionary = {}
 
 func apply_cultural_influence(
 	width: int,
@@ -863,6 +1087,7 @@ func _assign_political_regions(
 func _build_political_seeds(settlements: Array[Dictionary], factions: Array[Dictionary], tiles: Dictionary, seed_number: int) -> Array[Dictionary]:
 	var seeds: Array[Dictionary] = []
 	var occupied := {}
+	_used_state_names.clear()
 	for faction: Dictionary in factions:
 		var capital := faction.get("capital", {}) as Dictionary
 		var x := int(capital.get("x", -1))
@@ -920,14 +1145,81 @@ func _is_land_tile(coord: Vector2i, tiles: Dictionary, is_land_base_tile_fn: Cal
 
 func _generate_state_name(culture_key: String, x: int, y: int, seed_number: int) -> String:
 	var normalized_key := normalise_culture_key(culture_key, "humans")
-	var culture_label := format_culture_label(normalized_key)
-	if STATE_FORMS.is_empty():
-		return culture_label
-	var index := int(_hash_u32(seed_number, x, y, normalized_key.hash()) % STATE_FORMS.size())
-	var form := STATE_FORMS[index]
-	if form in ["Empire", "Khaganate", "Shogunate", "Caliphate", "Oligarchy", "Union", "Confederation", "League"]:
-		return "%s %s" % [culture_label, form]
-	return "%s of %s" % [form, culture_label]
+	# Dwarves get proper hold-names ("Deep Kingdom of Kardun-Varr", "Ironroot")
+	# rather than "Horde of Dwarves".
+	if normalized_key == "dwarves" or normalized_key.begins_with("dwarf"):
+		return _generate_dwarf_state_name(x, y, seed_number)
+	# Every other race draws a themed realm name from its archetype pool.
+	return _generate_archetype_state_name(normalized_key, x, y, seed_number)
+
+## A themed realm name for any non-dwarf culture, by archetype (human, elf, orc,
+## beast, reptile, giant, fae, demon, dragon, desert, sea, sky, hearth, or a
+## generic default). Composes a place name from prefix+suffix roots (or a
+## standalone name), fronts/tails it with a fitting title, and scans forward to
+## the first name not yet claimed this run so realms never share a label.
+func _generate_archetype_state_name(normalized_key: String, x: int, y: int, seed_number: int) -> String:
+	var archetype := String(RACE_ARCHETYPE.get(normalized_key, "default"))
+	var pool := ARCHETYPE_POOLS.get(archetype, ARCHETYPE_POOLS["default"]) as Dictionary
+	var pre := pool.get("pre", []) as Array
+	var suf := pool.get("suf", []) as Array
+	var solo := pool.get("solo", []) as Array
+	var titles := pool.get("titles", []) as Array
+	var base_salt := normalized_key.hash()
+	for attempt: int in range(96):
+		var candidate := ""
+		var use_solo := not solo.is_empty() and _hash_u32(seed_number, x, y, base_salt ^ (attempt * 131 + 1)) % 5 == 0
+		if use_solo:
+			candidate = String(solo[_hash_u32(seed_number, x, y, base_salt ^ (attempt * 131 + 2)) % solo.size()])
+		elif not pre.is_empty() and not suf.is_empty():
+			var place := "%s%s" % [
+				String(pre[_hash_u32(seed_number, x, y, base_salt ^ (attempt * 131 + 3)) % pre.size()]),
+				String(suf[_hash_u32(seed_number, x, y, base_salt ^ (attempt * 131 + 4)) % suf.size()])
+			]
+			var title := "Realm"
+			if not titles.is_empty():
+				title = String(titles[_hash_u32(seed_number, x, y, base_salt ^ (attempt * 131 + 5)) % titles.size()])
+			# Orc/beast realms read better with the title trailing ("Bloodfang
+			# Horde"); everyone else fronts it ("Kingdom of Valemont").
+			var trail := (archetype == "orc" or archetype == "beast") and _hash_u32(seed_number, x, y, base_salt ^ (attempt * 131 + 6)) % 2 == 0
+			candidate = ("%s %s" % [place, title]) if trail else ("%s of %s" % [title, place])
+		else:
+			break
+		if not _used_state_names.has(candidate):
+			_used_state_names[candidate] = true
+			return candidate
+	# Fell through (tiny pool or everything claimed): disambiguate with the label.
+	var fallback := "%s of the %s" % [
+		String(titles[0]) if not titles.is_empty() else "Realm",
+		format_culture_label(normalized_key)
+	]
+	return fallback
+
+## A distinct dwarf realm name, deterministic per capital tile: a complete
+## hold-name used as-is, or a titled Khuzdul name ("{Title} of {Name}"). Scans
+## forward from a hashed start to the first name not yet claimed this run, so
+## neighbouring dwarf realms never share a name.
+func _generate_dwarf_state_name(x: int, y: int, seed_number: int) -> String:
+	var total := DWARF_STANDALONE_REALMS.size() + DWARF_TITLED_NAMES.size()
+	if total <= 0:
+		return "Kingdom of the Dwarves"
+	var start := int(_hash_u32(seed_number, x, y, 0x44574152) % total)
+	for offset: int in range(total):
+		var idx := (start + offset) % total
+		var candidate := ""
+		if idx < DWARF_STANDALONE_REALMS.size():
+			candidate = DWARF_STANDALONE_REALMS[idx]
+		else:
+			var realm_name := DWARF_TITLED_NAMES[idx - DWARF_STANDALONE_REALMS.size()]
+			var title := DWARF_REALM_TITLES[int(_hash_u32(seed_number, x, y, realm_name.hash()) % DWARF_REALM_TITLES.size())]
+			candidate = "%s of %s" % [title, realm_name]
+		if not _used_state_names.has(candidate):
+			_used_state_names[candidate] = true
+			return candidate
+	# More dwarf realms than distinct names: title a Khuzdul name and let the
+	# title vary by tile so at least the string differs.
+	var fallback_name := DWARF_TITLED_NAMES[start % DWARF_TITLED_NAMES.size()]
+	var fallback_title := DWARF_REALM_TITLES[int(_hash_u32(seed_number, x, y, 0x484F4C44) % DWARF_REALM_TITLES.size())]
+	return "%s of %s" % [fallback_title, fallback_name]
 
 func _entries_for_settlement(settlement: Dictionary, settlement_type: String) -> Array[Dictionary]:
 	var entries: Array[Dictionary] = []
