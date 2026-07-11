@@ -658,6 +658,16 @@ var _tile_region_names: Dictionary = {}
 var _tile_population_groups: Dictionary = {}
 var _tooltip_cache_coord := Vector2i(-1, -1)
 var _tooltip_cache: Dictionary = {}
+## Autowrap labels over-report their minimum height on the frame their text
+## changes: they reshape at a stale, near-zero width, wrapping every word onto
+## its own line, so a same-frame combined-minimum can be several screens tall
+## (and Control.set_size clamps UP to that minimum, so it can't just be shrunk).
+## We therefore park the freshly-populated panel off-screen for one frame — laid
+## out, so the labels reshape at their real width — and only place it on-screen
+## once the measurement is trustworthy. This tracks that pending state and the
+## tile whose content is currently loaded.
+var _tooltip_settle_pending := false
+var _tooltip_content_coord := Vector2i(-9999, -9999)
 var _height_map: Dictionary = {}
 var _height_buffer: PackedFloat32Array = PackedFloat32Array()
 var _height_texture: ImageTexture = null
@@ -8373,8 +8383,12 @@ func _format_population_breakdown_entry(entry: Dictionary) -> String:
 func _populate_population_breakdown_list(breakdown: Array) -> void:
 	if tooltip_population_breakdown_list == null:
 		return
+	# Free synchronously (not queue_free): a deferred free leaves the old rows
+	# parented for the rest of the frame, so a same-frame size measurement would
+	# double-count them and inflate the panel.
 	for child in tooltip_population_breakdown_list.get_children():
-		child.queue_free()
+		tooltip_population_breakdown_list.remove_child(child)
+		child.free()
 	var sorted_breakdown := breakdown.duplicate()
 	sorted_breakdown.sort_custom(
 		func(a: Dictionary, b: Dictionary) -> bool:
@@ -8599,9 +8613,7 @@ func _update_map_tooltip() -> void:
 		if _is_dragging_globe or _is_dragging_scene3d or _hovered_tile.x < 0 or _hovered_tile.y < 0:
 			_hide_map_tooltip()
 			return
-		_refresh_map_tooltip(_hovered_tile)
-		tooltip_panel.visible = true
-		_position_map_tooltip()
+		_present_map_tooltip(_hovered_tile)
 		return
 	var global_mouse := get_global_mouse_position()
 	var local_mouse := map_layer.to_local(global_mouse)
@@ -8614,9 +8626,40 @@ func _update_map_tooltip() -> void:
 		return
 	if coord != _hovered_tile:
 		_hovered_tile = coord
+	_present_map_tooltip(coord)
+
+## Shows the tooltip for a tile. Repopulates only when the hovered tile changes
+## (re-setting the label text every frame keeps the autowrap measurement
+## perpetually stale). On the frame content changes, the panel is laid out but
+## parked off-screen so the transient screen-tall measurement is never seen;
+## once the combined minimum is trustworthy it is placed at the cursor.
+func _present_map_tooltip(coord: Vector2i) -> void:
+	if tooltip_panel == null:
+		return
+	if coord != _tooltip_content_coord:
+		_tooltip_content_coord = coord
 		_refresh_map_tooltip(coord)
+		_tooltip_settle_pending = true
 	tooltip_panel.visible = true
+	if _tooltip_settle_pending and not _tooltip_measurement_trustworthy():
+		# Keep it laid out (visible) so the labels reshape at their real width,
+		# but off-screen so the stale over-wrapped panel is invisible this frame.
+		tooltip_panel.position = Vector2(-100000.0, -100000.0)
+		return
+	_tooltip_settle_pending = false
 	_position_map_tooltip()
+
+## A combined minimum taller than the viewport is the tell-tale of autowrap
+## labels reshaped before their width settled; a plausible height means the
+## measurement can be trusted for on-screen placement.
+func _tooltip_measurement_trustworthy() -> bool:
+	if tooltip_panel == null:
+		return true
+	var viewport := get_viewport()
+	var max_height := 720.0
+	if viewport != null:
+		max_height = viewport.get_visible_rect().size.y
+	return tooltip_panel.get_combined_minimum_size().y <= max_height + 1.0
 
 func _refresh_map_tooltip(coord: Vector2i) -> void:
 	if tooltip_panel == null:
@@ -8800,7 +8843,6 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		_set_tooltip_section_visible(tooltip_population_breakdown_section, false)
 		if tooltip_population_pie_chart != null and tooltip_population_pie_chart.has_method("set_slices"):
 			tooltip_population_pie_chart.call("set_slices", [])
-	tooltip_panel.size = tooltip_panel.get_combined_minimum_size()
 	_tooltip_cache_coord = coord
 	_tooltip_cache = {"region_name": region_name}
 
@@ -8811,13 +8853,9 @@ func _position_map_tooltip() -> void:
 	if viewport == null:
 		return
 	var cursor_pos := viewport.get_mouse_position()
-	# The autowrap labels carry fixed wrap widths, so the combined minimum
-	# is stable; snapping to it here heals the screen-tall panel that a
-	# pre-layout measurement (autowrap heights taken before widths settled)
-	# used to leave behind without reintroducing per-frame flicker.
-	var min_size := tooltip_panel.get_combined_minimum_size()
-	if absf(tooltip_panel.size.y - min_size.y) > 1.0 or absf(tooltip_panel.size.x - min_size.x) > 1.0:
-		tooltip_panel.size = min_size
+	# Only reached once the measurement is trustworthy (see _present_map_tooltip),
+	# so the combined minimum is the true content fit here.
+	tooltip_panel.size = tooltip_panel.get_combined_minimum_size()
 	var tooltip_size := tooltip_panel.size
 	var offset := Vector2(16, 16)
 	var viewport_size := viewport.get_visible_rect().size
