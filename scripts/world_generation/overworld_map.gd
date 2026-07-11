@@ -490,6 +490,7 @@ const WORLD_AMBIENT_SITE_CAP := 2500
 @onready var settlement_layer: TileMapLayer = get_node_or_null("SettlementLayer")
 @onready var map_overlays: Node2D = get_node_or_null("MapOverlays")
 @onready var elevation_overlay: Sprite2D = get_node_or_null("MapOverlays/ElevationOverlay")
+@onready var cliffs_overlay: Sprite2D = get_node_or_null("MapOverlays/CliffsOverlay")
 @onready var temperature_overlay: Sprite2D = get_node_or_null("MapOverlays/TemperatureOverlay")
 @onready var moisture_overlay: Sprite2D = get_node_or_null("MapOverlays/MoistureOverlay")
 @onready var biome_overlay: Sprite2D = get_node_or_null("MapOverlays/BiomeOverlay")
@@ -522,6 +523,7 @@ var _map_lod_active := false
 @onready var scene3d_view_button: Button = get_node_or_null("MapUi/TopBar/TopBarLayout/Scene3DViewButton")
 @onready var temperature_map_button: Button = get_node_or_null("MapUi/TopBar/TopBarLayout/TemperatureMapButton")
 @onready var elevation_map_button: Button = get_node_or_null("MapUi/TopBar/TopBarLayout/ElevationMapButton")
+@onready var cliffs_map_button: Button = get_node_or_null("MapUi/TopBar/TopBarLayout/CliffsMapButton")
 @onready var moisture_map_button: Button = get_node_or_null("MapUi/TopBar/TopBarLayout/MoistureMapButton")
 @onready var biome_map_button: Button = get_node_or_null("MapUi/TopBar/TopBarLayout/BiomeMapButton")
 @onready var culture_map_button: Button = get_node_or_null("MapUi/TopBar/TopBarLayout/CultureMapButton")
@@ -686,6 +688,7 @@ var _is_dragging_globe := false
 var _is_scene3d_view := false
 var _is_dragging_scene3d := false
 var _elevation_overlay_enabled := false
+var _cliffs_overlay_enabled := false
 var _temperature_overlay_enabled := false
 var _moisture_overlay_enabled := false
 var _biome_overlay_enabled := false
@@ -712,7 +715,8 @@ var _overlay_dirty := {
 	"moisture": true,
 	"biome": true,
 	"culture": true,
-	"political_boundaries": true
+	"political_boundaries": true,
+	"cliffs": true
 }
 var _hovered_tile := Vector2i(-999, -999)
 var _context_menu_tile := Vector2i(-1, -1)
@@ -819,6 +823,10 @@ func _ready() -> void:
 	if elevation_map_button != null:
 		elevation_map_button.toggled.connect(_on_elevation_map_toggled)
 		elevation_map_button.button_pressed = false
+	if cliffs_map_button != null:
+		cliffs_map_button.toggled.connect(_on_cliffs_map_toggled)
+		cliffs_map_button.button_pressed = false
+		cliffs_map_button.tooltip_text = "Toggle the cliff map: shaded relief with escarpments burned in dark"
 	if moisture_map_button != null:
 		moisture_map_button.toggled.connect(_on_moisture_map_toggled)
 		moisture_map_button.button_pressed = false
@@ -1048,6 +1056,12 @@ func _on_elevation_map_toggled(is_pressed: bool) -> void:
 	if is_pressed:
 		_ensure_overlay_texture("elevation")
 	_update_elevation_overlay_visibility()
+
+func _on_cliffs_map_toggled(is_pressed: bool) -> void:
+	_cliffs_overlay_enabled = is_pressed
+	if is_pressed:
+		_ensure_overlay_texture("cliffs")
+	_update_cliffs_overlay_visibility()
 
 func _on_moisture_map_toggled(is_pressed: bool) -> void:
 	_moisture_overlay_enabled = is_pressed
@@ -1823,6 +1837,7 @@ func _mark_all_overlays_dirty() -> void:
 	_overlay_dirty["biome"] = true
 	_overlay_dirty["culture"] = true
 	_overlay_dirty["political_boundaries"] = true
+	_overlay_dirty["cliffs"] = true
 
 func _ensure_overlay_texture(overlay_key: String) -> void:
 	if not bool(_overlay_dirty.get(overlay_key, false)):
@@ -1840,6 +1855,8 @@ func _ensure_overlay_texture(overlay_key: String) -> void:
 			_update_culture_overlay()
 		"political_boundaries":
 			_update_political_boundaries_overlay()
+		"cliffs":
+			_update_cliffs_overlay()
 
 func _generate_map() -> void:
 	var map_generation_started_ms := Time.get_ticks_msec()
@@ -8484,6 +8501,7 @@ func _set_globe_view(enabled: bool) -> void:
 	elif not enabled and not _is_scene3d_view:
 		_restore_map_layer_parent()
 	_update_elevation_overlay_visibility()
+	_update_cliffs_overlay_visibility()
 	_update_temperature_overlay_visibility()
 	_update_moisture_overlay_visibility()
 	_update_biome_overlay_visibility()
@@ -8516,6 +8534,7 @@ func _set_scene3d_view(enabled: bool) -> void:
 	elif not enabled and not _is_globe_view:
 		_restore_map_layer_parent()
 	_update_elevation_overlay_visibility()
+	_update_cliffs_overlay_visibility()
 	_update_temperature_overlay_visibility()
 	_update_moisture_overlay_visibility()
 	_update_biome_overlay_visibility()
@@ -9096,6 +9115,41 @@ func _update_elevation_overlay_visibility() -> void:
 	if elevation_overlay == null:
 		return
 	elevation_overlay.visible = _elevation_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
+
+## The cliff map: each tile shaded by its elevation gradient against its
+## four neighbours, so slopes hillshade and sharp drops burn in dark like
+## Dwarf Fortress's cliff view.
+func _update_cliffs_overlay() -> void:
+	if cliffs_overlay == null:
+		return
+	if _height_buffer.is_empty():
+		cliffs_overlay.texture = null
+		_overlay_dirty["cliffs"] = false
+		return
+	var image := Image.create(map_size.x, map_size.y, false, Image.FORMAT_RGBA8)
+	for y in range(map_size.y):
+		for x in range(map_size.x):
+			image.set_pixel(x, y, _cliff_color_at(x, y))
+	var texture := ImageTexture.create_from_image(image)
+	cliffs_overlay.texture = texture
+	_overlay_dirty["cliffs"] = false
+	cliffs_overlay.centered = false
+	cliffs_overlay.scale = Vector2(tile_size, tile_size)
+	cliffs_overlay.position = Vector2.ZERO
+	_update_cliffs_overlay_visibility()
+
+func _cliff_color_at(x: int, y: int) -> Color:
+	var height := float(_height_buffer[_xy_to_index(x, y)])
+	var west := float(_height_buffer[_xy_to_index(maxi(x - 1, 0), y)])
+	var east := float(_height_buffer[_xy_to_index(mini(x + 1, map_size.x - 1), y)])
+	var north := float(_height_buffer[_xy_to_index(x, maxi(y - 1, 0))])
+	var south := float(_height_buffer[_xy_to_index(x, mini(y + 1, map_size.y - 1))])
+	return OVERWORLD_RENDERING.cliff_shade_color(height, west, east, north, south, water_level, mountain_level)
+
+func _update_cliffs_overlay_visibility() -> void:
+	if cliffs_overlay == null:
+		return
+	cliffs_overlay.visible = _cliffs_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
 
 func _update_moisture_overlay() -> void:
 	if moisture_overlay == null:

@@ -101,6 +101,11 @@ visible = false
 z_index = 7
 centered = false
 
+[node name="CliffsOverlay" type="Sprite2D" parent="MapOverlays"]
+visible = false
+z_index = 8
+centered = false
+
 [node name="PoliticalBoundariesOverlay" type="Sprite2D" parent="MapOverlays"]
 visible = false
 z_index = 8
@@ -212,6 +217,11 @@ text = "Moisture Map"
 layout_mode = 2
 toggle_mode = true
 text = "Elevation Map"
+
+[node name="CliffsMapButton" type="Button" parent="MapUi/TopBar/TopBarLayout"]
+layout_mode = 2
+toggle_mode = true
+text = "Cliff Map"
 
 [node name="BiomeMapButton" type="Button" parent="MapUi/TopBar/TopBarLayout"]
 layout_mode = 2
