@@ -73,6 +73,11 @@ func _tween_fade_alpha(target_alpha: float, duration: float) -> void:
 	if _fade_rect == null or not is_instance_valid(_fade_rect):
 		return
 	var tween := create_tween()
+	# Run even while the tree is paused: an incoming scene may pause on entry
+	# (e.g. the embark "Strike the earth!" screen), and a pause-bound reveal
+	# tween would freeze at full black — leaving the player staring at the
+	# black overlay with the message stuck beneath it.
+	tween.set_pause_mode(Tween.TWEEN_PAUSE_PROCESS)
 	tween.tween_property(_fade_rect, "color:a", target_alpha, duration)
 	await tween.finished
 

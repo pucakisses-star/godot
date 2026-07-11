@@ -195,8 +195,8 @@ static func _biome_terrain(cell: Vector2i, noise_set: Dictionary, elevation: flo
 	# it crosses. Coast and beach are already handled above, so this only
 	# touches dry cells; the course reads as ordinary water (block/boatable).
 	if _tile_has_river(biome_ctx, tile):
-		var river_mask := _river_mask_for_tile(biome_ctx, tile, water3x3, noise_set, cells_per_tile)
-		if not river_mask.is_empty() and river_mask[local_y * cells_per_tile + local_x] != 0:
+		var river_cells := _river_mask_for_tile(biome_ctx, tile, water3x3, noise_set, cells_per_tile)
+		if river_cells.has(local_y * cells_per_tile + local_x):
 			return {"base": "water" if detail > -0.15 else "water_calm", "decor": ""}
 	var land_biome := _blend_land_biome(biomes3x3, land_own, cell, noise_set, fx, fy)
 	return _terrain_for_biome(land_biome, cell, elevation, forest, detail, danger)
@@ -346,11 +346,14 @@ static func _field_from_neighbors(values: PackedFloat32Array, fx: float, fy: flo
 
 ## The tile's river course, built once and cached on the ctx. The 3x3
 ## river-bit neighborhood joins the shared water3x3 field, so a flagged
-## tile knows which of its edges to reach toward.
-static func _river_mask_for_tile(biome_ctx: Dictionary, tile: Vector2i, water3x3: PackedFloat32Array, noise_set: Dictionary, cells_per_tile: int) -> PackedByteArray:
+## tile knows which of its edges to reach toward. The course is stored
+## SPARSELY (a set of local linear cell indices) rather than a dense
+## grid*grid mask, so a large cells_per_tile costs river-length memory,
+## not tile-area memory.
+static func _river_mask_for_tile(biome_ctx: Dictionary, tile: Vector2i, water3x3: PackedFloat32Array, noise_set: Dictionary, cells_per_tile: int) -> Dictionary:
 	var cache := biome_ctx.get("river_cache", {}) as Dictionary
 	if cache.has(tile):
-		return cache[tile] as PackedByteArray
+		return cache[tile] as Dictionary
 	var river3x3 := PackedFloat32Array()
 	river3x3.resize(9)
 	for ny in 3:
@@ -365,9 +368,9 @@ static func _river_mask_for_tile(biome_ctx: Dictionary, tile: Vector2i, water3x3
 ## one meandering segment per river or sea neighbor, wobble faded to zero at
 ## both endpoints so a tile's course meets its neighbors' exactly at the
 ## shared edge. A lone river tile still shows its stream, north to south.
-static func _build_river_mask(tile: Vector2i, river3x3: PackedFloat32Array, water3x3: PackedFloat32Array, noise_set: Dictionary, grid: int) -> PackedByteArray:
-	var mask := PackedByteArray()
-	mask.resize(grid * grid)
+## Returns a set {local_index: true}.
+static func _build_river_mask(tile: Vector2i, river3x3: PackedFloat32Array, water3x3: PackedFloat32Array, noise_set: Dictionary, grid: int) -> Dictionary:
+	var mask: Dictionary = {}
 	var center := Vector2(grid * 0.5, grid * 0.5)
 	var noise := noise_set.get("detail") as FastNoiseLite
 	var connections := 0
@@ -384,11 +387,19 @@ static func _build_river_mask(tile: Vector2i, river3x3: PackedFloat32Array, wate
 		_stamp_river_segment(mask, center, Vector2(center.x, float(grid)), tile, noise, grid)
 	return mask
 
-static func _stamp_river_segment(mask: PackedByteArray, from_point: Vector2, to_point: Vector2, tile: Vector2i, noise: FastNoiseLite, grid: int) -> void:
+static func _stamp_river_segment(mask: Dictionary, from_point: Vector2, to_point: Vector2, tile: Vector2i, noise: FastNoiseLite, grid: int) -> void:
 	var axis := (to_point - from_point).normalized()
 	var perpendicular := Vector2(-axis.y, axis.x)
-	var brush := 1
-	var steps := 56
+	# Width, meander amplitude and meander wavelength all scale with the
+	# tile's cell resolution, so a stream reads the same whether a tile is
+	# 64 or 768 cells across (at 64 these collapse to the original 1-cell
+	# brush, 11-cell wobble, 0.12 frequency).
+	var brush := maxi(1, grid / 256)
+	var wobble_amp := 11.0 * float(grid) / 64.0
+	var wobble_freq := 0.12 * 64.0 / float(grid)
+	# One sample per cell of segment length keeps the course continuous at
+	# any scale (the dense mask relied on 56 steps oversampling a 32-cell run).
+	var steps := maxi(56, int(ceil((to_point - from_point).length())))
 	for step in steps + 1:
 		var t := float(step) / float(steps)
 		var straight := from_point.lerp(to_point, t)
@@ -396,7 +407,7 @@ static func _stamp_river_segment(mask: PackedByteArray, from_point: Vector2, to_
 		# detail noise the map render uses - so the ground reproduces the
 		# world map's exact course; it fades to zero at both endpoints.
 		var world := Vector2(tile * grid) + straight
-		var wobble := noise.get_noise_2d(world.x * 0.12, world.y * 0.12) * 11.0 * sin(PI * t)
+		var wobble := noise.get_noise_2d(world.x * wobble_freq, world.y * wobble_freq) * wobble_amp * sin(PI * t)
 		var pos := straight + perpendicular * wobble
 		var px := int(round(pos.x))
 		var py := int(round(pos.y))
@@ -405,7 +416,7 @@ static func _stamp_river_segment(mask: PackedByteArray, from_point: Vector2, to_
 				var mx := px + ox
 				var my := py + oy
 				if mx >= 0 and my >= 0 and mx < grid and my < grid:
-					mask[my * grid + mx] = 1
+					mask[my * grid + mx] = true
 
 static func chunk_for_cell(cell: Vector2i) -> Vector2i:
 	return Vector2i(int(floor(float(cell.x) / CHUNK_SIZE)), int(floor(float(cell.y) / CHUNK_SIZE)))

@@ -5401,7 +5401,13 @@ const SURFACE_EVICT_RADIUS := 4
 ## places every neighboring site at its true walking distance - with
 ## roads leading there and an arrival gate that hands the walker over
 ## to that site's own scene.
-const WORLD_CELLS_PER_OVERWORLD_TILE := 64
+## PROTOTYPE: each overworld tile expands to a 768-cell-square walkable
+## region (was 64). At the fixed 8 km/tile that drops the ground scale from
+## ~125 m/step to ~10 m/step. The surface is chunk-streamed, so only the
+## window around the player ever exists; the one structure that scaled with
+## this constant — the per-tile river course — was reworked to a sparse,
+## scale-aware set (SurfaceWorldService) so it never allocates 768x768.
+const WORLD_CELLS_PER_OVERWORLD_TILE := 768
 const SURFACE_SITE_REACH_TILES := 20
 ## A settlement entering the window only earns a connecting road when the
 ## nearest network anchor is within this many cells, so trails stay local
