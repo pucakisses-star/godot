@@ -644,6 +644,11 @@ func _ready() -> void:
 	_build_stats_label()
 	_refresh_dwarf_preview()
 
+	# Open on a fresh random dwarf every time the creator loads — all parts
+	# rolled, not the same default. Editor previews keep their authored state.
+	if not Engine.is_editor_hint():
+		_randomize_all_parts()
+
 func _process(delta: float) -> void:
 	_position_attribute_tooltip()
 	_update_animated_background(delta)
@@ -1159,6 +1164,13 @@ func _build_character_dict() -> Dictionary:
 
 func _on_randomize_button_pressed() -> void:
 	_play_randomize_sound()
+	_randomize_all_parts()
+
+## Rolls every part of the character — gender, profession, clan, skin/hair/beard
+## colors, hair and beard style, clothing color and name — to a fresh random
+## combination. Driven by the dice button and once on load (see _ready) so the
+## creator always opens on a new dwarf rather than the same default.
+func _randomize_all_parts() -> void:
 	_set_gender(_rng.randf() < 0.5)
 
 	if profession_choice and profession_choice.item_count > 0:
