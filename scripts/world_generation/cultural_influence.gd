@@ -63,7 +63,101 @@ const STATE_FORMS: Array[String] = [
 	"Imamah"
 ]
 
+## Dwarf realms get proper hold-names instead of "Horde of Dwarves". These
+## English-compound names read as complete realms and are used as-is.
+const DWARF_STANDALONE_REALMS: Array[String] = [
+	"Ironroot",
+	"Stonevein",
+	"Goldhollow",
+	"Anvildeep",
+	"Hammerfall",
+	"Blackforge",
+	"Embervault",
+	"Frostbeard Hold",
+	"Bronzebarrow",
+	"Deepmantle",
+	"Runebastion",
+	"Grimdelve",
+	"Kragmor",
+	"Oathstone",
+	"Grudgebound",
+	"Redhammer Realm",
+	"Ashenhold",
+	"Silverdelve",
+	"Granite Crown",
+	"The Underthrone",
+	"Drakevault",
+	"Stonehelm",
+	"Ironmarch",
+	"Coalgrip",
+	"The Seven Halls",
+	"The Copper Kings",
+	"Deepcrown",
+	"Molten Gate",
+	"Rimehammer",
+	"The Shattered Delve",
+	"High Anvil",
+	"The Vaulted Kingdom"
+]
+
+## Khuzdul-style names that read best fronted by a title ("Deep Kingdom of
+## Kardun-Varr", "Hold of Barak-Thorum").
+const DWARF_TITLED_NAMES: Array[String] = [
+	"Khazrund",
+	"Barak-Thorum",
+	"Dumgaraz",
+	"Kardun-Varr",
+	"Azrak-Khaz",
+	"Thalgrund",
+	"Durhazad",
+	"Thorek-Dun",
+	"Kazad-Grom",
+	"Varn-Kadrin",
+	"Dolgaz-Nur",
+	"Kragdum",
+	"Baldurak",
+	"Garn-Thalor",
+	"Kharak-Vuld",
+	"Tor-Dumaz",
+	"Old Kazadar",
+	"Karak-Dur",
+	"Grimvault",
+	"Mithrilgate"
+]
+
+## Dwarf-flavoured realm titles for the "{Title} of {Name}" form.
+const DWARF_REALM_TITLES: Array[String] = [
+	"Kingdom",
+	"High Kingdom",
+	"Empire",
+	"Hold",
+	"Great Hold",
+	"Mountainhold",
+	"Delve",
+	"Deep Kingdom",
+	"Underkingdom",
+	"Thanehold",
+	"Thanedom",
+	"Khanate",
+	"March",
+	"Freehold",
+	"Commonwealth",
+	"League",
+	"Confederation",
+	"Guild-State",
+	"Forge-Realm",
+	"Runedom",
+	"Stone-Crown",
+	"Vault-Kingdom",
+	"Hegemony",
+	"Dominion",
+	"Realm"
+]
+
 var _sources: Array[Dictionary] = []
+## Realm names already handed out this generation, so two dwarf holds never
+## share a name. Reset when political seeds are rebuilt.
+var _used_state_names: Dictionary = {}
 
 func apply_cultural_influence(
 	width: int,
@@ -863,6 +957,7 @@ func _assign_political_regions(
 func _build_political_seeds(settlements: Array[Dictionary], factions: Array[Dictionary], tiles: Dictionary, seed_number: int) -> Array[Dictionary]:
 	var seeds: Array[Dictionary] = []
 	var occupied := {}
+	_used_state_names.clear()
 	for faction: Dictionary in factions:
 		var capital := faction.get("capital", {}) as Dictionary
 		var x := int(capital.get("x", -1))
@@ -920,6 +1015,10 @@ func _is_land_tile(coord: Vector2i, tiles: Dictionary, is_land_base_tile_fn: Cal
 
 func _generate_state_name(culture_key: String, x: int, y: int, seed_number: int) -> String:
 	var normalized_key := normalise_culture_key(culture_key, "humans")
+	# Dwarves get proper hold-names ("Deep Kingdom of Kardun-Varr", "Ironroot")
+	# rather than "Horde of Dwarves".
+	if normalized_key == "dwarves" or normalized_key.begins_with("dwarf"):
+		return _generate_dwarf_state_name(x, y, seed_number)
 	var culture_label := format_culture_label(normalized_key)
 	if STATE_FORMS.is_empty():
 		return culture_label
@@ -928,6 +1027,33 @@ func _generate_state_name(culture_key: String, x: int, y: int, seed_number: int)
 	if form in ["Empire", "Khaganate", "Shogunate", "Caliphate", "Oligarchy", "Union", "Confederation", "League"]:
 		return "%s %s" % [culture_label, form]
 	return "%s of %s" % [form, culture_label]
+
+## A distinct dwarf realm name, deterministic per capital tile: a complete
+## hold-name used as-is, or a titled Khuzdul name ("{Title} of {Name}"). Scans
+## forward from a hashed start to the first name not yet claimed this run, so
+## neighbouring dwarf realms never share a name.
+func _generate_dwarf_state_name(x: int, y: int, seed_number: int) -> String:
+	var total := DWARF_STANDALONE_REALMS.size() + DWARF_TITLED_NAMES.size()
+	if total <= 0:
+		return "Kingdom of the Dwarves"
+	var start := int(_hash_u32(seed_number, x, y, 0x44574152) % total)
+	for offset: int in range(total):
+		var idx := (start + offset) % total
+		var candidate := ""
+		if idx < DWARF_STANDALONE_REALMS.size():
+			candidate = DWARF_STANDALONE_REALMS[idx]
+		else:
+			var realm_name := DWARF_TITLED_NAMES[idx - DWARF_STANDALONE_REALMS.size()]
+			var title := DWARF_REALM_TITLES[int(_hash_u32(seed_number, x, y, realm_name.hash()) % DWARF_REALM_TITLES.size())]
+			candidate = "%s of %s" % [title, realm_name]
+		if not _used_state_names.has(candidate):
+			_used_state_names[candidate] = true
+			return candidate
+	# More dwarf realms than distinct names: title a Khuzdul name and let the
+	# title vary by tile so at least the string differs.
+	var fallback_name := DWARF_TITLED_NAMES[start % DWARF_TITLED_NAMES.size()]
+	var fallback_title := DWARF_REALM_TITLES[int(_hash_u32(seed_number, x, y, 0x484F4C44) % DWARF_REALM_TITLES.size())]
+	return "%s of %s" % [fallback_title, fallback_name]
 
 func _entries_for_settlement(settlement: Dictionary, settlement_type: String) -> Array[Dictionary]:
 	var entries: Array[Dictionary] = []
