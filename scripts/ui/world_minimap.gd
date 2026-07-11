@@ -242,6 +242,24 @@ func _on_zoom_in_pressed() -> void:
 	queue_redraw()
 
 
+## Mouse wheel over the map zooms it (in the corner and, above all, in the
+## expanded M view): up tightens onto the player, down pulls back to reveal
+## more ground. The event is eaten so the same scroll never also zooms the
+## world behind the map.
+func _gui_input(event: InputEvent) -> void:
+	if _collapsed:
+		return
+	var button := event as InputEventMouseButton
+	if button == null or not button.pressed:
+		return
+	if button.button_index == MOUSE_BUTTON_WHEEL_UP:
+		_on_zoom_in_pressed()
+		accept_event()
+	elif button.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+		_on_zoom_out_pressed()
+		accept_event()
+
+
 func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), PANEL_BG, true)
 	draw_rect(Rect2(0.0, 0.0, size.x, HEADER_H), HEADER_BG, true)

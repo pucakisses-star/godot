@@ -34,7 +34,6 @@ var _slot_panels: Array[PanelContainer] = []
 var _slot_icons: Array[TextureRect] = []
 var _slot_counts: Array[Label] = []
 var _tabs: TabContainer
-var _dynasty_scroll: ScrollContainer
 var _tree_view: FamilyTreeView
 
 func _init() -> void:
@@ -112,9 +111,7 @@ func show_dynasty_tab() -> void:
 func _apply_dynasty_focus() -> void:
 	if _tabs.current_tab != 1:
 		return
-	var focus := _tree_view.sitting_scroll_center()
-	_dynasty_scroll.scroll_horizontal = int(maxf(0.0, focus.x - 210.0))
-	_dynasty_scroll.scroll_vertical = int(maxf(0.0, focus.y - 250.0))
+	_tree_view.focus_on_sitting()
 
 func _on_tab_changed(tab_index: int) -> void:
 	if tab_index == 1:
@@ -139,7 +136,7 @@ func _populate_family(npc_state: Dictionary, identity: Dictionary, present_year:
 	else:
 		_tabs.set_tab_title(1, "Family")
 		_tree_view.set_dynasty([], {}, age, _individual_family(npc_state, identity, present_year))
-	_dynasty_scroll.custom_minimum_size = Vector2(420, 500)
+	_tree_view.custom_minimum_size = Vector2(420, 500)
 
 ## The inspected NPC's own family graph, built on first inspection from
 ## their identity (name/clan/gender/age/race and any roster kin) and cached
@@ -287,13 +284,14 @@ func _build_ui() -> void:
 	_coins_label.add_theme_color_override("font_color", Color(0.92, 0.86, 0.7, 1.0))
 	belongings_box.add_child(_coins_label)
 
-	_dynasty_scroll = ScrollContainer.new()
-	_dynasty_scroll.name = "Dynasty"
-	_tabs.add_child(_dynasty_scroll)
+	# The tree is its own pan/zoom viewport (drag to move, wheel to zoom) — no
+	# ScrollContainer, so it clips to the tab and the whole genealogy is
+	# reachable by dragging out to distant kin and zooming to fit.
 	_tree_view = FamilyTreeView.new()
+	_tree_view.name = "Dynasty"
 	_tree_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_tree_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_dynasty_scroll.add_child(_tree_view)
+	_tabs.add_child(_tree_view)
 
 func _populate_slots(items: Array) -> void:
 	for slot_index in range(SLOT_COUNT):
@@ -366,6 +364,13 @@ class FamilyTreeView:
 	const PLAQUE_COLOR := Color(0.23, 0.18, 0.14, 1.0)
 	const MUTED_PLAQUE_COLOR := Color(0.19, 0.16, 0.13, 1.0)
 
+	## Pan/zoom of the view: content is drawn through a single transform, so
+	## the player can drag the genealogy around and wheel-zoom to fit a wide
+	## family into the tab or lean in on one branch.
+	const MIN_ZOOM := 0.35
+	const MAX_ZOOM := 2.5
+	const ZOOM_STEP := 1.12
+
 	## The dynasty graph (person id -> person dictionary) and its layout.
 	var _people: Dictionary = {}
 	var _order: Array[String] = []
@@ -376,7 +381,54 @@ class FamilyTreeView:
 	var _segments: Array[Dictionary] = []
 	var _daggers: Array[Vector2] = []
 	var _sitting_center := Vector2.ZERO
+	var _content_size := Vector2.ZERO
 	var _portrait_cache: Dictionary = {}
+	var _view_offset := Vector2.ZERO
+	var _zoom := 1.0
+	var _dragging := false
+
+	func _ready() -> void:
+		clip_contents = true
+		mouse_filter = Control.MOUSE_FILTER_STOP
+
+	## Drag with the left/middle button to pan, mouse wheel to zoom toward the
+	## cursor. Bounded so the tree can never be flung off to an empty void.
+	func _gui_input(event: InputEvent) -> void:
+		if event is InputEventMouseButton:
+			var button := event as InputEventMouseButton
+			if button.button_index == MOUSE_BUTTON_WHEEL_UP and button.pressed:
+				_zoom_to(_zoom * ZOOM_STEP, button.position)
+				accept_event()
+			elif button.button_index == MOUSE_BUTTON_WHEEL_DOWN and button.pressed:
+				_zoom_to(_zoom / ZOOM_STEP, button.position)
+				accept_event()
+			elif button.button_index == MOUSE_BUTTON_LEFT or button.button_index == MOUSE_BUTTON_MIDDLE:
+				_dragging = button.pressed
+				accept_event()
+		elif event is InputEventMouseMotion and _dragging:
+			_view_offset += (event as InputEventMouseMotion).relative
+			queue_redraw()
+			accept_event()
+
+	func _zoom_to(target_zoom: float, pivot: Vector2) -> void:
+		var new_zoom := clampf(target_zoom, MIN_ZOOM, MAX_ZOOM)
+		if is_equal_approx(new_zoom, _zoom):
+			return
+		# Keep the content point under the cursor pinned as the scale changes.
+		var world := (pivot - _view_offset) / _zoom
+		_zoom = new_zoom
+		_view_offset = pivot - world * _zoom
+		queue_redraw()
+
+	## Frames the sitting/focus person in the middle of the view at 1:1, the
+	## natural starting pose whenever the tab opens.
+	func focus_on_sitting() -> void:
+		_zoom = 1.0
+		var view := size
+		if view == Vector2.ZERO:
+			view = _content_size
+		_view_offset = view * 0.5 - _sitting_center * _zoom
+		queue_redraw()
 
 	## People the tree draws; 0 when no dynasty is loaded.
 	func node_count() -> int:
@@ -631,7 +683,10 @@ class FamilyTreeView:
 				if violent:
 					_daggers.append(Vector2(blood_center + 9.0, (rail_y + child_row_top) * 0.5))
 			_add_hline(rail_min, rail_max, rail_y, LINE_COLOR)
-		custom_minimum_size = Vector2(
+		# Content bounds drive pan/zoom framing, not the tab size — the view is
+		# a fixed viewport the player drags within, so this must NOT become the
+		# control's minimum (that would blow the card up to the tree's width).
+		_content_size = Vector2(
 			content_right + EDGE_PADDING,
 			EDGE_PADDING * 2.0 + float(max_generation + 1) * NODE_HEIGHT + float(max_generation) * ROW_GAP
 		)
@@ -845,6 +900,9 @@ class FamilyTreeView:
 	## --- Drawing -------------------------------------------------------------
 
 	func _draw() -> void:
+		# Everything below is authored in content coordinates; this single
+		# transform applies the current pan and zoom to the whole tree at once.
+		draw_set_transform(_view_offset, 0.0, Vector2(_zoom, _zoom))
 		for segment: Dictionary in _segments:
 			draw_rect(segment["rect"] as Rect2, segment["color"] as Color)
 		for dagger: Vector2 in _daggers:
