@@ -506,6 +506,8 @@ const DIG_FOSSIL_FINDS := [
 	"Fossil Antler", "Fern Amber", "Fossil Cluster", "Fin Spines"
 ]
 const DIG_FOSSIL_CHANCE_PERCENT := 7
+const DIG_ORE_CHANCE_PERCENT := 9
+const DIG_COAL_CHANCE_PERCENT := 6
 
 ## Rock has durability: each pickaxe swing chips it, and it only breaks
 ## once the accumulated damage reaches the rock's hit points. Bare hands
@@ -1559,6 +1561,9 @@ func _generate_city() -> void:
 
 	_rng.seed = hash(seed_text)
 	_world_seed_hash = hash(seed_text)
+	# DF-style geology for this hold's country rock: layer family, strata,
+	# metals and coal, stable per world seed.
+	_geology = GeologyService.profile_for_seed(_world_seed_hash)
 	# Holds carry no generated details dict; the market derives from a
 	# seeded stub of mountain exports (ore, ingots, gems, stone).
 	_hold_market = SettlementEconomyService.settlement_market(SettlementEconomyService.hold_details_stub(_world_seed_hash), _world_seed_hash)
@@ -5609,6 +5614,27 @@ func _update_inventory_label() -> void:
 var _rock_damage: Dictionary = {}
 var _rock_crack_sprites: Dictionary = {}
 var _rock_crack_textures: Array[ImageTexture] = []
+## This world's geologic profile (GeologyService), set with the seed.
+var _geology: Dictionary = {}
+
+## An ore appropriate to the current stratum, drawn from this world's
+## metal list - the same list the overworld geology readout advertises.
+func _roll_dig_ore(layer_class: String) -> String:
+	if _geology.is_empty():
+		return ""
+	var metals := _geology.get("metals", []) as Array
+	if metals.is_empty():
+		return ""
+	var host_pool := GeologyService.METAL_POOLS.get(layer_class, []) as Array
+	var candidates: Array[String] = []
+	for metal_variant: Variant in metals:
+		var metal := String(metal_variant)
+		if host_pool.has(metal):
+			candidates.append(metal)
+	if candidates.is_empty():
+		for metal_variant: Variant in metals:
+			candidates.append(String(metal_variant))
+	return "%s Ore" % candidates[_rng.randi_range(0, candidates.size() - 1)]
 
 ## One pickaxe swing at a rock wall, gated by the shared swing cooldown so
 ## click spam can't bypass durability. Damage comes from the best digging
@@ -5621,14 +5647,37 @@ func _swing_at_rock(cell: Vector2i) -> void:
 	for tool_name: String in DIG_TOOL_DAMAGE.keys():
 		if int(_player_inventory.get(tool_name, 0)) > 0:
 			damage = maxi(damage, int(DIG_TOOL_DAMAGE[tool_name]))
+	var rock_hp := _rock_durability()
 	var total_damage := int(_rock_damage.get(cell, 0)) + damage
-	if total_damage >= ROCK_DURABILITY_HP:
+	if total_damage >= rock_hp:
 		_dig_cell(cell)
 		return
 	_rock_damage[cell] = total_damage
-	_update_rock_crack(cell, float(total_damage) / float(ROCK_DURABILITY_HP))
+	_update_rock_crack(cell, float(total_damage) / float(rock_hp))
 	# A small chip spray per swing; the full crumble plays on the last hit.
 	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.55, 0.53, 0.5, 1.0), 5)
+
+## Rock durability follows the level's geologic layer: soft sedimentary
+## strata dig faster than deep granite country.
+func _rock_durability() -> int:
+	if _geology.is_empty():
+		return ROCK_DURABILITY_HP
+	var layer := GeologyService.layer_class_for_depth(_geology, _hold_state.current_level_index)
+	return int(GeologyService.LAYER_DURABILITY.get(layer, ROCK_DURABILITY_HP))
+
+## The named stratum this level is dug through, stable per level.
+func _level_stone_name() -> String:
+	if _geology.is_empty():
+		return "Stone"
+	var layer := GeologyService.layer_class_for_depth(_geology, _hold_state.current_level_index)
+	if layer == String(_geology.get("layer_class", "")):
+		var surface_stones := _geology.get("stones", []) as Array
+		if not surface_stones.is_empty():
+			return String(surface_stones[0])
+	var stones := GeologyService.LAYER_STONES.get(layer, []) as Array
+	if stones.is_empty():
+		return "Stone"
+	return String(stones[absi(_world_seed_hash + _hold_state.current_level_index * 31) % stones.size()])
 
 ## Crack overlay stages drawn over the damaged wall tile.
 func _update_rock_crack(cell: Vector2i, damage_ratio: float) -> void:
@@ -5700,11 +5749,26 @@ func _dig_cell(cell: Vector2i) -> void:
 	_erase_hold_grid_edit(cell)
 	_record_hold_edit("dug", cell)
 	_add_to_inventory("Stone", 1)
-	if _rng.randi_range(1, 100) <= DIG_FOSSIL_CHANCE_PERCENT:
+	var layer_class := ""
+	if not _geology.is_empty():
+		layer_class = GeologyService.layer_class_for_depth(_geology, _hold_state.current_level_index)
+	# Fossils only survive in sedimentary strata; elsewhere the pick can
+	# strike ore from this world's veins or a coal seam instead.
+	if layer_class == GeologyService.LAYER_SEDIMENTARY and _rng.randi_range(1, 100) <= DIG_FOSSIL_CHANCE_PERCENT:
 		var fossil: String = DIG_FOSSIL_FINDS[_rng.randi_range(0, DIG_FOSSIL_FINDS.size() - 1)]
 		_add_to_inventory(fossil, 1)
 		if _player_sprite != null:
 			_spawn_floating_text("Found %s!" % fossil, _player_sprite.position, Color(0.95, 0.9, 0.6, 1.0))
+	elif layer_class == GeologyService.LAYER_SEDIMENTARY and bool(_geology.get("coal", false)) and _rng.randi_range(1, 100) <= DIG_COAL_CHANCE_PERCENT:
+		_add_to_inventory("Coal", 1)
+		if _player_sprite != null:
+			_spawn_floating_text("Struck a coal seam!", _player_sprite.position, Color(0.75, 0.72, 0.68, 1.0))
+	elif _rng.randi_range(1, 100) <= DIG_ORE_CHANCE_PERCENT:
+		var ore := _roll_dig_ore(layer_class)
+		if not ore.is_empty():
+			_add_to_inventory(ore, 1)
+			if _player_sprite != null:
+				_spawn_floating_text("Struck %s!" % ore, _player_sprite.position, Color(0.95, 0.85, 0.5, 1.0))
 	_render_world_rect(Rect2i(cell - Vector2i(1, 1), Vector2i(3, 3)))
 	# The rock is now open hall; open the light through the fresh gap.
 	_refresh_occlusion_cell(cell)
@@ -6348,6 +6412,9 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 		if not affliction_line.is_empty():
 			tooltip_lines.append(affliction_line)
 		tooltip_lines.append("")
+	# Rock reads as its actual stratum ("Tile: Limestone"), DF-style.
+	if zone_name == "Rock" and (tile_name == "Stone" or tile_name == "Stone Face" or tile_name == "Unknown"):
+		tile_name = _level_stone_name()
 	tooltip_lines.append("Tile: %s" % tile_name)
 	tooltip_lines.append("Zone: %s" % zone_name)
 	var furnishing_piece := String(_furnishing_by_cell.get(hovered_cell, ""))

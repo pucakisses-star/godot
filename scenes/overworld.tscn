@@ -358,6 +358,54 @@ autowrap_mode = 3
 horizontal_alignment = 2
 text = "—"
 
+[node name="TooltipGeologyLabel" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+theme_override_font_sizes/font_size = 9
+text = "GEOLOGY"
+
+[node name="TooltipGeology" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
+theme_override_font_sizes/font_size = 10
+size_flags_horizontal = 3
+autowrap_mode = 3
+horizontal_alignment = 2
+text = "—"
+
+[node name="TooltipSoilLabel" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+theme_override_font_sizes/font_size = 9
+text = "SOIL"
+
+[node name="TooltipSoil" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
+theme_override_font_sizes/font_size = 10
+size_flags_horizontal = 3
+autowrap_mode = 3
+horizontal_alignment = 2
+text = "—"
+
+[node name="TooltipAquiferLabel" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+theme_override_font_sizes/font_size = 9
+text = "AQUIFER"
+
+[node name="TooltipAquifer" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
+theme_override_font_sizes/font_size = 10
+size_flags_horizontal = 3
+autowrap_mode = 3
+horizontal_alignment = 2
+text = "—"
+
+[node name="TooltipMetalsLabel" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+theme_override_font_sizes/font_size = 9
+text = "METALS"
+
+[node name="TooltipMetals" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
+custom_minimum_size = Vector2(210, 0)
+theme_override_font_sizes/font_size = 10
+size_flags_horizontal = 3
+autowrap_mode = 3
+horizontal_alignment = 2
+text = "—"
+
 [node name="TooltipMajorPopulationGroupsLabel" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid"]
 theme_override_font_sizes/font_size = 9
 text = "MAJOR GROUPS"

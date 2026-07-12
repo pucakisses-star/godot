@@ -596,6 +596,10 @@ var _is_generating := false
 @onready var tooltip_realm: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipRealm")
 @onready var tooltip_climate: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipClimate")
 @onready var tooltip_resources: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipResources")
+@onready var tooltip_geology: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipGeology")
+@onready var tooltip_soil: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipSoil")
+@onready var tooltip_aquifer: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipAquifer")
+@onready var tooltip_metals: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipMetals")
 @onready var tooltip_major_population_groups: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipMajorPopulationGroups")
 @onready var tooltip_minor_population_groups: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipMinorPopulationGroups")
 @onready var tooltip_settlement: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipSettlement")
@@ -8960,6 +8964,32 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		resource_text,
 		not resource_text.is_empty()
 	)
+
+	# DF embark-style geology readout: recomputed on demand from the seed
+	# and this tile's terrain, never stored.
+	var geology := GeologyService.profile_for_tile(coord, data, map_seed)
+	if geology.is_empty():
+		_set_tooltip_label(tooltip_geology, "", false)
+		_set_tooltip_label(tooltip_soil, "", false)
+		_set_tooltip_label(tooltip_aquifer, "", false)
+		_set_tooltip_label(tooltip_metals, "", false)
+	else:
+		var stones := _variant_array_to_strings(geology.get("stones", []))
+		var geology_text := "%s — %s" % [String(geology.get("layer_label", "")), ", ".join(stones)]
+		if bool(geology.get("flux", false)):
+			geology_text += " (flux)"
+		if bool(geology.get("coal", false)):
+			geology_text += ", coal seams"
+		_set_tooltip_label(tooltip_geology, geology_text, true)
+		var soil_text := "%s soil" % String(geology.get("soil", "Shallow"))
+		var clay_text := String(geology.get("clay", ""))
+		if not clay_text.is_empty():
+			soil_text += ", %s" % clay_text.to_lower()
+		_set_tooltip_label(tooltip_soil, soil_text, true)
+		var aquifer_text := String(geology.get("aquifer", ""))
+		_set_tooltip_label(tooltip_aquifer, aquifer_text, not aquifer_text.is_empty())
+		var metals := _variant_array_to_strings(geology.get("metals", []))
+		_set_tooltip_label(tooltip_metals, ", ".join(metals), not metals.is_empty())
 
 	var culture_tooltip := _culture_pipeline.build_tooltip_data(data)
 	var population_groups := _tile_population_groups_for_coord(coord)
