@@ -146,7 +146,10 @@ static func _layout_curved_label(container: Node2D, font_size: int) -> void:
 	var curve := float(container.get_meta("curve", 0.16))
 	var font_color := container.get_meta("font_color", Color.WHITE) as Color
 	var outline_color := container.get_meta("outline_color", Color.BLACK) as Color
-	var outline_size := int(container.get_meta("outline_size", 2))
+	# Big lettering needs a proportionally thick outline or the strokes
+	# drown in busy terrain; scale it with the font instead of leaving the
+	# small-label constant.
+	var outline_size := maxi(int(container.get_meta("outline_size", 2)), int(round(float(font_size) / 7.0)))
 	var font := ThemeDB.fallback_font
 	var char_widths: Array[float] = []
 	var total_width := 0.0
@@ -328,6 +331,7 @@ static func rebuild(labels_overlay: Node2D, entries: Array[Dictionary], config: 
 		label.add_theme_color_override("font_outline_color", outline_color)
 		label.add_theme_constant_override("outline_size", int(round(outline_size)))
 		label.set_meta("base_font_size", font_size)
+		label.set_meta("base_outline_size", int(round(outline_size)))
 		label.set_meta("anchor_center", placed_center)
 		label.set_meta("screen_px_scale", screen_px_scale)
 		label.set_meta("category", String(entry.get("category", "location")))
@@ -399,6 +403,10 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 				if int(label.get_meta("applied_font_size", -1)) != rounded_size:
 					label.set_meta("applied_font_size", rounded_size)
 					label.add_theme_font_size_override("font_size", rounded_size)
+					# Outline thickness rides the font so grown lettering
+					# stays readable over busy terrain.
+					var base_outline := int(label.get_meta("base_outline_size", 2))
+					label.add_theme_constant_override("outline_size", maxi(base_outline, int(round(float(rounded_size) / 7.0))))
 					# Re-derive the label rect from the scaled font, centered on
 					# the collision-resolved placement, so the text is never
 					# clipped by a stale, smaller rect after zooming in.

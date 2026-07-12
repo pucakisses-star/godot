@@ -10479,8 +10479,10 @@ const REGION_LABEL_SCREEN_PX := 13.0
 const REGION_LABEL_BASE_FONT := 12
 const REGION_LABEL_MIN_ELONGATION := 1.35
 const REGION_LABEL_MAX_ANGLE := 0.62
-const REGION_LABEL_WATER_CURVE := 0.16
+const REGION_LABEL_WATER_CURVE := 0.10
 const REGION_LABEL_CURVE_MIN_TILES := 300
+const REGION_LABEL_CURVED_MAX_ANGLE := 0.3
+const REGION_LABEL_PCA_WINDOW_TILES := 18
 
 var _region_labels_overlay: Node2D = null
 
@@ -10498,10 +10500,6 @@ func _rebuild_region_labels_overlay() -> void:
 	var cluster_sums: Dictionary = {}
 	var cluster_counts: Dictionary = {}
 	var cluster_name_votes: Dictionary = {}
-	# Second-moment sums feed a per-cluster PCA: the label leans along the
-	# region's long axis, like a cartographer laying a sea name.
-	var cluster_sq_sums: Dictionary = {}
-	var cluster_xy_sums: Dictionary = {}
 	var cluster_water_votes: Dictionary = {}
 	for coord_variant: Variant in _tile_data.keys():
 		var coord := coord_variant as Vector2i
@@ -10514,8 +10512,6 @@ func _rebuild_region_labels_overlay() -> void:
 			continue
 		var cell_center := _map_cell_center(coord)
 		cluster_sums[cluster_id] = (cluster_sums.get(cluster_id, Vector2.ZERO) as Vector2) + cell_center
-		cluster_sq_sums[cluster_id] = (cluster_sq_sums.get(cluster_id, Vector2.ZERO) as Vector2) + Vector2(cell_center.x * cell_center.x, cell_center.y * cell_center.y)
-		cluster_xy_sums[cluster_id] = float(cluster_xy_sums.get(cluster_id, 0.0)) + cell_center.x * cell_center.y
 		cluster_counts[cluster_id] = int(cluster_counts.get(cluster_id, 0)) + 1
 		if String(tile_info.get("base_biome", tile_info.get("biome_type", ""))) == "water":
 			cluster_water_votes[cluster_id] = int(cluster_water_votes.get(cluster_id, 0)) + 1
@@ -10536,24 +10532,71 @@ func _rebuild_region_labels_overlay() -> void:
 	if finalists.size() > REGION_LABEL_MAX_COUNT:
 		finalists.resize(REGION_LABEL_MAX_COUNT)
 
-	# Snap each centroid onto the nearest tile of its own cluster so concave
-	# regions never label over a neighbour.
+	# Collect each finalist's tiles (for anchors and local PCA), and the
+	# water-depth field: distance in tiles from the nearest non-water tile,
+	# so sea names can anchor in OPEN water instead of hugging a coast.
 	var centroids: Dictionary = {}
-	var best_anchor: Dictionary = {}
-	var best_distance: Dictionary = {}
 	for cluster_id: int in finalists:
 		centroids[cluster_id] = (cluster_sums[cluster_id] as Vector2) / float(cluster_counts[cluster_id])
+	var finalist_set: Dictionary = {}
+	for cluster_id: int in finalists:
+		finalist_set[cluster_id] = true
+	var cluster_tiles: Dictionary = {}
+	var water_depth: Dictionary = {}
+	var depth_frontier: Array[Vector2i] = []
 	for coord_variant: Variant in _tile_data.keys():
 		var coord := coord_variant as Vector2i
 		var tile_info := _tile_data.get(coord, {}) as Dictionary
 		var cluster_id := int(tile_info.get("biome_cluster_id", -1))
-		if not centroids.has(cluster_id):
+		if finalist_set.has(cluster_id):
+			if not cluster_tiles.has(cluster_id):
+				cluster_tiles[cluster_id] = [] as Array[Vector2i]
+			(cluster_tiles[cluster_id] as Array[Vector2i]).append(coord)
+		if String(tile_info.get("base_biome", tile_info.get("biome_type", ""))) != "water":
+			water_depth[coord] = 0
+			depth_frontier.append(coord)
+	# Multi-source BFS from all land: water_depth[water tile] = tiles to shore.
+	var frontier_index := 0
+	while frontier_index < depth_frontier.size():
+		var coord := depth_frontier[frontier_index]
+		frontier_index += 1
+		var next_depth := int(water_depth.get(coord, 0)) + 1
+		for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+			var neighbor: Vector2i = coord + offset
+			if neighbor.x < 0 or neighbor.y < 0 or neighbor.x >= map_size.x or neighbor.y >= map_size.y:
+				continue
+			if water_depth.has(neighbor):
+				continue
+			water_depth[neighbor] = next_depth
+			depth_frontier.append(neighbor)
+
+	# Anchors: land regions snap their centroid onto the nearest own tile
+	# (concave regions never label over a neighbour); water regions anchor
+	# on their DEEPEST tile - the open heart of the sea - tie-broken toward
+	# the centroid, so a C-shaped ocean never lays its name across land.
+	var best_anchor: Dictionary = {}
+	for cluster_id: int in finalists:
+		var tiles := cluster_tiles.get(cluster_id, []) as Array[Vector2i]
+		if tiles.is_empty():
 			continue
-		var center := _map_cell_center(coord)
-		var distance := center.distance_squared_to(centroids[cluster_id] as Vector2)
-		if distance < float(best_distance.get(cluster_id, INF)):
-			best_distance[cluster_id] = distance
-			best_anchor[cluster_id] = center
+		var centroid := centroids[cluster_id] as Vector2
+		var is_water_cluster := int(cluster_water_votes.get(cluster_id, 0)) * 2 > int(cluster_counts[cluster_id])
+		var best_coord := tiles[0]
+		var best_depth := -1
+		var best_dist := INF
+		for coord: Vector2i in tiles:
+			var center := _map_cell_center(coord)
+			var dist := center.distance_squared_to(centroid)
+			if is_water_cluster:
+				var depth := int(water_depth.get(coord, 0))
+				if depth > best_depth or (depth == best_depth and dist < best_dist):
+					best_depth = depth
+					best_dist = dist
+					best_coord = coord
+			elif dist < best_dist:
+				best_dist = dist
+				best_coord = coord
+		best_anchor[cluster_id] = _map_cell_center(best_coord)
 
 	var entries: Array[Dictionary] = []
 	for cluster_id: int in finalists:
@@ -10567,30 +10610,49 @@ func _rebuild_region_labels_overlay() -> void:
 		if best_name.is_empty():
 			continue
 		var count := float(cluster_counts[cluster_id])
-		# PCA of the cluster's tile positions: covariance eigenvalues give
-		# the long axis (label angle) and how stretched the region is.
-		var mean := (cluster_sums[cluster_id] as Vector2) / count
-		var sq := (cluster_sq_sums.get(cluster_id, Vector2.ZERO) as Vector2) / count
-		var cov_xx := maxf(0.0, sq.x - mean.x * mean.x)
-		var cov_yy := maxf(0.0, sq.y - mean.y * mean.y)
-		var cov_xy := float(cluster_xy_sums.get(cluster_id, 0.0)) / count - mean.x * mean.y
-		var spread := sqrt(maxf(0.0, (cov_xx - cov_yy) * (cov_xx - cov_yy) + 4.0 * cov_xy * cov_xy))
-		var lambda_major := 0.5 * (cov_xx + cov_yy + spread)
-		var lambda_minor := maxf(0.0001, 0.5 * (cov_xx + cov_yy - spread))
-		var elongation := sqrt(lambda_major / lambda_minor)
+		var anchor := best_anchor.get(cluster_id, centroids[cluster_id]) as Vector2
+		# PCA over only the cluster tiles NEAR the anchor: the label leans
+		# with the local lie of the land (or basin), not the whole cluster's
+		# axis - a C-shaped ocean's global axis is meaningless where the
+		# name actually sits.
+		var window_px := float(REGION_LABEL_PCA_WINDOW_TILES * tile_size)
+		var local_sum := Vector2.ZERO
+		var local_sq := Vector2.ZERO
+		var local_xy := 0.0
+		var local_count := 0.0
+		for coord: Vector2i in (cluster_tiles.get(cluster_id, []) as Array[Vector2i]):
+			var center := _map_cell_center(coord)
+			if absf(center.x - anchor.x) > window_px or absf(center.y - anchor.y) > window_px:
+				continue
+			local_sum += center
+			local_sq += Vector2(center.x * center.x, center.y * center.y)
+			local_xy += center.x * center.y
+			local_count += 1.0
 		var angle := 0.0
-		if elongation >= REGION_LABEL_MIN_ELONGATION:
-			# Half-angle form of the principal axis; clamped so no name
-			# ever tips past comfortable reading.
-			angle = clampf(0.5 * atan2(2.0 * cov_xy, cov_xx - cov_yy), -REGION_LABEL_MAX_ANGLE, REGION_LABEL_MAX_ANGLE)
+		if local_count >= 8.0:
+			var mean := local_sum / local_count
+			var cov_xx := maxf(0.0, local_sq.x / local_count - mean.x * mean.x)
+			var cov_yy := maxf(0.0, local_sq.y / local_count - mean.y * mean.y)
+			var cov_xy := local_xy / local_count - mean.x * mean.y
+			var spread := sqrt(maxf(0.0, (cov_xx - cov_yy) * (cov_xx - cov_yy) + 4.0 * cov_xy * cov_xy))
+			var lambda_major := 0.5 * (cov_xx + cov_yy + spread)
+			var lambda_minor := maxf(0.0001, 0.5 * (cov_xx + cov_yy - spread))
+			if sqrt(lambda_major / lambda_minor) >= REGION_LABEL_MIN_ELONGATION:
+				# Half-angle form of the principal axis; clamped so no name
+				# ever tips past comfortable reading.
+				angle = clampf(0.5 * atan2(2.0 * cov_xy, cov_xx - cov_yy), -REGION_LABEL_MAX_ANGLE, REGION_LABEL_MAX_ANGLE)
 		# Bigger regions carry bigger names at every zoom, capped so an
 		# ocean never becomes a banner.
 		var area_scale := clampf(sqrt(count / float(REGION_LABEL_MIN_TILES)), 1.0, 2.6)
 		var base_font := int(round(float(REGION_LABEL_BASE_FONT) * area_scale))
 		var is_water := int(cluster_water_votes.get(cluster_id, 0)) * 2 > int(cluster_counts[cluster_id])
 		var curve := REGION_LABEL_WATER_CURVE if (is_water and count >= float(REGION_LABEL_CURVE_MIN_TILES)) else 0.0
+		if curve > 0.0:
+			# Arc tilt stacks on the label angle at the name's ends; keep
+			# curved names near-horizontal so no glyph ever tips too far.
+			angle = clampf(angle, -REGION_LABEL_CURVED_MAX_ANGLE, REGION_LABEL_CURVED_MAX_ANGLE)
 		entries.append({
-			"center": best_anchor.get(cluster_id, centroids[cluster_id]) as Vector2,
+			"center": anchor,
 			"name": best_name,
 			"category": "region",
 			"importance": REGION_LABEL_IMPORTANCE,

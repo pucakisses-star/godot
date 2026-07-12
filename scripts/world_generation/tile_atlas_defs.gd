@@ -137,68 +137,30 @@ const OGRE_DEN_TILE := Vector2i(5, 1)
 ##   straights (e+w): 8, 9, 14, 20      corners n+e: 7, 11, 13
 ##   corners n+w: 12, 17                 tees n+e+w: 15, 16
 ##   end caps: 19 (n), 10 and 21 (w)     isolated patch: 18
-## The row draws only horizontal-ish pieces, so every other orientation is
-## the same art transposed/flipped via TileSetAtlasSource TRANSFORM_* bits
-## packed into "alt". Transpose swaps N<->W and E<->S, then flip_h swaps
-## E<->W and flip_v swaps N<->S.
+## Purpose-drawn trail set on atlas row 7 (appended to the sheet): every
+## piece's stroke passes EXACTLY through the tile edge midpoints it opens
+## toward, with wobble faded to zero at the edges, so any two adjacent
+## trail cells always join seamlessly. The old approach reoriented the
+## sheet's hand-drawn squiggles with TRANSFORM_* bits, but that art never
+## reached its edges consistently and trails drew broken. Corners are
+## named for the edges they connect (ne = North+East).
 const ROAD_SEGMENTS := {
-	"ew": [
-		{"atlas": Vector2i(8, 5), "alt": 0}, {"atlas": Vector2i(9, 5), "alt": 0},
-		{"atlas": Vector2i(14, 5), "alt": 0}, {"atlas": Vector2i(20, 5), "alt": 0}
-	],
-	"ns": [
-		{"atlas": Vector2i(8, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
-		{"atlas": Vector2i(9, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
-		{"atlas": Vector2i(14, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
-		{"atlas": Vector2i(20, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE}
-	],
-	"ne": [
-		{"atlas": Vector2i(7, 5), "alt": 0}, {"atlas": Vector2i(11, 5), "alt": 0},
-		{"atlas": Vector2i(13, 5), "alt": 0},
-		{"atlas": Vector2i(12, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H}
-	],
-	"nw": [
-		{"atlas": Vector2i(12, 5), "alt": 0}, {"atlas": Vector2i(17, 5), "alt": 0},
-		{"atlas": Vector2i(7, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H},
-		{"atlas": Vector2i(11, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H}
-	],
-	"se": [
-		{"atlas": Vector2i(7, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
-		{"atlas": Vector2i(11, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
-		{"atlas": Vector2i(13, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V}
-	],
-	"sw": [
-		{"atlas": Vector2i(12, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
-		{"atlas": Vector2i(17, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
-		{"atlas": Vector2i(7, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H | TileSetAtlasSource.TRANSFORM_FLIP_V}
-	],
-	"new": [{"atlas": Vector2i(15, 5), "alt": 0}, {"atlas": Vector2i(16, 5), "alt": 0}],
-	"sew": [
-		{"atlas": Vector2i(15, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
-		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V}
-	],
-	"nes": [
-		{"atlas": Vector2i(15, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE | TileSetAtlasSource.TRANSFORM_FLIP_H},
-		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE | TileSetAtlasSource.TRANSFORM_FLIP_H}
-	],
-	"nsw": [
-		{"atlas": Vector2i(15, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
-		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE}
-	],
-	"nesw": [
-		{"atlas": Vector2i(15, 5), "alt": 0},
-		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
-		{"atlas": Vector2i(15, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
-		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE | TileSetAtlasSource.TRANSFORM_FLIP_H}
-	],
-	"end_n": [{"atlas": Vector2i(19, 5), "alt": 0}],
-	"end_s": [{"atlas": Vector2i(19, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V}],
-	"end_w": [{"atlas": Vector2i(10, 5), "alt": 0}, {"atlas": Vector2i(21, 5), "alt": 0}],
-	"end_e": [
-		{"atlas": Vector2i(10, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H},
-		{"atlas": Vector2i(21, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H}
-	],
-	"none": [{"atlas": Vector2i(18, 5), "alt": 0}]
+	"none": [{"atlas": Vector2i(0, 7), "alt": 0}],
+	"end_n": [{"atlas": Vector2i(1, 7), "alt": 0}],
+	"end_s": [{"atlas": Vector2i(2, 7), "alt": 0}],
+	"end_e": [{"atlas": Vector2i(3, 7), "alt": 0}],
+	"end_w": [{"atlas": Vector2i(4, 7), "alt": 0}],
+	"ns": [{"atlas": Vector2i(5, 7), "alt": 0}, {"atlas": Vector2i(6, 7), "alt": 0}],
+	"ew": [{"atlas": Vector2i(7, 7), "alt": 0}, {"atlas": Vector2i(8, 7), "alt": 0}],
+	"ne": [{"atlas": Vector2i(9, 7), "alt": 0}],
+	"nw": [{"atlas": Vector2i(10, 7), "alt": 0}],
+	"se": [{"atlas": Vector2i(11, 7), "alt": 0}],
+	"sw": [{"atlas": Vector2i(12, 7), "alt": 0}],
+	"nes": [{"atlas": Vector2i(13, 7), "alt": 0}],
+	"nsw": [{"atlas": Vector2i(14, 7), "alt": 0}],
+	"new": [{"atlas": Vector2i(15, 7), "alt": 0}],
+	"sew": [{"atlas": Vector2i(16, 7), "alt": 0}],
+	"nesw": [{"atlas": Vector2i(17, 7), "alt": 0}]
 }
 
 ## 4-neighbor road mask (N=1 E=2 S=4 W=8) -> segment signature.
