@@ -1017,14 +1017,18 @@ func _update_map_lod() -> void:
 func _process(delta: float) -> void:
 	if loading_screen != null and loading_screen.visible:
 		_update_loading_bar(delta)
+	if _is_globe_view:
+		_rotate_globe(delta)
+		_apply_globe_key_rotation(delta)
+		# The tooltip's globe branch reads _hovered_tile; resolve it from the
+		# mouse ray BEFORE the tooltip update so hover works on the sphere.
+		_hovered_tile = Vector2i(-999, -999) if _is_dragging_globe else _globe_tile_under_mouse()
 	_update_map_tooltip()
 	_update_caravans(delta)
 	_update_pirate_ships(delta)
 	_update_map_lod()
 	if _region_mode:
 		_stream_region_tiles()
-	if _is_globe_view:
-		_rotate_globe(delta)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel"):
@@ -2370,6 +2374,7 @@ func _generate_map() -> void:
 	# ("Ruins of X") and the overlay is only ever built once.
 	generation_started_ms = Time.get_ticks_msec()
 	_rebuild_labels_overlay()
+	_rebuild_region_labels_overlay()
 	_log_generation_stage("labels overlay", generation_started_ms)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "settlements and culture")
 	_set_loading_progress(84.0, "Drawing the cartographer's overlays...")
@@ -9383,6 +9388,79 @@ func _rotate_globe(delta: float) -> void:
 		return
 	globe_mesh.rotate_y(globe_rotation_speed * delta)
 
+## Arrow keys pan the globe view like a drag; radians per second.
+const GLOBE_KEY_ROTATION_SPEED := 1.1
+
+func _apply_globe_key_rotation(delta: float) -> void:
+	if globe_mesh == null:
+		return
+	# Typing in a text field (the seed box) must not spin the planet.
+	var focus_owner := get_viewport().gui_get_focus_owner()
+	if focus_owner is LineEdit or focus_owner is TextEdit:
+		return
+	var yaw := 0.0
+	var pitch := 0.0
+	if Input.is_key_pressed(KEY_RIGHT):
+		yaw += 1.0
+	if Input.is_key_pressed(KEY_LEFT):
+		yaw -= 1.0
+	if Input.is_key_pressed(KEY_UP):
+		pitch += 1.0
+	if Input.is_key_pressed(KEY_DOWN):
+		pitch -= 1.0
+	if yaw == 0.0 and pitch == 0.0:
+		return
+	var step := GLOBE_KEY_ROTATION_SPEED * delta
+	# Signs mirror the drag convention: RIGHT looks east (surface slides
+	# west), UP looks north (surface slides south).
+	globe_mesh.rotate_y(yaw * step)
+	globe_mesh.rotate_object_local(Vector3.RIGHT, pitch * step)
+
+## Mouse ray vs the globe: which map tile is under the cursor. Returns
+## (-999,-999) over space, the synthesized seam bridge, or the polar cap.
+func _globe_tile_under_mouse() -> Vector2i:
+	var miss := Vector2i(-999, -999)
+	if globe_camera == null or globe_mesh == null or not _mouse_inside_window:
+		return miss
+	var sphere_mesh := globe_mesh.mesh as SphereMesh
+	if sphere_mesh == null:
+		return miss
+	var mouse_pos := get_viewport().get_mouse_position()
+	var ray_origin := globe_camera.project_ray_origin(mouse_pos)
+	var ray_direction := globe_camera.project_ray_normal(mouse_pos)
+	# Solve in the globe's local space so its spin/tilt is accounted for.
+	var to_local := globe_mesh.global_transform.affine_inverse()
+	var local_origin := to_local * ray_origin
+	var local_direction := (to_local.basis * ray_direction).normalized()
+	var radius := sphere_mesh.radius
+	var midpoint := local_origin.dot(local_direction)
+	var discriminant := midpoint * midpoint - (local_origin.dot(local_origin) - radius * radius)
+	if discriminant < 0.0:
+		return miss
+	var hit_distance := -midpoint - sqrt(discriminant)
+	if hit_distance <= 0.0:
+		return miss
+	var hit := local_origin + local_direction * hit_distance
+	# SphereMesh UV convention: u wraps atan2(x, z) around Y, v runs
+	# acos(y/r) from the north pole down.
+	var sphere_u := fposmod(atan2(hit.x, hit.z) / TAU, 1.0)
+	var sphere_v := acos(clampf(hit.y / maxf(radius, 0.0001), -1.0, 1.0)) / PI
+	# Invert the shader's seam/polar compression; the synthesized ocean
+	# bridge and ice cap describe no real tile.
+	var usable_u := maxf(1.0 - clampf(globe_seam_band, 0.0, 0.3), 0.001)
+	var usable_v := maxf(1.0 - clampf(globe_polar_band, 0.0, 0.3), 0.001)
+	if sphere_u >= usable_u or sphere_v >= usable_v:
+		return miss
+	var coord := Vector2i(
+		int(sphere_u / usable_u * float(map_size.x)),
+		int(sphere_v / usable_v * float(map_size.y))
+	)
+	if coord.x < 0 or coord.y < 0 or coord.x >= map_size.x or coord.y >= map_size.y:
+		return miss
+	if not _tile_data.has(coord):
+		return miss
+	return coord
+
 func _configure_tileset() -> void:
 	var result := OverworldTilesetService.build_tile_set(tile_size, iceberg_tile_options)
 	var tile_set := result["tile_set"] as TileSet
@@ -10131,7 +10209,12 @@ func _update_rivers_overlay_visibility() -> void:
 func _update_labels_overlay_visibility() -> void:
 	if labels_overlay == null:
 		return
-	labels_overlay.visible = _labels_overlay_enabled and not (_is_globe_view or _is_scene3d_view)
+	# Labels render into the map viewport, which wraps the globe - so they
+	# work painted onto the sphere (RimWorld-style); only the flat 3D plane
+	# view goes without them.
+	labels_overlay.visible = _labels_overlay_enabled and not _is_scene3d_view
+	if _region_labels_overlay != null:
+		_region_labels_overlay.visible = _labels_overlay_enabled and not _is_scene3d_view
 	if labels_overlay.visible:
 		_update_labels_overlay_zoom_behavior()
 
@@ -10186,13 +10269,148 @@ func _rebuild_labels_overlay() -> void:
 	_update_labels_overlay_zoom_behavior()
 	_update_labels_overlay_visibility()
 
+## On the globe the labels live inside the full-resolution map texture that
+## wraps the sphere: roughly half the texture width spans the window, so
+## fonts must grow far beyond their 2D sizes to stay readable. Feeding the
+## rescale path this virtual zoom does exactly that while preserving the
+## importance hierarchy.
+const GLOBE_LABEL_VIRTUAL_ZOOM := 0.07
+
 func _update_labels_overlay_zoom_behavior() -> void:
-	if labels_overlay == null or overworld_camera == null:
+	_update_region_labels_zoom_behavior()
+	if labels_overlay == null:
+		return
+	if _is_globe_view:
+		OverworldLabelsService.update_zoom_behavior(labels_overlay, GLOBE_LABEL_VIRTUAL_ZOOM, {
+			"tile_size": tile_size,
+			"rescale_on_zoom": true,
+			"auto_visibility": false,
+			"min_screen_size": labels_overlay_min_screen_size,
+			"max_screen_size": labels_overlay_max_screen_size
+		})
+		return
+	if overworld_camera == null:
 		return
 	OverworldLabelsService.update_zoom_behavior(labels_overlay, overworld_camera.zoom.x, {
 		"tile_size": tile_size,
 		"rescale_on_zoom": labels_overlay_rescale_on_zoom,
 		"auto_visibility": labels_overlay_auto_visibility,
+		"min_screen_size": labels_overlay_min_screen_size,
+		"max_screen_size": labels_overlay_max_screen_size
+	})
+
+## --- Region name labels (RimWorld-style): the largest named biome and
+## ocean regions carry their name on the map and the globe. ---
+const REGION_LABEL_MIN_TILES := 80
+const REGION_LABEL_MAX_COUNT := 26
+const REGION_LABEL_IMPORTANCE := 3
+const REGION_LABEL_SCREEN_PX := 13.0
+
+var _region_labels_overlay: Node2D = null
+
+func _ensure_region_labels_overlay() -> void:
+	if _region_labels_overlay != null or map_overlays == null:
+		return
+	_region_labels_overlay = Node2D.new()
+	_region_labels_overlay.name = "RegionLabelsOverlay"
+	map_overlays.add_child(_region_labels_overlay)
+
+func _rebuild_region_labels_overlay() -> void:
+	_ensure_region_labels_overlay()
+	if _region_labels_overlay == null:
+		return
+	var cluster_sums: Dictionary = {}
+	var cluster_counts: Dictionary = {}
+	var cluster_name_votes: Dictionary = {}
+	for coord_variant: Variant in _tile_data.keys():
+		var coord := coord_variant as Vector2i
+		var tile_info := _tile_data.get(coord, {}) as Dictionary
+		var cluster_id := int(tile_info.get("biome_cluster_id", -1))
+		if cluster_id < 0:
+			continue
+		var region_name := String(_tile_region_names.get(coord, "")).strip_edges()
+		if region_name.is_empty():
+			continue
+		cluster_sums[cluster_id] = (cluster_sums.get(cluster_id, Vector2.ZERO) as Vector2) + _map_cell_center(coord)
+		cluster_counts[cluster_id] = int(cluster_counts.get(cluster_id, 0)) + 1
+		# Settlement/ruin tiles rename their own tile; a per-cluster majority
+		# vote recovers the region's real name.
+		var votes := cluster_name_votes.get(cluster_id, {}) as Dictionary
+		votes[region_name] = int(votes.get(region_name, 0)) + 1
+		cluster_name_votes[cluster_id] = votes
+
+	var finalists: Array[int] = []
+	for cluster_variant: Variant in cluster_counts.keys():
+		var cluster_id := int(cluster_variant)
+		if int(cluster_counts[cluster_id]) >= REGION_LABEL_MIN_TILES:
+			finalists.append(cluster_id)
+	finalists.sort_custom(func(a: int, b: int) -> bool:
+		return int(cluster_counts[a]) > int(cluster_counts[b])
+	)
+	if finalists.size() > REGION_LABEL_MAX_COUNT:
+		finalists.resize(REGION_LABEL_MAX_COUNT)
+
+	# Snap each centroid onto the nearest tile of its own cluster so concave
+	# regions never label over a neighbour.
+	var centroids: Dictionary = {}
+	var best_anchor: Dictionary = {}
+	var best_distance: Dictionary = {}
+	for cluster_id: int in finalists:
+		centroids[cluster_id] = (cluster_sums[cluster_id] as Vector2) / float(cluster_counts[cluster_id])
+	for coord_variant: Variant in _tile_data.keys():
+		var coord := coord_variant as Vector2i
+		var tile_info := _tile_data.get(coord, {}) as Dictionary
+		var cluster_id := int(tile_info.get("biome_cluster_id", -1))
+		if not centroids.has(cluster_id):
+			continue
+		var center := _map_cell_center(coord)
+		var distance := center.distance_squared_to(centroids[cluster_id] as Vector2)
+		if distance < float(best_distance.get(cluster_id, INF)):
+			best_distance[cluster_id] = distance
+			best_anchor[cluster_id] = center
+
+	var entries: Array[Dictionary] = []
+	for cluster_id: int in finalists:
+		var votes := cluster_name_votes.get(cluster_id, {}) as Dictionary
+		var best_name := ""
+		var best_votes := 0
+		for name_variant: Variant in votes.keys():
+			if int(votes[name_variant]) > best_votes:
+				best_votes = int(votes[name_variant])
+				best_name = String(name_variant)
+		if best_name.is_empty():
+			continue
+		entries.append({
+			"center": best_anchor.get(cluster_id, centroids[cluster_id]) as Vector2,
+			"name": best_name,
+			"category": "region",
+			"importance": REGION_LABEL_IMPORTANCE,
+			"population": int(cluster_counts[cluster_id])
+		})
+
+	OverworldLabelsService.rebuild(_region_labels_overlay, entries, {
+		"tile_size": tile_size,
+		"map_pixel_size": Vector2(float(map_size.x * tile_size), float(map_size.y * tile_size)),
+		"primary_color": Color(0.93, 0.95, 0.99, 0.82),
+		"secondary_color": Color(0.93, 0.95, 0.99, 0.7),
+		"outline_color": Color(0.07, 0.09, 0.13, 0.85),
+		"outline_size": labels_overlay_outline_size
+	})
+	_update_region_labels_zoom_behavior()
+	_update_labels_overlay_visibility()
+
+func _update_region_labels_zoom_behavior() -> void:
+	if _region_labels_overlay == null:
+		return
+	var zoom_factor := GLOBE_LABEL_VIRTUAL_ZOOM if _is_globe_view else (overworld_camera.zoom.x if overworld_camera != null else 1.0)
+	# Region names are overview aids: constant on-screen size at any zoom,
+	# never auto-hidden while the labels toggle is on.
+	OverworldLabelsService.update_zoom_behavior(_region_labels_overlay, zoom_factor, {
+		"tile_size": tile_size,
+		"rescale_on_zoom": labels_overlay_rescale_on_zoom,
+		"auto_visibility": false,
+		"constant_screen_size": true,
+		"target_screen_px": REGION_LABEL_SCREEN_PX,
 		"min_screen_size": labels_overlay_min_screen_size,
 		"max_screen_size": labels_overlay_max_screen_size
 	})
