@@ -9,6 +9,8 @@ class_name SettlementEconomyService
 const DEFAULT_ITEM_VALUE := 2
 const ITEM_VALUES := {
 	"Stone": 1, "Stone Block": 2, "Iron Ore": 4, "Copper Ore": 5,
+	"Gold Ore": 12, "Tin Ore": 6, "Lead Ore": 4, "Zinc Ore": 5,
+	"Nickel Ore": 7, "Platinum Ore": 16, "Coal": 3,
 	"Gold Nugget": 14, "Gem Shard": 16, "Starmetal Ore": 60, "Starmetal Bar": 150, "Old Tome": 12, "Carved Curio": 6, "Iron Ingot": 8, "Leather Strap": 2,
 
 	"Amber": 12, "Spider Amber": 18, "Fern Amber": 16, "Fossil Leaf": 10,
