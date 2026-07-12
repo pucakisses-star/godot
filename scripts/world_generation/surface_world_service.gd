@@ -29,10 +29,10 @@ static func make_noise_set(world_seed: int) -> Dictionary:
 	detail.seed = world_seed + 154
 	detail.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	detail.frequency = 0.6
-	# Coastline wobble: LOW frequency on purpose. Wobbling the shore with
-	# the per-cell detail noise dithered land and water into a huge
-	# salt-and-pepper band; this smooth field makes shores meander in
-	# clean curves instead.
+	# Coastline warp field: LOW frequency on purpose. It displaces the
+	# POSITION the water field is sampled at (domain warp), so the shore
+	# meanders as one continuous curve - additive wobble spawned offshore
+	# islets, per-cell noise dithered the whole coast to speckle.
 	var coast := FastNoiseLite.new()
 	coast.seed = world_seed + 233
 	coast.noise_type = FastNoiseLite.TYPE_SIMPLEX
@@ -187,23 +187,22 @@ static func _biome_terrain(cell: Vector2i, noise_set: Dictionary, elevation: flo
 	var fy := (float(local_y) + 0.5) / float(cells_per_tile)
 	var biomes3x3 := PackedStringArray()
 	biomes3x3.resize(9)
-	var water3x3 := PackedFloat32Array()
-	water3x3.resize(9)
 	for ny in 3:
 		for nx in 3:
-			var neighbor := tile + Vector2i(nx - 1, ny - 1)
-			var index := ny * 3 + nx
-			var label := _biome_for_tile(biome_ctx, neighbor)
-			biomes3x3[index] = label
-			water3x3[index] = 1.0 if label == (TILE_ATLAS_DEFS.BIOME_WATER as String) else 0.0
-	# The coastline is the water-presence field wobbled by a dedicated
-	# SMOOTH noise: shores meander in clean curves. (The old per-cell
-	# detail wobble dithered the whole transition into speckle.)
-	var coast_wobble := detail * 0.16
+			biomes3x3[ny * 3 + nx] = _biome_for_tile(biome_ctx, tile + Vector2i(nx - 1, ny - 1))
+	# The coastline: the water-presence field sampled through a smooth
+	# DOMAIN WARP - the sample position wiggles, not the field's value.
+	# Warping the position keeps the shore one continuous meandering
+	# curve; ADDING noise to the field (both earlier attempts) minted
+	# chains of offshore islets wherever the blend band crossed the
+	# threshold, which is exactly what the beach complaint showed.
+	var warped_x := float(cell.x)
+	var warped_y := float(cell.y)
 	var coast_noise := noise_set.get("coast") as FastNoiseLite
 	if coast_noise != null:
-		coast_wobble = coast_noise.get_noise_2d(float(cell.x), float(cell.y)) * 0.18
-	var coast := _field_from_neighbors(water3x3, fx, fy) + coast_wobble
+		warped_x += coast_noise.get_noise_2d(float(cell.x), float(cell.y)) * COAST_WARP_CELLS
+		warped_y += coast_noise.get_noise_2d(float(cell.x) + 517.0, float(cell.y) - 293.0) * COAST_WARP_CELLS
+	var coast := _coast_field(biome_ctx, warped_x, warped_y, cells_per_tile)
 	if coast > 0.52:
 		return {"base": "water" if detail > -0.15 else "water_calm", "decor": ""}
 	var own_biome := String(biomes3x3[4])
@@ -220,6 +219,10 @@ static func _biome_terrain(cell: Vector2i, noise_set: Dictionary, elevation: flo
 	# it crosses. Coast and beach are already handled above, so this only
 	# touches dry cells; the course reads as ordinary water (block/boatable).
 	if _tile_has_river(biome_ctx, tile):
+		var water3x3 := PackedFloat32Array()
+		water3x3.resize(9)
+		for water_index in 9:
+			water3x3[water_index] = 1.0 if String(biomes3x3[water_index]) == (TILE_ATLAS_DEFS.BIOME_WATER as String) else 0.0
 		var river_cells := _river_mask_for_tile(biome_ctx, tile, water3x3, noise_set, cells_per_tile)
 		if river_cells.has(local_y * cells_per_tile + local_x):
 			return {"base": "water" if detail > -0.15 else "water_calm", "decor": ""}
@@ -359,6 +362,25 @@ static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, 
 			return {"base": "grass_dark", "decor": decor}
 	# Grassland and any unmapped climate keep the standalone-noise wilds.
 	return _legacy_terrain(cell, elevation, forest, detail, danger)
+
+## How far (in cells) the shoreline meanders off the tile-grid blend.
+const COAST_WARP_CELLS := 7.0
+
+## The global water-presence field at a (possibly warped, fractional)
+## world position: bilinear between the surrounding overworld tiles'
+## water flags. Continuous across tile borders, so thresholding it gives
+## one clean coastline.
+static func _coast_field(biome_ctx: Dictionary, world_x: float, world_y: float, cells_per_tile: int) -> float:
+	var tile := Vector2i(int(floor(world_x / float(cells_per_tile))), int(floor(world_y / float(cells_per_tile))))
+	var water3x3 := PackedFloat32Array()
+	water3x3.resize(9)
+	for ny in 3:
+		for nx in 3:
+			var label := _biome_for_tile(biome_ctx, tile + Vector2i(nx - 1, ny - 1))
+			water3x3[ny * 3 + nx] = 1.0 if label == (TILE_ATLAS_DEFS.BIOME_WATER as String) else 0.0
+	var fx := (world_x - float(tile.x * cells_per_tile) + 0.5) / float(cells_per_tile)
+	var fy := (world_y - float(tile.y * cells_per_tile) + 0.5) / float(cells_per_tile)
+	return _field_from_neighbors(water3x3, fx, fy)
 
 ## Bilinear between tile centers so a field crosses tile boundaries
 ## smoothly instead of stair-stepping the tile grid.
