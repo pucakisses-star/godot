@@ -3284,7 +3284,9 @@ func _apply_island_region_names(
 	rng: RandomNumberGenerator,
 	region_names: Dictionary
 ) -> void:
-	var island_max_tiles := maxi(64, int(round(float(map_size.x * map_size.y) / 512.0)))
+	# Anchored to the reference map so "small island" means the same physical
+	# size on every map size.
+	var island_max_tiles := maxi(64, int(round(REFERENCE_MAP_WIDTH * REFERENCE_MAP_HEIGHT / 512.0)))
 	var visited := {}
 	var used_names := {}
 	for y in range(map_size.y):
@@ -3430,6 +3432,7 @@ func _terrain_settings() -> Dictionary:
 	return {
 		"map_size": map_size,
 		"map_seed": map_seed,
+		"feature_scale": _map_feature_scale(),
 		"water_level": water_level,
 		"falloff_strength": falloff_strength,
 		"falloff_power": falloff_power,
@@ -3485,8 +3488,18 @@ func _sample_height(
 ) -> float:
 	return float(TerrainGenerator.sample_height(continent_noise, detail_noise, ridge_noise, x, y, _terrain_settings(), _landmass_centers))
 
+## Terrain feature size is anchored to the Normal map's dimensions: a bigger
+## map keeps Normal-scale continents, islands and climate texture and simply
+## holds MORE of them, instead of stretching one Normal-sized world to fit.
+const REFERENCE_MAP_WIDTH := 455.0
+const REFERENCE_MAP_HEIGHT := 256.0
+
 func _feature_frequency_divisor() -> float:
-	return maxf(1.0, float(map_size.x))
+	return REFERENCE_MAP_WIDTH
+
+
+func _map_feature_scale() -> float:
+	return maxf(0.05, float(map_size.x) / REFERENCE_MAP_WIDTH)
 
 
 func _sample_continent_bias(x: int, y: int) -> float:
@@ -4090,7 +4103,7 @@ func _build_highland_overlays(
 	var ridge_detail_noise := FastNoiseLite.new()
 	ridge_detail_noise.seed = map_seed + 0x165667b1
 	ridge_detail_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	ridge_detail_noise.frequency = 7.4 / maxf(1.0, float(width))
+	ridge_detail_noise.frequency = 7.4 / REFERENCE_MAP_WIDTH
 	ridge_detail_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	ridge_detail_noise.fractal_octaves = 5
 	ridge_detail_noise.fractal_gain = 0.47
@@ -4099,7 +4112,7 @@ func _build_highland_overlays(
 	var orientation_noise := FastNoiseLite.new()
 	orientation_noise.seed = map_seed + 0xd3a2646c
 	orientation_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	orientation_noise.frequency = 9.2 / maxf(1.0, float(width))
+	orientation_noise.frequency = 9.2 / REFERENCE_MAP_WIDTH
 	orientation_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	orientation_noise.fractal_octaves = 3
 	orientation_noise.fractal_gain = 0.58
@@ -4515,10 +4528,10 @@ func _apply_tree_overlays(
 		var elevation_center := 0.34
 		var elevation_range := 0.28
 		var elevation_preference := clampf(1.0 - absf(elevation_relative - elevation_center) / elevation_range, 0.0, 1.0)
-		var nx := float(coord.x) / maxf(1.0, float(map_size.x - 1))
-		var ny := float(coord.y) / maxf(1.0, float(map_size.y - 1))
 		var large_scale_noise := _to_normalized(_vegetation_noise.get_noise_2d(coord.x, coord.y))
-		var detail_noise := _value_noise(nx * 28.0 + 1.7, ny * 28.0 + 7.3, map_seed + 0x3c6ef372)
+		# Reference-anchored coords keep forest patchiness at the Normal
+		# map's tile scale on every map size.
+		var detail_noise := _value_noise(float(coord.x) / REFERENCE_MAP_WIDTH * 28.0 + 1.7, float(coord.y) / REFERENCE_MAP_HEIGHT * 28.0 + 7.3, map_seed + 0x3c6ef372)
 		var density := (large_scale_noise * 0.6 + detail_noise * 0.4) * 0.5
 		density *= (0.75 + elevation_preference * 0.65)
 		density *= (0.55 + moisture * 0.9)
@@ -10330,6 +10343,15 @@ func _apply_cached_world_settings() -> void:
 			# Browser worldGenerationProfiles (main.js:20044-20108).
 			_sea_level_shift = float(layout_preset.get("sea_level_shift", 0.02))
 			_rainfall_bias = float(layout_preset.get("rainfall_bias", 0.0))
+			# Bigger maps hold more world, not a stretched one: multi-center
+			# layouts gain landmass anchors with the map's area while each
+			# anchor keeps its Normal-map tile radius. Major Continent and
+			# Twin Continents keep their identity (their continents grow
+			# with the map) - only the noise texture stays Normal-scaled.
+			if landmass_center_count >= 4:
+				var area_ratio := float(map_size.x * map_size.y) / (REFERENCE_MAP_WIDTH * REFERENCE_MAP_HEIGHT)
+				landmass_center_count = maxi(2, int(round(float(landmass_center_count) * area_ratio)))
+				landmass_falloff_scale = maxf(0.2, landmass_falloff_scale / _map_feature_scale())
 		if settings.has("terrain_ratios") and settings["terrain_ratios"] is Dictionary:
 			_apply_terrain_ratio_settings(settings["terrain_ratios"])
 		_world_name = String(settings.get("world_name", "")).strip_edges()
