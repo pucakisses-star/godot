@@ -40,6 +40,10 @@ extends Node2D
 ## Fraction of globe longitude reserved for the synthesized ocean strip that
 ## bridges the map's east and west edges so the sphere wrap has no seam.
 @export_range(0.0, 0.3, 0.01) var globe_seam_band: float = 0.08
+## Fraction of globe latitude reserved at the south pole for a synthesized
+## Antarctic ice cap (globe view only); the map is compressed northward so
+## its own bottom edge sits above the cap.
+@export_range(0.0, 0.3, 0.01) var globe_polar_band: float = 0.07
 @export var scene3d_height_scale: float = 0.1
 @export var scene3d_mountain_compression: float = 0.35
 @export var scene3d_land_blend_power: float = 1.75
@@ -9269,6 +9273,7 @@ func _update_globe_texture() -> void:
 	globe_material.set_shader_parameter("land_blend_power", scene3d_land_blend_power)
 	globe_material.set_shader_parameter("height_scale", globe_height_scale)
 	globe_material.set_shader_parameter("seam_band", globe_seam_band)
+	globe_material.set_shader_parameter("polar_band", globe_polar_band)
 
 func _update_scene3d_texture() -> void:
 	if scene3d_mesh == null or map_viewport == null:
