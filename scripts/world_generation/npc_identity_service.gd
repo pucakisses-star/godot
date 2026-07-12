@@ -178,6 +178,19 @@ static func dwarf_name_gender(first_name: String) -> String:
 		return "male"
 	return ""
 
+## Gender of any first name by pool membership across every race's
+## gendered pools ("" when the name isn't in one — goblin, gnome and
+## kobold pools carry no split).
+static func name_gender(first_name: String) -> String:
+	var gender := dwarf_name_gender(first_name)
+	if not gender.is_empty():
+		return gender
+	if TOWNSFOLK_FIRST_NAMES_FEMALE.has(first_name):
+		return "female"
+	if TOWNSFOLK_FIRST_NAMES_MALE.has(first_name):
+		return "male"
+	return ""
+
 static func roll_race(rng: RandomNumberGenerator, kind: String) -> String:
 	var pool := RACES_BY_KIND.get(kind, RACES_BY_KIND["townsfolk"]) as Array
 	var total := 0
@@ -222,6 +235,7 @@ static func generate(rng: RandomNumberGenerator, profession: String, kind: Strin
 		"first_name": first_name,
 		"clan": surname,
 		"race": race,
+		"gender": name_gender(first_name),
 		"profession": profession,
 		"age": age,
 		"temperament": TEMPERAMENTS[rng.randi_range(0, TEMPERAMENTS.size() - 1)],
@@ -329,6 +343,18 @@ static func appearance_for_identity(identity: Dictionary, default_species: Strin
 			beardless = true
 		"Gnome":
 			body_scale = 0.72
+	# No beards on the ladies — matching the character creator, which
+	# strips the beard layer for female player dwarves. Gender rides the
+	# identity when the caller knows it (family graphs, fresh rolls);
+	# older identities fall back to name-pool inference.
+	var gender := String(identity.get("gender", ""))
+	if gender.is_empty():
+		var first_name := String(identity.get("first_name", ""))
+		if first_name.is_empty():
+			first_name = String(identity.get("name", "")).get_slice(" ", 0)
+		gender = name_gender(first_name)
+	if gender == "female":
+		beardless = true
 	var age := int(identity.get("age", 60))
 	var age_range := RACE_AGE_RANGES.get(race, [16, 78]) as Array
 	var lifespan := float(int(age_range[1]))
