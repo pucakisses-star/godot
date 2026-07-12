@@ -207,6 +207,23 @@ static func _generate_badlands_name(rng: RandomNumberGenerator) -> String:
 	if rng.randf() < 0.35: return "The %s %s" % [descriptor, noun]
 	return "%s %s" % [descriptor, noun]
 
+## Names for the narrow seas: channels, straits and gulfs carved out of a
+## parent ocean where it squeezes between facing shores. Bigger cuts lean
+## toward the grander nouns ("Sea", "Gulf"), small ones stay nautical
+## ("Narrows", "Sound").
+const STRAIT_NAME_NOUNS: Array[String] = ["Strait", "Channel", "Sound", "Narrows", "Passage"]
+const STRAIT_NAME_GRAND_NOUNS: Array[String] = ["Sea", "Gulf"]
+
+static func generate_strait_name(rng: RandomNumberGenerator, context_size: int) -> String:
+	var noun := _pick_random_entry(STRAIT_NAME_NOUNS, rng, "Strait")
+	if context_size >= 220 and rng.randf() < 0.55:
+		noun = _pick_random_entry(STRAIT_NAME_GRAND_NOUNS, rng, "Sea")
+	var descriptor := _pick_random_entry(OCEAN_NAME_DESCRIPTORS, rng, "Narrow")
+	var motif := _pick_random_entry(OCEAN_NAME_MOTIFS, rng)
+	if not motif.is_empty() and rng.randf() < 0.55:
+		return "%s of the %s" % [noun, motif]
+	return "The %s %s" % [descriptor, noun]
+
 static func _generate_ocean_name(rng: RandomNumberGenerator, context_size: int) -> String:
 	var descriptor := _pick_random_entry(OCEAN_NAME_DESCRIPTORS, rng, "Sapphire")
 	var noun := _pick_random_entry(OCEAN_NAME_NOUNS, rng, "Sea")

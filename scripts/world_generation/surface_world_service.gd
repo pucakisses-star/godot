@@ -29,7 +29,23 @@ static func make_noise_set(world_seed: int) -> Dictionary:
 	detail.seed = world_seed + 154
 	detail.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	detail.frequency = 0.6
-	return {"elevation": elevation, "forest": forest, "detail": detail}
+	# Coastline wobble: LOW frequency on purpose. Wobbling the shore with
+	# the per-cell detail noise dithered land and water into a huge
+	# salt-and-pepper band; this smooth field makes shores meander in
+	# clean curves instead.
+	var coast := FastNoiseLite.new()
+	coast.seed = world_seed + 233
+	coast.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	coast.frequency = 0.045
+	coast.fractal_type = FastNoiseLite.FRACTAL_FBM
+	coast.fractal_octaves = 2
+	# Marsh pools: mid frequency so bog water gathers into real pools a
+	# few cells wide rather than single-cell speckle.
+	var pool := FastNoiseLite.new()
+	pool.seed = world_seed + 411
+	pool.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	pool.frequency = 0.13
+	return {"elevation": elevation, "forest": forest, "detail": detail, "coast": coast, "pool": pool}
 
 ## The whole overworld's climate, packed for the wilds renderer: given a
 ## WORLD cell, which overworld tile it sits on and thus which biome. World
@@ -180,13 +196,22 @@ static func _biome_terrain(cell: Vector2i, noise_set: Dictionary, elevation: flo
 			var label := _biome_for_tile(biome_ctx, neighbor)
 			biomes3x3[index] = label
 			water3x3[index] = 1.0 if label == (TILE_ATLAS_DEFS.BIOME_WATER as String) else 0.0
-	# The coastline is the water-presence field wobbled by the detail
-	# noise, the same trick the detailed map view uses for its shores.
-	var coast := _field_from_neighbors(water3x3, fx, fy) + detail * 0.16
-	if coast > 0.5:
+	# The coastline is the water-presence field wobbled by a dedicated
+	# SMOOTH noise: shores meander in clean curves. (The old per-cell
+	# detail wobble dithered the whole transition into speckle.)
+	var coast_wobble := detail * 0.16
+	var coast_noise := noise_set.get("coast") as FastNoiseLite
+	if coast_noise != null:
+		coast_wobble = coast_noise.get_noise_2d(float(cell.x), float(cell.y)) * 0.18
+	var coast := _field_from_neighbors(water3x3, fx, fy) + coast_wobble
+	if coast > 0.52:
 		return {"base": "water" if detail > -0.15 else "water_calm", "decor": ""}
 	var own_biome := String(biomes3x3[4])
 	var land_own := own_biome if own_biome != (TILE_ATLAS_DEFS.BIOME_WATER as String) else String(TILE_ATLAS_DEFS.BIOME_GRASSLAND)
+	if coast > 0.46:
+		# Wading shallows: a walkable ribbon of thigh-deep water over a
+		# sandy bottom between the beach and the open water.
+		return {"base": "water_shallow", "decor": ""}
 	if coast > 0.4:
 		# A sandy shoreline just above the waterline.
 		return {"base": "sand" if detail > -0.2 else "sand_pebbles", "decor": ""}
@@ -199,7 +224,7 @@ static func _biome_terrain(cell: Vector2i, noise_set: Dictionary, elevation: flo
 		if river_cells.has(local_y * cells_per_tile + local_x):
 			return {"base": "water" if detail > -0.15 else "water_calm", "decor": ""}
 	var land_biome := _blend_land_biome(biomes3x3, land_own, cell, noise_set, fx, fy)
-	return _terrain_for_biome(land_biome, cell, elevation, forest, detail, danger)
+	return _terrain_for_biome(land_biome, cell, elevation, forest, detail, danger, noise_set)
 
 ## Per-candidate bilinear presence plus per-biome noise wobble; the high
 ## bid wins, so land biomes meet along meandering fronts instead of tile
@@ -246,7 +271,7 @@ static func _blend_land_biome(biomes3x3: PackedStringArray, land_own: String, ce
 ## climates render through the closest available keys: rock as pebble/sand,
 ## marsh as dark grass pocked with calm water. Tundra uses the painted-in
 ## snow ground tile.
-static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, forest: float, detail: float, danger: float) -> Dictionary:
+static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, forest: float, detail: float, danger: float, noise_set: Dictionary = {}) -> Dictionary:
 	match biome:
 		TILE_ATLAS_DEFS.BIOME_DESERT:
 			var base := "sand"
@@ -299,8 +324,14 @@ static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, 
 				decor = "tree_dark"
 			return {"base": base, "decor": decor}
 		TILE_ATLAS_DEFS.BIOME_MARSH:
-			# Dark waterlogged grass pocked with frequent calm-water pools.
-			if detail > 0.25:
+			# Dark waterlogged grass gathered into real bog pools (the pool
+			# noise is mid-frequency, so water forms wadeable ponds a few
+			# cells wide instead of single-cell speckle).
+			var pool_noise := noise_set.get("pool") as FastNoiseLite
+			if pool_noise != null:
+				if pool_noise.get_noise_2d(float(cell.x), float(cell.y)) > 0.3:
+					return {"base": "water_shallow", "decor": ""}
+			elif detail > 0.25:
 				return {"base": "water_calm", "decor": ""}
 			var base := "grass_tuft" if detail < -0.45 else "grass_dark"
 			var decor := ""

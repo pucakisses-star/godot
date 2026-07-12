@@ -800,6 +800,9 @@ const NEIGHBOR_OPPOSITES_8: Array[int] = [7, 6, 5, 4, 3, 2, 1, 0]
 ## south of 0.5. latitude = 1 - normalizedY (north = top of the map).
 const SNOW_LATITUDE_START := 0.5
 const SNOW_LATITUDE_FULL := 0.86
+## Deserts stop this far short of the flurry line: no dunes at any
+## latitude where snow tiles could appear.
+const DESERT_SNOW_LATITUDE_BUFFER := 0.04
 ## Minimum Chebyshev distance (tiles) kept clear between desert sand and
 ## tundra; the belt in between stays grassland so the climates never
 ## touch, and noise fades the belt out over four more tiles beyond it.
@@ -3291,8 +3294,101 @@ func _build_region_name_map(
 			if not region_name.is_empty():
 				for coord: Vector2i in cluster_cells:
 					region_names[coord] = region_name
+	_carve_channel_seas(biome_map, rng, region_names, cluster_ids, next_cluster_id)
 	_apply_island_region_names(biome_map, rng, region_names)
 	return {"names": region_names, "clusters": cluster_ids}
+
+## Where a big ocean squeezes between facing shores it stops being "the
+## ocean" and becomes its own named water - a strait, sound, gulf or
+## narrow sea, the way real charts name the channel between two coasts.
+## A water cell qualifies when land lies within CHANNEL_SPAN_TILES on two
+## OPPOSITE sides (so open coastlines, land on one side only, never
+## trigger); connected runs of qualifying cells big enough to matter get
+## a fresh cluster id and a strait-style name, overriding the parent
+## ocean's name on just those tiles.
+const CHANNEL_SPAN_TILES := 9
+const CHANNEL_MIN_TILES := 80
+const CHANNEL_PARENT_MIN_TILES := 420
+const CHANNEL_MAX_COUNT := 8
+
+func _carve_channel_seas(
+	biome_map: Dictionary,
+	rng: RandomNumberGenerator,
+	region_names: Dictionary,
+	cluster_ids: Dictionary,
+	next_cluster_id: int
+) -> void:
+	var cluster_sizes: Dictionary = {}
+	for coord_variant: Variant in cluster_ids.keys():
+		var cluster_id := int(cluster_ids[coord_variant])
+		cluster_sizes[cluster_id] = int(cluster_sizes.get(cluster_id, 0)) + 1
+	var channel_cells: Dictionary = {}
+	for y in range(map_size.y):
+		for x in range(map_size.x):
+			var coord := Vector2i(x, y)
+			if String(biome_map.get(coord, BIOME_GRASSLAND)) != BIOME_WATER:
+				continue
+			if int(cluster_sizes.get(int(cluster_ids.get(coord, -1)), 0)) < CHANNEL_PARENT_MIN_TILES:
+				continue
+			if _water_between_shores(biome_map, coord):
+				channel_cells[coord] = true
+	# Connected components of the qualifying water, largest first.
+	var components: Array = []
+	var component_seen: Dictionary = {}
+	for start_variant: Variant in channel_cells.keys():
+		var start := start_variant as Vector2i
+		if component_seen.has(start):
+			continue
+		var component: Array[Vector2i] = []
+		var frontier: Array[Vector2i] = [start]
+		component_seen[start] = true
+		while not frontier.is_empty():
+			var coord: Vector2i = frontier.pop_back()
+			component.append(coord)
+			for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+				var neighbor: Vector2i = coord + offset
+				if component_seen.has(neighbor) or not channel_cells.has(neighbor):
+					continue
+				component_seen[neighbor] = true
+				frontier.append(neighbor)
+		if component.size() >= CHANNEL_MIN_TILES:
+			components.append(component)
+	components.sort_custom(func(a: Array, b: Array) -> bool:
+		return a.size() > b.size()
+	)
+	var carved := 0
+	for component_variant: Variant in components:
+		if carved >= CHANNEL_MAX_COUNT:
+			break
+		var component := component_variant as Array
+		var sea_name := WORLD_NAMING.generate_strait_name(rng, component.size())
+		if sea_name.is_empty():
+			continue
+		for coord: Vector2i in component:
+			region_names[coord] = sea_name
+			cluster_ids[coord] = next_cluster_id
+		next_cluster_id += 1
+		carved += 1
+
+## True when the water cell has land within CHANNEL_SPAN_TILES in BOTH
+## directions of any opposite pair (E/W, N/S, both diagonals) - the
+## "between two shores" test that separates channels and gulfs from open
+## coastline.
+func _water_between_shores(biome_map: Dictionary, coord: Vector2i) -> bool:
+	for direction: Vector2i in [Vector2i(1, 0), Vector2i(0, 1), Vector2i(1, 1), Vector2i(1, -1)]:
+		if _shore_within(biome_map, coord, direction) and _shore_within(biome_map, coord, -direction):
+			return true
+	return false
+
+func _shore_within(biome_map: Dictionary, coord: Vector2i, direction: Vector2i) -> bool:
+	var probe := coord
+	for _step in range(CHANNEL_SPAN_TILES):
+		probe += direction
+		if probe.x < 0 or probe.y < 0 or probe.x >= map_size.x or probe.y >= map_size.y:
+			return false
+		if String(biome_map.get(probe, BIOME_GRASSLAND)) != BIOME_WATER:
+			return true
+	return false
 
 ## Small islands read as islands, not inland terrain: every land cell on a
 ## landmass at or below the island size cutoff shares one island-style name
@@ -3842,6 +3938,13 @@ func _assign_base_biome(
 ## heat fields the refinement/badlands passes read later.
 func _evaluate_desert_cell(x: int, y: int, height: float) -> bool:
 	var idx := _xy_to_index(x, y)
+	# Hard latitude wall: snow can appear anywhere north of the flurry
+	# line, and dunes and drifts are different worlds — no desert at any
+	# latitude where snow tiles could show up, buffer included.
+	if _north_latitude(y) >= SNOW_LATITUDE_START - DESERT_SNOW_LATITUDE_BUFFER:
+		if idx >= 0 and idx < _desert_suitability_buffer.size():
+			_desert_suitability_buffer[idx] = 0.0
+		return false
 	var rainfall := _rainfall_at(idx)
 	var ny := (float(y) + 0.5) / maxf(1.0, float(map_size.y))
 	var equatorial := clampf(1.0 - absf(ny - 0.5) * 2.0, 0.0, 1.0)
@@ -4825,6 +4928,10 @@ func _seed_desert_biomes(
 		if height_map.get(coord, 0.0) < water_level:
 			continue
 		if temperature_map.get(coord, 0.0) < warm_threshold:
+			continue
+		# Same latitude wall as _evaluate_desert_cell: fallback seeding must
+		# not plant dunes where snow tiles could appear.
+		if _north_latitude(coord.y) >= SNOW_LATITUDE_START - DESERT_SNOW_LATITUDE_BUFFER:
 			continue
 		candidates.append(coord)
 	if candidates.is_empty():
@@ -10367,6 +10474,13 @@ const REGION_LABEL_MIN_TILES := 80
 const REGION_LABEL_MAX_COUNT := 26
 const REGION_LABEL_IMPORTANCE := 3
 const REGION_LABEL_SCREEN_PX := 13.0
+## Cartographic lettering: names lean along their region's long axis
+## (PCA), scale with its area, and the great seas arc their names.
+const REGION_LABEL_BASE_FONT := 12
+const REGION_LABEL_MIN_ELONGATION := 1.35
+const REGION_LABEL_MAX_ANGLE := 0.62
+const REGION_LABEL_WATER_CURVE := 0.16
+const REGION_LABEL_CURVE_MIN_TILES := 300
 
 var _region_labels_overlay: Node2D = null
 
@@ -10384,6 +10498,11 @@ func _rebuild_region_labels_overlay() -> void:
 	var cluster_sums: Dictionary = {}
 	var cluster_counts: Dictionary = {}
 	var cluster_name_votes: Dictionary = {}
+	# Second-moment sums feed a per-cluster PCA: the label leans along the
+	# region's long axis, like a cartographer laying a sea name.
+	var cluster_sq_sums: Dictionary = {}
+	var cluster_xy_sums: Dictionary = {}
+	var cluster_water_votes: Dictionary = {}
 	for coord_variant: Variant in _tile_data.keys():
 		var coord := coord_variant as Vector2i
 		var tile_info := _tile_data.get(coord, {}) as Dictionary
@@ -10393,8 +10512,13 @@ func _rebuild_region_labels_overlay() -> void:
 		var region_name := String(_tile_region_names.get(coord, "")).strip_edges()
 		if region_name.is_empty():
 			continue
-		cluster_sums[cluster_id] = (cluster_sums.get(cluster_id, Vector2.ZERO) as Vector2) + _map_cell_center(coord)
+		var cell_center := _map_cell_center(coord)
+		cluster_sums[cluster_id] = (cluster_sums.get(cluster_id, Vector2.ZERO) as Vector2) + cell_center
+		cluster_sq_sums[cluster_id] = (cluster_sq_sums.get(cluster_id, Vector2.ZERO) as Vector2) + Vector2(cell_center.x * cell_center.x, cell_center.y * cell_center.y)
+		cluster_xy_sums[cluster_id] = float(cluster_xy_sums.get(cluster_id, 0.0)) + cell_center.x * cell_center.y
 		cluster_counts[cluster_id] = int(cluster_counts.get(cluster_id, 0)) + 1
+		if String(tile_info.get("base_biome", tile_info.get("biome_type", ""))) == "water":
+			cluster_water_votes[cluster_id] = int(cluster_water_votes.get(cluster_id, 0)) + 1
 		# Settlement/ruin tiles rename their own tile; a per-cluster majority
 		# vote recovers the region's real name.
 		var votes := cluster_name_votes.get(cluster_id, {}) as Dictionary
@@ -10442,12 +10566,39 @@ func _rebuild_region_labels_overlay() -> void:
 				best_name = String(name_variant)
 		if best_name.is_empty():
 			continue
+		var count := float(cluster_counts[cluster_id])
+		# PCA of the cluster's tile positions: covariance eigenvalues give
+		# the long axis (label angle) and how stretched the region is.
+		var mean := (cluster_sums[cluster_id] as Vector2) / count
+		var sq := (cluster_sq_sums.get(cluster_id, Vector2.ZERO) as Vector2) / count
+		var cov_xx := maxf(0.0, sq.x - mean.x * mean.x)
+		var cov_yy := maxf(0.0, sq.y - mean.y * mean.y)
+		var cov_xy := float(cluster_xy_sums.get(cluster_id, 0.0)) / count - mean.x * mean.y
+		var spread := sqrt(maxf(0.0, (cov_xx - cov_yy) * (cov_xx - cov_yy) + 4.0 * cov_xy * cov_xy))
+		var lambda_major := 0.5 * (cov_xx + cov_yy + spread)
+		var lambda_minor := maxf(0.0001, 0.5 * (cov_xx + cov_yy - spread))
+		var elongation := sqrt(lambda_major / lambda_minor)
+		var angle := 0.0
+		if elongation >= REGION_LABEL_MIN_ELONGATION:
+			# Half-angle form of the principal axis; clamped so no name
+			# ever tips past comfortable reading.
+			angle = clampf(0.5 * atan2(2.0 * cov_xy, cov_xx - cov_yy), -REGION_LABEL_MAX_ANGLE, REGION_LABEL_MAX_ANGLE)
+		# Bigger regions carry bigger names at every zoom, capped so an
+		# ocean never becomes a banner.
+		var area_scale := clampf(sqrt(count / float(REGION_LABEL_MIN_TILES)), 1.0, 2.6)
+		var base_font := int(round(float(REGION_LABEL_BASE_FONT) * area_scale))
+		var is_water := int(cluster_water_votes.get(cluster_id, 0)) * 2 > int(cluster_counts[cluster_id])
+		var curve := REGION_LABEL_WATER_CURVE if (is_water and count >= float(REGION_LABEL_CURVE_MIN_TILES)) else 0.0
 		entries.append({
 			"center": best_anchor.get(cluster_id, centroids[cluster_id]) as Vector2,
 			"name": best_name,
 			"category": "region",
 			"importance": REGION_LABEL_IMPORTANCE,
-			"population": int(cluster_counts[cluster_id])
+			"population": int(cluster_counts[cluster_id]),
+			"font_size": base_font,
+			"screen_px_scale": area_scale,
+			"angle": angle,
+			"curve": curve
 		})
 
 	OverworldLabelsService.rebuild(_region_labels_overlay, entries, {

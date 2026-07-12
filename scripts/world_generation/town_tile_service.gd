@@ -178,6 +178,11 @@ static func terrain_family_for_tile_key(tile_key: String) -> String:
 		return "grass"
 	if tile_key.begins_with("tilled"):
 		return "tilled"
+	# Wading shallows are their own family, NOT "water": water-family cells
+	# block walkers, boat, fish and grow shore fringes, while shallows are
+	# just walkable wet ground between the beach and the open water.
+	if tile_key == "water_shallow":
+		return "shallow"
 	if tile_key.begins_with("water"):
 		return "water"
 	if tile_key.begins_with("sand"):

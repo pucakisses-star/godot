@@ -718,6 +718,11 @@ const TOWN_TILE_ATLAS := {
 	"stairway_down": Vector2i(0, 45),
 	"stairway_up": Vector2i(1, 45),
 	"cellar_rock": Vector2i(2, 45),
+	# Wading shallows: pale walkable water over a sandy bottom, painted at
+	# atlas build time (town_generation._paint_water_shallow_tile). Sits
+	# between the beach band and open water on wilds coasts and forms the
+	# bog pools in marshes.
+	"water_shallow": Vector2i(3, 45),
 	# Lakeshore water plants, painted into appended row 46 at atlas build time
 	# (town_generation._paint_water_plant_tiles; the shipped sheet has no
 	# aquatic plant art at all — verified by full-sheet inventory). Transparent
@@ -844,7 +849,10 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	"crop_tomato_0", "crop_tomato_1", "crop_tomato_2",
 	# Stairways carry walkers between levels; "cellar_rock" is deliberately
 	# absent (undug earth blocks movement, like the dwarfhold's stone).
-	"stairway_down", "stairway_up"
+	"stairway_down", "stairway_up",
+	# Wading shallows are the one walkable water: thigh-deep over sand.
+	# Open "water"/"water_calm" still block unless the walker boats.
+	"water_shallow"
 ]
 
 static func validate_atlas_no_duplicates(atlas_name: String, atlas: Dictionary) -> bool:
