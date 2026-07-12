@@ -992,7 +992,10 @@ class FamilyTreeView:
 			"name": person_name,
 			"clan": String(person.get("clan", "")),
 			"age": age,
-			"race": race
+			"race": race,
+			# Family-graph persons know their gender; pass it through so
+			# grandmothers and daughters compose beardless.
+			"gender": String(person.get("gender", ""))
 		}
 		var layers := NpcIdentityService.appearance_for_identity(identity, "dwarf")
 		var texture := DwarfSpriteComposer.compose_crowned(layers) if crowned else DwarfSpriteComposer.compose(layers)
