@@ -324,7 +324,10 @@ void fragment() {
 	}
 	reveal = clamp(reveal, 0.0, 1.0);
 	float a = darkness_color.a * darkness_strength * (1.0 - reveal);
-	COLOR = vec4(darkness_color.rgb, a);
+	// Torchlight penumbra: the thinning darkness near a light leans warm
+	// instead of cold void, so light pools read like firelight.
+	vec3 shade = mix(darkness_color.rgb, vec3(0.38, 0.23, 0.10), reveal * 0.6);
+	COLOR = vec4(shade, a);
 }
 "
 

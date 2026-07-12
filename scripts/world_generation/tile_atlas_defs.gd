@@ -206,6 +206,12 @@ const TREE_VARIANT_TUNDRA_LONE := "tundra_lone"
 
 const DWARFHOLD_TILE_ATLAS := {
 	"dirt": Vector2i(0, 2),
+	# Depth variants (Core Keeper-style mining look): a stone wall with open
+	# ground to its south shows its carved face, dirt under a rock wall sits
+	# in its shadow, and dirt_alt breaks up floor repetition.
+	"stone_face": Vector2i(0, 0),
+	"dirt_shadow": Vector2i(0, 1),
+	"dirt_alt": Vector2i(4, 1),
 	"workbench": Vector2i(0, 3),
 	"shelf": Vector2i(0, 4),
 	"winepress": Vector2i(0, 5),
@@ -240,7 +246,7 @@ const DWARFHOLD_TILE_ATLAS := {
 	"stairway_down": Vector2i(6, 7),
 	"water": Vector2i(6, 0)
 }
-const DWARFHOLD_PASSABLE_TILE_KEYS := ["floor", "dirt", "door", "stairway_up", "stairway_down"]
+const DWARFHOLD_PASSABLE_TILE_KEYS := ["floor", "dirt", "dirt_shadow", "dirt_alt", "door", "stairway_up", "stairway_down"]
 
 ## Above-ground human town interiors. Coordinates index the 32px grid of
 ## resources/images/town/town_tileset.png (a 2x upscale of the village
