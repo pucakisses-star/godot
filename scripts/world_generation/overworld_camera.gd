@@ -12,6 +12,11 @@ signal zoom_changed(zoom_level: float)
 
 const PAN_THRESHOLD: float = 3.0
 
+## The exported min_zoom as authored, captured before any auto-fit
+## lowers it: each fit derives from this baseline rather than the last
+## fit's value, so repeated fits (regenerate, resize) can't ratchet the
+## floor ever lower.
+var _base_min_zoom := -1.0
 var _is_panning := false
 var _pan_pointer_index := -1
 var _pan_start_screen := Vector2.ZERO
@@ -131,6 +136,14 @@ func _fit_to_world_bounds() -> void:
 	var fit_zoom_x := viewport_size.x / _world_bounds.size.x
 	var fit_zoom_y := viewport_size.y / _world_bounds.size.y
 	var next_zoom := maxf(0.001, minf(fit_zoom_x, fit_zoom_y))
+	# The fitted whole-world view sits below the default min_zoom for every
+	# map size; unless the floor follows it down, the first wheel notch
+	# snaps 2.5x closer and the full-map view is unreachable forever.
+	# Derive from the authored baseline, not the current value: a repeated
+	# fit (regenerate after a resize) must be able to RAISE the floor back.
+	if _base_min_zoom < 0.0:
+		_base_min_zoom = min_zoom
+	min_zoom = minf(_base_min_zoom, next_zoom)
 	zoom = Vector2(next_zoom, next_zoom)
 	global_position = _world_bounds.position + (_world_bounds.size * 0.5)
 	_clamp_to_world_bounds()

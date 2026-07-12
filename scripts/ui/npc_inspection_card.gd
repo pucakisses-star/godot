@@ -81,7 +81,12 @@ func _populate_profile(npc_state: Dictionary, identity: Dictionary, role_title: 
 		age_clan += " • Clan %s" % clan
 	_age_clan_label.text = age_clan
 	for child: Node in _detail_rows.get_children():
-		child.queue_free()
+		# Free NOW, not end-of-frame: open() measures with reset_size()
+		# this same frame, and queued-free rows still count toward the
+		# minimum size — inflating every card after the first with a band
+		# of dead space.
+		_detail_rows.remove_child(child)
+		child.free()
 	for line: String in NpcIdentityService.detail_lines(identity):
 		var row := Label.new()
 		row.text = line
@@ -407,6 +412,7 @@ class FamilyTreeView:
 				accept_event()
 		elif event is InputEventMouseMotion and _dragging:
 			_view_offset += (event as InputEventMouseMotion).relative
+			_clamp_view_offset()
 			queue_redraw()
 			accept_event()
 
@@ -418,7 +424,19 @@ class FamilyTreeView:
 		var world := (pivot - _view_offset) / _zoom
 		_zoom = new_zoom
 		_view_offset = pivot - world * _zoom
+		_clamp_view_offset()
 		queue_redraw()
+
+	## Enforces the "never flung off to an empty void" promise: at least
+	## a margin of the tree stays inside the viewport after pan or zoom.
+	func _clamp_view_offset() -> void:
+		var view := size
+		if view.x <= 0.0 or view.y <= 0.0:
+			return
+		var margin := 60.0
+		var content := _content_size * _zoom
+		_view_offset.x = clampf(_view_offset.x, margin - content.x, view.x - margin)
+		_view_offset.y = clampf(_view_offset.y, margin - content.y, view.y - margin)
 
 	## Frames the sitting/focus person in the middle of the view at 1:1, the
 	## natural starting pose whenever the tab opens.
@@ -945,9 +963,14 @@ class FamilyTreeView:
 	func _portrait_texture(node: Dictionary) -> Texture2D:
 		var person := _person(String(node.get("id", "")))
 		var deceased := bool(node.get("deceased", false))
-		var crowned := bool(node.get("sitting", false))
+		# "sitting" only means "the person this tree centers on" — every
+		# inspected citizen carries it. Only actual rulers wear the crown,
+		# but the focus person's bust always uses their real age (a child's
+		# portrait must not fall through to the adult-floored estimate).
+		var sitting := bool(node.get("sitting", false))
+		var crowned := sitting and int(person.get("ruler_index", -1)) >= 0
 		var age := int(person.get("age", 0))
-		if crowned:
+		if sitting:
 			age = _sitting_age
 		elif age <= 0:
 			var birth := int(person.get("birth", 0))

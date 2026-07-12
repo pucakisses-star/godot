@@ -186,6 +186,8 @@ const WORLD_NAMES := [
 @onready var map_preview: TextureRect = get_node_or_null("%MapPreview")
 @onready var background_map: TextureRect = get_node_or_null("BackgroundMap")
 
+var _preview_debounce: Timer
+
 ## The preview thumbnail runs the real terrain math (same noises, same
 ## layout preset, same landmass centers) at postcard resolution, so what
 ## you see is the world you get: pick Twin Continents and two lobes
@@ -209,12 +211,22 @@ func _ready() -> void:
 	age_input.value = random_chronology_age()
 	_refresh_summary()
 
+	# The preview resamples the whole terrain synchronously, so only the
+	# inputs that shape terrain trigger it — and seed keystrokes debounce
+	# through a short timer instead of hitching the UI on every letter.
+	_preview_debounce = Timer.new()
+	_preview_debounce.one_shot = true
+	_preview_debounce.wait_time = 0.25
+	_preview_debounce.timeout.connect(_update_map_preview)
+	add_child(_preview_debounce)
 	map_size_select.item_selected.connect(func(_index: int) -> void: _refresh_summary())
 	world_layout_select.item_selected.connect(func(_index: int) -> void: _refresh_summary())
-	seed_input.text_changed.connect(func(_text: String) -> void: _refresh_summary())
-	year_input.value_changed.connect(func(_value: float) -> void: _refresh_summary())
-	age_input.value_changed.connect(func(_value: float) -> void: _refresh_summary())
-	world_name_input.text_changed.connect(func(_text: String) -> void: _refresh_summary())
+	seed_input.text_changed.connect(func(_text: String) -> void:
+		_refresh_summary_text()
+		_preview_debounce.start())
+	year_input.value_changed.connect(func(_value: float) -> void: _refresh_summary_text())
+	age_input.value_changed.connect(func(_value: float) -> void: _refresh_summary_text())
+	world_name_input.text_changed.connect(func(_text: String) -> void: _refresh_summary_text())
 
 	randomise_chronology_button.pressed.connect(_on_randomise_chronology_pressed)
 	randomise_world_name_button.pressed.connect(_on_randomise_world_name_pressed)
@@ -233,12 +245,15 @@ func _populate_options() -> void:
 	world_layout_select.select(0)
 
 func _refresh_summary() -> void:
+	_refresh_summary_text()
+	_update_map_preview()
+
+func _refresh_summary_text() -> void:
 	var map_size: Dictionary = MAP_SIZES[map_size_select.selected]
 	summary_map_size.text = "%s — %s" % [map_size["name"], map_size["dimensions"]]
 	summary_layout.text = world_layout_select.get_item_text(world_layout_select.selected)
 	summary_seed.text = seed_input.text.strip_edges() if not seed_input.text.strip_edges().is_empty() else "Random"
-	summary_chronology.text = "Year %d of the %d Age" % [int(year_input.value), int(age_input.value)]
-	_update_map_preview()
+	summary_chronology.text = "Year %d, Age %d" % [int(year_input.value), int(age_input.value)]
 
 func _update_map_preview() -> void:
 	if map_preview == null:

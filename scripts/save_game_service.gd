@@ -61,22 +61,9 @@ static func save_slot(context: Node, slot_id: String, label: String = "") -> Err
 	DirAccess.make_dir_recursive_absolute(SAVE_DIR)
 	var settings: Dictionary = session.call("get_world_settings")
 	var character: Dictionary = session.call("get_player_character")
-	var clock := settings.get("game_clock", {}) as Dictionary if settings.get("game_clock") is Dictionary else {}
-	if label.strip_edges().is_empty():
-		label = default_label(character, settings)
 	var payload := {
 		"version": SAVE_FORMAT_VERSION,
-		"meta": {
-			"label": label,
-			"saved_at": Time.get_unix_time_from_system(),
-			"saved_at_text": Time.get_datetime_string_from_system(false, true),
-			"character_name": String(character.get("name", "A wanderer")),
-			"character_profession": String(character.get("profession", "")),
-			"world_name": String(settings.get("world_name", "")).strip_edges(),
-			"day": maxi(1, int(clock.get("day", 1))),
-			"hour": int(clock.get("hour", 8.0)),
-			"location": location_label(settings)
-		},
+		"meta": _build_meta(character, settings, label),
 		"world_settings": session.call("encode_settings_for_save", settings),
 		"player_character": session.call("encode_settings_for_save", character)
 	}
@@ -90,6 +77,25 @@ static func save_slot(context: Node, slot_id: String, label: String = "") -> Err
 	if slot_id != AUTOSAVE_SLOT and session.has_method("set_current_slot"):
 		session.call("set_current_slot", slot_id)
 	return OK
+
+## The slot-row header block, built from one (character, settings) pair —
+## the ONLY place the meta schema lives, so manual saves, autosaves and
+## migrated legacy saves can never drift apart.
+static func _build_meta(character: Dictionary, settings: Dictionary, label: String = "") -> Dictionary:
+	var clock := settings.get("game_clock", {}) as Dictionary if settings.get("game_clock") is Dictionary else {}
+	if label.strip_edges().is_empty():
+		label = default_label(character, settings)
+	return {
+		"label": label,
+		"saved_at": Time.get_unix_time_from_system(),
+		"saved_at_text": Time.get_datetime_string_from_system(false, true),
+		"character_name": String(character.get("name", "A wanderer")),
+		"character_profession": String(character.get("profession", "")),
+		"world_name": String(settings.get("world_name", "")).strip_edges(),
+		"day": maxi(1, int(clock.get("day", 1))),
+		"hour": int(clock.get("hour", 8.0)),
+		"location": location_label(settings)
+	}
 
 static func default_label(character: Dictionary, settings: Dictionary) -> String:
 	var who := String(character.get("name", "A wanderer")).strip_edges()
@@ -178,17 +184,14 @@ static func migrate_legacy_save() -> void:
 		return
 	var payload := parsed as Dictionary
 	payload["version"] = SAVE_FORMAT_VERSION
-	payload["meta"] = {
-		"label": "Imported Save",
-		"saved_at": Time.get_unix_time_from_system(),
-		"saved_at_text": Time.get_datetime_string_from_system(false, true),
-		"character_name": "A wanderer",
-		"character_profession": "",
-		"world_name": "",
-		"day": 1,
-		"hour": 8,
-		"location": "The World Map"
-	}
+	# Describe the slot from the legacy payload itself — a hardcoded
+	# "Imported Save · A wanderer · Day 1" header would mislabel the
+	# player's real world on the Load Game screen.
+	var legacy_settings := payload.get("world_settings", {}) as Dictionary \
+		if payload.get("world_settings") is Dictionary else {}
+	var legacy_character := payload.get("player_character", {}) as Dictionary \
+		if payload.get("player_character") is Dictionary else {}
+	payload["meta"] = _build_meta(legacy_character, legacy_settings)
 	DirAccess.make_dir_recursive_absolute(SAVE_DIR)
 	var out := FileAccess.open(slot_path("slot_1"), FileAccess.WRITE)
 	if out == null:
@@ -197,8 +200,11 @@ static func migrate_legacy_save() -> void:
 	out.close()
 	DirAccess.remove_absolute(LEGACY_SAVE_PATH)
 
-## Written whenever the walker crosses between scenes.
+## Written whenever the walker crosses between scenes (unless the player
+## switched auto save off in Options).
 static func autosave(context: Node) -> void:
+	if not GameSettingsService.autosave_enabled():
+		return
 	var session := _session(context)
 	if session == null or not session.has_method("has_player_character"):
 		return

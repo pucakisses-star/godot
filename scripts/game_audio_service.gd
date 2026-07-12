@@ -51,7 +51,10 @@ static func _load_stream(path: String, looped: bool) -> AudioStream:
 		var wav := stream.duplicate() as AudioStreamWAV
 		wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
 		wav.loop_begin = 0
-		wav.loop_end = wav.data.size() / 2
+		# loop_end is in FRAMES. data.size()/2 only equals that for
+		# uncompressed 16-bit PCM; these WAVs import QOA-compressed, so
+		# that guess landed ~1/5 in and every theme restarted early.
+		wav.loop_end = int(round(wav.get_length() * wav.mix_rate))
 		stream = wav
 	_stream_cache[cache_key] = stream
 	return stream
@@ -76,6 +79,7 @@ static func play_music(scene_root: Node, music_key: String) -> void:
 	var next_player := AudioStreamPlayer.new()
 	next_player.name = "MusicPlayer"
 	next_player.stream = stream
+	next_player.bus = "Music"
 	next_player.volume_db = -40.0
 	next_player.set_meta("music_key", music_key)
 	scene_root.add_child(next_player)
@@ -90,6 +94,7 @@ static func play_sfx(scene_root: Node, sfx_key: String) -> void:
 		return
 	var player := AudioStreamPlayer.new()
 	player.stream = stream
+	player.bus = "SFX"
 	player.volume_db = SFX_DB
 	scene_root.add_child(player)
 	player.finished.connect(player.queue_free)

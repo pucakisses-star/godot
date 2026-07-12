@@ -25,6 +25,8 @@ const PROFESSION_STATS := {
 	"hunter": {"hp": 2, "attack": 2},
 	"farmer": {"hp": 4, "attack": 0},
 	"herder": {"hp": 4, "attack": 0},
+	"shepherd": {"hp": 4, "attack": 0},
+	# Compat alias: older saves stored the misspelled profession.
 	"shepard": {"hp": 4, "attack": 0},
 	"scholar": {"hp": -2, "attack": 3},
 	"alchemist": {"hp": -2, "attack": 3},

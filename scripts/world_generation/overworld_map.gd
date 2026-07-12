@@ -656,8 +656,6 @@ var _forest_bias := 0.0
 var _tile_data: Dictionary = {}
 var _tile_region_names: Dictionary = {}
 var _tile_population_groups: Dictionary = {}
-var _tooltip_cache_coord := Vector2i(-1, -1)
-var _tooltip_cache: Dictionary = {}
 ## Autowrap labels over-report their minimum height on the frame their text
 ## changes: they reshape at a stale, near-zero width, wrapping every word onto
 ## its own line, so a same-frame combined-minimum can be several screens tall
@@ -799,10 +797,10 @@ var _more_info_texture_cache: Dictionary = {}
 var _more_info_cache_initialized := false
 var _landmass_masks: Dictionary = {}
 
-## Re-attached from the scene cache: parked AudioStreamPlayers stop, so
-## strike the theme back up.
+## Re-attached from the scene cache (which restarts the parked theme
+## itself; nothing extra needed here yet).
 func _on_scene_resumed() -> void:
-	GameAudioService.play_music(self, "overworld")
+	pass
 
 func _ready() -> void:
 	if map_layer == null:
@@ -1246,7 +1244,12 @@ const DIVE_SECONDS := 0.85
 ## world map: while in region mode the camera cap lifts to this, restored on
 ## exit. Remembers the world-map cap so the two never leak into each other.
 const REGION_MAX_ZOOM := 12.0
+## Half-extent cap (in tiles) of the region detail streamer's window —
+## shared by _camera_visible_tile_rect and the region zoom floor so the
+## two can never drift apart.
+const REGION_STREAM_HALF_TILES := Vector2i(25, 13)
 var _world_map_max_zoom := -1.0
+var _world_map_min_zoom := -1.0
 var _dive_pending := false
 
 func _handle_double_click_dive(event: InputEvent) -> bool:
@@ -1256,6 +1259,11 @@ func _handle_double_click_dive(event: InputEvent) -> bool:
 	if mouse_button_event.button_index != MOUSE_BUTTON_LEFT:
 		return false
 	if _is_globe_view or _is_scene3d_view or _dive_pending:
+		return false
+	# A dive during the awaited regeneration would enter region mode on a
+	# half-built map, and the fit that ends generation would then wipe the
+	# region zoom floor — leaving a mostly-blank detail view.
+	if _is_generating:
 		return false
 	if overworld_camera == null or map_layer == null:
 		return false
@@ -1993,8 +2001,9 @@ func _generate_map() -> void:
 	_tile_data.clear()
 	_tile_region_names.clear()
 	_tile_population_groups.clear()
-	_tooltip_cache_coord = Vector2i(-1, -1)
-	_tooltip_cache.clear()
+	# Forget which tile the visible tooltip describes, or a stationary
+	# cursor keeps showing the OLD world's data after a regenerate.
+	_tooltip_content_coord = Vector2i(-9999, -9999)
 
 	var cell_count := _map_cell_count()
 	var height_buffer := PackedFloat32Array()
@@ -8679,8 +8688,33 @@ func _move_map_layer_to_viewport() -> void:
 		map_viewport_root.add_child(_coast_layer)
 		_coast_layer.position = Vector2.ZERO
 
+## Tracks whether the OS cursor is inside the window: the tooltip follows
+## get_global_mouse_position(), which freezes at its last value once the
+## cursor leaves, so without this the tooltip sticks on screen forever.
+var _mouse_inside_window := true
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_MOUSE_EXIT:
+		_mouse_inside_window = false
+		_hide_map_tooltip()
+	elif what == NOTIFICATION_WM_MOUSE_ENTER:
+		_mouse_inside_window = true
+
 func _update_map_tooltip() -> void:
 	if tooltip_panel == null or map_layer == null:
+		return
+	if not _mouse_inside_window:
+		_hide_map_tooltip()
+		return
+	# The cursor is on real UI (toolbar buttons, scale bar, a dialog): the
+	# tile tooltip must not pop up over it. The tooltip's own subtree is
+	# exempt so it can't hide itself when edge-clamping slides it under
+	# the cursor.
+	var hovered_control := get_viewport().gui_get_hovered_control()
+	if hovered_control != null and hovered_control != tooltip_panel \
+			and not tooltip_panel.is_ancestor_of(hovered_control) \
+			and _control_blocks_map_tooltip(hovered_control):
+		_hide_map_tooltip()
 		return
 	if _is_globe_view or _is_scene3d_view:
 		if _is_dragging_globe or _is_dragging_scene3d or _hovered_tile.x < 0 or _hovered_tile.y < 0:
@@ -8700,6 +8734,21 @@ func _update_map_tooltip() -> void:
 	if coord != _hovered_tile:
 		_hovered_tile = coord
 	_present_map_tooltip(coord)
+
+## Interactive controls (STOP filter) and opaque panels suppress the tile
+## tooltip. Transparent PASS containers stretched over the map — like the
+## top bar's empty strip past its last button — do not: the player sees
+## bare map there and expects the tooltip.
+func _control_blocks_map_tooltip(hovered: Control) -> bool:
+	var node: Node = hovered
+	while node is Control:
+		var control := node as Control
+		if control.mouse_filter == Control.MOUSE_FILTER_STOP:
+			return true
+		if control is PanelContainer or control is Panel:
+			return true
+		node = control.get_parent()
+	return false
 
 ## Shows the tooltip for a tile. Repopulates only when the hovered tile changes
 ## (re-setting the label text every frame keeps the autowrap measurement
@@ -8916,8 +8965,6 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		_set_tooltip_section_visible(tooltip_population_breakdown_section, false)
 		if tooltip_population_pie_chart != null and tooltip_population_pie_chart.has_method("set_slices"):
 			tooltip_population_pie_chart.call("set_slices", [])
-	_tooltip_cache_coord = coord
-	_tooltip_cache = {"region_name": region_name}
 
 func _position_map_tooltip() -> void:
 	if tooltip_panel == null:
@@ -10367,6 +10414,15 @@ func _enter_region_mode() -> void:
 		if _world_map_max_zoom < 0.0:
 			_world_map_max_zoom = overworld_camera.max_zoom
 		overworld_camera.max_zoom = REGION_MAX_ZOOM
+		# The detail streamer only fills a band around the camera
+		# (_camera_visible_tile_rect cap): raise the zoom floor so the
+		# viewport can never outgrow the band into blank void. Recomputed
+		# on window resize — the floor depends on the viewport size.
+		if _world_map_min_zoom < 0.0:
+			_world_map_min_zoom = overworld_camera.min_zoom
+		_update_region_zoom_floor()
+		if not get_viewport().size_changed.is_connected(_update_region_zoom_floor):
+			get_viewport().size_changed.connect(_update_region_zoom_floor)
 	_ensure_region_layer()
 	_ensure_region_hint()
 	if _region_noise.is_empty():
@@ -10388,10 +10444,12 @@ func _enter_region_mode() -> void:
 		_render_region_tile(_region_render_queue.pop_front() as Vector2i)
 		budget -= 1
 	_dispatch_region_jobs()
-	# The overlay resolution differs between world and detail view, so rebuild
-	# it against the mode we just entered when it is on screen.
+	# The overlay resolution differs between world and detail view, so the
+	# cached texture is stale for this mode even while the toggle is OFF —
+	# mark it dirty unconditionally or re-enabling it later shows the
+	# wrong-resolution borders.
+	_overlay_dirty["political_boundaries"] = true
 	if _political_boundaries_overlay_enabled:
-		_overlay_dirty["political_boundaries"] = true
 		_ensure_overlay_texture("political_boundaries")
 
 func _exit_region_mode() -> void:
@@ -10404,6 +10462,11 @@ func _exit_region_mode() -> void:
 		overworld_camera.max_zoom = _world_map_max_zoom
 		if overworld_camera.zoom.x > _world_map_max_zoom:
 			overworld_camera.adjust_zoom(_world_map_max_zoom - overworld_camera.zoom.x)
+	if overworld_camera != null and _world_map_min_zoom > 0.0:
+		overworld_camera.min_zoom = _world_map_min_zoom
+		_world_map_min_zoom = -1.0
+	if get_viewport() != null and get_viewport().size_changed.is_connected(_update_region_zoom_floor):
+		get_viewport().size_changed.disconnect(_update_region_zoom_floor)
 	_region_render_queue.clear()
 	_region_queued.clear()
 	if _region_layer != null:
@@ -10420,9 +10483,24 @@ func _exit_region_mode() -> void:
 		_map_snapshot_sprite.visible = false
 	_update_map_lod()
 	# Restore the coarse world-map boundary overlay when leaving detail view.
+	# Dirty unconditionally: even with the toggle off, the cached texture
+	# belongs to the other mode's resolution now.
+	_overlay_dirty["political_boundaries"] = true
 	if _political_boundaries_overlay_enabled:
-		_overlay_dirty["political_boundaries"] = true
 		_ensure_overlay_texture("political_boundaries")
+
+## The region floor keeps the viewport inside the streamed detail band;
+## it depends on the live viewport size, so window resizes re-derive it.
+func _update_region_zoom_floor() -> void:
+	if not _region_mode or overworld_camera == null:
+		return
+	var region_view := get_viewport().get_visible_rect().size
+	var band := Vector2(REGION_STREAM_HALF_TILES * 2) * float(tile_size)
+	var floor_zoom := maxf(region_view.x / band.x, region_view.y / band.y)
+	var base_min := _world_map_min_zoom if _world_map_min_zoom > 0.0 else overworld_camera.min_zoom
+	overworld_camera.min_zoom = maxf(base_min, floor_zoom)
+	if overworld_camera.zoom.x < overworld_camera.min_zoom:
+		overworld_camera.adjust_zoom(overworld_camera.min_zoom - overworld_camera.zoom.x)
 
 func _set_base_map_layers_visible(layers_visible: bool) -> void:
 	for layer: TileMapLayer in [map_layer, tree_layer, river_layer, highland_layer, iceberg_layer, _coast_layer]:
@@ -10455,8 +10533,8 @@ func _camera_visible_tile_rect(margin: int) -> Rect2i:
 			int(ceil(view.y / (zoom * float(tile_size) * 2.0)))
 		)
 	half += Vector2i(margin, margin)
-	half.x = mini(half.x, 25)
-	half.y = mini(half.y, 13)
+	half.x = mini(half.x, REGION_STREAM_HALF_TILES.x)
+	half.y = mini(half.y, REGION_STREAM_HALF_TILES.y)
 	var top_left := (center - half).clamp(Vector2i.ZERO, map_size - Vector2i.ONE)
 	var bottom_right := (center + half).clamp(Vector2i.ZERO, map_size - Vector2i.ONE)
 	return Rect2i(top_left, bottom_right - top_left + Vector2i.ONE)

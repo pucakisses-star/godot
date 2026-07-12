@@ -60,8 +60,13 @@ const BEAST_TROPHY_SUFFIXES := {
 	"thing_below": "Eye"
 }
 
-const TOWN_RULER_TITLES: Array[String] = [
-	"Mayor", "Lord", "Lady", "Reeve", "Alderman", "Baron", "Baroness"
+## Split by gender so a rolled name never wears the wrong title
+## ("Lady Duncan Miller"); Mayor and Reeve fit anyone.
+const TOWN_RULER_TITLES_MALE: Array[String] = [
+	"Mayor", "Lord", "Reeve", "Alderman", "Baron"
+]
+const TOWN_RULER_TITLES_FEMALE: Array[String] = [
+	"Mayor", "Lady", "Reeve", "Baroness"
 ]
 const ELF_RULER_TITLES: Array[String] = [
 	"Warden", "Elder Warden", "Bough-Speaker"
@@ -200,19 +205,22 @@ static func _simulate_foundings(
 		var founder := _roll_person(settlement_type, rng)
 		record["founded_year"] = founded_year
 		record["founded_by"] = String(founder.get("full", ""))
-		var founding_text := _founding_text(settlement_type, String(founder.get("full", "")))
+		var founding_text := _founding_text(settlement_type, founder)
 		_push_event(record, all_events, founded_year, "founding", founding_text, String(record.get("name", "")))
 
-static func _founding_text(settlement_type: String, founder: String) -> String:
+static func _founding_text(settlement_type: String, founder: Dictionary) -> String:
+	var full := String(founder.get("full", ""))
 	match settlement_type:
 		"dwarfhold":
-			return "Founded by %s, whose clan first delved beneath the mountain." % founder
+			return "Founded by %s, whose clan first delved beneath the mountain." % full
 		"woodElfGrove":
-			return "Took root beneath the elder trees under the wardenship of %s." % founder
+			# The bare name here: the titled form doubles the noun
+			# ("under the wardenship of Warden Aelira").
+			return "Took root beneath the elder trees under the wardenship of %s." % String(founder.get("name", full))
 		"lizardmenCity":
-			return "Raised as a temple city by %s." % founder
+			return "Raised as a temple city by %s." % full
 		_:
-			return "Founded by %s, who raised the first hall at the crossroads." % founder
+			return "Founded by %s, who raised the first hall at the crossroads." % full
 
 ## 2-5 named beasts drawn from the world's existing creature concepts.
 static func _spawn_beasts(rng: RandomNumberGenerator) -> Array:
@@ -374,14 +382,14 @@ static func _simulate_wars(
 			var battle_name := "Battle of %s" % site_name
 			battles.append({"year": battle_year, "name": battle_name, "site": site_key, "site_name": site_name})
 			var battle_text := (
-				"Besieged by the armies of %s at the %s; a hard year of hunger followed." % [enemy_state, battle_name]
+				"Besieged by the armies of %s at the %s; a hard year of hunger followed." % [_realm_ref(enemy_state), battle_name]
 				if rng.randf() < 0.5
-				else "The %s was fought at the gates; the armies of %s were thrown back." % [battle_name, enemy_state]
+				else "The %s was fought at the gates; the armies of %s were thrown back." % [battle_name, _realm_ref(enemy_state)]
 			)
 			_push_event(site, all_events, battle_year, "battle", battle_text, site_name)
 			_push_mark(site, battle_year, "battle", rng.randf_range(0.08, 0.2))
 			(site["rumors"] as Array).append("My grandmother survived the %s. She never spoke of it twice." % battle_name)
-			(site["agenda_goals"] as Array).append("to repay %s for the %s" % [enemy_state, battle_name])
+			(site["agenda_goals"] as Array).append("to repay %s for the %s" % [_realm_ref(enemy_state), battle_name])
 		if battles.is_empty():
 			continue
 		var outcome := "white_peace"
@@ -403,21 +411,21 @@ static func _simulate_wars(
 			var conquered_name := String(conquered.get("name", ""))
 			_push_event(
 				conquered, all_events, end_year, "conquest",
-				"Stormed by the armies of %s as %s ended; for a generation it flew the banner of %s." % [winner, war_name, winner],
+				"Stormed by the armies of %s as %s ended; for a generation it flew the banner of %s." % [_realm_ref(winner), _war_ref(war_name), _realm_ref(winner)],
 				conquered_name
 			)
 			_push_mark(conquered, end_year, "battle", rng.randf_range(0.1, 0.22))
-			(conquered["agenda_goals"] as Array).append("to cast off every debt owed to %s" % winner)
+			(conquered["agenda_goals"] as Array).append("to cast off every debt owed to %s" % _realm_ref(winner))
 		all_events.append({
 			"year": start_year,
 			"type": "war_start",
-			"text": "%s began: %s marched against %s." % [war_name, attacker, defender],
+			"text": "%s began: %s marched against %s." % [war_name, _capitalize_first(_realm_ref(attacker)), _realm_ref(defender)],
 			"site_name": ""
 		})
 		var end_text := (
-			"%s ended in a white peace between %s and %s." % [war_name, attacker, defender]
+			"%s ended in a white peace between %s and %s." % [war_name, _realm_ref(attacker), _realm_ref(defender)]
 			if outcome == "white_peace"
-			else "%s ended: %s dictated terms to %s." % [war_name, attacker, defender]
+			else "%s ended: %s dictated terms to %s." % [war_name, _capitalize_first(_realm_ref(attacker)), _realm_ref(defender)]
 		)
 		all_events.append({"year": end_year, "type": "war_end", "text": end_text, "site_name": ""})
 		wars.append({
@@ -497,8 +505,8 @@ static func _simulate_hold_falls(
 			var enemy := String(war_cause.get("attacker", ""))
 			if enemy == String(record.get("state", "")):
 				enemy = String(war_cause.get("defender", ""))
-			var fall_text := "The gates were breached by the armies of %s during %s; the hold fell, and its halls have been silent since." % [enemy, String(war_cause.get("name", "the war"))]
-			record["fall_text"] = "Fell to the armies of %s, year %d" % [enemy, fall_year]
+			var fall_text := "The gates were breached by the armies of %s during %s; the hold fell, and its halls have been silent since." % [_realm_ref(enemy), _war_ref(String(war_cause.get("name", "the war")))]
+			record["fall_text"] = "Fell to the armies of %s, year %d" % [_realm_ref(enemy), fall_year]
 			_push_event(record, all_events, fall_year, "fall", fall_text, hold_name)
 		else:
 			var beast := _pick_hold_felling_beast(beasts, rng)
@@ -652,10 +660,10 @@ static func _simulate_razings(
 				enemy = String(war.get("defender", ""))
 			raze_year = clampi(rng.randi_range(int(war.get("start", raze_year)), int(war.get("end", raze_year))), founded_year + 1, current_year - 1)
 			record["fell_year"] = raze_year
-			record["fall_text"] = "Razed by the armies of %s, year %d" % [enemy, raze_year]
+			record["fall_text"] = "Razed by the armies of %s, year %d" % [_realm_ref(enemy), raze_year]
 			_push_event(
 				record, all_events, raze_year, "razing",
-				"Razed by the armies of %s during %s; the survivors scattered, and only ruins remain." % [enemy, String(war.get("name", "the war"))],
+				"Razed by the armies of %s during %s; the survivors scattered, and only ruins remain." % [_realm_ref(enemy), _war_ref(String(war.get("name", "the war")))],
 				razed_name
 			)
 		else:
@@ -823,9 +831,7 @@ static func _roll_lineage_ruler(
 	rng: RandomNumberGenerator
 ) -> Dictionary:
 	if settlement_type != "dwarfhold":
-		var person := _roll_person(settlement_type, rng)
-		person["gender"] = ""
-		return person
+		return _roll_person(settlement_type, rng)
 	var gender := NpcIdentityService.roll_dwarf_gender(rng)
 	var first := NpcIdentityService.dwarf_ruler_first_name(rng, gender)
 	for _reroll: int in range(6):
@@ -1547,8 +1553,11 @@ static func _family_link_child(people: Dictionary, parent_ids: Array[String], ch
 static func _family_first_name(gender: String, used_first: Dictionary, rng: RandomNumberGenerator, race: String = "Dwarf") -> String:
 	var pool: Array[String] = []
 	if race == "Human":
-		## Human name pools carry no gender split; ignore gender for them.
-		pool.append_array(NpcIdentityService.TOWNSFOLK_FIRST_NAMES)
+		pool.append_array(
+			NpcIdentityService.TOWNSFOLK_FIRST_NAMES_FEMALE
+			if gender == "female"
+			else NpcIdentityService.TOWNSFOLK_FIRST_NAMES_MALE
+		)
 	elif gender == "female":
 		pool.append_array(NpcIdentityService.DWARF_FIRST_NAMES_FEMALE)
 		pool.append_array(NpcIdentityService.DWARF_RULER_FIRST_NAMES_FEMALE)
@@ -1710,7 +1719,7 @@ static func _build_world_rumors(chronicle: Dictionary, rng: RandomNumberGenerato
 		if battles.is_empty():
 			continue
 		var battle := battles[rng.randi_range(0, battles.size() - 1)] as Dictionary
-		rumors.append("They still sing of the %s, from %s." % [String(battle.get("name", "old battle")), String(war.get("name", "the war"))])
+		rumors.append("They still sing of the %s, from %s." % [String(battle.get("name", "old battle")), _war_ref(String(war.get("name", "the war")))])
 	for beast_variant: Variant in (chronicle.get("beasts", []) as Array):
 		var beast := beast_variant as Dictionary
 		if String(beast.get("status", "")) == "slain":
@@ -1738,11 +1747,12 @@ static func _roll_person(settlement_type: String, rng: RandomNumberGenerator) ->
 	var first := ""
 	var last := ""
 	var title := ""
+	var gender := ""
 	match settlement_type:
 		"dwarfhold":
 			## Founders and heroes are gender-consistent like the ruler
 			## lines: gender first, then name and title from matching pools.
-			var gender := NpcIdentityService.roll_dwarf_gender(rng)
+			gender = NpcIdentityService.roll_dwarf_gender(rng)
 			var first_pool := (
 				NpcIdentityService.DWARF_FIRST_NAMES_FEMALE
 				if gender == "female"
@@ -1763,13 +1773,25 @@ static func _roll_person(settlement_type: String, rng: RandomNumberGenerator) ->
 			]
 			title = LIZARD_RULER_TITLES[rng.randi_range(0, LIZARD_RULER_TITLES.size() - 1)]
 		_:
-			first = NpcIdentityService.TOWNSFOLK_FIRST_NAMES[rng.randi_range(0, NpcIdentityService.TOWNSFOLK_FIRST_NAMES.size() - 1)]
+			## Towns mirror the dwarfhold branch: gender first, then name
+			## and title from matching pools.
+			gender = "female" if rng.randf() < 0.5 else "male"
+			var town_pool := (
+				NpcIdentityService.TOWNSFOLK_FIRST_NAMES_FEMALE
+				if gender == "female"
+				else NpcIdentityService.TOWNSFOLK_FIRST_NAMES_MALE
+			)
+			first = town_pool[rng.randi_range(0, town_pool.size() - 1)]
 			last = NpcIdentityService.TOWNSFOLK_SURNAMES[rng.randi_range(0, NpcIdentityService.TOWNSFOLK_SURNAMES.size() - 1)]
-			title = TOWN_RULER_TITLES[rng.randi_range(0, TOWN_RULER_TITLES.size() - 1)]
+			var town_titles := (
+				TOWN_RULER_TITLES_FEMALE if gender == "female" else TOWN_RULER_TITLES_MALE
+			)
+			title = town_titles[rng.randi_range(0, town_titles.size() - 1)]
 	var full_name := first if last.is_empty() else "%s %s" % [first, last]
 	return {
 		"name": full_name,
 		"title": title,
+		"gender": gender,
 		"full": "%s %s" % [title, full_name]
 	}
 
@@ -1777,6 +1799,24 @@ static func _capitalize_first(text: String) -> String:
 	if text.is_empty():
 		return text
 	return text.substr(0, 1).to_upper() + text.substr(1)
+
+## Realm names are mostly titled forms ("Kingdom of Valemont") that read
+## wrong bare in a sentence ("the armies of Kingdom of Valemont"); those
+## take a leading "the". Standalone names ("Ironroot") pass through.
+static func _realm_ref(state_name: String) -> String:
+	var trimmed := state_name.strip_edges()
+	if trimmed.is_empty() or trimmed.begins_with("The ") or trimmed.begins_with("the "):
+		return trimmed
+	if trimmed.contains(" of "):
+		return "the %s" % trimmed
+	return trimmed
+
+## War names are minted as "The X War"; mid-sentence the capital reads
+## wrong ("as The Salt War ended").
+static func _war_ref(war_name: String) -> String:
+	if war_name.begins_with("The "):
+		return "the %s" % war_name.trim_prefix("The ")
+	return war_name
 
 ## --- Population timelines ----------------------------------------------------
 
@@ -2027,7 +2067,20 @@ static func _death_event_text(death: Dictionary) -> String:
 		return "%s starved to death at %s." % [who, place]
 	if cause.is_empty():
 		return "%s perished at %s." % [who, place]
-	return "%s perished at %s, slain by %s." % [who, place, cause]
+	return "%s perished at %s, slain by %s." % [who, place, _cause_ref(cause)]
+
+## Creature defs carry Title-Case display names ("Orc Raider"), which read
+## raw in a sentence — those become "an orc raider". Already-phrased causes
+## ("the fire jets", "a whirling saw blade", named beasts) pass through.
+static func _cause_ref(cause: String) -> String:
+	if cause.begins_with("The "):
+		return "the %s" % cause.trim_prefix("The ")
+	var first_char := cause.substr(0, 1)
+	if first_char != first_char.to_upper():
+		return cause
+	var lowered := cause.to_lower()
+	var article := "an" if lowered.substr(0, 1) in ["a", "e", "i", "o", "u"] else "a"
+	return "%s %s" % [article, lowered]
 
 ## Patches a (freshly simulated or stored) chronicle with the deaths of
 ## player characters: each becomes a world event (and a tavern rumor)

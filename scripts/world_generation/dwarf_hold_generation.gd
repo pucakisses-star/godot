@@ -996,7 +996,11 @@ func _ready() -> void:
 	_lighting_mask_sprite.centered = false
 	_lighting_mask_sprite.texture = _create_white_texture()
 	_lighting_mask_sprite.material = _darkness_material
-	_lighting_mask_sprite.z_index = 1
+	# Above every world actor (creatures 12, items 6, player/NPCs 11) so
+	# darkness swallows them all alike — at z 1 monsters and loot floated
+	# fully lit over unexplored black. Torches (14) and glows (15) stay on
+	# top as the light sources that punch through.
+	_lighting_mask_sprite.z_index = 13
 	_lighting_mask_sprite.visible = false
 	lighting_layer.add_child(_lighting_mask_sprite)
 	fog_of_war.visible = false
@@ -3024,6 +3028,26 @@ func _render_world_rect(rect: Rect2i) -> void:
 				_place_tile(decor_layer, cell, decor_key)
 				if decor_key == "chest":
 					_ensure_chest_inventory(cell)
+	_stamp_active_stairs_in_rect(rect)
+
+## Re-stamps the active level's staircases inside a repainted rect.
+## Chunk streaming, digging and building all repaint base tiles through
+## _render_world_rect, and _pick_base_tile knows nothing about stairs —
+## without this the stairway tile visibly vanishes (and stops working)
+## the moment a nearby chunk streams in. Any future repaint path must
+## call this too.
+func _stamp_active_stairs_in_rect(rect: Rect2i) -> void:
+	for stair_key: String in ["up", "down"]:
+		if not _hold_state.active_level_stairs.has(stair_key):
+			continue
+		var stair_cell := _hold_state.active_level_stairs[stair_key] as Vector2i
+		if not rect.has_point(stair_cell):
+			continue
+		if city_layer.get_cell_source_id(stair_cell) < 0:
+			continue
+		_place_tile(city_layer, stair_cell, "stairway_up" if stair_key == "up" else "stairway_down")
+		decor_layer.erase_cell(stair_cell)
+		_actor_passable_cache.erase(stair_cell)
 
 func _is_diggable_cell(cell: Vector2i) -> bool:
 	if _world_noise.is_empty():
@@ -4345,7 +4369,9 @@ func _handle_fish_action() -> void:
 		_bobber_texture = _create_bobber_texture()
 	bobber.texture = _bobber_texture
 	bobber.position = _cell_center_position(water_cell)
-	bobber.z_index = 13
+	# Below the darkness quad (13): the bobber belongs to the world, not
+	# the light pass.
+	bobber.z_index = 12
 	actor_layer.add_child(bobber)
 	_fishing_state = {
 		"cell": water_cell,
@@ -4756,7 +4782,9 @@ func _spawn_lair_boss_at(cell: Vector2i) -> void:
 	var sprite: Sprite2D = UndergroundCreatureService.create_creature_sprite(_creature_texture, int(def.get("slot", 0)), tile_size)
 	UndergroundCreatureService.apply_boss_visuals(sprite, spec, WorldChronicleService._capitalize_first(display))
 	sprite.position = _cell_center_position(cell)
-	sprite.z_index = 13
+	# Below the darkness quad (13): even the lair boss hides in the dark
+	# until a light reveals it.
+	sprite.z_index = 12
 	actor_layer.add_child(sprite)
 	_creature_states.append({
 		"def_index": def_index,

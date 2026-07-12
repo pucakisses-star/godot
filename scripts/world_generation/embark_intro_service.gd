@@ -38,6 +38,8 @@ const FLAVOR_BY_PROFESSION := {
 	"hunter": "The wild beyond the gates holds no dread for you. You will range the crags and forests, bring back meat and hide, and mark what stalks the dark before it ever finds the hold.",
 	"farmer": "From cave-moss to root and grain, you coax life from grudging ground. While the caravan is late and the stores run thin, it is your hands that keep the hold fed.",
 	"herder": "From beast and pasture you draw meat, milk and leather. While the caravan is late and the stores run thin, it is your hands that keep the hold fed.",
+	"shepherd": "From beast and pasture you draw meat, milk and leather. While the caravan is late and the stores run thin, it is your hands that keep the hold fed.",
+	# Compat alias: older saves stored the misspelled profession.
 	"shepard": "From beast and pasture you draw meat, milk and leather. While the caravan is late and the stores run thin, it is your hands that keep the hold fed.",
 	"butcher": "Nothing a beast gives is wasted under your knife — meat, hide, bone and tallow all find their use. A hold eats well while you draw breath.",
 	"carpenter": "Timber and stave take shape beneath your tools: doors and beds, barrels and beams — the hundred small things a living hold cannot do without.",

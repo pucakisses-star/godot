@@ -427,10 +427,22 @@ func _place_down_stairs() -> void:
 			return
 
 func _travel_to_depth(new_depth: int) -> void:
+	var ascending := new_depth < _depth
 	_depth = clampi(new_depth, 1, MAX_DEPTH)
 	_player_move_path.clear()
 	_player_is_moving = false
 	_generate_dungeon()
+	# Climbing up lands beside the staircase you climbed — matching how
+	# the settlement scenes pair stairs — not back at the floor's
+	# entrance, where one accidental step exits the dungeon entirely.
+	if ascending and _down_stairs_cell != Vector2i(2147483647, 2147483647) and _player_sprite != null:
+		var landing := _down_stairs_cell
+		for direction: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			if _is_walkable(_down_stairs_cell + direction):
+				landing = _down_stairs_cell + direction
+				break
+		_player_cell = landing
+		_player_sprite.position = _cell_center(landing)
 
 func _carve_corridor(from_cell: Vector2i, to_cell: Vector2i) -> void:
 	var cursor := from_cell
@@ -497,6 +509,11 @@ func _place_traps() -> void:
 	_place_spike_plates()
 
 func _rect_overlaps_blocked(rect: Rect2i) -> bool:
+	# The staircase down counts as blocked ground for every area hazard:
+	# a trap footprint covering it would hide the way down and force
+	# damage to descend. (Sentinel coords before placement never match.)
+	if rect.has_point(_down_stairs_cell):
+		return true
 	for blocked_variant: Variant in _blocked_cells.keys():
 		if rect.has_point(blocked_variant as Vector2i):
 			return true
@@ -629,6 +646,10 @@ func _place_spike_plates() -> void:
 	for cell_variant: Variant in _grid.keys():
 		var cell := cell_variant as Vector2i
 		if int(_grid[cell_variant]) != FLOOR or _is_safe_zone(cell) or _blocked_cells.has(cell):
+			continue
+		# Never on the way down: a plate sprite would cover the staircase
+		# and force trap damage to descend.
+		if cell == _down_stairs_cell:
 			continue
 		if decor_layer.get_cell_source_id(cell) >= 0:
 			continue

@@ -155,11 +155,18 @@ func flash(index: int) -> void:
 	slot_button.modulate = Color(1.6, 1.5, 1.1, 1.0)
 	var tween := create_tween()
 	tween.tween_property(slot_button, "modulate", Color.WHITE, 0.3)
+	# The resting look isn't WHITE for every slot (dry bindings dim to
+	# 0.35 alpha); refresh re-applies the true state after the flash so
+	# pressing an out-of-stock key can't leave the slot looking restocked.
+	tween.tween_callback(refresh)
 
-## Docks the bar bottom-center of its parent control.
+## Docks the bar bottom-center of its parent control, and keeps it there
+## when the window (and thus the full-rect parent) resizes.
 func reposition() -> void:
 	var parent_control := get_parent() as Control
 	if parent_control == null:
 		return
+	if not parent_control.resized.is_connected(reposition):
+		parent_control.resized.connect(reposition)
 	reset_size()
 	position = Vector2((parent_control.size.x - size.x) * 0.5, parent_control.size.y - size.y - 10.0)

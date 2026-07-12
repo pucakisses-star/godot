@@ -33,6 +33,8 @@ gdscript/warnings/assert_always_false=2
 
 [display]
 
+window/size/viewport_width=1280
+window/size/viewport_height=800
 mouse_cursor/custom_image="uid://cyu3a5pyub4jy"
 
 [physics]

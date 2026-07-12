@@ -58,7 +58,8 @@ const PEACE_TEMPLATES: Array[String] = [
 const RAID_TEMPLATES: Array[String] = [
 	"%s raiders struck %s in the night — smoke was seen for miles.",
 	"%s warbands hit %s; the survivors flee along the roads.",
-	"A %s host tested the gates of %s and was bloodied for it."
+	# No leading article: "A Orc host" needs a/an chosen per culture.
+	"%s war-parties tested the gates of %s and were bloodied for it."
 ]
 const GROWTH_TEMPLATES: Array[String] = [
 	"%s is thriving — the census counts its folk up near %d%% this season.",

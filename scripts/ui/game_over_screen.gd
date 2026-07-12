@@ -168,6 +168,13 @@ func _show_view(view: VBoxContainer) -> void:
 	_load_box.visible = view == _load_box
 	# The panel shrinks back around whichever view is showing.
 	_panel.reset_size()
+	# Keyboard navigation needs a starting focus (deferred: the view may
+	# only become visible later this frame).
+	for child in view.get_children():
+		var button := child as Button
+		if button != null:
+			button.call_deferred("grab_focus")
+			break
 
 ## There is no escaping death: ESC only backs out of the sub-views.
 func _unhandled_input(event: InputEvent) -> void:

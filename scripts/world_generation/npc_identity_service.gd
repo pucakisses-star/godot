@@ -62,12 +62,18 @@ const DWARF_DARK_RULER_TITLES: Array[String] = [
 	"Sorcerer-Prophet", "Ash Lord", "Obsidian Warden", "Flame Regent", "Deep Ember"
 ]
 const DWARF_RULER_NEUTRAL_TITLE_CHANCE := 0.3
-const TOWNSFOLK_FIRST_NAMES: Array[String] = [
+## Gendered pools for callers that pair names with gendered titles or
+## family relations ("Lady Duncan Miller" must not happen); the combined
+## pool is derived so the three lists can never drift apart.
+const TOWNSFOLK_FIRST_NAMES_MALE: Array[String] = [
 	"Aldric", "Bertram", "Cedric", "Duncan", "Edwin", "Gareth", "Harold",
-	"Osric", "Percival", "Rowan", "Tobias", "Wallace", "Agnes", "Beatrice",
-	"Clara", "Edith", "Greta", "Isolde", "Maren", "Nell", "Rosalind",
-	"Sybil", "Tilda", "Winifred", "Yorick", "Petra", "Lambert", "Hugh"
+	"Osric", "Percival", "Rowan", "Tobias", "Wallace", "Yorick", "Lambert", "Hugh"
 ]
+const TOWNSFOLK_FIRST_NAMES_FEMALE: Array[String] = [
+	"Agnes", "Beatrice", "Clara", "Edith", "Greta", "Isolde", "Maren",
+	"Nell", "Rosalind", "Sybil", "Tilda", "Winifred", "Petra"
+]
+const TOWNSFOLK_FIRST_NAMES: Array[String] = TOWNSFOLK_FIRST_NAMES_MALE + TOWNSFOLK_FIRST_NAMES_FEMALE
 const TOWNSFOLK_SURNAMES: Array[String] = [
 	"Miller", "Thatcher", "Cooper", "Fletcher", "Baker", "Weaver", "Tanner",
 	"Mason", "Carter", "Shepherd", "Brewer", "Smith", "Wright", "Potter",
@@ -242,7 +248,12 @@ static func summary_line(identity: Dictionary) -> String:
 static func personal_line(identity: Dictionary, rng: RandomNumberGenerator) -> String:
 	match rng.randi_range(0, 4):
 		0:
-			return "My dream? %s." % String(identity.get("dream", "to keep on keeping on")).capitalize()
+			# capitalize() Title-Cases Every Word (it's for snake_case
+			# identifiers); spoken dialogue only wants the first letter up.
+			# (Not WorldChronicleService._capitalize_first: that would make
+			# the chronicle<->identity class references cyclic.)
+			var dream := String(identity.get("dream", "to keep on keeping on"))
+			return "My dream? %s." % (dream.substr(0, 1).to_upper() + dream.substr(1))
 		1:
 			return "Nothing beats a bit of %s, I say." % String(identity.get("favorite", "quiet"))
 		2:

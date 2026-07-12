@@ -98,8 +98,11 @@ func _draw_axis_labels(plot: Rect2, min_value: float, max_value: float) -> void:
 	var axis_font := get_theme_default_font()
 	# Y-axis label and value range
 	draw_string(axis_font, Vector2(6.0, plot.position.y - 2.0), "Population", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 12, AXIS_LABEL_COLOR)
-	draw_string(axis_font, Vector2(plot.position.x - 6.0, plot.position.y + 4.0), str(int(round(max_value))), HORIZONTAL_ALIGNMENT_RIGHT, 46.0, 11, AXIS_LABEL_COLOR)
-	draw_string(axis_font, Vector2(plot.position.x - 6.0, plot.end.y), str(int(round(min_value))), HORIZONTAL_ALIGNMENT_RIGHT, 46.0, 11, AXIS_LABEL_COLOR)
+	# draw_string's position is the LEFT edge of the alignment box, so a
+	# right-aligned box must start box-width short of the target edge —
+	# otherwise these labels land inside the plot / past the widget.
+	draw_string(axis_font, Vector2(plot.position.x - 6.0 - 46.0, plot.position.y + 4.0), str(int(round(max_value))), HORIZONTAL_ALIGNMENT_RIGHT, 46.0, 11, AXIS_LABEL_COLOR)
+	draw_string(axis_font, Vector2(plot.position.x - 6.0 - 46.0, plot.end.y), str(int(round(min_value))), HORIZONTAL_ALIGNMENT_RIGHT, 46.0, 11, AXIS_LABEL_COLOR)
 	# X-axis label and year range
 	var start_year := 1
 	var end_year := points.size()
@@ -107,8 +110,8 @@ func _draw_axis_labels(plot: Rect2, min_value: float, max_value: float) -> void:
 		start_year = int((points[0] as Dictionary).get("year", 1))
 		end_year = int((points[points.size() - 1] as Dictionary).get("year", points.size()))
 	draw_string(axis_font, Vector2(plot.position.x, plot.end.y + 18.0), str(start_year), HORIZONTAL_ALIGNMENT_LEFT, -1.0, 11, AXIS_LABEL_COLOR)
-	draw_string(axis_font, Vector2(plot.end.x, plot.end.y + 18.0), str(end_year), HORIZONTAL_ALIGNMENT_RIGHT, 40.0, 11, AXIS_LABEL_COLOR)
-	draw_string(axis_font, Vector2(plot.position.x + plot.size.x * 0.5, plot.end.y + 18.0), "Year", HORIZONTAL_ALIGNMENT_CENTER, 48.0, 12, AXIS_LABEL_COLOR)
+	draw_string(axis_font, Vector2(plot.end.x - 40.0, plot.end.y + 18.0), str(end_year), HORIZONTAL_ALIGNMENT_RIGHT, 40.0, 11, AXIS_LABEL_COLOR)
+	draw_string(axis_font, Vector2(plot.position.x + plot.size.x * 0.5 - 24.0, plot.end.y + 18.0), "Year", HORIZONTAL_ALIGNMENT_CENTER, 48.0, 12, AXIS_LABEL_COLOR)
 
 func _draw() -> void:
 	var rect := Rect2(Vector2.ZERO, size)
