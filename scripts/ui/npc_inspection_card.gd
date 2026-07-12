@@ -130,7 +130,24 @@ func _populate_family(npc_state: Dictionary, identity: Dictionary, present_year:
 	_tabs.current_tab = 0
 	var ruler_family := npc_state.get("ruler_family", {}) as Dictionary
 	var ruler_people := ruler_family.get("people", {}) as Dictionary
-	if bool(npc_state.get("is_ruler", false)) and not ruler_people.is_empty():
+	var dynasty_person_id := String(npc_state.get("dynasty_person_id", ""))
+	if not dynasty_person_id.is_empty() and ruler_people.has(dynasty_person_id):
+		## A living member of the ruling dynasty: the shared dynasty tree,
+		## re-centered on THEM (highlight, age and relation labels).
+		_tabs.set_tab_title(1, "Dynasty")
+		var centered := ruler_family.duplicate(true)
+		var centered_people := centered.get("people", {}) as Dictionary
+		for member_id_variant: Variant in centered_people.keys():
+			var member := centered_people[String(member_id_variant)] as Dictionary
+			member["sitting"] = String(member_id_variant) == dynasty_person_id
+		centered["sitting"] = dynasty_person_id
+		_tree_view.set_dynasty(
+			npc_state.get("ruler_lineage", []) as Array,
+			npc_state.get("ruler_kin", {}) as Dictionary,
+			age,
+			centered
+		)
+	elif bool(npc_state.get("is_ruler", false)) and not ruler_people.is_empty():
 		_tabs.set_tab_title(1, "Dynasty")
 		_tree_view.set_dynasty(
 			npc_state.get("ruler_lineage", []) as Array,
@@ -141,7 +158,9 @@ func _populate_family(npc_state: Dictionary, identity: Dictionary, present_year:
 	else:
 		_tabs.set_tab_title(1, "Family")
 		_tree_view.set_dynasty([], {}, age, _individual_family(npc_state, identity, present_year))
-	_tree_view.custom_minimum_size = Vector2(420, 500)
+	# Trees now span five generations; give the pan/zoom viewport a bit
+	# more room to breathe.
+	_tree_view.custom_minimum_size = Vector2(460, 540)
 
 ## The inspected NPC's own family graph, built on first inspection from
 ## their identity (name/clan/gender/age/race and any roster kin) and cached
@@ -359,6 +378,10 @@ class FamilyTreeView:
 	const LINE_THICKNESS := 2.0
 	const LINE_COLOR := Color(0.62, 0.52, 0.36, 1.0)
 	const VIOLENT_COLOR := Color(0.85, 0.24, 0.2, 1.0)
+	## The dimmer secondary connector: a person whose subtree hangs under
+	## one side of the family still shows a drawn link from their OTHER
+	## parents (the in-law grandparents), so no branch floats detached.
+	const SECONDARY_LINE_COLOR := Color(0.62, 0.52, 0.36, 0.45)
 	const NAME_COLOR := Color(0.95, 0.88, 0.72, 1.0)
 	const TITLE_COLOR := Color(0.78, 0.68, 0.5, 1.0)
 	const REIGN_COLOR := Color(0.62, 0.57, 0.47, 1.0)
@@ -625,7 +648,13 @@ class FamilyTreeView:
 				"center": 0.0,
 				"generation": int(_person(String(members[0])).get("generation", 0))
 			})
-		## Children attach beneath their parents' unit, one parent only.
+		## Children attach beneath their parents' unit, one parent only —
+		## but a child whose parents live in TWO units (a married-in
+		## member with their own parents in the graph) records the second
+		## unit as a secondary link, drawn dimmer after layout. Without it
+		## the in-law side rendered as an island with no visible relation.
+		var extra_links: Array[Dictionary] = []
+		var extra_link_seen: Dictionary = {}
 		for unit_index: int in range(units.size()):
 			var unit := units[unit_index]
 			for member_variant: Variant in (unit["members"] as Array):
@@ -636,7 +665,14 @@ class FamilyTreeView:
 					if child_unit < 0 or child_unit == unit_index:
 						continue
 					var child_entry := units[child_unit]
-					if int(child_entry["parent"]) >= 0 or int(child_entry["generation"]) <= int(unit["generation"]):
+					if int(child_entry["generation"]) <= int(unit["generation"]):
+						continue
+					if int(child_entry["parent"]) >= 0:
+						if int(child_entry["parent"]) != unit_index:
+							var link_key := "%d|%s" % [unit_index, child_id]
+							if not extra_link_seen.has(link_key):
+								extra_link_seen[link_key] = true
+								extra_links.append({"parent_unit": unit_index, "child_id": child_id})
 						continue
 					child_entry["parent"] = unit_index
 					(unit["children"] as Array).append(child_unit)
@@ -701,6 +737,34 @@ class FamilyTreeView:
 				if violent:
 					_daggers.append(Vector2(blood_center + 9.0, (rail_y + child_row_top) * 0.5))
 			_add_hline(rail_min, rail_max, rail_y, LINE_COLOR)
+		## Secondary drops: the dim link from a person's OTHER parents —
+		## the couple their subtree does not hang under — routed on a rail
+		## slightly above the child's row so it can't collide with the
+		## primary rail.
+		for link: Dictionary in extra_links:
+			var link_parent := units[int(link["parent_unit"])] as Dictionary
+			var link_child_id := String(link["child_id"])
+			var link_child_unit := units[int(unit_by_person.get(link_child_id, -1))] as Dictionary
+			var link_parent_members := link_parent["members"] as Array
+			var link_parent_top := EDGE_PADDING + float(int(link_parent["generation"])) * (NODE_HEIGHT + ROW_GAP)
+			var link_anchor_x := float(link_parent["center"])
+			var link_drop_top := (
+				link_parent_top + PORTRAIT_BOX * 0.5
+				if link_parent_members.size() == 2
+				else link_parent_top + NODE_HEIGHT - 2.0
+			)
+			var link_child_members := link_child_unit["members"] as Array
+			var member_slot := maxi(link_child_members.find(link_child_id), 0)
+			var link_child_own := float(link_child_members.size()) * NODE_WIDTH + float(link_child_members.size() - 1) * COUPLE_GAP
+			var member_center := (
+				float(link_child_unit["center"]) - link_child_own * 0.5
+				+ NODE_WIDTH * 0.5 + float(member_slot) * (NODE_WIDTH + COUPLE_GAP)
+			)
+			var link_child_top := EDGE_PADDING + float(int(link_child_unit["generation"])) * (NODE_HEIGHT + ROW_GAP)
+			var link_rail_y := link_child_top - RAIL_GAP * 0.5
+			_add_vline(link_anchor_x, link_drop_top, link_rail_y, SECONDARY_LINE_COLOR)
+			_add_hline(minf(link_anchor_x, member_center), maxf(link_anchor_x, member_center), link_rail_y, SECONDARY_LINE_COLOR)
+			_add_vline(member_center, link_rail_y, link_child_top, SECONDARY_LINE_COLOR)
 		# Content bounds drive pan/zoom framing, not the tab size — the view is
 		# a fixed viewport the player drags within, so this must NOT become the
 		# control's minimum (that would blow the card up to the tree's width).

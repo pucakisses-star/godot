@@ -2544,6 +2544,7 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_assign_npc_identities()
 	_assign_npc_families()
 	_apply_ruler_identity()
+	_materialize_dynasty_kin()
 	_assign_settlement_factions()
 	SettlementAfflictionService.seed_afflictions(_npc_states, _rng)
 	_apply_affliction_visuals()
@@ -4045,6 +4046,144 @@ func _rename_roster_npc(old_name: String, new_name: String, new_age: int) -> voi
 		identity["age"] = new_age
 	target_state["npc_name"] = new_name
 	_repair_kin_references(old_name, new_name)
+
+## Every living soul on the dynasty tree walks the hold: each surviving
+## graph person takes over a generic roster dwarf (name, gender, age and
+## kin links), so the ruler's whole living family exists in the flesh.
+## The consort and children were already claimed by
+## _reconcile_kin_with_family; this covers siblings, cousins, aunts and
+## any long-lived elders. Runs right after _apply_ruler_identity.
+func _materialize_dynasty_kin() -> void:
+	if _ruler_npc_index < 0 or _ruler_npc_index >= _npc_states.size():
+		return
+	var ruler_state := _npc_states[_ruler_npc_index]
+	var family := ruler_state.get("ruler_family", {}) as Dictionary
+	var people := family.get("people", {}) as Dictionary
+	var sitting_id := String(family.get("sitting", ""))
+	if people.is_empty() or sitting_id.is_empty():
+		return
+	ruler_state["dynasty_person_id"] = sitting_id
+	var state_by_name: Dictionary = {}
+	for state_variant: Variant in _npc_states:
+		state_by_name[String((state_variant as Dictionary).get("npc_name", ""))] = state_variant
+	## Roster dwarves that can be taken over: not the ruler, not anyone
+	## already wearing a dynasty name; the kinless first, so takeovers
+	## sever as few roster marriages as possible.
+	var dynasty_names: Dictionary = {}
+	for person_variant: Variant in people.values():
+		dynasty_names[String((person_variant as Dictionary).get("name", ""))] = true
+	var candidates: Array[int] = []
+	for npc_index: int in range(_npc_states.size()):
+		if npc_index == _ruler_npc_index:
+			continue
+		var state := _npc_states[npc_index]
+		if dynasty_names.has(String(state.get("npc_name", ""))):
+			continue
+		candidates.append(npc_index)
+	candidates.sort_custom(func(left: int, right: int) -> bool:
+		return _roster_kin_weight(_npc_states[left]) < _roster_kin_weight(_npc_states[right]))
+	## Half the roster stays ordinary folk no matter how wide the tree.
+	var takeover_budget := mini(candidates.size(), _npc_states.size() / 2)
+	var cursor := 0
+	var materialized := 0
+	for person_id_variant: Variant in (family.get("order", []) as Array):
+		var person_id := String(person_id_variant)
+		if person_id == sitting_id:
+			continue
+		var person := people.get(person_id, {}) as Dictionary
+		if person.is_empty() or int(person.get("death", 0)) > 0:
+			continue
+		var person_name := String(person.get("name", ""))
+		if person_name.is_empty():
+			continue
+		var graph_year := int(family.get("year", _calendar_start_year))
+		var person_age := clampi(graph_year - int(person.get("birth", graph_year - 100)), 16, 320)
+		## Already walking under this name (the consort and children the
+		## reconcile pass renamed): tag them so their card shows the
+		## dynasty tree centered on themselves.
+		if state_by_name.has(person_name):
+			var existing := state_by_name[person_name] as Dictionary
+			existing["dynasty_person_id"] = person_id
+			existing["ruler_family"] = family
+			_apply_graph_kin_names(existing.get("identity", {}) as Dictionary, people, person)
+			continue
+		if cursor >= candidates.size() or materialized >= takeover_budget:
+			break
+		var state := _npc_states[candidates[cursor]]
+		cursor += 1
+		materialized += 1
+		var identity := state.get("identity", {}) as Dictionary
+		var old_name := String(identity.get("name", ""))
+		_detach_roster_kin(old_name)
+		identity["name"] = person_name
+		identity["first_name"] = person_name.get_slice(" ", 0)
+		identity["clan"] = person_name.get_slice(" ", 1) if person_name.contains(" ") else String(person.get("clan", ""))
+		identity["gender"] = String(person.get("gender", ""))
+		identity["race"] = String(person.get("race", "Dwarf"))
+		identity["age"] = person_age
+		_apply_graph_kin_names(identity, people, person)
+		state["npc_name"] = person_name
+		state["dynasty_person_id"] = person_id
+		state["ruler_family"] = family
+		state_by_name[person_name] = state
+	print("[%s] dynasty kin: %d living members walking the hold" % [name, materialized])
+
+## How entangled a roster dwarf is; the least entangled are the first
+## picked when the dynasty needs bodies.
+func _roster_kin_weight(state: Dictionary) -> int:
+	var identity := state.get("identity", {}) as Dictionary
+	var weight := 0
+	if not String(identity.get("spouse", "")).is_empty():
+		weight += 2
+	weight += (identity.get("children", []) as Array).size()
+	weight += (identity.get("parents", []) as Array).size()
+	if not String(state.get("staffed_profession", "")).is_empty():
+		weight += 1
+	return weight
+
+## Rewrites an identity's kin links to the dynasty graph's names, so the
+## detail lines and roster references match the family tree exactly.
+func _apply_graph_kin_names(identity: Dictionary, people: Dictionary, person: Dictionary) -> void:
+	if identity.is_empty():
+		return
+	var spouse_id := String(person.get("spouse", ""))
+	identity["spouse"] = String((people.get(spouse_id, {}) as Dictionary).get("name", "")) if people.has(spouse_id) else ""
+	var parent_names: Array = []
+	for parent_variant: Variant in (person.get("parents", []) as Array):
+		var parent := people.get(String(parent_variant), {}) as Dictionary
+		if not parent.is_empty():
+			parent_names.append(String(parent.get("name", "")))
+	identity["parents"] = parent_names
+	var child_names: Array = []
+	for child_variant: Variant in (person.get("children", []) as Array):
+		var child := people.get(String(child_variant), {}) as Dictionary
+		if not child.is_empty():
+			child_names.append(String(child.get("name", "")))
+	identity["children"] = child_names
+
+## Severs a renamed-away dwarf's old roster marriage and kin references,
+## so nobody claims a spouse who no longer exists under that name.
+func _detach_roster_kin(old_name: String) -> void:
+	if old_name.is_empty():
+		return
+	for state_variant: Variant in _npc_states:
+		var other := state_variant as Dictionary
+		var other_identity := other.get("identity", {}) as Dictionary
+		if other_identity.is_empty():
+			continue
+		if String(other_identity.get("spouse", "")) == old_name:
+			other_identity["spouse"] = ""
+		_remove_from_kin_list(other_identity, "parents", old_name)
+		_remove_from_kin_list(other_identity, "children", old_name)
+
+func _remove_from_kin_list(identity: Dictionary, list_key: String, kin_name: String) -> void:
+	var entries_variant: Variant = identity.get(list_key)
+	if not (entries_variant is Array):
+		return
+	var entries := entries_variant as Array
+	for entry_index: int in range(entries.size() - 1, -1, -1):
+		if String(entries[entry_index]) == kin_name:
+			entries.remove_at(entry_index)
 
 ## Unlinks one roster child from the royal couple when the dynasty graph
 ## records fewer children than the family pass placed under their roof.

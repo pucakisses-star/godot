@@ -860,7 +860,7 @@ static func _roll_lineage_ruler(
 ## graph is JSON-safe (String/int/bool/Array/Dictionary), deterministic
 ## from the rng handed in, and bounded by FAMILY_HARD_CAP people.
 
-const FAMILY_HARD_CAP := 50
+const FAMILY_HARD_CAP := 76
 ## How many rulers of a long chain the graph includes; the lineage array
 ## itself keeps the full line for dialogue and the history tab.
 const FAMILY_RULER_WINDOW := 9
@@ -904,6 +904,34 @@ static func build_family_for_lineage(
 	if window_start > 0:
 		root_fields["violent_takeover"] = bool((lineage[window_start - 1] as Dictionary).get("violent_end", false))
 	var current_id := _family_add(people, id_order, root_fields)
+
+	## Two generations of unthroned forebears above the oldest included
+	## ruler, so the tree reaches back past the first crowned name. The
+	## root ruler therefore sits at generation 2 and the chain grows down
+	## from there (every later generation derives from its predecessor).
+	var root_person := people[current_id] as Dictionary
+	root_person["generation"] = 2
+	var root_race := String(root_person.get("race", "Dwarf"))
+	var elder_id := current_id
+	for forebear_generation: int in [1, 0]:
+		var elder := people[elder_id] as Dictionary
+		var blood_gender := "male" if rng.randf() < 0.5 else "female"
+		var blood_birth := int(elder["birth"]) - rng.randi_range(24, 45)
+		var blood_id := _individual_add(people, id_order, used_first, rng, "", blood_gender, clan, blood_birth, root_race, false, forebear_generation)
+		if blood_id.is_empty():
+			break
+		var married_id := _individual_add(
+			people, id_order, used_first, rng, "",
+			"female" if blood_gender == "male" else "male",
+			_family_surname(root_race, rng, clan),
+			blood_birth + rng.randi_range(-8, 8), root_race, true, forebear_generation
+		)
+		var forebear_couple: Array[String] = [blood_id]
+		if not married_id.is_empty():
+			forebear_couple.append(married_id)
+		_family_link_child(people, forebear_couple, elder_id)
+		_individual_wed(people, blood_id, married_id)
+		elder_id = blood_id
 
 	## The chain: each succession places the next ruler as a child,
 	## sibling or nephew/niece of the one before.
@@ -1014,8 +1042,9 @@ static func build_family_for_lineage(
 
 ## Builds the family graph centered on one ordinary NPC (dwarf or human),
 ## not a succession line: the focus is the sitting person (ruler_index -1,
-## no title), with their two parents, up to two grandparent couples, a
-## scatter of aunts/uncles and cousins, siblings, a spouse and children.
+## no title), with their two parents, up to two grandparent couples and
+## great-grandparent couples above the blood lines, a scatter of
+## aunts/uncles and cousins, siblings, a spouse and children.
 ## focus keys: name, clan, gender ("" to derive), age, race, current_year,
 ## spouse (name or ""), parents (Array of names), children (Array of names).
 ## Returns the same graph shape as build_family_for_lineage; deterministic
@@ -1044,13 +1073,13 @@ static func build_family_for_individual(focus: Dictionary, rng: RandomNumberGene
 			focus_gender = "female" if rng.randf() < 0.5 else "male"
 	used_first[focus_name.get_slice(" ", 0)] = true
 
-	## gen 2: the focus, the sitting person the tree centers on.
+	## gen 3: the focus, the sitting person the tree centers on.
 	var focus_fields := _family_person_fields(focus_name, focus_gender, focus_clan, focus_birth, race)
 	focus_fields["sitting"] = true
-	focus_fields["generation"] = 2
+	focus_fields["generation"] = 3
 	var focus_id := _family_add(people, id_order, focus_fields)
 
-	## gen 1: two parents — a blood parent sharing the focus's clan and a
+	## gen 2: two parents — a blood parent sharing the focus's clan and a
 	## married-in parent of another. Provided names fill them when given.
 	var provided_parents := focus.get("parents", []) as Array
 	var blood_name := ""
@@ -1072,11 +1101,11 @@ static func build_family_for_individual(focus: Dictionary, rng: RandomNumberGene
 	var married_gender := "female" if blood_gender == "male" else "male"
 	var blood_parent_birth := focus_birth - rng.randi_range(24, 45)
 	var married_parent_birth := focus_birth - rng.randi_range(24, 45)
-	var blood_parent_id := _individual_add(people, id_order, used_first, rng, blood_name, blood_gender, focus_clan, blood_parent_birth, race, false, 1)
+	var blood_parent_id := _individual_add(people, id_order, used_first, rng, blood_name, blood_gender, focus_clan, blood_parent_birth, race, false, 2)
 	var married_parent_clan := _family_surname(race, rng, focus_clan)
 	if not married_name.is_empty() and married_name.contains(" "):
 		married_parent_clan = married_name.get_slice(" ", 1)
-	var married_parent_id := _individual_add(people, id_order, used_first, rng, married_name, married_gender, married_parent_clan, married_parent_birth, race, true, 1)
+	var married_parent_id := _individual_add(people, id_order, used_first, rng, married_name, married_gender, married_parent_clan, married_parent_birth, race, true, 2)
 	var focus_parent_ids: Array[String] = []
 	if not blood_parent_id.is_empty():
 		focus_parent_ids.append(blood_parent_id)
@@ -1085,29 +1114,36 @@ static func build_family_for_individual(focus: Dictionary, rng: RandomNumberGene
 	_family_link_child(people, focus_parent_ids, focus_id)
 	_individual_wed(people, blood_parent_id, married_parent_id)
 
-	## gen 0: a grandparent couple over each parent (maternal side second,
+	## gen 1: a grandparent couple over each parent (maternal side second,
 	## so it drops out first if the cap is reached).
-	var paternal_gp := _individual_grandparents(people, id_order, used_first, rng, blood_parent_id, focus_clan, race)
-	var maternal_gp := _individual_grandparents(people, id_order, used_first, rng, married_parent_id, married_parent_clan, race)
+	var paternal_gp := _individual_grandparents(people, id_order, used_first, rng, blood_parent_id, focus_clan, race, 1)
+	var maternal_gp := _individual_grandparents(people, id_order, used_first, rng, married_parent_id, married_parent_clan, race, 1)
 
-	## gen 1 aunts/uncles under each grandparent couple, gen 2 cousins under
+	## gen 0: great-grandparent couples over each blood grandparent, so
+	## the tree reaches back three full generations from the focus.
+	if not paternal_gp.is_empty():
+		_individual_grandparents(people, id_order, used_first, rng, paternal_gp[0], focus_clan, race, 0)
+	if not maternal_gp.is_empty():
+		_individual_grandparents(people, id_order, used_first, rng, maternal_gp[0], married_parent_clan, race, 0)
+
+	## gen 2 aunts/uncles under each grandparent couple, gen 3 cousins under
 	## the aunts/uncles that wed.
-	_individual_aunts(people, id_order, used_first, rng, paternal_gp, blood_parent_birth, focus_clan, race, current_year)
-	_individual_aunts(people, id_order, used_first, rng, maternal_gp, married_parent_birth, married_parent_clan, race, current_year)
+	_individual_aunts(people, id_order, used_first, rng, paternal_gp, blood_parent_birth, focus_clan, race, current_year, 2)
+	_individual_aunts(people, id_order, used_first, rng, maternal_gp, married_parent_birth, married_parent_clan, race, current_year, 2)
 
-	## gen 2 siblings of the focus, sharing the same two parents.
+	## gen 3 siblings of the focus, sharing the same two parents.
 	var sibling_count := rng.randi_range(0, 3)
 	for _sibling_slot: int in range(sibling_count):
 		if people.size() >= FAMILY_HARD_CAP:
 			break
 		var sibling_gender := "male" if rng.randf() < 0.5 else "female"
 		var sibling_birth := maxi(focus_birth + rng.randi_range(-14, 14), blood_parent_birth + 16)
-		var sibling_id := _individual_add(people, id_order, used_first, rng, "", sibling_gender, focus_clan, sibling_birth, race, false, 2)
+		var sibling_id := _individual_add(people, id_order, used_first, rng, "", sibling_gender, focus_clan, sibling_birth, race, false, 3)
 		if sibling_id.is_empty():
 			break
 		_family_link_child(people, focus_parent_ids, sibling_id)
 
-	## gen 2 spouse (married-in): the given name, else a ~70% roll.
+	## gen 3 spouse (married-in): the given name, else a ~70% roll.
 	var focus_spouse_name := String(focus.get("spouse", ""))
 	var focus_spouse_id := ""
 	if (not focus_spouse_name.is_empty() or rng.randf() < 0.7) and people.size() < FAMILY_HARD_CAP:
@@ -1120,10 +1156,10 @@ static func build_family_for_individual(focus: Dictionary, rng: RandomNumberGene
 		if not focus_spouse_name.is_empty() and focus_spouse_name.contains(" "):
 			spouse_clan = focus_spouse_name.get_slice(" ", 1)
 		var spouse_birth := focus_birth + rng.randi_range(-10, 10)
-		focus_spouse_id = _individual_add(people, id_order, used_first, rng, focus_spouse_name, spouse_gender, spouse_clan, spouse_birth, race, true, 2)
+		focus_spouse_id = _individual_add(people, id_order, used_first, rng, focus_spouse_name, spouse_gender, spouse_clan, spouse_birth, race, true, 3)
 		_individual_wed(people, focus_id, focus_spouse_id)
 
-	## gen 3 children of the focus: named ones when given, else a small
+	## gen 4 children of the focus: named ones when given, else a small
 	## brood only when the focus has a spouse. Born after focus_birth + 16.
 	var child_parent_ids: Array[String] = [focus_id]
 	if not focus_spouse_id.is_empty():
@@ -1140,7 +1176,7 @@ static func build_family_for_individual(focus: Dictionary, rng: RandomNumberGene
 			if child_hi < child_lo:
 				break
 			var child_birth := clampi(focus_birth + rng.randi_range(16, maxi(17, age - 1)), child_lo, child_hi)
-			var child_id := _individual_add(people, id_order, used_first, rng, child_name, child_gender, focus_clan, child_birth, race, false, 3)
+			var child_id := _individual_add(people, id_order, used_first, rng, child_name, child_gender, focus_clan, child_birth, race, false, 4)
 			if child_id.is_empty():
 				break
 			_family_link_child(people, child_parent_ids, child_id)
@@ -1153,7 +1189,7 @@ static func build_family_for_individual(focus: Dictionary, rng: RandomNumberGene
 				break
 			var child_gender := "male" if rng.randf() < 0.5 else "female"
 			var child_birth := rng.randi_range(child_lo, child_hi)
-			var child_id := _individual_add(people, id_order, used_first, rng, "", child_gender, focus_clan, child_birth, race, false, 3)
+			var child_id := _individual_add(people, id_order, used_first, rng, "", child_gender, focus_clan, child_birth, race, false, 4)
 			if child_id.is_empty():
 				break
 			_family_link_child(people, child_parent_ids, child_id)
@@ -1241,7 +1277,8 @@ static func _individual_grandparents(
 	rng: RandomNumberGenerator,
 	child_id: String,
 	child_clan: String,
-	race: String
+	race: String,
+	generation: int = 0
 ) -> Array[String]:
 	if child_id.is_empty() or people.size() + 1 >= FAMILY_HARD_CAP:
 		return []
@@ -1251,9 +1288,9 @@ static func _individual_grandparents(
 	var married_gender := "female" if blood_gender == "male" else "male"
 	var blood_birth := child_birth - rng.randi_range(24, 45)
 	var married_birth := child_birth - rng.randi_range(24, 45)
-	var blood_id := _individual_add(people, id_order, used_first, rng, "", blood_gender, child_clan, blood_birth, race, false, 0)
+	var blood_id := _individual_add(people, id_order, used_first, rng, "", blood_gender, child_clan, blood_birth, race, false, generation)
 	var married_clan := _family_surname(race, rng, child_clan)
-	var married_id := _individual_add(people, id_order, used_first, rng, "", married_gender, married_clan, married_birth, race, true, 0)
+	var married_id := _individual_add(people, id_order, used_first, rng, "", married_gender, married_clan, married_birth, race, true, generation)
 	var gp_ids: Array[String] = []
 	if not blood_id.is_empty():
 		gp_ids.append(blood_id)
@@ -1274,7 +1311,8 @@ static func _individual_aunts(
 	parent_birth: int,
 	clan: String,
 	race: String,
-	current_year: int
+	current_year: int,
+	aunt_generation: int = 1
 ) -> void:
 	if grandparents.size() < 2:
 		return
@@ -1285,7 +1323,7 @@ static func _individual_aunts(
 			break
 		var aunt_gender := "male" if rng.randf() < 0.5 else "female"
 		var aunt_birth := maxi(parent_birth + rng.randi_range(-12, 12), grandparent_birth + 16)
-		var aunt_id := _individual_add(people, id_order, used_first, rng, "", aunt_gender, clan, aunt_birth, race, false, 1)
+		var aunt_id := _individual_add(people, id_order, used_first, rng, "", aunt_gender, clan, aunt_birth, race, false, aunt_generation)
 		if aunt_id.is_empty():
 			break
 		_family_link_child(people, grandparents, aunt_id)
@@ -1294,7 +1332,7 @@ static func _individual_aunts(
 		var spouse_gender := "female" if aunt_gender == "male" else "male"
 		var spouse_clan := _family_surname(race, rng, clan)
 		var spouse_birth := aunt_birth + rng.randi_range(-10, 10)
-		var spouse_id := _individual_add(people, id_order, used_first, rng, "", spouse_gender, spouse_clan, spouse_birth, race, true, 1)
+		var spouse_id := _individual_add(people, id_order, used_first, rng, "", spouse_gender, spouse_clan, spouse_birth, race, true, aunt_generation)
 		if spouse_id.is_empty():
 			continue
 		_individual_wed(people, aunt_id, spouse_id)
@@ -1307,7 +1345,7 @@ static func _individual_aunts(
 			var cousin_birth := mini(aunt_birth + rng.randi_range(18, 40), current_year - 1)
 			if cousin_birth <= aunt_birth + 15:
 				continue
-			var cousin_id := _individual_add(people, id_order, used_first, rng, "", cousin_gender, clan, cousin_birth, race, false, 2)
+			var cousin_id := _individual_add(people, id_order, used_first, rng, "", cousin_gender, clan, cousin_birth, race, false, aunt_generation + 1)
 			if cousin_id.is_empty():
 				break
 			_family_link_child(people, cousin_parents, cousin_id)
