@@ -32,6 +32,10 @@ var current_slot_id: String = ""
 ## overworld instead of forging a new world.
 var pending_same_world_rebirth := false
 
+func _ready() -> void:
+	# Reapply persisted display/audio options before the first scene shows.
+	GameSettingsService.apply_saved()
+
 func set_current_slot(slot_id: String) -> void:
 	current_slot_id = slot_id
 

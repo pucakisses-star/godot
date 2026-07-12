@@ -131,6 +131,10 @@ func _fit_to_world_bounds() -> void:
 	var fit_zoom_x := viewport_size.x / _world_bounds.size.x
 	var fit_zoom_y := viewport_size.y / _world_bounds.size.y
 	var next_zoom := maxf(0.001, minf(fit_zoom_x, fit_zoom_y))
+	# The fitted whole-world view sits below the default min_zoom for every
+	# map size; unless the floor follows it down, the first wheel notch
+	# snaps 2.5x closer and the full-map view is unreachable forever.
+	min_zoom = minf(min_zoom, next_zoom)
 	zoom = Vector2(next_zoom, next_zoom)
 	global_position = _world_bounds.position + (_world_bounds.size * 0.5)
 	_clamp_to_world_bounds()

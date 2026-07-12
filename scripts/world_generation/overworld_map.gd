@@ -1247,6 +1247,7 @@ const DIVE_SECONDS := 0.85
 ## exit. Remembers the world-map cap so the two never leak into each other.
 const REGION_MAX_ZOOM := 12.0
 var _world_map_max_zoom := -1.0
+var _world_map_min_zoom := -1.0
 var _dive_pending := false
 
 func _handle_double_click_dive(event: InputEvent) -> bool:
@@ -1995,6 +1996,9 @@ func _generate_map() -> void:
 	_tile_population_groups.clear()
 	_tooltip_cache_coord = Vector2i(-1, -1)
 	_tooltip_cache.clear()
+	# Forget which tile the visible tooltip describes, or a stationary
+	# cursor keeps showing the OLD world's data after a regenerate.
+	_tooltip_content_coord = Vector2i(-9999, -9999)
 
 	var cell_count := _map_cell_count()
 	var height_buffer := PackedFloat32Array()
@@ -8679,8 +8683,31 @@ func _move_map_layer_to_viewport() -> void:
 		map_viewport_root.add_child(_coast_layer)
 		_coast_layer.position = Vector2.ZERO
 
+## Tracks whether the OS cursor is inside the window: the tooltip follows
+## get_global_mouse_position(), which freezes at its last value once the
+## cursor leaves, so without this the tooltip sticks on screen forever.
+var _mouse_inside_window := true
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_MOUSE_EXIT:
+		_mouse_inside_window = false
+		_hide_map_tooltip()
+	elif what == NOTIFICATION_WM_MOUSE_ENTER:
+		_mouse_inside_window = true
+
 func _update_map_tooltip() -> void:
 	if tooltip_panel == null or map_layer == null:
+		return
+	if not _mouse_inside_window:
+		_hide_map_tooltip()
+		return
+	# The cursor is on real UI (toolbar, scale bar, a dialog): the tile
+	# tooltip must not pop up over it. The tooltip's own subtree is exempt
+	# so it can't hide itself when edge-clamping slides it under the cursor.
+	var hovered_control := get_viewport().gui_get_hovered_control()
+	if hovered_control != null and hovered_control != tooltip_panel \
+			and not tooltip_panel.is_ancestor_of(hovered_control):
+		_hide_map_tooltip()
 		return
 	if _is_globe_view or _is_scene3d_view:
 		if _is_dragging_globe or _is_dragging_scene3d or _hovered_tile.x < 0 or _hovered_tile.y < 0:
@@ -10367,6 +10394,19 @@ func _enter_region_mode() -> void:
 		if _world_map_max_zoom < 0.0:
 			_world_map_max_zoom = overworld_camera.max_zoom
 		overworld_camera.max_zoom = REGION_MAX_ZOOM
+		# The detail streamer only fills a ~50x26-tile band around the
+		# camera (_camera_visible_tile_rect cap): raise the zoom floor so
+		# the viewport can never outgrow the band into blank void.
+		if _world_map_min_zoom < 0.0:
+			_world_map_min_zoom = overworld_camera.min_zoom
+		var region_view := get_viewport().get_visible_rect().size
+		overworld_camera.min_zoom = maxf(
+			overworld_camera.min_zoom,
+			maxf(
+				region_view.x / (50.0 * float(tile_size)),
+				region_view.y / (26.0 * float(tile_size))
+			)
+		)
 	_ensure_region_layer()
 	_ensure_region_hint()
 	if _region_noise.is_empty():
@@ -10388,10 +10428,12 @@ func _enter_region_mode() -> void:
 		_render_region_tile(_region_render_queue.pop_front() as Vector2i)
 		budget -= 1
 	_dispatch_region_jobs()
-	# The overlay resolution differs between world and detail view, so rebuild
-	# it against the mode we just entered when it is on screen.
+	# The overlay resolution differs between world and detail view, so the
+	# cached texture is stale for this mode even while the toggle is OFF —
+	# mark it dirty unconditionally or re-enabling it later shows the
+	# wrong-resolution borders.
+	_overlay_dirty["political_boundaries"] = true
 	if _political_boundaries_overlay_enabled:
-		_overlay_dirty["political_boundaries"] = true
 		_ensure_overlay_texture("political_boundaries")
 
 func _exit_region_mode() -> void:
@@ -10404,6 +10446,9 @@ func _exit_region_mode() -> void:
 		overworld_camera.max_zoom = _world_map_max_zoom
 		if overworld_camera.zoom.x > _world_map_max_zoom:
 			overworld_camera.adjust_zoom(_world_map_max_zoom - overworld_camera.zoom.x)
+	if overworld_camera != null and _world_map_min_zoom > 0.0:
+		overworld_camera.min_zoom = _world_map_min_zoom
+		_world_map_min_zoom = -1.0
 	_region_render_queue.clear()
 	_region_queued.clear()
 	if _region_layer != null:
@@ -10420,8 +10465,10 @@ func _exit_region_mode() -> void:
 		_map_snapshot_sprite.visible = false
 	_update_map_lod()
 	# Restore the coarse world-map boundary overlay when leaving detail view.
+	# Dirty unconditionally: even with the toggle off, the cached texture
+	# belongs to the other mode's resolution now.
+	_overlay_dirty["political_boundaries"] = true
 	if _political_boundaries_overlay_enabled:
-		_overlay_dirty["political_boundaries"] = true
 		_ensure_overlay_texture("political_boundaries")
 
 func _set_base_map_layers_visible(layers_visible: bool) -> void:

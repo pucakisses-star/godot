@@ -30,12 +30,15 @@ static func build_settlement_history_timeline(
 	var span := maxi(1, founded_years_ago)
 	var middle_event_count := clampi(span / 16, 3, 8)
 
+	# Sample WITHOUT replacement (pools run as small as 2 entries), or the
+	# timeline repeats the same event verbatim at different years.
+	var remaining_pool: Array[String] = []
+	remaining_pool.assign(event_pool)
 	var selected_events: Array[String] = []
-	for _index in range(middle_event_count):
-		if event_pool.is_empty():
-			break
-		var selected_index := rng.randi_range(0, event_pool.size() - 1)
-		selected_events.append(event_pool[selected_index])
+	for _index in range(mini(middle_event_count, remaining_pool.size())):
+		var selected_index := rng.randi_range(0, remaining_pool.size() - 1)
+		selected_events.append(remaining_pool[selected_index])
+		remaining_pool.remove_at(selected_index)
 
 	var events: Array[Dictionary] = []
 	events.append({

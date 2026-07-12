@@ -167,9 +167,8 @@ static func rebuild(labels_overlay: Node2D, entries: Array[Dictionary], config: 
 		var font_size := font_size_for_importance(importance)
 		var text := String(entry.get("name", ""))
 		var center: Vector2 = entry.get("center", Vector2.ZERO)
-		var estimated_width := maxf(22.0, text.length() * float(font_size) * 0.52)
-		var estimated_height := float(font_size) * 1.2
-		var half_size := Vector2(estimated_width * 0.5, estimated_height * 0.5)
+		var box := label_box_size(text, font_size)
+		var half_size := box * 0.5
 		var offset_distance := maxf(float(tile_size) * 0.9, float(font_size) * 2.2)
 		# Browser candidateOffsets (main.js:29628-29638): above, below,
 		# right, left, four diagonals, far above.
@@ -257,22 +256,26 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 			if constant_screen:
 				scaled_font_size = clampf(target_screen_px / safe_zoom, base_font_size, base_font_size * 60.0)
 			elif rescale_on_zoom:
-				scaled_font_size = maxf(8.0, (base_font_size + (base_font_size * safe_zoom)) * 0.5)
+				# Godot 4: screen px = world px * zoom, so holding readable
+				# size while zoomED OUT means growing the world-space font by
+				# 1/zoom (half-compensated). Scaling WITH zoom (the old code)
+				# double-magnified: specks when zoomed out, banners zoomed in.
+				scaled_font_size = maxf(8.0, (base_font_size + (base_font_size / safe_zoom)) * 0.5)
 			label.add_theme_font_size_override("font_size", int(round(scaled_font_size)))
 
 			# Re-derive the label rect from the scaled font, centered on the
 			# collision-resolved placement, so the text is never clipped by
 			# a stale, smaller rect after zooming in.
 			var anchor := label.get_meta("anchor_center", Vector2.ZERO) as Vector2
-			var scaled_width := maxf(22.0, label.text.length() * scaled_font_size * 0.52)
-			var scaled_height := scaled_font_size * 1.2
-			label.position = anchor - Vector2(scaled_width * 0.5, scaled_height * 0.5)
-			label.size = Vector2(scaled_width, scaled_height)
+			var scaled_box := label_box_size(label.text, int(round(scaled_font_size)))
+			label.position = anchor - scaled_box * 0.5
+			label.size = scaled_box
 
 			if constant_screen:
 				label.visible = true
 			elif auto_visibility:
-				var screen_size := scaled_font_size / safe_zoom
+				# On-screen glyph height is world font size * zoom (Godot 4).
+				var screen_size := scaled_font_size * safe_zoom
 				label.visible = screen_size >= min_screen_size and screen_size <= max_screen_size
 			else:
 				label.visible = true

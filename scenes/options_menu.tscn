@@ -127,19 +127,10 @@ tick_count = 6
 layout_mode = 2
 text = "Gameplay"
 
-[node name="SubtitlesCheckBox" type="CheckBox" parent="Panel/MarginContainer/VBoxContainer"]
-layout_mode = 2
-button_pressed = true
-text = "Show Subtitles"
-
 [node name="AutoSaveCheckBox" type="CheckBox" parent="Panel/MarginContainer/VBoxContainer"]
 layout_mode = 2
 button_pressed = true
 text = "Enable Auto Save"
-
-[node name="StateToggleCheckBox" type="CheckBox" parent="Panel/MarginContainer/VBoxContainer"]
-layout_mode = 2
-text = "State Toggle"
 
 [node name="BackButton" type="Button" parent="Panel/MarginContainer/VBoxContainer"]
 layout_mode = 2
@@ -152,4 +143,4 @@ text = "Back"
 [connection signal="value_changed" from="Panel/MarginContainer/VBoxContainer/MasterVolumeRow/MasterVolumeSlider" to="." method="_on_master_volume_value_changed"]
 [connection signal="value_changed" from="Panel/MarginContainer/VBoxContainer/MusicVolumeRow/MusicVolumeSlider" to="." method="_on_music_volume_value_changed"]
 [connection signal="value_changed" from="Panel/MarginContainer/VBoxContainer/SfxVolumeRow/SfxVolumeSlider" to="." method="_on_sfx_volume_value_changed"]
-[connection signal="toggled" from="Panel/MarginContainer/VBoxContainer/StateToggleCheckBox" to="." method="_on_state_toggle_toggled"]
+[connection signal="toggled" from="Panel/MarginContainer/VBoxContainer/AutoSaveCheckBox" to="." method="_on_auto_save_toggled"]

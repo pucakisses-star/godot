@@ -220,11 +220,30 @@ func _populate_slot_list() -> void:
 func _on_slot_load_pressed(slot_id: String) -> void:
 	var resume_scene: String = SaveGameService.load_slot(self, slot_id)
 	if resume_scene.is_empty():
+		# Silence here read as a dead button; say why nothing happened.
+		var dialog := AcceptDialog.new()
+		dialog.title = "Load failed"
+		dialog.dialog_text = "That save could not be loaded. The file may be missing or corrupted."
+		add_child(dialog)
+		dialog.popup_centered()
 		_populate_slot_list()
 		return
 	get_tree().change_scene_to_file(resume_scene)
 
+## One misclick next to Load must not erase a world: confirm first.
 func _on_slot_delete_pressed(slot_id: String) -> void:
-	SaveGameService.delete_slot(slot_id)
-	_populate_slot_list()
-	_refresh_load_button()
+	var label := slot_id
+	for meta: Dictionary in SaveGameService.list_saves():
+		if String(meta.get("slot_id", "")) == slot_id:
+			label = String(meta.get("label", slot_id))
+			break
+	var dialog := ConfirmationDialog.new()
+	dialog.title = "Delete save?"
+	dialog.dialog_text = "Delete \"%s\"?\nThis cannot be undone." % label
+	dialog.ok_button_text = "Delete"
+	dialog.confirmed.connect(func() -> void:
+		SaveGameService.delete_slot(slot_id)
+		_populate_slot_list()
+		_refresh_load_button())
+	add_child(dialog)
+	dialog.popup_centered()

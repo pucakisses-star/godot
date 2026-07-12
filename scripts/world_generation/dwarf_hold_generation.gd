@@ -5381,6 +5381,10 @@ func _on_scene_resumed() -> void:
 	_update_clock_label()
 	_update_hp_label()
 	_update_hunger_label()
+	# Parked AudioStreamPlayers stop on tree exit and _ready won't rerun;
+	# without this a revisited hold stays silent (the overworld does the
+	# same in its _on_scene_resumed).
+	GameAudioService.play_music(self, "hold")
 
 func _exit_tree() -> void:
 	_save_persistent_player_state()

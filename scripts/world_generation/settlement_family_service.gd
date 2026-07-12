@@ -12,6 +12,10 @@ const CHILD_AGE_MAX := {"Dwarf": 49, "Human": 19, "Gnome": 39, "Goblin": 12, "Ko
 const COUPLE_CHANCE := 0.6
 const MAX_CHILDREN_PER_FAMILY := 3
 const SHARED_FAITH_CHANCE := 0.8
+## The youngest credible parent is child + 16 — the same floor the world
+## chronicle's dynasty builder enforces. Without it a 22-year-old could
+## read "Parent of Nell" on a 19-year-old's inspection card.
+const MIN_PARENT_CHILD_AGE_GAP := 16
 
 ## Mutates identities and home anchors in place; returns
 ## {"couples": int, "children_placed": int} for tests and logs.
@@ -80,11 +84,18 @@ static func build_families(npc_states: Array[Dictionary], kind: String, rng: Ran
 			if siblings.size() >= MAX_CHILDREN_PER_FAMILY:
 				continue
 			var child := npc_states[youth_index]
-			var child_race := String((child.get("identity", {}) as Dictionary).get("race", default_race))
+			var child_identity := child.get("identity", {}) as Dictionary
+			var child_race := String(child_identity.get("race", default_race))
 			if child_race != String(family.get("race", default_race)):
 				continue
+			var child_age := int(child_identity.get("age", 0))
+			var youngest_parent_age := 2147483647
+			for parent_variant: Variant in parents:
+				var parent_identity := (parent_variant as Dictionary).get("identity", {}) as Dictionary
+				youngest_parent_age = mini(youngest_parent_age, int(parent_identity.get("age", 0)))
+			if youngest_parent_age - child_age < MIN_PARENT_CHILD_AGE_GAP:
+				continue
 			_adopt_surname(child, String(family.get("clan", "")), used_names)
-			var child_identity := child.get("identity", {}) as Dictionary
 			if rng.randf() < SHARED_FAITH_CHANCE and not String(family.get("faith", "")).is_empty():
 				child_identity["faith"] = String(family.get("faith", ""))
 			var parent_names: Array[String] = []

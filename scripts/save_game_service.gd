@@ -178,16 +178,25 @@ static func migrate_legacy_save() -> void:
 		return
 	var payload := parsed as Dictionary
 	payload["version"] = SAVE_FORMAT_VERSION
+	# Describe the slot from the legacy payload itself — a hardcoded
+	# "Imported Save · A wanderer · Day 1" header would mislabel the
+	# player's real world on the Load Game screen.
+	var legacy_settings := payload.get("world_settings", {}) as Dictionary \
+		if payload.get("world_settings") is Dictionary else {}
+	var legacy_character := payload.get("player_character", {}) as Dictionary \
+		if payload.get("player_character") is Dictionary else {}
+	var legacy_clock := legacy_settings.get("game_clock", {}) as Dictionary \
+		if legacy_settings.get("game_clock") is Dictionary else {}
 	payload["meta"] = {
-		"label": "Imported Save",
+		"label": default_label(legacy_character, legacy_settings),
 		"saved_at": Time.get_unix_time_from_system(),
 		"saved_at_text": Time.get_datetime_string_from_system(false, true),
-		"character_name": "A wanderer",
-		"character_profession": "",
-		"world_name": "",
-		"day": 1,
-		"hour": 8,
-		"location": "The World Map"
+		"character_name": String(legacy_character.get("name", "A wanderer")),
+		"character_profession": String(legacy_character.get("profession", "")),
+		"world_name": String(legacy_settings.get("world_name", "")).strip_edges(),
+		"day": maxi(1, int(legacy_clock.get("day", 1))),
+		"hour": int(legacy_clock.get("hour", 8.0)),
+		"location": location_label(legacy_settings)
 	}
 	DirAccess.make_dir_recursive_absolute(SAVE_DIR)
 	var out := FileAccess.open(slot_path("slot_1"), FileAccess.WRITE)
@@ -197,8 +206,11 @@ static func migrate_legacy_save() -> void:
 	out.close()
 	DirAccess.remove_absolute(LEGACY_SAVE_PATH)
 
-## Written whenever the walker crosses between scenes.
+## Written whenever the walker crosses between scenes (unless the player
+## switched auto save off in Options).
 static func autosave(context: Node) -> void:
+	if not GameSettingsService.autosave_enabled():
+		return
 	var session := _session(context)
 	if session == null or not session.has_method("has_player_character"):
 		return
