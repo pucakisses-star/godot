@@ -9429,9 +9429,9 @@ func _globe_tile_under_mouse() -> Vector2i:
 	var ray_origin := globe_camera.project_ray_origin(mouse_pos)
 	var ray_direction := globe_camera.project_ray_normal(mouse_pos)
 	# Solve in the globe's local space so its spin/tilt is accounted for.
-	var to_local := globe_mesh.global_transform.affine_inverse()
-	var local_origin := to_local * ray_origin
-	var local_direction := (to_local.basis * ray_direction).normalized()
+	var globe_inverse := globe_mesh.global_transform.affine_inverse()
+	var local_origin := globe_inverse * ray_origin
+	var local_direction := (globe_inverse.basis * ray_direction).normalized()
 	var radius := sphere_mesh.radius
 	var midpoint := local_origin.dot(local_direction)
 	var discriminant := midpoint * midpoint - (local_origin.dot(local_origin) - radius * radius)
