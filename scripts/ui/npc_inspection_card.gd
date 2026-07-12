@@ -36,6 +36,23 @@ var _slot_icons: Array[TextureRect] = []
 var _slot_counts: Array[Label] = []
 var _tabs: TabContainer
 var _tree_view: FamilyTreeView
+var _family_tab_index := 1
+var _overview_text: RichTextLabel
+var _skills_text: RichTextLabel
+var _health_text: RichTextLabel
+var _personality_text: RichTextLabel
+var _thoughts_text: RichTextLabel
+
+## DF-style text tones for the dossier tabs.
+const TONE_COLORS := {
+	"good": "9ed26a",
+	"great": "b48ce8",
+	"bad": "e0a04a",
+	"curious": "7fb2e0",
+	"plain": "ded6c2",
+	"dim": "9a8f78",
+	"header": "e8d9a8"
+}
 
 func _init() -> void:
 	_build_ui()
@@ -61,6 +78,11 @@ func open(npc_state: Dictionary, role_title: String, seed_value: int, present_ye
 	_populate_slots(belongings.get("items", []) as Array)
 	_coins_label.text = "🪙 %d coins" % int(belongings.get("coins", 0))
 	_populate_family(npc_state, identity, year)
+	# The DF side of the dossier: attributes, skills, health, personality,
+	# thoughts - derived once and cached on the state like the belongings.
+	if not (npc_state.get("dossier") is Dictionary):
+		npc_state["dossier"] = NpcDossierService.build(identity, role_title, seed_value, npc_state)
+	_populate_dossier_tabs(npc_state["dossier"] as Dictionary, npc_state, identity)
 	visible = true
 	reset_size()
 	_center_in_parent()
@@ -114,18 +136,18 @@ func dynasty_node_count() -> int:
 	return _tree_view.node_count()
 
 func show_dynasty_tab() -> void:
-	_tabs.current_tab = 1
+	_tabs.current_tab = _family_tab_index
 	call_deferred("_apply_dynasty_focus")
 
 ## Scrolls the (now laid-out) family tab onto the inspected person; runs
 ## deferred whenever the tab becomes the active page.
 func _apply_dynasty_focus() -> void:
-	if _tabs.current_tab != 1:
+	if _tabs.current_tab != _family_tab_index:
 		return
 	_tree_view.focus_on_sitting()
 
 func _on_tab_changed(tab_index: int) -> void:
-	if tab_index == 1:
+	if tab_index == _family_tab_index:
 		call_deferred("_apply_dynasty_focus")
 
 ## Loads the family tab. A sitting ruler shows their prebuilt dynasty
@@ -140,7 +162,7 @@ func _populate_family(npc_state: Dictionary, identity: Dictionary, present_year:
 	if not dynasty_person_id.is_empty() and ruler_people.has(dynasty_person_id):
 		## A living member of the ruling dynasty: the shared dynasty tree,
 		## re-centered on THEM (highlight, age and relation labels).
-		_tabs.set_tab_title(1, "Dynasty")
+		_tabs.set_tab_title(_family_tab_index, "Dynasty")
 		var centered := ruler_family.duplicate(true)
 		var centered_people := centered.get("people", {}) as Dictionary
 		for member_id_variant: Variant in centered_people.keys():
@@ -154,7 +176,7 @@ func _populate_family(npc_state: Dictionary, identity: Dictionary, present_year:
 			centered
 		)
 	elif bool(npc_state.get("is_ruler", false)) and not ruler_people.is_empty():
-		_tabs.set_tab_title(1, "Dynasty")
+		_tabs.set_tab_title(_family_tab_index, "Dynasty")
 		_tree_view.set_dynasty(
 			npc_state.get("ruler_lineage", []) as Array,
 			npc_state.get("ruler_kin", {}) as Dictionary,
@@ -162,7 +184,7 @@ func _populate_family(npc_state: Dictionary, identity: Dictionary, present_year:
 			ruler_family
 		)
 	else:
-		_tabs.set_tab_title(1, "Family")
+		_tabs.set_tab_title(_family_tab_index, "Family")
 		_tree_view.set_dynasty([], {}, age, _individual_family(npc_state, identity, present_year))
 	# Trees now span five generations; give the pan/zoom viewport a bit
 	# more room to breathe.
@@ -272,13 +294,16 @@ func _build_ui() -> void:
 	close_button.pressed.connect(close)
 	header.add_child(close_button)
 
-	## Two pages under one profile: the pockets, and the family tree.
+	## The dossier pages: DF-style overview, the pockets, skills, health,
+	## personality and thoughts, then the family tree.
 	_tabs = TabContainer.new()
 	_tabs.tab_changed.connect(_on_tab_changed)
 	layout.add_child(_tabs)
 
+	_overview_text = _add_text_tab("Overview")
+
 	var belongings_box := VBoxContainer.new()
-	belongings_box.name = "Belongings"
+	belongings_box.name = "Items"
 	belongings_box.add_theme_constant_override("separation", 8)
 	_tabs.add_child(belongings_box)
 
@@ -318,6 +343,11 @@ func _build_ui() -> void:
 	_coins_label.add_theme_color_override("font_color", Color(0.92, 0.86, 0.7, 1.0))
 	belongings_box.add_child(_coins_label)
 
+	_skills_text = _add_text_tab("Skills")
+	_health_text = _add_text_tab("Health")
+	_personality_text = _add_text_tab("Personality")
+	_thoughts_text = _add_text_tab("Thoughts")
+
 	# The tree is its own pan/zoom viewport (drag to move, wheel to zoom) — no
 	# ScrollContainer, so it clips to the tab and the whole genealogy is
 	# reachable by dragging out to distant kin and zooming to fit.
@@ -326,6 +356,144 @@ func _build_ui() -> void:
 	_tree_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_tree_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_tabs.add_child(_tree_view)
+	_family_tab_index = _tabs.get_tab_idx_from_control(_tree_view)
+
+## One scrollable DF-text page: a RichTextLabel whose colored lines the
+## dossier populator writes as BBCode.
+func _add_text_tab(tab_name: String) -> RichTextLabel:
+	var scroll := ScrollContainer.new()
+	scroll.name = tab_name
+	scroll.custom_minimum_size = Vector2(460.0, 0.0)
+	var text := RichTextLabel.new()
+	text.bbcode_enabled = true
+	text.fit_content = true
+	text.scroll_active = false
+	text.selection_enabled = false
+	text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	text.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	text.add_theme_font_size_override("normal_font_size", 12)
+	text.add_theme_constant_override("line_separation", 3)
+	scroll.add_child(text)
+	_tabs.add_child(scroll)
+	return text
+
+## --- The DF dossier pages -------------------------------------------------
+
+func _tone(text: String, tone: String) -> String:
+	return "[color=#%s]%s[/color]" % [String(TONE_COLORS.get(tone, TONE_COLORS["plain"])), text]
+
+## The rank line color ladder from the DF screenshot: trained ranks read
+## bright, low ranks the impatient yellow, dabblers dim.
+func _rank_tone(level: int) -> String:
+	if level >= 4:
+		return "header"
+	if level >= 1:
+		return "bad"
+	return "dim"
+
+## Spouse from whichever family graph the card drew: the dynasty graph for
+## royals, the cached individual graph for everyone else.
+func _spouse_name(npc_state: Dictionary) -> String:
+	var graph := npc_state.get("family_graph", {}) as Dictionary
+	var focus_id := String(graph.get("sitting", ""))
+	if graph.is_empty():
+		graph = npc_state.get("ruler_family", {}) as Dictionary
+		focus_id = String(npc_state.get("dynasty_person_id", ""))
+		if focus_id.is_empty():
+			focus_id = String(graph.get("sitting", ""))
+	var people := graph.get("people", {}) as Dictionary
+	if focus_id.is_empty() or not people.has(focus_id):
+		return ""
+	var spouse_id := String((people[focus_id] as Dictionary).get("spouse", ""))
+	if spouse_id.is_empty() or not people.has(spouse_id):
+		return ""
+	return String((people[spouse_id] as Dictionary).get("name", ""))
+
+func _populate_dossier_tabs(dossier: Dictionary, npc_state: Dictionary, identity: Dictionary) -> void:
+	var gender := String(identity.get("gender", ""))
+	var gender_mark := "♂" if gender == "male" else ("♀" if gender == "female" else "")
+
+	# --- Overview: the DF unit screen's left-and-right summary ---
+	var lines: Array[String] = []
+	lines.append(_tone("%d Years Old%s" % [int(identity.get("age", 0)), (", %s" % gender_mark) if not gender_mark.is_empty() else ""], "header"))
+	var spouse := _spouse_name(npc_state)
+	if not spouse.is_empty():
+		lines.append("%s %s" % [_tone("Spouse:", "dim"), _tone(spouse, "good")])
+	lines.append("")
+	for attribute_variant: Variant in (dossier.get("attributes", []) as Array):
+		var attribute := attribute_variant as Dictionary
+		lines.append(_tone(String(attribute.get("text", "")), String(attribute.get("tone", "plain"))))
+	lines.append("")
+	var health_status := String(dossier.get("health_status", "Healthy"))
+	lines.append(_tone(health_status, "good" if health_status == "Healthy" else "bad"))
+	lines.append(_tone(String(dossier.get("position", "No official position")), "dim"))
+	lines.append("%s %s" % [_tone("Squad:", "dim"), _tone(String(dossier.get("squad", "None")), "plain")])
+	lines.append("")
+	var skills := dossier.get("skills", []) as Array
+	if not skills.is_empty():
+		var primary := skills[0] as Dictionary
+		lines.append(_tone("%s %s" % [String(primary.get("rank", "")), String(primary.get("name", ""))], "header"))
+		for skill_index in range(1, skills.size()):
+			var skill := skills[skill_index] as Dictionary
+			lines.append(_tone("%s %s" % [String(skill.get("rank", "")), String(skill.get("name", ""))], _rank_tone(int(skill.get("level", 0)))))
+	var needs := dossier.get("needs", []) as Array
+	if not needs.is_empty():
+		lines.append("")
+		for need_variant: Variant in needs:
+			lines.append("%s %s" % [_tone("Unmet need:", "dim"), _tone(String(need_variant), "bad")])
+	lines.append("")
+	lines.append(_tone("“%s”" % String(dossier.get("quote", "")), "plain"))
+	_overview_text.text = "\n".join(lines)
+
+	# --- Skills: trade ranks, then the soldier in them ---
+	lines = []
+	lines.append(_tone("Trade", "dim"))
+	for skill_variant: Variant in skills:
+		var skill := skill_variant as Dictionary
+		lines.append(_tone("%s %s" % [String(skill.get("rank", "")), String(skill.get("name", ""))], _rank_tone(int(skill.get("level", 0)))))
+	lines.append("")
+	lines.append(_tone("Military", "dim"))
+	lines.append("%s %s" % [_tone("Squad:", "dim"), _tone(String(dossier.get("squad", "None")), "plain")])
+	for military_variant: Variant in (dossier.get("military", []) as Array):
+		var drill := military_variant as Dictionary
+		lines.append(_tone("%s %s" % [String(drill.get("rank", "")), String(drill.get("name", ""))], _rank_tone(int(drill.get("level", 0)))))
+	_skills_text.text = "\n".join(lines)
+
+	# --- Health ---
+	lines = []
+	var status := String(dossier.get("health_status", "Healthy"))
+	lines.append(_tone(status, "good" if status == "Healthy" else "bad"))
+	lines.append("")
+	var conditions := dossier.get("health_conditions", []) as Array
+	if conditions.is_empty():
+		lines.append(_tone("No wounds, no complaints.", "plain"))
+	else:
+		for condition_variant: Variant in conditions:
+			lines.append(_tone(String(condition_variant) + ".", "bad"))
+	lines.append("")
+	lines.append("%s %s" % [_tone("Rest:", "dim"), _tone(String(dossier.get("rest_state", "Well rested")), "plain")])
+	lines.append("%s %s" % [_tone("Blood:", "dim"), _tone("Full", "plain")])
+	_health_text.text = "\n".join(lines)
+
+	# --- Personality ---
+	lines = []
+	for facet_variant: Variant in (dossier.get("personality", []) as Array):
+		lines.append(_tone(String(facet_variant), "plain"))
+		lines.append("")
+	_personality_text.text = "\n".join(lines)
+
+	# --- Thoughts: the recent-feelings log, feeling words colored ---
+	lines = []
+	lines.append(_tone("“%s”" % String(dossier.get("quote", "")), "header"))
+	lines.append("")
+	for thought_variant: Variant in (dossier.get("thoughts", []) as Array):
+		var thought := thought_variant as Dictionary
+		lines.append("%s %s %s" % [
+			_tone(String(thought.get("lead", "")), "plain"),
+			_tone(String(thought.get("feeling", "")), String(thought.get("tone", "plain"))),
+			_tone(String(thought.get("rest", "")), "plain")
+		])
+	_thoughts_text.text = "\n".join(lines)
 
 func _populate_slots(items: Array) -> void:
 	for slot_index in range(SLOT_COUNT):

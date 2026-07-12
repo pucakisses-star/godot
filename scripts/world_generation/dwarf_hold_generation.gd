@@ -115,6 +115,10 @@ var _build_selection := -1
 var _escape_menu: EscapeMenu
 var _game_over: GameOverScreen
 var _torch_sprites: Dictionary = {}
+## Core Keeper-style mining target: a pick marker pinned to the diggable
+## rock face under the cursor when the dwarf is close enough to swing.
+var _mining_cursor: Sprite2D = null
+var _mining_cursor_texture: Texture2D
 ## Streamed wild chunks currently resident, chunk coords -> true. The
 ## city core never appears here and is never evicted.
 var _streamed_chunks: Dictionary = {}
@@ -1141,14 +1145,15 @@ func _process(delta: float) -> void:
 	_update_player_regen(delta)
 	_update_fishing(delta)
 
-## The city and deep levels stay lit; the wild underground is dark, held
-## back by the player's lantern glow and any placed torches.
+## Every level of the hold sits in darkness - the city, the wild
+## underground AND the deep mining strata (deep levels used to skip the
+## overlay entirely and drew fully lit, which is exactly un-Core-Keeper).
+## Only light sources carve reveal pools: the player's lantern, placed
+## torches, and the settlement's own hearths and candles.
 func _update_wild_darkness(delta: float) -> void:
-	# The whole hold is dark; only light sources (the player's lantern, placed
-	# torches, and the settlement's own hearths/candles) carve reveal pools.
 	# The lighting toggle off forces full daylight everywhere.
 	var target := 0.0
-	if _lighting_enabled and not _world_noise.is_empty() and _player_sprite != null:
+	if _lighting_enabled and _player_sprite != null:
 		target = 1.0
 	_darkness_strength = lerpf(_darkness_strength, target, clampf(delta * 3.0, 0.0, 1.0))
 	if absf(_darkness_strength - target) < 0.002:
@@ -2283,6 +2288,10 @@ func _update_light_uniforms() -> void:
 		positions.append(_player_sprite.position)
 		radii.append(PLAYER_LIGHT_TILES * float(tile_size.x))
 	var cull_sq := pow(LIGHT_CULL_TILES * float(tile_size.x), 2.0)
+	# Firelight breathes: torch and hearth radii ride a slow per-source
+	# sine so the pools flicker like flame, Core Keeper style. Phases are
+	# keyed by cell so neighboring fires never pulse in lockstep.
+	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
 	for torch_cell_variant: Variant in _torch_sprites.keys():
 		if positions.size() >= MAX_DYNAMIC_LIGHTS:
 			break
@@ -2291,7 +2300,8 @@ func _update_light_uniforms() -> void:
 		if _player_sprite != null and torch_position.distance_squared_to(_player_sprite.position) > cull_sq:
 			continue
 		positions.append(torch_position)
-		radii.append(TORCH_LIGHT_TILES * float(tile_size.x))
+		var torch_flicker := 1.0 + 0.05 * sin(flicker_phase * 8.0 + float(torch_cell.x * 7 + torch_cell.y * 13))
+		radii.append(TORCH_LIGHT_TILES * float(tile_size.x) * torch_flicker)
 	# The settlement's own fires and candles light their pools, so districts
 	# glow around their hearths instead of being uniformly bright.
 	for light_cell: Vector2i in _light_furnishing_cells:
@@ -2302,7 +2312,8 @@ func _update_light_uniforms() -> void:
 			continue
 		var is_hearth := HEARTH_LIGHT_PIECES.has(String(_furnishing_by_cell.get(light_cell, "")))
 		positions.append(light_position)
-		radii.append((HEARTH_LIGHT_TILES if is_hearth else CANDLE_LIGHT_TILES) * float(tile_size.x))
+		var hearth_flicker := 1.0 + (0.04 if is_hearth else 0.0) * sin(flicker_phase * 6.0 + float(light_cell.x * 11 + light_cell.y * 5))
+		radii.append((HEARTH_LIGHT_TILES if is_hearth else CANDLE_LIGHT_TILES) * float(tile_size.x) * hearth_flicker)
 	_darkness_material.set_shader_parameter("light_count", positions.size())
 	_darkness_material.set_shader_parameter("light_pos", positions)
 	_darkness_material.set_shader_parameter("light_radius", radii)
@@ -3094,9 +3105,10 @@ func _stamp_active_stairs_in_rect(rect: Rect2i) -> void:
 		decor_layer.erase_cell(stair_cell)
 		_actor_passable_cache.erase(stair_cell)
 
+## Rock digs on EVERY level: the surface hold's streamed wilds and the
+## deep strata alike (the pick's whole geology ladder lives down there).
+## The dig ledger persists per level, so deep tunnels survive revisits.
 func _is_diggable_cell(cell: Vector2i) -> bool:
-	if _world_noise.is_empty():
-		return false
 	return _cell_at(_latest_grid, cell.x, cell.y) == CELL_ROCK
 
 func _is_minable_rubble(cell: Vector2i) -> bool:
@@ -6383,6 +6395,7 @@ func _update_hover_tooltip(mouse_position: Vector2) -> void:
 		return
 
 	var hovered_cell := _cell_from_mouse_position(mouse_position)
+	_update_mining_cursor(hovered_cell)
 	var hovered_layer := decor_layer
 	if decor_layer.get_cell_source_id(hovered_cell) < 0:
 		hovered_layer = city_layer
@@ -6482,6 +6495,48 @@ func _hide_hover_tooltip() -> void:
 	_hover_tooltip_cell = Vector2i(2147483647, 2147483647)
 	_hover_tooltip_layer = null
 	_hover_tooltip_npc = ""
+	if _mining_cursor != null:
+		_mining_cursor.visible = false
+
+## Shows the pick marker over hovered rock the player could swing at
+## right now (diggable and adjacent); hides it everywhere else.
+func _update_mining_cursor(hovered_cell: Vector2i) -> void:
+	if _mining_cursor == null:
+		_mining_cursor_texture = _create_mining_cursor_texture()
+		_mining_cursor = Sprite2D.new()
+		_mining_cursor.texture = _mining_cursor_texture
+		_mining_cursor.centered = true
+		# Above the darkness mask (13) and torches (14): the target marker
+		# must read even on unlit rock.
+		_mining_cursor.z_index = 16
+		lighting_layer.add_child(_mining_cursor)
+	var cursor_visible := _player_sprite != null and _player_control_enabled \
+		and _is_diggable_cell(hovered_cell) and _is_player_adjacent_to_cell(hovered_cell)
+	_mining_cursor.visible = cursor_visible
+	if cursor_visible:
+		_mining_cursor.position = _cell_center_position(hovered_cell)
+
+## The Core Keeper-blue pickaxe painted at runtime like the torch art:
+## a bright arced head over a wooden haft, nearest-upscaled to stay
+## chunky.
+func _create_mining_cursor_texture() -> Texture2D:
+	var image := Image.create(12, 12, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var bright := Color(0.45, 0.74, 0.96, 1.0)
+	var deep := Color(0.16, 0.45, 0.85, 1.0)
+	for x in range(2, 10):
+		image.set_pixel(x, 1, bright)
+	for x in range(1, 11):
+		image.set_pixel(x, 2, deep)
+	image.set_pixel(1, 3, deep)
+	image.set_pixel(10, 3, deep)
+	image.set_pixel(0, 4, deep)
+	image.set_pixel(11, 4, deep)
+	for y in range(3, 11):
+		image.set_pixel(5, y, Color(0.55, 0.38, 0.22, 1.0))
+		image.set_pixel(6, y, Color(0.42, 0.28, 0.16, 1.0))
+	image.resize(24, 24, Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(image)
 
 func _tile_name_from_atlas(atlas_coords: Vector2i) -> String:
 	return DwarfHoldTileService.tile_name_from_atlas(atlas_coords, TILE_ATLAS)

@@ -685,6 +685,21 @@ const TOWN_TILE_ATLAS := {
 	# between the beach band and open water on wilds coasts and forms the
 	# bog pools in marshes.
 	"water_shallow": Vector2i(3, 45),
+	# Tundra dressing and the ice ruins, all painted at atlas build time
+	# (town_generation._paint_snow_pattern_tiles / _paint_snow_rock_tile /
+	# _paint_ruin_tiles). Wind-carved snow patterns and the snow-capped
+	# boulder scatter the open snowfields; the ruin set (dark stone floor,
+	# white ice-brick walls whole and worn, a snow-capped column, webs)
+	# assembles the wilds' randomly generated ruined forts.
+	"snow_swirl": Vector2i(4, 45),
+	"snow_carved": Vector2i(5, 45),
+	"snow_rock": Vector2i(6, 45),
+	"ruin_floor": Vector2i(7, 45),
+	"ruin_floor_cracked": Vector2i(8, 45),
+	"ice_brick": Vector2i(9, 45),
+	"ice_brick_worn": Vector2i(10, 45),
+	"ruin_tower": Vector2i(11, 45),
+	"web": Vector2i(12, 45),
 	# Lakeshore water plants, painted into appended row 46 at atlas build time
 	# (town_generation._paint_water_plant_tiles; the shipped sheet has no
 	# aquatic plant art at all — verified by full-sheet inventory). Transparent
@@ -814,7 +829,11 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	"stairway_down", "stairway_up",
 	# Wading shallows are the one walkable water: thigh-deep over sand.
 	# Open "water"/"water_calm" still block unless the walker boats.
-	"water_shallow"
+	"water_shallow",
+	# Carved snow walks like snow; ruin floors and webs walk like any
+	# courtyard. The ice bricks, ruin towers and snow rocks are
+	# deliberately absent - broken walls still stop a walker.
+	"snow_swirl", "snow_carved", "ruin_floor", "ruin_floor_cracked", "web"
 ]
 
 static func validate_atlas_no_duplicates(atlas_name: String, atlas: Dictionary) -> bool:

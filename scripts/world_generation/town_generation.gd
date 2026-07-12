@@ -1880,6 +1880,11 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 	_paint_cellar_rock_tile(augmented)
 	# Wading shallows for wilds coasts and marsh pools.
 	_paint_water_shallow_tile(augmented)
+	# Tundra dressing and the ice-ruin set (wind-carved snow, the
+	# snow-capped boulder, ruin floors/walls/towers/webs).
+	_paint_snow_pattern_tiles(augmented)
+	_paint_snow_rock_tile(augmented)
+	_paint_ruin_tiles(augmented)
 	# Lakeshore water plants (transparent decor over the animated water) and
 	# the snow-dusted copies of the two full-height trees.
 	_paint_water_plant_tiles(augmented)
@@ -2392,6 +2397,183 @@ func _paint_water_shallow_tile(image: Image) -> void:
 			if grain % 41 == 0:
 				tone = Color(0.63, 0.62, 0.5, 1.0)
 			image.set_pixel(origin.x + tx, origin.y + ty, tone)
+
+## Wind-carved snow: the painted snow base engraved with pale-blue drift
+## strokes (sastrugi), kept clear of the tile edges so any mix of plain
+## and carved snow tiles butts seamlessly.
+func _paint_snow_pattern_tiles(image: Image) -> void:
+	var snow_coords := TILE_ATLAS.get("snow", Vector2i(-1, -1)) as Vector2i
+	if snow_coords.x < 0:
+		return
+	for variant_index: int in range(2):
+		var key := "snow_swirl" if variant_index == 0 else "snow_carved"
+		var coords := TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var origin := coords * tile_size
+		image.blit_rect(image, Rect2i(snow_coords * tile_size, tile_size), origin)
+		var groove := Color(0.63, 0.76, 0.87, 1.0)
+		var crest := Color(0.94, 0.97, 1.0, 1.0)
+		var stroke_count := 3 + variant_index
+		for stroke_index in range(stroke_count):
+			var base_y := 5 + stroke_index * (tile_size.y - 10) / stroke_count + variant_index * 2
+			var span_start := 3 + ((stroke_index * 7 + variant_index * 5) % 6)
+			var span_end := tile_size.x - 3 - ((stroke_index * 5 + variant_index * 3) % 6)
+			for tx in range(span_start, span_end):
+				var arc := sin(float(tx - span_start) / float(maxi(span_end - span_start, 1)) * PI)
+				var wave := sin(float(tx) * 0.55 + float(stroke_index) * 2.1 + float(variant_index) * 1.3) * 1.6
+				var ty := base_y + int(round(wave * arc))
+				if ty < 2 or ty > tile_size.y - 3:
+					continue
+				image.set_pixel(origin.x + tx, origin.y + ty, groove)
+				image.set_pixel(origin.x + tx, origin.y + ty - 1, crest)
+
+## A snow-capped boulder on a transparent surround: grey stone with a
+## white crown and a soft ground shadow. Blocking decor - a rock is a
+## rock.
+func _paint_snow_rock_tile(image: Image) -> void:
+	var coords := TILE_ATLAS.get("snow_rock", Vector2i(-1, -1)) as Vector2i
+	if coords.x < 0:
+		return
+	var origin := coords * tile_size
+	var center := Vector2(float(tile_size.x) * 0.5, float(tile_size.y) * 0.62)
+	var radius := Vector2(float(tile_size.x) * 0.34, float(tile_size.y) * 0.26)
+	for ty in range(tile_size.y):
+		for tx in range(tile_size.x):
+			var dx := (float(tx) - center.x) / radius.x
+			var dy := (float(ty) - center.y) / radius.y
+			var d := dx * dx + dy * dy
+			if d > 1.0:
+				# soft shadow pooling under the south rim
+				if d < 1.5 and dy > 0.4:
+					image.set_pixel(origin.x + tx, origin.y + ty, Color(0.42, 0.5, 0.6, 0.35))
+				continue
+			var tone := Color(0.52, 0.55, 0.6, 1.0)
+			if dy < -0.15 - dx * dx * 0.35:
+				tone = Color(0.95, 0.97, 1.0, 1.0)
+			elif d > 0.62:
+				tone = Color(0.38, 0.41, 0.47, 1.0)
+			elif dx < -0.25 and dy < 0.1:
+				tone = Color(0.62, 0.65, 0.7, 1.0)
+			var grain := (tx * 73856093 ^ ty * 19349663) & 0x7fffffff
+			if grain % 31 == 0 and tone.r < 0.9:
+				tone = Color(0.45, 0.48, 0.54, 1.0)
+			image.set_pixel(origin.x + tx, origin.y + ty, tone)
+
+## The ice-ruin kit: dark blue-stone floors (whole and cracked), white
+## ice-brick walls (whole and worn down to courses over floor), a
+## snow-capped column, and a corner web.
+func _paint_ruin_tiles(image: Image) -> void:
+	var floor_dark := Color(0.2, 0.24, 0.31, 1.0)
+	var floor_grout := Color(0.15, 0.18, 0.24, 1.0)
+	var floor_light := Color(0.25, 0.3, 0.38, 1.0)
+	var brick_white := Color(0.92, 0.95, 0.98, 1.0)
+	var brick_shade := Color(0.74, 0.82, 0.9, 1.0)
+	var brick_mortar := Color(0.55, 0.66, 0.78, 1.0)
+	for key: String in ["ruin_floor", "ruin_floor_cracked"]:
+		var coords := TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var origin := coords * tile_size
+		for ty in range(tile_size.y):
+			for tx in range(tile_size.x):
+				var tone := floor_dark
+				if (tx % 16 == 0) or (ty % 16 == 0):
+					tone = floor_grout
+				else:
+					var grain := (tx * 73856093 ^ ty * 19349663) & 0x7fffffff
+					if grain % 23 == 0:
+						tone = floor_light
+					elif grain % 29 == 1:
+						tone = floor_grout
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+		if key == "ruin_floor_cracked":
+			# One jagged diagonal crack with a couple of offshoots.
+			var cy := 6.0
+			for tx in range(3, tile_size.x - 3):
+				cy += sin(float(tx) * 1.7) * 1.4 + 0.55
+				var ty := clampi(int(cy), 2, tile_size.y - 3)
+				image.set_pixel(origin.x + tx, origin.y + ty, floor_grout)
+				if tx % 7 == 0:
+					image.set_pixel(origin.x + tx, origin.y + ty + 1, floor_grout)
+	# Whole wall: full courses of white brick.
+	var brick_coords := TILE_ATLAS.get("ice_brick", Vector2i(-1, -1)) as Vector2i
+	if brick_coords.x >= 0:
+		var origin := brick_coords * tile_size
+		for ty in range(tile_size.y):
+			for tx in range(tile_size.x):
+				var course := ty / 8
+				var offset := (course % 2) * 8
+				var tone := brick_white
+				if ty % 8 >= 6:
+					tone = brick_mortar
+				elif (tx + offset) % 16 >= 14:
+					tone = brick_mortar
+				elif ty % 8 >= 4:
+					tone = brick_shade
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+	# Worn wall: ruin floor showing behind, brick courses surviving below a
+	# ragged breakline.
+	var worn_coords := TILE_ATLAS.get("ice_brick_worn", Vector2i(-1, -1)) as Vector2i
+	var floor_coords := TILE_ATLAS.get("ruin_floor", Vector2i(-1, -1)) as Vector2i
+	if worn_coords.x >= 0 and floor_coords.x >= 0:
+		var origin := worn_coords * tile_size
+		image.blit_rect(image, Rect2i(floor_coords * tile_size, tile_size), origin)
+		for tx in range(tile_size.x):
+			var break_y := 12 + int(round(sin(float(tx) * 0.9) * 3.0)) + ((tx * 7) % 3)
+			for ty in range(break_y, tile_size.y):
+				var course := ty / 8
+				var offset := (course % 2) * 8
+				var tone := brick_white
+				if ty % 8 >= 6:
+					tone = brick_mortar
+				elif (tx + offset) % 16 >= 14:
+					tone = brick_mortar
+				elif ty % 8 >= 4:
+					tone = brick_shade
+				if ty == break_y:
+					tone = brick_shade
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+	# The column: a snow-capped drum on transparent ground.
+	var tower_coords := TILE_ATLAS.get("ruin_tower", Vector2i(-1, -1)) as Vector2i
+	if tower_coords.x >= 0:
+		var origin := tower_coords * tile_size
+		var left := tile_size.x / 2 - 6
+		var right := tile_size.x / 2 + 6
+		for ty in range(2, tile_size.y):
+			for tx in range(left, right):
+				var tone := brick_white
+				if ty < 7:
+					tone = Color(0.97, 0.99, 1.0, 1.0)
+				elif ty % 6 >= 4:
+					tone = brick_mortar
+				elif tx >= right - 3:
+					tone = brick_shade
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+			if ty >= tile_size.y - 3:
+				image.set_pixel(origin.x + left - 1, origin.y + ty, brick_shade)
+				image.set_pixel(origin.x + right, origin.y + ty, brick_shade)
+	# The web: thin radial strands anchored in the north-west corner.
+	var web_coords := TILE_ATLAS.get("web", Vector2i(-1, -1)) as Vector2i
+	if web_coords.x >= 0:
+		var origin := web_coords * tile_size
+		var strand := Color(0.88, 0.9, 0.93, 0.75)
+		var faint := Color(0.88, 0.9, 0.93, 0.4)
+		for ray in range(5):
+			var angle := 0.12 + float(ray) * (PI * 0.5 - 0.24) / 4.0
+			for step in range(2, 15):
+				var tx := int(round(cos(angle) * float(step)))
+				var ty := int(round(sin(angle) * float(step)))
+				if tx < tile_size.x and ty < tile_size.y:
+					image.set_pixel(origin.x + tx, origin.y + ty, strand)
+		for ring in range(2):
+			var ring_radius := 6.0 + float(ring) * 5.0
+			for arc_step in range(20):
+				var angle := float(arc_step) / 19.0 * PI * 0.5
+				var tx := int(round(cos(angle) * ring_radius))
+				var ty := int(round(sin(angle) * ring_radius))
+				if tx < tile_size.x and ty < tile_size.y:
+					image.set_pixel(origin.x + tx, origin.y + ty, faint)
 
 ## --- painted water plants and snow trees --------------------------------------
 
@@ -6878,7 +7060,172 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 	_surface_chunks[chunk] = painted
 	_stamp_gates_in_rect(rect)
 	_stamp_landmarks_in_chunk(chunk, rect)
+	_stamp_snow_ruins_in_chunk(rect)
 	_clear_understory_under_trees(rect)
+
+## --- Randomly generated ice ruins ------------------------------------------
+## Ruined snow forts scattered through the tundra wilds: one candidate
+## anchor per SNOW_RUIN_LATTICE-cell block of WORLD space (hash-rolled,
+## so every embark sees the same fort at the same spot), realized only
+## where the ground is snow. The layout is a pure function of the anchor,
+## so each streaming chunk stamps just its own slice and eviction or
+## repaint always rebuilds the identical ruin — dark stone floor, broken
+## ice-brick walls, snow-capped columns, webs in the corners and one
+## lootable chest at its heart.
+const SNOW_RUIN_LATTICE := 56
+const SNOW_RUIN_CHANCE := 0.3
+const SNOW_RUIN_MAX_HALF := 9
+const SNOW_RUIN_GATE_CLEARANCE := 26
+
+var _snow_ruin_layouts: Dictionary = {}
+
+func _stamp_snow_ruins_in_chunk(rect: Rect2i) -> void:
+	if _surface_biome_ctx.is_empty():
+		return
+	var world_rect := Rect2i(rect.position + _surface_world_origin, rect.size)
+	var min_block_x := int(floor(float(world_rect.position.x - SNOW_RUIN_MAX_HALF) / float(SNOW_RUIN_LATTICE)))
+	var min_block_y := int(floor(float(world_rect.position.y - SNOW_RUIN_MAX_HALF) / float(SNOW_RUIN_LATTICE)))
+	var max_block_x := int(floor(float(world_rect.end.x + SNOW_RUIN_MAX_HALF) / float(SNOW_RUIN_LATTICE)))
+	var max_block_y := int(floor(float(world_rect.end.y + SNOW_RUIN_MAX_HALF) / float(SNOW_RUIN_LATTICE)))
+	for block_y in range(min_block_y, max_block_y + 1):
+		for block_x in range(min_block_x, max_block_x + 1):
+			var anchor := _snow_ruin_anchor(Vector2i(block_x, block_y))
+			if anchor.x == 2147483647:
+				continue
+			var layout := _snow_ruin_layout(anchor)
+			for cell_variant: Variant in layout.keys():
+				var cell := cell_variant as Vector2i
+				if not rect.has_point(cell):
+					continue
+				if _latest_grid.has(cell) or _surface_road_cells.has(cell) or _surface_landmark_blocked_cells.has(cell):
+					continue
+				var piece := layout[cell] as Dictionary
+				var base_key := String(piece.get("base", ""))
+				if not base_key.is_empty():
+					_place_tile(city_layer, cell, base_key)
+				var decor_key := String(piece.get("decor", ""))
+				if decor_key.is_empty():
+					decor_layer.erase_cell(cell)
+				else:
+					_place_tile(decor_layer, cell, decor_key)
+
+## The block's LOCAL-space ruin anchor, or the sentinel when the block
+## rolled no ruin, its ground is not snow, or a site gate is too close
+## (the fort must never collide with a hold massif or clearing).
+func _snow_ruin_anchor(block: Vector2i) -> Vector2i:
+	var sentinel := Vector2i(2147483647, 2147483647)
+	var roll := hash("snow_ruin|%s|%d|%d" % [_surface_world_seed_text, block.x, block.y])
+	if float(roll & 0xffff) / 65535.0 > SNOW_RUIN_CHANCE:
+		return sentinel
+	var span := SNOW_RUIN_LATTICE - SNOW_RUIN_MAX_HALF * 2 - 2
+	var world_anchor := block * SNOW_RUIN_LATTICE + Vector2i(
+		SNOW_RUIN_MAX_HALF + 1 + (roll >> 16) % span,
+		SNOW_RUIN_MAX_HALF + 1 + (roll >> 32) % span
+	)
+	if SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, world_anchor) != (TILE_ATLAS_DEFS.BIOME_TUNDRA as String):
+		return sentinel
+	var anchor := world_anchor - _surface_world_origin
+	for gate: Dictionary in _surface_gates:
+		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		if maxi(absi(gate_anchor.x - anchor.x), absi(gate_anchor.y - anchor.y)) < SNOW_RUIN_GATE_CLEARANCE:
+			return sentinel
+	return anchor
+
+## The full fort as {local cell: {"base": key, "decor": key}}, cached per
+## anchor. Deterministic: seeded by the anchor's world position.
+func _snow_ruin_layout(anchor: Vector2i) -> Dictionary:
+	var cached_variant: Variant = _snow_ruin_layouts.get(anchor)
+	if cached_variant is Dictionary:
+		return cached_variant as Dictionary
+	if _snow_ruin_layouts.size() > 24:
+		_snow_ruin_layouts.clear()
+	var world_anchor := anchor + _surface_world_origin
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("snow_ruin_layout|%s|%d|%d" % [_surface_world_seed_text, world_anchor.x, world_anchor.y])
+	var layout: Dictionary = {}
+	var half_w := rng.randi_range(6, SNOW_RUIN_MAX_HALF)
+	var half_h := rng.randi_range(5, SNOW_RUIN_MAX_HALF - 1)
+	# The courtyard: a ragged dark-stone blob.
+	for y in range(-half_h, half_h + 1):
+		for x in range(-half_w, half_w + 1):
+			var dx := float(x) / float(half_w)
+			var dy := float(y) / float(half_h)
+			var edge := float(hash("ruin_edge|%d|%d" % [world_anchor.x + x, world_anchor.y + y]) & 0xffff) / 65535.0
+			if dx * dx + dy * dy > 0.66 + edge * 0.45:
+				continue
+			layout[anchor + Vector2i(x, y)] = {
+				"base": "ruin_floor_cracked" if rng.randf() < 0.28 else "ruin_floor",
+				"decor": ""
+			}
+	# Broken wall runs: straight courses with collapse gaps, a share worn
+	# down to their lowest bricks.
+	for _run in range(rng.randi_range(4, 7)):
+		var horizontal := rng.randf() < 0.5
+		var run_length := rng.randi_range(3, 7)
+		var start := Vector2i(
+			rng.randi_range(-half_w + 2, half_w - 2 - (run_length if horizontal else 0)),
+			rng.randi_range(-half_h + 2, half_h - 2 - (0 if horizontal else run_length))
+		)
+		for step in range(run_length):
+			if rng.randf() < 0.24:
+				continue
+			var cell := anchor + start + (Vector2i(step, 0) if horizontal else Vector2i(0, step))
+			if not layout.has(cell):
+				continue
+			layout[cell] = {
+				"base": "ice_brick_worn" if rng.randf() < 0.35 else "ice_brick",
+				"decor": ""
+			}
+	# Snow-capped columns on the rim.
+	for _tower in range(rng.randi_range(2, 4)):
+		var angle := rng.randf() * TAU
+		var rim_cell := anchor + Vector2i(
+			int(round(cos(angle) * float(half_w - 1))),
+			int(round(sin(angle) * float(half_h - 1)))
+		)
+		if layout.has(rim_cell):
+			var rim_entry := layout[rim_cell] as Dictionary
+			if String(rim_entry.get("base", "")).begins_with("ruin_floor"):
+				rim_entry["decor"] = "ruin_tower"
+	# Webs where floor meets standing wall.
+	var web_budget := rng.randi_range(3, 5)
+	for cell_variant: Variant in layout.keys():
+		if web_budget <= 0:
+			break
+		var cell := cell_variant as Vector2i
+		var entry := layout[cell] as Dictionary
+		if not String(entry.get("base", "")).begins_with("ruin_floor") or not String(entry.get("decor", "")).is_empty():
+			continue
+		var wall_beside := false
+		for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var neighbor_entry_variant: Variant = layout.get(cell + offset)
+			if neighbor_entry_variant is Dictionary and String((neighbor_entry_variant as Dictionary).get("base", "")).begins_with("ice_brick"):
+				wall_beside = true
+				break
+		if wall_beside and rng.randf() < 0.3:
+			entry["decor"] = "web"
+			web_budget -= 1
+	# One chest at the heart: the ruin's reward (chest decor cells are
+	# lootable through the ordinary chest interaction).
+	for radius in range(0, 4):
+		var placed := false
+		for y in range(-radius, radius + 1):
+			for x in range(-radius, radius + 1):
+				var cell := anchor + Vector2i(x, y)
+				var entry_variant: Variant = layout.get(cell)
+				if not (entry_variant is Dictionary):
+					continue
+				var entry := entry_variant as Dictionary
+				if String(entry.get("base", "")).begins_with("ruin_floor") and String(entry.get("decor", "")).is_empty():
+					entry["decor"] = "chest"
+					placed = true
+					break
+			if placed:
+				break
+		if placed:
+			break
+	_snow_ruin_layouts[anchor] = layout
+	return layout
 
 ## Ground-truth guarantee that no cut-stump or bush is left drawn on top of
 ## a tree: after a chunk (and its landmarks) are painted, scan it — grown by
