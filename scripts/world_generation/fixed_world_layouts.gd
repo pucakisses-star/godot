@@ -584,9 +584,14 @@ static func build_layout_fields(
 			var warped_gx := (float(x) + 0.5 - offset_x) / scale + warp_noise_x.get_noise_2d(float(x), float(y)) * WARP_CELLS
 			var warped_gy := (float(y) + 0.5 - offset_y) / scale + warp_noise_y.get_noise_2d(float(x), float(y)) * WARP_CELLS
 			var cell_gx := int(floor(warped_gx))
-			var cell_gy := int(floor(warped_gy))
+			# Vertical letterboxing clamps to the grid's edge rows instead of
+			# padding with ocean, so Earth's Antarctica runs to the map's
+			# south edge and merges with the globe's polar ice cap instead of
+			# floating above a polar ocean ring. Horizontal letterboxing stays
+			# ocean so the globe's wrap-seam bridge always has water to blend.
+			var cell_gy := clampi(int(floor(warped_gy)), 0, grid_h - 1)
 			var code := CODE_OCEAN
-			if cell_gx >= 0 and cell_gy >= 0 and cell_gx < grid_w and cell_gy < grid_h:
+			if cell_gx >= 0 and cell_gx < grid_w:
 				code = codes[cell_gy * grid_w + cell_gx]
 
 			var height := _bilinear_coarse_height(
@@ -602,7 +607,7 @@ static func build_layout_fields(
 				height = maxf(height, sea_level + 0.02)
 			heights[idx] = clampf(height, 0.0, 1.0)
 
-			if cell_gx >= 0 and cell_gy >= 0 and cell_gx < grid_w and cell_gy < grid_h:
+			if cell_gx >= 0 and cell_gx < grid_w:
 				biomes[idx] = coarse_biomes[cell_gy * grid_w + cell_gx]
 			else:
 				biomes[idx] = TILE_ATLAS_DEFS.BIOME_WATER
@@ -765,9 +770,11 @@ static func _coarse_height_at(
 	gy: int,
 	fallback: float
 ) -> float:
-	if gx < 0 or gy < 0 or gx >= grid_w or gy >= grid_h:
+	# Rows clamp (vertical letterbox extends the grid's edge rows); columns
+	# fall back to deep ocean (horizontal letterbox feeds the seam bridge).
+	if gx < 0 or gx >= grid_w:
 		return fallback
-	return float(coarse_heights[gy * grid_w + gx])
+	return float(coarse_heights[clampi(gy, 0, grid_h - 1) * grid_w + gx])
 
 
 static func _bilinear_coarse_height(

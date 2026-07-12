@@ -80,8 +80,17 @@ static func sample_continent_bias(x: int, y: int, settings: Dictionary, landmass
 	var centered_ny := ny * 2.0 - 1.0
 	var map_seed := int(settings.get("map_seed", 0))
 	var base_seed := map_seed + 0x6a09e667
-	var fractal := (value_noise(nx * 18.0 + 2.3, ny * 18.0 + 9.7, base_seed) - 0.5) * 0.1
-	fractal += (value_noise(nx * 42.0 + 13.1, ny * 42.0 + 5.4, base_seed + 0xbb67ae85) - 0.5) * 0.05
+	# feature_scale anchors noise-driven terms to the Normal map's tile scale
+	# (settings["feature_scale"] = map_width / reference_width): sampling at
+	# (nx * fs, ny * fs) keeps the terrain texture stationary in TILES, so a
+	# larger map holds more Normal-sized features instead of stretched ones.
+	# The radial/center/edge terms stay in map-normalized space on purpose -
+	# they describe the map frame, not a feature.
+	var feature_scale := maxf(0.05, float(settings.get("feature_scale", 1.0)))
+	var fx := nx * feature_scale
+	var fy := ny * feature_scale
+	var fractal := (value_noise(fx * 18.0 + 2.3, fy * 18.0 + 9.7, base_seed) - 0.5) * 0.1
+	fractal += (value_noise(fx * 42.0 + 13.1, fy * 42.0 + 5.4, base_seed + 0xbb67ae85) - 0.5) * 0.05
 	var radial := sample_radial_falloff_bias(centered_nx, centered_ny, float(settings.get("falloff_strength", 0.0)), float(settings.get("falloff_power", 2.4)))
 	var center := sample_landmass_center_bias(centered_nx, centered_ny, float(settings.get("landmass_falloff_scale", 1.35)), float(settings.get("falloff_power", 2.4)), landmass_centers) * float(settings.get("center_shape_strength", 1.0))
 	var mask := sample_landmass_mask_bias(nx, ny, settings)
@@ -157,10 +166,16 @@ static func sample_center_voronoi_variation(nx: float, ny: float, landmass_cente
 static func sample_landmass_mask(nx: float, ny: float, settings: Dictionary) -> float:
 	var map_seed := int(settings.get("map_seed", 0))
 	var base_seed := map_seed + 0x9e3779b
-	var warp_x := (value_noise(nx * CONTINENT_WARP_SCALE + 2.7, ny * CONTINENT_WARP_SCALE + 9.1, base_seed) - 0.5) * 0.18
-	var warp_y := (value_noise(nx * CONTINENT_WARP_SCALE + 13.2, ny * CONTINENT_WARP_SCALE + 4.8, base_seed + 0x85ebca6) - 0.5) * 0.18
-	var sx := nx + warp_x
-	var sy := ny + warp_y
+	# All the noise lookups run at feature-anchored coordinates so landmass
+	# blobs keep the Normal map's tile size on any map; only the edge falloff
+	# below stays in true map-normalized space (it hugs the actual map frame).
+	var feature_scale := maxf(0.05, float(settings.get("feature_scale", 1.0)))
+	var fnx := nx * feature_scale
+	var fny := ny * feature_scale
+	var warp_x := (value_noise(fnx * CONTINENT_WARP_SCALE + 2.7, fny * CONTINENT_WARP_SCALE + 9.1, base_seed) - 0.5) * 0.18
+	var warp_y := (value_noise(fnx * CONTINENT_WARP_SCALE + 13.2, fny * CONTINENT_WARP_SCALE + 4.8, base_seed + 0x85ebca6) - 0.5) * 0.18
+	var sx := fnx + warp_x
+	var sy := fny + warp_y
 
 	var mask_scale := maxf(float(settings.get("landmass_mask_scale", 1.0)), 0.05)
 	var macro := sample_fbm(sx * CONTINENT_MACRO_SCALE * mask_scale, sy * CONTINENT_MACRO_SCALE * mask_scale, base_seed + 0xc2b2ae35, 4, 2.05, 0.52)
@@ -178,8 +193,8 @@ static func sample_landmass_mask(nx: float, ny: float, settings: Dictionary) -> 
 	var edge_falloff := clampf(edge_distance / edge_band, 0.0, 1.0)
 	value *= edge_falloff
 
-	value += (value_noise(nx * 12.5 + 3.1, ny * 12.5 + 7.9, base_seed) - 0.5) * 0.12
-	value += (value_noise(nx * 34.2 + 11.3, ny * 34.2 + 4.6, base_seed + 0x85ebca6) - 0.5) * 0.06
+	value += (value_noise(fnx * 12.5 + 3.1, fny * 12.5 + 7.9, base_seed) - 0.5) * 0.12
+	value += (value_noise(fnx * 34.2 + 11.3, fny * 34.2 + 4.6, base_seed + 0x85ebca6) - 0.5) * 0.06
 	return clampf(value, 0.0, 1.0)
 
 static func sample_fbm(x: float, y: float, seed_value: int, octaves: int, lacunarity: float, gain: float) -> float:

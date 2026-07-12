@@ -10,6 +10,8 @@ const CELL_PLAZA := 4
 ## SettlementSceneBase.CELL_WALL). Renders as stone unless a door is
 ## punched through it, and never counts as room floor.
 const CELL_WALL := 6
+## Underground rivers/pools (matches UndergroundWorldService.CELL_WATER).
+const CELL_WATER := 5
 
 static func place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String, tile_atlas: Dictionary) -> void:
 	var atlas_coords: Vector2i = tile_atlas.get(tile_key, Vector2i(-1, -1))
@@ -18,6 +20,22 @@ static func place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: Str
 	target_layer.set_cell(cell, 0, atlas_coords, 0)
 
 static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cells: Dictionary, tile_atlas: Dictionary) -> String:
+	var tile := _pick_flat_base_tile(grid, x, y, cell, door_cells)
+	# Depth pass (Core Keeper-style mining look): a stone wall with open
+	# ground to its south shows its carved face, dirt right under a wall
+	# sits in its shadow, and a deterministic sprinkle of dirt_alt breaks
+	# floor repetition. Guarded by atlas lookups because the town scene
+	# shares this service with an atlas that has none of these variants.
+	if tile == "stone" and tile_atlas.has("stone_face") and _is_open_ground_cell(_cell_at(grid, x, y + 1)):
+		return "stone_face"
+	if tile == "dirt" and tile_atlas.has("dirt_shadow"):
+		if _casts_wall_shadow(grid, x, y, door_cells):
+			return "dirt_shadow"
+		if tile_atlas.has("dirt_alt") and absi(x * 73856093 + y * 19349663) % 4 == 0:
+			return "dirt_alt"
+	return tile
+
+static func _pick_flat_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cells: Dictionary) -> String:
 	if cell == CELL_WALL:
 		## Interior partitions are solid stone except where a door was
 		## punched to connect two rooms.
@@ -37,6 +55,19 @@ static func pick_base_tile(grid: Dictionary, x: int, y: int, cell: int, door_cel
 			return ""
 		_:
 			return "stone"
+
+## Anything dug out or walkable counts as ground a wall face can drop to.
+static func _is_open_ground_cell(cell: int) -> bool:
+	return _is_corridor_cell(cell) or _is_structural_cell(cell) or cell == CELL_WATER
+
+## Dirt lies in shadow when the cell north of it renders as solid wall.
+static func _casts_wall_shadow(grid: Dictionary, x: int, y: int, door_cells: Dictionary) -> bool:
+	var north := _cell_at(grid, x, y - 1)
+	if north == CELL_ROCK or north == CELL_WALL:
+		return not door_cells.has(Vector2i(x, y - 1))
+	if _is_structural_cell(north):
+		return wall_or_floor_tile(grid, x, y - 1, north, door_cells) == "stone"
+	return false
 
 static func is_hall_border_rock_cell(grid: Dictionary, x: int, y: int) -> bool:
 	if _cell_at(grid, x, y) != CELL_ROCK:
@@ -168,6 +199,12 @@ static func is_adjacent_to_stone_or_wall(grid: Dictionary, x: int, y: int, door_
 static func tile_name_from_atlas(atlas_coords: Vector2i, tile_atlas: Dictionary) -> String:
 	for tile_key: String in tile_atlas.keys():
 		if tile_atlas[tile_key] == atlas_coords:
+			# Depth variants are still the same material to the player.
+			match tile_key:
+				"stone_face":
+					return "Stone"
+				"dirt_shadow", "dirt_alt":
+					return "Dirt"
 			return tile_key.replace("_", " ").capitalize()
 	return "Unknown"
 

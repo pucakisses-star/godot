@@ -40,6 +40,10 @@ extends Node2D
 ## Fraction of globe longitude reserved for the synthesized ocean strip that
 ## bridges the map's east and west edges so the sphere wrap has no seam.
 @export_range(0.0, 0.3, 0.01) var globe_seam_band: float = 0.08
+## Fraction of globe latitude reserved at the south pole for a synthesized
+## Antarctic ice cap (globe view only); the map is compressed northward so
+## its own bottom edge sits above the cap.
+@export_range(0.0, 0.3, 0.01) var globe_polar_band: float = 0.07
 @export var scene3d_height_scale: float = 0.1
 @export var scene3d_mountain_compression: float = 0.35
 @export var scene3d_land_blend_power: float = 1.75
@@ -3284,7 +3288,9 @@ func _apply_island_region_names(
 	rng: RandomNumberGenerator,
 	region_names: Dictionary
 ) -> void:
-	var island_max_tiles := maxi(64, int(round(float(map_size.x * map_size.y) / 512.0)))
+	# Anchored to the reference map so "small island" means the same physical
+	# size on every map size.
+	var island_max_tiles := maxi(64, int(round(REFERENCE_MAP_WIDTH * REFERENCE_MAP_HEIGHT / 512.0)))
 	var visited := {}
 	var used_names := {}
 	for y in range(map_size.y):
@@ -3430,6 +3436,7 @@ func _terrain_settings() -> Dictionary:
 	return {
 		"map_size": map_size,
 		"map_seed": map_seed,
+		"feature_scale": _map_feature_scale(),
 		"water_level": water_level,
 		"falloff_strength": falloff_strength,
 		"falloff_power": falloff_power,
@@ -3485,8 +3492,18 @@ func _sample_height(
 ) -> float:
 	return float(TerrainGenerator.sample_height(continent_noise, detail_noise, ridge_noise, x, y, _terrain_settings(), _landmass_centers))
 
+## Terrain feature size is anchored to the Normal map's dimensions: a bigger
+## map keeps Normal-scale continents, islands and climate texture and simply
+## holds MORE of them, instead of stretching one Normal-sized world to fit.
+const REFERENCE_MAP_WIDTH := 455.0
+const REFERENCE_MAP_HEIGHT := 256.0
+
 func _feature_frequency_divisor() -> float:
-	return maxf(1.0, float(map_size.x))
+	return REFERENCE_MAP_WIDTH
+
+
+func _map_feature_scale() -> float:
+	return maxf(0.05, float(map_size.x) / REFERENCE_MAP_WIDTH)
 
 
 func _sample_continent_bias(x: int, y: int) -> float:
@@ -4090,7 +4107,7 @@ func _build_highland_overlays(
 	var ridge_detail_noise := FastNoiseLite.new()
 	ridge_detail_noise.seed = map_seed + 0x165667b1
 	ridge_detail_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	ridge_detail_noise.frequency = 7.4 / maxf(1.0, float(width))
+	ridge_detail_noise.frequency = 7.4 / REFERENCE_MAP_WIDTH
 	ridge_detail_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	ridge_detail_noise.fractal_octaves = 5
 	ridge_detail_noise.fractal_gain = 0.47
@@ -4099,7 +4116,7 @@ func _build_highland_overlays(
 	var orientation_noise := FastNoiseLite.new()
 	orientation_noise.seed = map_seed + 0xd3a2646c
 	orientation_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	orientation_noise.frequency = 9.2 / maxf(1.0, float(width))
+	orientation_noise.frequency = 9.2 / REFERENCE_MAP_WIDTH
 	orientation_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	orientation_noise.fractal_octaves = 3
 	orientation_noise.fractal_gain = 0.58
@@ -4515,10 +4532,10 @@ func _apply_tree_overlays(
 		var elevation_center := 0.34
 		var elevation_range := 0.28
 		var elevation_preference := clampf(1.0 - absf(elevation_relative - elevation_center) / elevation_range, 0.0, 1.0)
-		var nx := float(coord.x) / maxf(1.0, float(map_size.x - 1))
-		var ny := float(coord.y) / maxf(1.0, float(map_size.y - 1))
 		var large_scale_noise := _to_normalized(_vegetation_noise.get_noise_2d(coord.x, coord.y))
-		var detail_noise := _value_noise(nx * 28.0 + 1.7, ny * 28.0 + 7.3, map_seed + 0x3c6ef372)
+		# Reference-anchored coords keep forest patchiness at the Normal
+		# map's tile scale on every map size.
+		var detail_noise := _value_noise(float(coord.x) / REFERENCE_MAP_WIDTH * 28.0 + 1.7, float(coord.y) / REFERENCE_MAP_HEIGHT * 28.0 + 7.3, map_seed + 0x3c6ef372)
 		var density := (large_scale_noise * 0.6 + detail_noise * 0.4) * 0.5
 		density *= (0.75 + elevation_preference * 0.65)
 		density *= (0.55 + moisture * 0.9)
@@ -9256,6 +9273,49 @@ func _update_globe_texture() -> void:
 	globe_material.set_shader_parameter("land_blend_power", scene3d_land_blend_power)
 	globe_material.set_shader_parameter("height_scale", globe_height_scale)
 	globe_material.set_shader_parameter("seam_band", globe_seam_band)
+	globe_material.set_shader_parameter("polar_band", globe_polar_band)
+	globe_material.set_shader_parameter("bridge_ocean_color", _globe_bridge_ocean_color())
+
+var _bridge_ocean_color := Color(0.14, 0.26, 0.4)
+var _bridge_ocean_color_cached := false
+
+## Average color of the water tile art. The globe's wrap-seam bridge
+## dissolves into this so it reads as open ocean even when the map's east
+## or west edge holds land instead of guaranteed sea.
+func _globe_bridge_ocean_color() -> Color:
+	if _bridge_ocean_color_cached:
+		return _bridge_ocean_color
+	if map_layer == null or map_layer.tile_set == null or _atlas_source_id < 0:
+		return _bridge_ocean_color
+	var atlas_source := map_layer.tile_set.get_source(_atlas_source_id) as TileSetAtlasSource
+	if atlas_source == null or atlas_source.texture == null:
+		return _bridge_ocean_color
+	var atlas_image := atlas_source.texture.get_image()
+	if atlas_image == null:
+		return _bridge_ocean_color
+	if atlas_image.is_compressed() and atlas_image.decompress() != OK:
+		return _bridge_ocean_color
+	var region := atlas_source.get_tile_texture_region(WATER_TILE, 0)
+	var red_sum := 0.0
+	var green_sum := 0.0
+	var blue_sum := 0.0
+	var sample_count := 0
+	for row in range(region.size.y):
+		for column in range(region.size.x):
+			var pixel_pos := region.position + Vector2i(column, row)
+			if pixel_pos.x < 0 or pixel_pos.y < 0 or pixel_pos.x >= atlas_image.get_width() or pixel_pos.y >= atlas_image.get_height():
+				continue
+			var pixel := atlas_image.get_pixelv(pixel_pos)
+			if pixel.a < 0.5:
+				continue
+			red_sum += pixel.r
+			green_sum += pixel.g
+			blue_sum += pixel.b
+			sample_count += 1
+	if sample_count > 0:
+		_bridge_ocean_color = Color(red_sum / float(sample_count), green_sum / float(sample_count), blue_sum / float(sample_count))
+		_bridge_ocean_color_cached = true
+	return _bridge_ocean_color
 
 func _update_scene3d_texture() -> void:
 	if scene3d_mesh == null or map_viewport == null:
@@ -10330,6 +10390,15 @@ func _apply_cached_world_settings() -> void:
 			# Browser worldGenerationProfiles (main.js:20044-20108).
 			_sea_level_shift = float(layout_preset.get("sea_level_shift", 0.02))
 			_rainfall_bias = float(layout_preset.get("rainfall_bias", 0.0))
+			# Bigger maps hold more world, not a stretched one: multi-center
+			# layouts gain landmass anchors with the map's area while each
+			# anchor keeps its Normal-map tile radius. Major Continent and
+			# Twin Continents keep their identity (their continents grow
+			# with the map) - only the noise texture stays Normal-scaled.
+			if landmass_center_count >= 4:
+				var area_ratio := float(map_size.x * map_size.y) / (REFERENCE_MAP_WIDTH * REFERENCE_MAP_HEIGHT)
+				landmass_center_count = maxi(2, int(round(float(landmass_center_count) * area_ratio)))
+				landmass_falloff_scale = maxf(0.2, landmass_falloff_scale / _map_feature_scale())
 		if settings.has("terrain_ratios") and settings["terrain_ratios"] is Dictionary:
 			_apply_terrain_ratio_settings(settings["terrain_ratios"])
 		_world_name = String(settings.get("world_name", "")).strip_edges()
