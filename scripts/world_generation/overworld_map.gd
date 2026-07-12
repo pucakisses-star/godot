@@ -80,6 +80,7 @@ const WorldSettings := preload("res://scripts/world_generation/world_settings.gd
 const BIOME_CLASSIFIER := preload("res://scripts/world_generation/biome_classifier.gd")
 const STRUCTURE_PLACER := preload("res://scripts/world_generation/structure_placer.gd")
 const WORLD_NAMING := preload("res://scripts/world_generation/world_naming.gd")
+const FIXED_WORLD_LAYOUTS := preload("res://scripts/world_generation/fixed_world_layouts.gd")
 const OVERWORLD_GENERATION := preload("res://scripts/world_generation/overworld_generation.gd")
 const OVERWORLD_RENDERING := preload("res://scripts/world_generation/overworld_rendering.gd")
 const OVERWORLD_INTERACTION := preload("res://scripts/world_generation/overworld_interaction.gd")
@@ -653,6 +654,9 @@ var _rainfall_bias := 0.0
 ## overwrites the export - regeneration must restart from this baseline or
 ## the same seed yields a different world on regen vs fresh boot.
 var _layout_water_level := -1.0
+## Non-empty when the selected world layout is a fixed painted map (Earth,
+## Middle-earth, ...) rather than a procedural landmass profile.
+var _fixed_layout_key := ""
 ## Slider biases (browser main.js:21300-21331).
 var _mountain_ratio := 0.5
 var _forest_bias := 0.0
@@ -2038,6 +2042,19 @@ func _generate_map() -> void:
 	_configure_landmass_centers(rng)
 	_set_loading_progress(8.0, "Raising mountains and carving seas...")
 	await _yield_generation_wave()
+	# Fixed layouts (Earth, Middle-earth, ...) hand-paint the landmass, biomes
+	# and mountain ranges; everything downstream (rivers, forests, settlements,
+	# cultures, history) still runs procedurally on top of them.
+	var fixed_fields: Dictionary = {}
+	if not _fixed_layout_key.is_empty():
+		fixed_fields = FIXED_WORLD_LAYOUTS.build_layout_fields(_fixed_layout_key, map_size, map_seed, water_level)
+		await _yield_generation_wave()
+	var has_fixed_layout := not fixed_fields.is_empty()
+	var fixed_biomes := fixed_fields.get("biomes", PackedStringArray()) as PackedStringArray
+	var fixed_temperature_targets := fixed_fields.get("temperature_targets", PackedFloat32Array()) as PackedFloat32Array
+	var fixed_moisture_targets := fixed_fields.get("moisture_targets", PackedFloat32Array()) as PackedFloat32Array
+	var fixed_vegetation_floors := fixed_fields.get("vegetation_floors", PackedFloat32Array()) as PackedFloat32Array
+	var fixed_jungle_cells := fixed_fields.get("jungle_cells", {}) as Dictionary
 	var frequency_divisor := _feature_frequency_divisor()
 
 	var continent_noise := FastNoiseLite.new()
@@ -2154,19 +2171,27 @@ func _generate_map() -> void:
 	_vegetation_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	_vegetation_noise.fractal_octaves = 3
 
-	for y in range(map_size.y):
-		for x in range(map_size.x):
-			var idx := _xy_to_index(x, y)
-			height_buffer[idx] = _sample_height(continent_noise, detail_noise, ridge_noise, x, y)
-		if y > 0 and y % GENERATION_YIELD_ROW_INTERVAL == 0:
-			await _yield_generation_wave()
+	if has_fixed_layout:
+		height_buffer = fixed_fields.get("heights", height_buffer) as PackedFloat32Array
+	else:
+		for y in range(map_size.y):
+			for x in range(map_size.x):
+				var idx := _xy_to_index(x, y)
+				height_buffer[idx] = _sample_height(continent_noise, detail_noise, ridge_noise, x, y)
+			if y > 0 and y % GENERATION_YIELD_ROW_INTERVAL == 0:
+				await _yield_generation_wave()
 
 	_smooth_height_buffer(height_buffer, 1, 0.35)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "height smoothing")
 	# Browser estimateSeaLevels (main.js:11590-11601): the sea level is the
 	# exact height percentile that puts targetWaterRatio of the map under
-	# water (0.47 + the layout's seaLevelShift, main.js:21308).
-	water_level = _estimate_sea_level(height_buffer)
+	# water (0.47 + the layout's seaLevelShift, main.js:21308). Fixed layouts
+	# synthesized their heights around the layout sea level instead, so the
+	# painted coastline must not be re-estimated away.
+	if has_fixed_layout:
+		water_level = float(fixed_fields.get("water_level", water_level))
+	else:
+		water_level = _estimate_sea_level(height_buffer)
 	_ensure_landmass_presence_buffer(height_buffer)
 	var height_map_for_biome := _float_buffer_to_dictionary(height_buffer)
 	_desert_suitability_buffer.resize(cell_count)
@@ -2186,11 +2211,25 @@ func _generate_map() -> void:
 			var height := float(height_buffer[idx])
 			var temperature := _sample_temperature(x, y, height)
 			var moisture := _sample_moisture(x, y, height)
+			if has_fixed_layout:
+				# Painted biomes pull the climate toward what that terrain
+				# implies (deserts hot and dry, tundra cold, ...) so crops,
+				# cultures and tooltips agree with the map.
+				var temperature_target := float(fixed_temperature_targets[idx])
+				if temperature_target >= 0.0:
+					temperature = lerpf(temperature, temperature_target, FIXED_WORLD_LAYOUTS.CLIMATE_TARGET_WEIGHT)
+				var moisture_target := float(fixed_moisture_targets[idx])
+				if moisture_target >= 0.0:
+					moisture = lerpf(moisture, moisture_target, FIXED_WORLD_LAYOUTS.CLIMATE_TARGET_WEIGHT)
 			var vegetation := _sample_vegetation(x, y, height, moisture, temperature)
 			temperature_buffer[idx] = temperature
 			moisture_buffer[idx] = moisture
+			if has_fixed_layout:
+				vegetation = maxf(vegetation, float(fixed_vegetation_floors[idx]))
+				base_biome_buffer[idx] = _biome_to_id(fixed_biomes[idx])
+			else:
+				base_biome_buffer[idx] = _biome_to_id(_assign_base_biome(coord, height, temperature, moisture, height_map_for_biome))
 			vegetation_buffer[idx] = vegetation
-			base_biome_buffer[idx] = _biome_to_id(_assign_base_biome(coord, height, temperature, moisture, height_map_for_biome))
 		if y > 0 and y % GENERATION_YIELD_ROW_INTERVAL == 0:
 			await _yield_generation_wave()
 
@@ -2209,21 +2248,28 @@ func _generate_map() -> void:
 	_smooth_biomes(base_biome_map, 2)
 	# The snow field is a direct function of latitude+height (browser
 	# main.js:21607-21635); smoothing may never drag tundra south of the
-	# band nor thin the guaranteed polar cap, so re-assert it.
-	_enforce_snow_presence(base_biome_map, height_buffer)
+	# band nor thin the guaranteed polar cap, so re-assert it. Fixed layouts
+	# paint their own snow (Antarctica sits at the SOUTH edge of Earth), so
+	# the north-only latitude rules must leave them alone — same for the
+	# desert/marsh refinement sweeps, which would erode painted regions
+	# like Dorne or the Neck.
+	if not has_fixed_layout:
+		_enforce_snow_presence(base_biome_map, height_buffer)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "biome smoothing")
 	_log_generation_stage("biome smoothing + snow", stage_started_ms)
 	await _yield_generation_wave()
 	stage_started_ms = Time.get_ticks_msec()
-	_refine_desert_biomes(base_biome_map)
+	if not has_fixed_layout:
+		_refine_desert_biomes(base_biome_map)
 	_log_generation_stage("desert refinement", stage_started_ms)
 	await _yield_generation_wave()
 	stage_started_ms = Time.get_ticks_msec()
-	_refine_marsh_biomes(base_biome_map, height_buffer, moisture_buffer, height_map, rng)
+	if not has_fixed_layout:
+		_refine_marsh_biomes(base_biome_map, height_buffer, moisture_buffer, height_map, rng)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "desert and marsh refinement")
 	_log_generation_stage("marsh refinement", stage_started_ms)
 	await _yield_generation_wave()
-	if _count_biome(base_biome_map, BIOME_DESERT) == 0:
+	if not has_fixed_layout and _count_biome(base_biome_map, BIOME_DESERT) == 0:
 		_seed_desert_biomes(base_biome_map, temperature_map, moisture_map, height_map)
 		_smooth_biomes(base_biome_map, 1)
 		_enforce_snow_presence(base_biome_map, height_buffer)
@@ -2240,7 +2286,8 @@ func _generate_map() -> void:
 		vegetation_map,
 		height_map,
 		highland_map,
-		rng
+		rng,
+		fixed_jungle_cells
 	)
 	generation_peak_memory = _sample_generation_memory_peak(generation_peak_memory, "tree overlays")
 	var river_map := _build_river_map_buffers(height_buffer, moisture_buffer, base_biome_buffer, rng)
@@ -4426,7 +4473,8 @@ func _apply_tree_overlays(
 	vegetation_map: Dictionary,
 	height_map: Dictionary,
 	highland_map: Dictionary,
-	rng: RandomNumberGenerator
+	rng: RandomNumberGenerator,
+	jungle_cells: Dictionary = {}
 ) -> Dictionary:
 	var tree_map: Dictionary = {}
 	var tree_source_map: Dictionary = {}
@@ -4476,7 +4524,9 @@ func _apply_tree_overlays(
 			if rng.randf() > soft_chance:
 				continue
 		var seed_moisture: float = moisture_map.get(coord, 0.0)
-		var seed_biome := _tree_overlay_biome(coord, String(biome_map.get(coord, BIOME_GRASSLAND)), seed_moisture, float(height_map.get(coord, 0.0)))
+		# Fixed layouts paint jungles wherever their world puts them; the
+		# latitude-band rule only governs procedural worlds.
+		var seed_biome := BIOME_JUNGLE if jungle_cells.has(coord) else _tree_overlay_biome(coord, String(biome_map.get(coord, BIOME_GRASSLAND)), seed_moisture, float(height_map.get(coord, 0.0)))
 		if not original_biomes.has(coord):
 			original_biomes[coord] = biome_map.get(coord, BIOME_GRASSLAND)
 		biome_map[coord] = seed_biome
@@ -4502,7 +4552,7 @@ func _apply_tree_overlays(
 			if rng.randf() > spread_chance:
 				continue
 			var moisture: float = moisture_map.get(coord, 0.0)
-			var tree_biome := _tree_overlay_biome(coord, String(biome_map.get(coord, BIOME_GRASSLAND)), moisture, float(height_map.get(coord, 0.0)))
+			var tree_biome := BIOME_JUNGLE if jungle_cells.has(coord) else _tree_overlay_biome(coord, String(biome_map.get(coord, BIOME_GRASSLAND)), moisture, float(height_map.get(coord, 0.0)))
 			if not original_biomes.has(coord):
 				original_biomes[coord] = biome_map.get(coord, BIOME_GRASSLAND)
 			biome_map[coord] = tree_biome
@@ -10243,7 +10293,11 @@ func _apply_cached_world_settings() -> void:
 			map_size = settings["map_dimensions"]
 		if settings.has("world_seed"):
 			map_seed = _seed_to_map_seed(settings["world_seed"])
+		_fixed_layout_key = ""
 		if settings.has("world_layout"):
+			_fixed_layout_key = FIXED_WORLD_LAYOUTS.layout_key_for_label(str(settings["world_layout"]))
+			# Fixed layouts fall through to the "normal" knobs; only the
+			# water_level baseline matters to them.
 			var layout_preset := WorldSettings.layout_generation_preset(str(settings["world_layout"]))
 			landmass_center_count = int(layout_preset.get("landmass_center_count", 4))
 			landmass_center_min_separation = float(layout_preset.get("landmass_center_min_separation", 0.0))
