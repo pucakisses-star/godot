@@ -9280,9 +9280,41 @@ func _update_globe_texture() -> void:
 	globe_material.set_shader_parameter("seam_band", globe_seam_band)
 	globe_material.set_shader_parameter("polar_band", globe_polar_band)
 	globe_material.set_shader_parameter("bridge_ocean_color", _globe_bridge_ocean_color())
+	var ice_texture := _globe_polar_ice_texture()
+	if ice_texture != null:
+		globe_material.set_shader_parameter("polar_ice_texture", ice_texture)
+	# One snow tile per equator-sized map tile: planar pole units are radians
+	# from the pole, and a map tile spans TAU / map_width radians there.
+	globe_material.set_shader_parameter("polar_tile_density", float(map_size.x) / TAU)
 
 var _bridge_ocean_color := Color(0.14, 0.26, 0.4)
 var _bridge_ocean_color_cached := false
+var _polar_ice_texture_cache: ImageTexture = null
+
+## The overworld's tundra tile art, extracted once from the atlas: the globe
+## builds its south polar cap out of real snow tiles instead of a flat glow.
+func _globe_polar_ice_texture() -> ImageTexture:
+	if _polar_ice_texture_cache != null:
+		return _polar_ice_texture_cache
+	if map_layer == null or map_layer.tile_set == null or _atlas_source_id < 0:
+		return null
+	var atlas_source := map_layer.tile_set.get_source(_atlas_source_id) as TileSetAtlasSource
+	if atlas_source == null or atlas_source.texture == null:
+		return null
+	var atlas_image := atlas_source.texture.get_image()
+	if atlas_image == null:
+		return null
+	if atlas_image.is_compressed() and atlas_image.decompress() != OK:
+		return null
+	var region := atlas_source.get_tile_texture_region(SNOW_TILE, 0)
+	if region.size.x <= 0 or region.size.y <= 0:
+		return null
+	var tile_image := atlas_image.get_region(region)
+	if tile_image == null:
+		return null
+	tile_image.generate_mipmaps()
+	_polar_ice_texture_cache = ImageTexture.create_from_image(tile_image)
+	return _polar_ice_texture_cache
 
 ## Average color of the water tile art. The globe's wrap-seam bridge
 ## dissolves into this so it reads as open ocean even when the map's east
@@ -10277,7 +10309,12 @@ func _rebuild_labels_overlay() -> void:
 const GLOBE_LABEL_VIRTUAL_ZOOM := 0.07
 
 func _update_labels_overlay_zoom_behavior() -> void:
-	_update_region_labels_zoom_behavior()
+	# Shared occupancy for RimWorld-style decluttering: region names claim
+	# their space first (they are the big geography names), settlement labels
+	# fill whatever is left, and anything that would overlap stays hidden
+	# instead of stacking.
+	var occupied_rects: Array = []
+	_update_region_labels_zoom_behavior(occupied_rects)
 	if labels_overlay == null:
 		return
 	if _is_globe_view:
@@ -10285,6 +10322,8 @@ func _update_labels_overlay_zoom_behavior() -> void:
 			"tile_size": tile_size,
 			"rescale_on_zoom": true,
 			"auto_visibility": false,
+			"cull_overlaps": true,
+			"occupied_rects": occupied_rects,
 			"min_screen_size": labels_overlay_min_screen_size,
 			"max_screen_size": labels_overlay_max_screen_size
 		})
@@ -10399,18 +10438,21 @@ func _rebuild_region_labels_overlay() -> void:
 	_update_region_labels_zoom_behavior()
 	_update_labels_overlay_visibility()
 
-func _update_region_labels_zoom_behavior() -> void:
+func _update_region_labels_zoom_behavior(occupied_rects: Array = []) -> void:
 	if _region_labels_overlay == null:
 		return
 	var zoom_factor := GLOBE_LABEL_VIRTUAL_ZOOM if _is_globe_view else (overworld_camera.zoom.x if overworld_camera != null else 1.0)
 	# Region names are overview aids: constant on-screen size at any zoom,
-	# never auto-hidden while the labels toggle is on.
+	# never auto-hidden while the labels toggle is on, decluttered so two
+	# region names can never stack on top of each other.
 	OverworldLabelsService.update_zoom_behavior(_region_labels_overlay, zoom_factor, {
 		"tile_size": tile_size,
 		"rescale_on_zoom": labels_overlay_rescale_on_zoom,
 		"auto_visibility": false,
 		"constant_screen_size": true,
 		"target_screen_px": REGION_LABEL_SCREEN_PX,
+		"cull_overlaps": true,
+		"occupied_rects": occupied_rects,
 		"min_screen_size": labels_overlay_min_screen_size,
 		"max_screen_size": labels_overlay_max_screen_size
 	})
