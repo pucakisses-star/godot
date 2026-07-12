@@ -9275,6 +9275,9 @@ func _update_globe_texture() -> void:
 	globe_material.set_shader_parameter("land_blend_power", scene3d_land_blend_power)
 	globe_material.set_shader_parameter("height_scale", globe_height_scale)
 	globe_material.set_shader_parameter("map_patch_span", globe_map_patch_span)
+	# Fixed painted worlds (Earth, Azeroth, ...) ARE whole planets: wrap the
+	# entire sphere; only procedural worlds read as a region of a larger one.
+	globe_material.set_shader_parameter("map_full_wrap", 1.0 if not _fixed_layout_key.is_empty() else 0.0)
 	globe_material.set_shader_parameter("filler_ocean_color", _globe_bridge_ocean_color())
 	# Every world gets its own arrangement of scenery continents.
 	globe_material.set_shader_parameter("filler_seed", map_seed & 0x7FFFFFFF)
@@ -9474,10 +9477,13 @@ func _globe_tile_under_mouse() -> Vector2i:
 	# acos(y/r) from the north pole down.
 	var sphere_u := fposmod(atan2(hit.x, hit.z) / TAU, 1.0)
 	var sphere_v := acos(clampf(hit.y / maxf(radius, 0.0001), -1.0, 1.0)) / PI
-	# Invert the map patch placement; the filler planet around the patch
-	# describes no real tile.
-	var local_u := (sphere_u - 0.5) / maxf(globe_map_patch_span.x, 0.001) + 0.5
-	var local_v := (sphere_v - 0.5) / maxf(globe_map_patch_span.y, 0.001) + 0.5
+	# Fixed worlds wrap the whole sphere; procedural worlds invert the map
+	# patch placement, and the filler planet around it describes no tile.
+	var local_u := sphere_u
+	var local_v := sphere_v
+	if _fixed_layout_key.is_empty():
+		local_u = (sphere_u - 0.5) / maxf(globe_map_patch_span.x, 0.001) + 0.5
+		local_v = (sphere_v - 0.5) / maxf(globe_map_patch_span.y, 0.001) + 0.5
 	if local_u < 0.0 or local_u > 1.0 or local_v < 0.0 or local_v > 1.0:
 		return miss
 	var coord := Vector2i(
@@ -10277,8 +10283,14 @@ func _rebuild_labels_overlay() -> void:
 ## fonts must grow far beyond their 2D sizes to stay readable. Feeding the
 ## rescale path this virtual zoom does exactly that while preserving the
 ## importance hierarchy.
-## Tuned for the map patch covering ~40% of the sphere's longitude.
-const GLOBE_LABEL_VIRTUAL_ZOOM := 0.03
+## Virtual zoom factors feeding the label rescale on the globe: fixed
+## worlds wrap the whole sphere, procedural maps cover only the ~40%
+## patch, so their labels must grow further to hold the same screen size.
+const GLOBE_LABEL_VIRTUAL_ZOOM_FULL_WRAP := 0.07
+const GLOBE_LABEL_VIRTUAL_ZOOM_PATCH := 0.03
+
+func _globe_label_virtual_zoom() -> float:
+	return GLOBE_LABEL_VIRTUAL_ZOOM_FULL_WRAP if not _fixed_layout_key.is_empty() else GLOBE_LABEL_VIRTUAL_ZOOM_PATCH
 
 func _update_labels_overlay_zoom_behavior() -> void:
 	# Shared occupancy for RimWorld-style decluttering: region names claim
@@ -10290,7 +10302,7 @@ func _update_labels_overlay_zoom_behavior() -> void:
 	if labels_overlay == null:
 		return
 	if _is_globe_view:
-		OverworldLabelsService.update_zoom_behavior(labels_overlay, GLOBE_LABEL_VIRTUAL_ZOOM, {
+		OverworldLabelsService.update_zoom_behavior(labels_overlay, _globe_label_virtual_zoom(), {
 			"tile_size": tile_size,
 			"rescale_on_zoom": true,
 			"auto_visibility": false,
@@ -10413,7 +10425,7 @@ func _rebuild_region_labels_overlay() -> void:
 func _update_region_labels_zoom_behavior(occupied_rects: Array = []) -> void:
 	if _region_labels_overlay == null:
 		return
-	var zoom_factor := GLOBE_LABEL_VIRTUAL_ZOOM if _is_globe_view else (overworld_camera.zoom.x if overworld_camera != null else 1.0)
+	var zoom_factor := _globe_label_virtual_zoom() if _is_globe_view else (overworld_camera.zoom.x if overworld_camera != null else 1.0)
 	# Region names are overview aids: constant on-screen size at any zoom,
 	# never auto-hidden while the labels toggle is on, decluttered so two
 	# region names can never stack on top of each other.
