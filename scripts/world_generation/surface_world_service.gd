@@ -319,12 +319,21 @@ static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, 
 				decor = "tree_dark" if danger > 0.55 else "tree"
 			return {"base": base, "decor": decor}
 		TILE_ATLAS_DEFS.BIOME_TUNDRA:
-			# Real snow ground (painted into the town/surface tileset), with
-			# an occasional drift variant and the odd wind-bent conifer.
-			var base := "snow_alt" if detail > 0.35 else "snow"
+			# Real snow ground (painted into the town/surface tileset) with
+			# wind-carved sastrugi patterns swept through the open fields,
+			# drift variants, snow-capped boulders and wind-bent conifers.
+			var base := "snow"
+			if detail > 0.35:
+				base = "snow_alt"
+			elif detail > 0.12:
+				base = "snow_swirl"
+			elif detail < -0.55:
+				base = "snow_carved"
 			var decor := ""
 			if forest > 0.32 and detail > 0.6:
 				decor = "tree_dark"
+			elif detail > 0.44 and forest < 0.0 and ((cell.x * 73856093 ^ cell.y * 19349663) & 0x7fffffff) % 47 == 0:
+				decor = "snow_rock"
 			return {"base": base, "decor": decor}
 		TILE_ATLAS_DEFS.BIOME_MARSH:
 			# Dark waterlogged grass gathered into real bog pools (the pool
