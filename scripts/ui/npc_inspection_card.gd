@@ -27,6 +27,7 @@ var _portrait_rect: TextureRect
 var _name_label: Label
 var _subtitle_label: Label
 var _age_clan_label: Label
+var _activity_label: Label
 var _detail_rows: VBoxContainer
 var _coins_label: Label
 var _seed_value := 0
@@ -80,6 +81,11 @@ func _populate_profile(npc_state: Dictionary, identity: Dictionary, role_title: 
 	if not clan.is_empty():
 		age_clan += " • Clan %s" % clan
 	_age_clan_label.text = age_clan
+	# What the scheduler has them doing right now ("drinking at the
+	# tavern", "hammering at the forge") — the goal made visible.
+	var doing := String(npc_state.get("activity_label", "")).strip_edges()
+	_activity_label.text = "✦ %s" % doing if not doing.is_empty() else ""
+	_activity_label.visible = not doing.is_empty()
 	for child: Node in _detail_rows.get_children():
 		# Free NOW, not end-of-frame: open() measures with reset_size()
 		# this same frame, and queued-free rows still count toward the
@@ -252,6 +258,10 @@ func _build_ui() -> void:
 	_age_clan_label.add_theme_font_size_override("font_size", 12)
 	_age_clan_label.add_theme_color_override("font_color", Color(0.78, 0.7, 0.56, 1.0))
 	details.add_child(_age_clan_label)
+	_activity_label = Label.new()
+	_activity_label.add_theme_font_size_override("font_size", 12)
+	_activity_label.add_theme_color_override("font_color", Color(0.66, 0.78, 0.62, 1.0))
+	details.add_child(_activity_label)
 	_detail_rows = VBoxContainer.new()
 	_detail_rows.add_theme_constant_override("separation", 1)
 	details.add_child(_detail_rows)

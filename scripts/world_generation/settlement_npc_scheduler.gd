@@ -4,13 +4,21 @@ class_name SettlementNpcScheduler
 ## Daily-life simulation for settlement NPCs (towns and dwarfholds).
 ## Each resident gets a role (matching their spritesheet slot), a home bed
 ## and a workplace; the game clock then drives where they head: work by
-## day, leisure at the tavern and around the plaza in the morning and
-## evening, home to bed at night. Guard-role NPCs patrol waypoints instead
-## of working a building, and half of them keep a night watch. Commutes
-## follow cached BFS paths (buildings have walls and single doors, so
-## greedy steps alone pile residents against the masonry), with a random
-## wander inside the anchor radius on arrival, reusing the tavern
-## service's facing/frame animation.
+## day, leisure in the evening, home to bed at night. Guard-role NPCs
+## patrol waypoints instead of working a building, and half of them keep
+## a night watch. Commutes follow cached BFS paths (buildings have walls
+## and single doors, so greedy steps alone pile residents against the
+## masonry), reusing the tavern service's facing/frame animation.
+##
+## Inside a shift nobody mills at random: every resident runs on NEEDS
+## (thirst, faith, company, recreation, errands) that build over time.
+## Off-shift they plan an objective against the settlement's venues —
+## drink at the tavern, pray at the temple, browse the market, visit a
+## friend or kinsdwarf and chat — walk there, engage for a while, and
+## sate the need. Workers rotate between task stations around their
+## workplace and take a tavern lunch when the town has one. At night a
+## dwarf with a claimed bed lies down IN it. Whatever they're doing is
+## written to state.activity_label, so inspection UIs can show the goal.
 ##
 ## Role numbers are spritesheet slots; which slot means what is supplied
 ## by the calling scene through the assignment context ("role_quotas",
@@ -31,6 +39,89 @@ const WORK_END_HOUR := 18.0
 const TRAVEL_COOLDOWN_RANGE := Vector2(0.05, 0.25)
 const WANDER_COOLDOWN_RANGE := Vector2(0.8, 2.4)
 const SLEEP_COOLDOWN_RANGE := Vector2(4.0, 9.0)
+
+## --- Needs & objectives -----------------------------------------------------
+## Every resident carries a small set of Dwarf-Fortress-style needs that
+## climb in real time; the most pressing one with an available venue
+## becomes their next objective. Rates are per real second, tuned so a
+## full evening of leisure cycles through two or three objectives.
+const NEED_RATES := {
+	"drink": 0.014,
+	"social": 0.011,
+	"worship": 0.008,
+	"market": 0.009,
+	"recreation": 0.010
+}
+## Which venue building types can sate a need, in preference order.
+const NEED_VENUES := {
+	"drink": ["tavern", "inn"],
+	"worship": ["temple", "chapel", "church", "shrine"],
+	"market": ["market_stall", "general_store", "auction_house", "bakery"],
+	"recreation": ["park", "bathhouse", "museum", "library", "archives"]
+}
+## What engaging at a venue reads as on the inspection card.
+const VENUE_LABELS := {
+	"tavern": "drinking at the tavern",
+	"inn": "drinking at the inn",
+	"temple": "praying at the temple",
+	"chapel": "praying at the chapel",
+	"church": "praying at the church",
+	"shrine": "praying at the shrine",
+	"market_stall": "browsing the market",
+	"general_store": "browsing the shops",
+	"auction_house": "watching the auctions",
+	"bakery": "buying bread",
+	"park": "resting in the park",
+	"bathhouse": "enjoying the baths",
+	"museum": "admiring the museum",
+	"library": "reading in the library",
+	"archives": "reading in the archives"
+}
+## Destination phrasing while walking there ("off to %s").
+const VENUE_GOALS := {
+	"tavern": "the tavern",
+	"inn": "the inn",
+	"temple": "the temple",
+	"chapel": "the chapel",
+	"church": "the church",
+	"shrine": "the shrine",
+	"market_stall": "the market",
+	"general_store": "the shops",
+	"auction_house": "the auction house",
+	"bakery": "the bakery",
+	"park": "the park",
+	"bathhouse": "the baths",
+	"museum": "the museum",
+	"library": "the library",
+	"archives": "the archives"
+}
+## Work reads as the trade, not as "standing around".
+const WORK_LABELS := {
+	"forge": "hammering at the forge",
+	"smithy": "hammering at the forge",
+	"smeltery": "feeding the smelter",
+	"brewery": "minding the mash",
+	"tavern": "keeping the taproom",
+	"inn": "keeping the inn",
+	"bakery": "baking the day's bread",
+	"kitchen": "cooking",
+	"market_stall": "minding the stall",
+	"general_store": "minding the counter",
+	"temple": "tending the altar",
+	"chapel": "tending the altar",
+	"church": "tending the altar",
+	"archives": "copying records",
+	"library": "shelving books",
+	"runesmith_sanctum": "graving runes",
+	"gemcutters_studio": "cutting gems",
+	"bank_vaults": "counting coin",
+	"barber_shop": "cutting hair",
+	"tannery": "scraping hides"
+}
+const ACTIVITY_ENGAGE_SECONDS := Vector2(8.0, 18.0)
+const WORK_STATION_SECONDS := Vector2(6.0, 14.0)
+const LUNCH_START_HOUR := 12.0
+const LUNCH_END_HOUR := 13.0
 
 ## Commute path computations allowed per update call; the rest of the
 ## crowd falls back to a greedy step this wake and asks again next time,
@@ -61,6 +152,9 @@ static func assign_daily_lives(npc_states: Array[Dictionary], context: Dictionar
 	var street_cells: Array[Vector2i] = []
 	for street_variant: Variant in (context.get("street_cells", []) as Array):
 		street_cells.append(street_variant as Vector2i)
+	var house_cells: Array[Vector2i] = []
+	for house_variant: Variant in (context.get("house_cells", []) as Array):
+		house_cells.append(house_variant as Vector2i)
 	var green_cells: Array[Vector2i] = []
 	for green_variant: Variant in (context.get("green_cells", []) as Array):
 		green_cells.append(green_variant as Vector2i)
@@ -85,14 +179,21 @@ static func assign_daily_lives(npc_states: Array[Dictionary], context: Dictionar
 		state["slot"] = role
 		state["role"] = role
 
-		# Home: a bed of their own (stand on the nearest open cell beside it).
+		# Home: a bed of their own — the bedside cell is the anchor, the
+		# bed itself is claimed so its owner can lie IN it at night.
 		var home_anchor := Vector2i(2147483647, 2147483647)
 		while bed_index < bed_cells.size():
-			var candidate := _walkable_neighbor(bed_cells[bed_index], is_walkable)
+			var bed := bed_cells[bed_index]
+			var candidate := _walkable_neighbor(bed, is_walkable)
 			bed_index += 1
 			if candidate.x != 2147483647:
 				home_anchor = candidate
+				state["bed_cell"] = bed
 				break
+		# Out of beds: bunk on a house floor rather than in the street, so
+		# nobody sleeps standing in an open corridor.
+		if home_anchor.x == 2147483647 and not house_cells.is_empty():
+			home_anchor = house_cells[rng.randi_range(0, house_cells.size() - 1)]
 		if home_anchor.x == 2147483647 and not street_cells.is_empty():
 			home_anchor = street_cells[rng.randi_range(0, street_cells.size() - 1)]
 		state["home_anchor"] = home_anchor
@@ -227,8 +328,9 @@ static func _radius_for_mode(mode: String) -> int:
 		_:
 			return 5
 
-## Per-frame update: clock-driven anchors + greedy walk, reusing the tavern
-## service's facing/frame animation.
+## Per-frame update: clock-driven anchors, needs-driven objectives, and
+## pathed walks, reusing the tavern service's facing/frame animation.
+## pois: venue type -> Array of walkable Vector2i cells (build_poi_table).
 static func update_scheduled_npcs(
 	delta: float,
 	npc_states: Array[Dictionary],
@@ -238,13 +340,27 @@ static func update_scheduled_npcs(
 	hour: float,
 	is_npc_walkable: Callable,
 	cell_center_position: Callable,
-	shelter := false
+	shelter := false,
+	pois: Dictionary = {}
 ) -> void:
 	_path_budget = MAX_PATHS_PER_UPDATE
 	for state: Dictionary in npc_states:
 		var sprite := state.get("sprite") as Sprite2D
 		if sprite == null:
 			continue
+
+		_raise_needs(state, delta, rng)
+		# A running engagement burns down in real time; on completion the
+		# need it served is sated and the resident plans afresh.
+		var running := state.get("activity", {}) as Dictionary
+		if not running.is_empty() and bool(running.get("engaged", false)):
+			running["remaining"] = float(running.get("remaining", 0.0)) - delta
+			if float(running["remaining"]) <= 0.0:
+				var sated := String(running.get("need", ""))
+				var needs := state.get("needs", {}) as Dictionary
+				if not sated.is_empty() and needs.has(sated):
+					needs[sated] = 0.0
+				state.erase("activity")
 
 		var mode := mode_for_hour(state, hour, shelter)
 		if String(state.get("mode", "")) != mode:
@@ -253,7 +369,9 @@ static func update_scheduled_npcs(
 			# (and spreads the path computations across many frames).
 			state["cooldown"] = rng.randf_range(0.0, 2.0)
 			state.erase("travel_path")
+			state.erase("activity")
 			_update_sleep_tag(sprite, false)
+			_leave_bed(state, sprite, cell_center_position)
 
 		var cooldown := float(state.get("cooldown", 0.0)) - delta
 		var direction := state.get("direction", Vector2.ZERO) as Vector2
@@ -263,12 +381,23 @@ static func update_scheduled_npcs(
 			var current_cell := city_layer.local_to_map(sprite.position)
 			var anchor := anchor_for_mode(state, mode)
 			var radius := _radius_for_mode(mode)
-			var distance := _chebyshev(current_cell, anchor)
 
-			if mode == MODE_PATROL and distance <= 1:
+			if mode == MODE_PATROL and _chebyshev(current_cell, anchor) <= 1:
 				state["patrol_index"] = int(state.get("patrol_index", 0)) + 1
 				anchor = anchor_for_mode(state, mode)
-				distance = _chebyshev(current_cell, anchor)
+			# Already tucked in: the bed IS the anchor, or the sleeper would
+			# march back to the bedside cell and hop in again forever.
+			if mode == MODE_SLEEP and bool(state.get("in_bed", false)):
+				anchor = state.get("bed_cell", anchor) as Vector2i
+
+			# Work and leisure run on objectives, not on loitering: the
+			# activity (a venue visit, a task station, a social call)
+			# overrides the mode's plain anchor while it lasts.
+			var activity := _ensure_activity(state, mode, npc_states, pois, rng, hour, is_npc_walkable)
+			if not activity.is_empty():
+				anchor = _activity_anchor(state, activity, npc_states, anchor)
+				radius = int(activity.get("radius", 1))
+			var distance := _chebyshev(current_cell, anchor)
 
 			var step := Vector2i.ZERO
 			if distance > radius:
@@ -279,11 +408,41 @@ static func update_scheduled_npcs(
 				step = _travel_path_step(state, current_cell, anchor, is_npc_walkable)
 				if step == Vector2i.ZERO:
 					step = _step_toward(current_cell, anchor, is_npc_walkable, rng)
+				if not activity.is_empty():
+					_set_label(state, "off to %s" % String(activity.get("goal", "an errand")))
+				elif mode == MODE_SLEEP:
+					_set_label(state, "heading home to sleep")
+				elif mode == MODE_SHELTER:
+					_set_label(state, "hurrying out of the storm")
+				elif mode == MODE_MEETING:
+					_set_label(state, "answering the meeting bell")
+				elif mode == MODE_PATROL:
+					_set_label(state, "on patrol")
+				else:
+					_set_label(state, "")
+				# A traveller who can't advance this wake shouldn't report
+				# an unreachable errand forever; give up and replan.
+				if step == Vector2i.ZERO and not activity.is_empty() and int(state.get("travel_bfs_backoff", 0)) > 0:
+					state.erase("activity")
 			elif mode == MODE_SLEEP:
 				step = Vector2i.ZERO
 				_update_sleep_tag(sprite, true)
-			elif rng.randf() < 0.6:
-				step = _wander_step(current_cell, anchor, radius, is_npc_walkable, rng)
+				_lie_in_bed(state, sprite, cell_center_position)
+				_set_label(state, "asleep in bed" if bool(state.get("in_bed", false)) else "asleep on their feet")
+			elif mode == MODE_PATROL:
+				_set_label(state, "keeping the night watch" if bool(state.get("night_watch", false)) else "on patrol")
+			elif mode == MODE_MEETING:
+				_set_label(state, "at a gathering")
+			elif mode == MODE_SHELTER:
+				_set_label(state, "sheltering from the storm")
+			elif not activity.is_empty():
+				# ARRIVED: engage the objective — face it, hold the spot,
+				# and let the countdown at the top of the loop run it out.
+				step = _engage_activity(state, activity, current_cell, npc_states, is_npc_walkable, rng)
+			else:
+				_set_label(state, "")
+				if rng.randf() < 0.6:
+					step = _wander_step(current_cell, anchor, radius, is_npc_walkable, rng)
 
 			if step != Vector2i.ZERO:
 				var next_cell := current_cell + step
@@ -291,6 +450,10 @@ static func update_scheduled_npcs(
 				target = cell_center_position.call(next_cell)
 				state["facing_row"] = DwarfHoldTavernService.facing_row_from_direction(direction)
 				cooldown = rng.randf_range(TRAVEL_COOLDOWN_RANGE.x, TRAVEL_COOLDOWN_RANGE.y) if distance > radius else rng.randf_range(WANDER_COOLDOWN_RANGE.x, WANDER_COOLDOWN_RANGE.y)
+			elif not activity.is_empty() and distance <= radius:
+				# Engaged residents re-check often (to keep facing a moving
+				# chat partner and to count the engagement down).
+				cooldown = rng.randf_range(0.6, 1.2)
 			else:
 				cooldown = rng.randf_range(SLEEP_COOLDOWN_RANGE.x, SLEEP_COOLDOWN_RANGE.y) if mode == MODE_SLEEP else rng.randf_range(WANDER_COOLDOWN_RANGE.x, WANDER_COOLDOWN_RANGE.y)
 
@@ -332,6 +495,290 @@ static func update_scheduled_npcs(
 		state["target"] = target
 		state["frame"] = frame
 		state["frame_elapsed"] = frame_elapsed
+
+## --- Needs, objectives & beds -------------------------------------------
+
+## Filters each known venue type's cells down to walkable ones. Scenes
+## call this once after generation and hand the table to every
+## update_scheduled_npcs call.
+static func build_poi_table(building_cells_by_type: Dictionary, is_walkable: Callable) -> Dictionary:
+	var pois: Dictionary = {}
+	var wanted: Dictionary = {}
+	for need_variant: Variant in NEED_VENUES.values():
+		for venue_variant: Variant in need_variant as Array:
+			wanted[String(venue_variant)] = true
+	for venue_type_variant: Variant in building_cells_by_type.keys():
+		var venue_type := String(venue_type_variant)
+		if not wanted.has(venue_type):
+			continue
+		var open_cells: Array = []
+		for cell_variant: Variant in (building_cells_by_type[venue_type_variant] as Array):
+			var cell := cell_variant as Vector2i
+			if bool(is_walkable.call(cell)):
+				open_cells.append(cell)
+		if not open_cells.is_empty():
+			pois[venue_type] = open_cells
+	return pois
+
+## Needs climb in real time, seeded at a random level so the whole
+## settlement doesn't get thirsty in unison.
+static func _raise_needs(state: Dictionary, delta: float, rng: RandomNumberGenerator) -> void:
+	var needs := state.get("needs", {}) as Dictionary
+	if needs.is_empty():
+		for need_variant: Variant in NEED_RATES.keys():
+			needs[String(need_variant)] = rng.randf_range(0.0, 0.6)
+		state["needs"] = needs
+	for need_variant: Variant in NEED_RATES.keys():
+		var need := String(need_variant)
+		needs[need] = minf(float(needs[need]) + float(NEED_RATES[need]) * delta, 1.5)
+
+static func _set_label(state: Dictionary, text: String) -> void:
+	state["activity_label"] = text
+
+## Returns the state's current activity, planning a new one when idle.
+## Activities: {"kind", "need", "cell"/"partner", "label", "remaining",
+## "radius", "engaged"}.
+static func _ensure_activity(
+	state: Dictionary,
+	mode: String,
+	npc_states: Array[Dictionary],
+	pois: Dictionary,
+	rng: RandomNumberGenerator,
+	hour: float,
+	is_npc_walkable: Callable
+) -> Dictionary:
+	if mode != MODE_WORK and mode != MODE_LEISURE:
+		return {}
+	var activity := state.get("activity", {}) as Dictionary
+	if not activity.is_empty():
+		return activity
+	if mode == MODE_WORK:
+		activity = _plan_work_activity(state, pois, rng, hour, is_npc_walkable)
+	else:
+		activity = _plan_leisure_activity(state, npc_states, pois, rng)
+	if not activity.is_empty():
+		state["activity"] = activity
+	return activity
+
+## Workers rotate between task stations around their workplace; when the
+## settlement pours ale, midday is spent at the tavern instead.
+static func _plan_work_activity(
+	state: Dictionary,
+	pois: Dictionary,
+	rng: RandomNumberGenerator,
+	hour: float,
+	is_npc_walkable: Callable
+) -> Dictionary:
+	var personal_hour := fposmod(hour + float(state.get("schedule_jitter", 0.0)), 24.0)
+	if personal_hour >= LUNCH_START_HOUR and personal_hour < LUNCH_END_HOUR:
+		var lunch_cell := _pick_venue_cell(["tavern", "inn"], pois, rng)
+		if lunch_cell.x != 2147483647:
+			return {
+				"kind": "venue", "need": "drink", "cell": lunch_cell,
+				"label": "taking lunch at the tavern",
+				"goal": "the tavern for lunch",
+				"remaining": rng.randf_range(ACTIVITY_ENGAGE_SECONDS.x, ACTIVITY_ENGAGE_SECONDS.y),
+				"radius": 1, "engaged": false
+			}
+	var work_anchor := state.get("work_anchor", Vector2i(2147483647, 2147483647)) as Vector2i
+	if work_anchor.x == 2147483647:
+		return {}
+	var station := work_anchor
+	for _attempt in 6:
+		var candidate := work_anchor + Vector2i(rng.randi_range(-2, 2), rng.randi_range(-2, 2))
+		if candidate != work_anchor and bool(is_npc_walkable.call(candidate)):
+			station = candidate
+			break
+	var trade := String(state.get("staffed_building_type", ""))
+	var label := String(WORK_LABELS.get(trade, "hard at work"))
+	if bool(state.get("is_ruler", false)):
+		label = "holding court"
+	return {
+		"kind": "station", "need": "", "cell": station,
+		"label": label,
+		"goal": "their post",
+		"remaining": rng.randf_range(WORK_STATION_SECONDS.x, WORK_STATION_SECONDS.y),
+		"radius": 0, "engaged": false
+	}
+
+## Off-shift, the most pressing need with an open venue wins: a drink, a
+## prayer, an errand, a bath — or calling on kin for a chat. With nothing
+## pressing (or nowhere to go), an evening stroll still has a name.
+static func _plan_leisure_activity(
+	state: Dictionary,
+	npc_states: Array[Dictionary],
+	pois: Dictionary,
+	rng: RandomNumberGenerator
+) -> Dictionary:
+	var needs := state.get("needs", {}) as Dictionary
+	var need_keys: Array = needs.keys()
+	need_keys.sort_custom(func(left: Variant, right: Variant) -> bool:
+		return float(needs[left]) > float(needs[right]))
+	for need_variant: Variant in need_keys:
+		var need := String(need_variant)
+		if float(needs[need]) < 0.55:
+			break
+		if need == "social":
+			var partner_name := _pick_chat_partner(state, npc_states, rng)
+			if partner_name.is_empty():
+				continue
+			return {
+				"kind": "social", "need": "social", "partner": partner_name,
+				"label": "calling on %s" % partner_name.get_slice(" ", 0),
+				"goal": "call on %s" % partner_name.get_slice(" ", 0),
+				"remaining": rng.randf_range(ACTIVITY_ENGAGE_SECONDS.x, ACTIVITY_ENGAGE_SECONDS.y),
+				"radius": 1, "engaged": false
+			}
+		var venue_types := NEED_VENUES.get(need, []) as Array
+		var venue_cell := Vector2i(2147483647, 2147483647)
+		var venue_label := ""
+		var venue_goal := ""
+		for venue_type_variant: Variant in venue_types:
+			var venue_type := String(venue_type_variant)
+			var cells := pois.get(venue_type, []) as Array
+			if cells.is_empty():
+				continue
+			venue_cell = cells[rng.randi_range(0, cells.size() - 1)] as Vector2i
+			venue_label = String(VENUE_LABELS.get(venue_type, "running an errand"))
+			venue_goal = String(VENUE_GOALS.get(venue_type, "an errand"))
+			break
+		if venue_cell.x == 2147483647:
+			continue
+		return {
+			"kind": "venue", "need": need, "cell": venue_cell,
+			"label": venue_label,
+			"goal": venue_goal,
+			"remaining": rng.randf_range(ACTIVITY_ENGAGE_SECONDS.x, ACTIVITY_ENGAGE_SECONDS.y),
+			"radius": 1, "engaged": false
+		}
+	## Nothing urgent: a named stroll near their haunt (sates recreation).
+	return {
+		"kind": "stroll", "need": "recreation",
+		"cell": state.get("leisure_anchor", Vector2i.ZERO) as Vector2i,
+		"label": "taking the evening air",
+		"goal": "their favorite haunt",
+		"remaining": rng.randf_range(ACTIVITY_ENGAGE_SECONDS.x, ACTIVITY_ENGAGE_SECONDS.y),
+		"radius": 3, "engaged": false
+	}
+
+## Kin first (spouse, then parents/children living in the roster), then
+## any fellow resident, so chats reflect the census.
+static func _pick_chat_partner(state: Dictionary, npc_states: Array[Dictionary], rng: RandomNumberGenerator) -> String:
+	var own_name := String(state.get("npc_name", ""))
+	var identity := state.get("identity", {}) as Dictionary
+	var preferred: Array[String] = []
+	var spouse := String(identity.get("spouse", ""))
+	if not spouse.is_empty():
+		preferred.append(spouse)
+	for list_key: String in ["children", "parents"]:
+		for kin_variant: Variant in (identity.get(list_key, []) as Array):
+			preferred.append(String(kin_variant))
+	for kin_name: String in preferred:
+		if not kin_name.is_empty() and kin_name != own_name and _find_state_by_name(npc_states, kin_name) >= 0:
+			return kin_name
+	if npc_states.size() <= 1:
+		return ""
+	for _attempt in 4:
+		var other := npc_states[rng.randi_range(0, npc_states.size() - 1)]
+		var other_name := String(other.get("npc_name", ""))
+		if not other_name.is_empty() and other_name != own_name:
+			return other_name
+	return ""
+
+static func _find_state_by_name(npc_states: Array[Dictionary], npc_name: String) -> int:
+	for index in npc_states.size():
+		if String(npc_states[index].get("npc_name", "")) == npc_name:
+			return index
+	return -1
+
+## Where the activity wants the resident: a fixed venue cell, or the
+## chat partner's CURRENT cell (kept fresh so the path follows them).
+static func _activity_anchor(state: Dictionary, activity: Dictionary, npc_states: Array[Dictionary], fallback: Vector2i) -> Vector2i:
+	if String(activity.get("kind", "")) == "social":
+		var partner_index := _find_state_by_name(npc_states, String(activity.get("partner", "")))
+		if partner_index < 0:
+			state.erase("activity")
+			return fallback
+		return npc_states[partner_index].get("cell", fallback) as Vector2i
+	return activity.get("cell", fallback) as Vector2i
+
+## On arrival: mark the activity engaged, face what it's about, and pull
+## an idle chat partner into the conversation. Strolls keep drifting
+## inside their radius; everything else holds its spot.
+static func _engage_activity(
+	state: Dictionary,
+	activity: Dictionary,
+	current_cell: Vector2i,
+	npc_states: Array[Dictionary],
+	is_npc_walkable: Callable,
+	rng: RandomNumberGenerator
+) -> Vector2i:
+	activity["engaged"] = true
+	_set_label(state, String(activity.get("label", "")))
+	var kind := String(activity.get("kind", ""))
+	if kind == "social":
+		var partner_index := _find_state_by_name(npc_states, String(activity.get("partner", "")))
+		if partner_index >= 0:
+			var partner := npc_states[partner_index]
+			var partner_cell := partner.get("cell", current_cell) as Vector2i
+			var toward := partner_cell - current_cell
+			if toward != Vector2i.ZERO:
+				state["facing_row"] = DwarfHoldTavernService.facing_row_from_direction(Vector2(toward))
+			# An idle off-shift partner turns to answer: both hold still,
+			# face each other, and wear the conversation on their card.
+			if String(partner.get("mode", "")) == MODE_LEISURE and (partner.get("direction", Vector2.ZERO) as Vector2).length_squared() <= 0.0:
+				partner["facing_row"] = DwarfHoldTavernService.facing_row_from_direction(Vector2(-toward))
+				partner["cooldown"] = maxf(float(partner.get("cooldown", 0.0)), 1.5)
+				_set_label(partner, "chatting with %s" % String(state.get("npc_name", "someone")).get_slice(" ", 0))
+			_set_label(state, "chatting with %s" % String(activity.get("partner", "someone")).get_slice(" ", 0))
+		return Vector2i.ZERO
+	if kind == "stroll":
+		return _wander_step(current_cell, activity.get("cell", current_cell) as Vector2i, int(activity.get("radius", 3)), is_npc_walkable, rng)
+	var focus := activity.get("cell", current_cell) as Vector2i
+	var toward_focus := focus - current_cell
+	if toward_focus != Vector2i.ZERO:
+		state["facing_row"] = DwarfHoldTavernService.facing_row_from_direction(Vector2(toward_focus))
+	return Vector2i.ZERO
+
+## A dwarf with a claimed bed sleeps IN it: the sprite lies sideways on
+## the bed cell (the zZ tag counter-rotates to stay readable).
+static func _lie_in_bed(state: Dictionary, sprite: Sprite2D, cell_center_position: Callable) -> void:
+	if bool(state.get("in_bed", false)):
+		return
+	var bed_variant: Variant = state.get("bed_cell")
+	if not (bed_variant is Vector2i):
+		return
+	var bed := bed_variant as Vector2i
+	sprite.position = cell_center_position.call(bed)
+	sprite.rotation_degrees = 90.0
+	state["cell"] = bed
+	state["target"] = sprite.position
+	state["in_bed"] = true
+	var tag := sprite.get_node_or_null(SLEEP_TAG_NAME) as Label
+	if tag != null:
+		tag.rotation_degrees = -90.0
+
+## Waking up steps back off the bed onto the bedside anchor.
+static func _leave_bed(state: Dictionary, sprite: Sprite2D, cell_center_position: Callable) -> void:
+	if not bool(state.get("in_bed", false)):
+		return
+	state["in_bed"] = false
+	sprite.rotation_degrees = 0.0
+	var tag := sprite.get_node_or_null(SLEEP_TAG_NAME) as Label
+	if tag != null:
+		tag.rotation_degrees = 0.0
+	var home := state.get("home_anchor", Vector2i(2147483647, 2147483647)) as Vector2i
+	if home.x != 2147483647:
+		sprite.position = cell_center_position.call(home)
+		state["cell"] = home
+		state["target"] = sprite.position
+
+static func _pick_venue_cell(venue_types: Array, pois: Dictionary, rng: RandomNumberGenerator) -> Vector2i:
+	for venue_type_variant: Variant in venue_types:
+		var cells := pois.get(String(venue_type_variant), []) as Array
+		if not cells.is_empty():
+			return cells[rng.randi_range(0, cells.size() - 1)] as Vector2i
+	return Vector2i(2147483647, 2147483647)
 
 ## One greedy step toward the goal; when the best axis is blocked, tries the
 ## other axis, then any open cell so crowds squeeze around corners.
