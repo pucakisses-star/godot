@@ -84,9 +84,10 @@ static func profile_for_tile(coord: Vector2i, tile_info: Dictionary, map_seed: i
 		clampf(float(tile_info.get("moisture", 0.5)), 0.0, 1.0)
 	)
 
-## Geology for a settlement scene that is not tied to a map tile (the hold
-## keys off the world seed alone): fabricates plausible terrain inputs
-## from the seed so the profile is stable per world.
+## Fallback geology for a hold opened without journey context (direct
+## scene runs, old saves): fabricates plausible mountain terrain inputs
+## from the seed so the profile is stable per world. Holds entered from
+## the overworld use their own tile's profile instead.
 static func profile_for_seed(seed_value: int) -> Dictionary:
 	var moisture := 0.3 + _hash01(3, 17, seed_value) * 0.5
 	var volcano := 0.4 if _hash01(11, 29, seed_value) < 0.12 else 0.0

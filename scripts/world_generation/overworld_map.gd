@@ -756,6 +756,7 @@ const CONTEXT_MENU_MORE_INFORMATION_ID := 1
 const DWARFHOLD_GENERATION_SCENE_PATH := "res://scenes/dwarf_hold_generation.tscn"
 const DWARFHOLD_SCENE_SEED_KEY := "dwarfhold_scene_seed"
 const DWARFHOLD_SCENE_TILE_KEY := "dwarfhold_scene_tile"
+const DWARFHOLD_SCENE_GEOLOGY_KEY := "dwarfhold_scene_geology"
 const DWARFHOLD_SCENE_NAME_KEY := "dwarfhold_scene_name"
 const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
 ## Fall summary for abandoned holds ("Fell to <beast>, year <y>") so the
@@ -1401,6 +1402,8 @@ func _store_selected_dwarfhold_scene_context(seed_text: String, tile_coord: Vect
 	settings[DWARFHOLD_SCENE_NAME_KEY] = _tile_region_name(tile_coord, details)
 	settings[DWARFHOLD_SCENE_POPULATION_KEY] = maxi(0, int(details.get("population", 0)))
 	settings[DWARFHOLD_SCENE_FALL_KEY] = String(details.get("fall_summary", ""))
+	# The hold digs the geology this exact tile advertises in the tooltip.
+	settings[DWARFHOLD_SCENE_GEOLOGY_KEY] = GeologyService.profile_for_tile(tile_coord, details, map_seed)
 	settings["underdeep_sites"] = _build_underdeep_sites(tile_coord)
 	game_session.call("set_world_settings", settings)
 
@@ -2467,14 +2470,20 @@ func _persist_world_sites() -> void:
 				if ambient_sites.size() < WORLD_AMBIENT_SITE_CAP:
 					ambient_sites.append(ambient_site)
 			continue
-		sites.append({
+		var site_record := {
 			"x": coord.x, "y": coord.y,
 			"class": site_class,
 			"seed": seed_text,
 			"name": _tile_region_name(coord, details),
 			"population": maxi(0, int(details.get("population", 0))),
 			"theme": _town_theme_for_details(details)
-		})
+		}
+		if site_class == "dwarfhold":
+			# Holds rise out of a specific mountain tile: carry that tile's
+			# geology so entering via a caravan journey digs the same strata
+			# the overworld tooltip advertises.
+			site_record["geology"] = GeologyService.profile_for_tile(coord, details, map_seed)
+		sites.append(site_record)
 	if ambient_candidate_count > ambient_sites.size():
 		print("[OverworldMap] ambient landmark sites truncated: kept %d of %d" % [ambient_sites.size(), ambient_candidate_count])
 	sites.append_array(ambient_sites)

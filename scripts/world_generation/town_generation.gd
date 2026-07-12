@@ -5623,12 +5623,21 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 	# Settlements greet from their whole clearing; a hold's carved
 	# mountain door and a dungeon's mouth only open at the door itself.
 	var trigger_cells: Array[Vector2i] = []
+	var gate_rect := Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7))
 	match String(site.get("class", "")):
-		"dwarfhold", "dungeon":
+		"dwarfhold":
+			trigger_cells = [anchor, anchor + Vector2i(0, 1)]
+			# A hold's gate is a whole mountain massif, far bigger than a
+			# clearing: the rect must cover every stone cell so eviction
+			# knows to re-stamp the full mountain on return.
+			gate_rect = Rect2i(
+				anchor - Vector2i(HOLD_MASSIF_HALF_WIDTH + 1, HOLD_MASSIF_HALF_HEIGHT * 2 + 1),
+				Vector2i(HOLD_MASSIF_HALF_WIDTH * 2 + 3, HOLD_MASSIF_HALF_HEIGHT * 2 + 5))
+		"dungeon":
 			trigger_cells = [anchor, anchor + Vector2i(0, 1)]
 	_surface_gates.append({
 		"key": site_key,
-		"rect": Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7)),
+		"rect": gate_rect,
 		"anchor": anchor,
 		"site": site,
 		"stamped": false,
@@ -5664,6 +5673,13 @@ func _unplan_surface_site(site_key: String) -> void:
 		if gate_label != null and is_instance_valid(gate_label):
 			_surface_gate_labels.erase(gate_label)
 			gate_label.queue_free()
+		# A hold massif's stamped stone must not haunt the wilds after the
+		# mountain is unplanned; natural crag flags in the same rect come
+		# back when their chunks repaint from terrain.
+		var stale_rect := gate.get("rect", Rect2i()) as Rect2i
+		for stale_y in range(stale_rect.position.y, stale_rect.end.y):
+			for stale_x in range(stale_rect.position.x, stale_rect.end.x):
+				_surface_blocked_cells.erase(Vector2i(stale_x, stale_y))
 		_surface_anchor_cells.erase(gate.get("anchor", Vector2i.ZERO) as Vector2i)
 		_surface_gates.remove_at(gate_index)
 	for landmark_index in range(_surface_landmarks.size() - 1, -1, -1):
@@ -7257,10 +7273,41 @@ func _stamp_settlement_clearing(gate_rect: Rect2i, anchor: Vector2i) -> void:
 			decor_layer.erase_cell(cell)
 	_place_tile(decor_layer, anchor + Vector2i(0, -2), "fence_post")
 
-## The hold's face in the wilds: a stone front carved into the hillside,
-## hedge-flanked, with one door at its center and a paved apron leading
-## in. Only the door (and the apron cell before it) descends.
+## The hold's face in the wilds: the mountain itself. A hold rises out of
+## its overworld tile, so arriving overland means meeting a ragged crag
+## massif of impassable stone — the same blocked-crag rock the wild
+## ranges use — with a dressed-stone front carved into its south face and
+## one door at its center. Only the door (and the apron cell before it)
+## descends; every other approach meets solid rock. Roads are left alone,
+## so a traced trail still carves its pass up to the door.
+const HOLD_MASSIF_HALF_WIDTH := 8
+const HOLD_MASSIF_HALF_HEIGHT := 5
+
 func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
+	# The massif bulges north behind the door, its south slope reaching
+	# the door row: an ellipse with a hash-ragged edge so no two holds
+	# share a silhouette.
+	var massif_center := Vector2(float(anchor.x), float(anchor.y - HOLD_MASSIF_HALF_HEIGHT) + 1.0)
+	for y in range(anchor.y - HOLD_MASSIF_HALF_HEIGHT * 2, anchor.y + 1):
+		for x in range(anchor.x - HOLD_MASSIF_HALF_WIDTH, anchor.x + HOLD_MASSIF_HALF_WIDTH + 1):
+			var cell := Vector2i(x, y)
+			if _latest_grid.has(cell) or _surface_road_cells.has(cell):
+				continue
+			var dx := (float(x) - massif_center.x) / float(HOLD_MASSIF_HALF_WIDTH)
+			var dy := (float(y) - massif_center.y) / float(HOLD_MASSIF_HALF_HEIGHT)
+			var edge_noise := float(hash("hold_massif|%d|%d" % [cell.x, cell.y]) & 0xffff) / 65535.0
+			if dx * dx + dy * dy > 0.72 + edge_noise * 0.42:
+				continue
+			# Mostly bare crag with occasional sandy folds, like the wild
+			# ranges; the blocked set is what stops walkers (the crag tile
+			# itself is atlas-passable).
+			var fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
+			_place_tile(city_layer, cell, "sand_pebbles" if fold % 5 != 0 else "sand")
+			decor_layer.erase_cell(cell)
+			_surface_blocked_cells[cell] = true
+	# The carved front set into the south face: dressed stone with the
+	# hold's single door. These cells trade the crag's blocked flag for
+	# their own tile passability (walls block, the door opens).
 	for y in range(anchor.y - 2, anchor.y + 1):
 		for x in range(anchor.x - 3, anchor.x + 4):
 			var cell := Vector2i(x, y)
@@ -7269,8 +7316,10 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 			var wall_key := "wall_alt" if y == anchor.y - 2 else "wall"
 			_place_tile(city_layer, cell, wall_key)
 			decor_layer.erase_cell(cell)
+			_surface_blocked_cells.erase(cell)
 	_place_tile(city_layer, anchor, "door")
 	decor_layer.erase_cell(anchor)
+	_surface_blocked_cells.erase(anchor)
 	for y in range(anchor.y + 1, anchor.y + 3):
 		for x in range(anchor.x - 2, anchor.x + 3):
 			var cell := Vector2i(x, y)
@@ -7278,6 +7327,7 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 				continue
 			_place_tile(city_layer, cell, "plaza")
 			decor_layer.erase_cell(cell)
+			_surface_blocked_cells.erase(cell)
 	_place_tile(decor_layer, Vector2i(anchor.x - 3, anchor.y + 1), "hedge")
 	_place_tile(decor_layer, Vector2i(anchor.x + 3, anchor.y + 1), "hedge_alt")
 

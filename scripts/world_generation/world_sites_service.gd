@@ -52,6 +52,10 @@ static func store_journey_context(settings: Dictionary, site: Dictionary) -> voi
 			settings["dwarfhold_scene_tile"] = {"x": tile.x, "y": tile.y}
 			settings["dwarfhold_scene_name"] = String(site.get("name", ""))
 			settings["dwarfhold_scene_population"] = maxi(0, int(site.get("population", 0)))
+			# The hold mines the strata of its own mountain tile, recorded
+			# in the gazetteer at world generation.
+			var site_geology: Dictionary = site.get("geology", {}) if site.get("geology") is Dictionary else {}
+			settings["dwarfhold_scene_geology"] = site_geology
 			# Underdeep projections belong to the overworld's richer view;
 			# stale ones from another hold would project the wrong towns.
 			settings.erase("underdeep_sites")

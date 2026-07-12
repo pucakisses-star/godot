@@ -425,6 +425,7 @@ const DWARFHOLD_SCENE_TILE_KEY := "dwarfhold_scene_tile"
 const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
 const DWARFHOLD_SCENE_NAME_KEY := "dwarfhold_scene_name"
 const DWARFHOLD_SCENE_FALL_KEY := "dwarfhold_scene_fall_text"
+const DWARFHOLD_SCENE_GEOLOGY_KEY := "dwarfhold_scene_geology"
 
 ## Identity carried in from the overworld chronicle: the hold's name and,
 ## for abandoned ruins, the fall summary ("Fell to <beast>, year <y>").
@@ -1510,6 +1511,8 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 		## The chronicle's still-living beast laired in THIS hold; slain
 		## beasts (by sim hero or player) never come back.
 		_lair_beast = WorldChronicleService.lair_beast_for_tile(settings, _hold_tile)
+	var geology_variant: Variant = settings.get(DWARFHOLD_SCENE_GEOLOGY_KEY, null)
+	_journey_geology = (geology_variant as Dictionary).duplicate(true) if geology_variant is Dictionary else {}
 	var chronology := settings.get("chronology", {}) as Dictionary
 	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
 	_underdeep_sites = []
@@ -1561,9 +1564,13 @@ func _generate_city() -> void:
 
 	_rng.seed = hash(seed_text)
 	_world_seed_hash = hash(seed_text)
-	# DF-style geology for this hold's country rock: layer family, strata,
-	# metals and coal, stable per world seed.
-	_geology = GeologyService.profile_for_seed(_world_seed_hash)
+	# DF-style geology for this hold's country rock: the overworld tile the
+	# hold rises from when a journey carried it in, a seed-derived profile
+	# only for holds opened without one (direct scene runs, old saves).
+	if _journey_geology.is_empty():
+		_geology = GeologyService.profile_for_seed(_world_seed_hash)
+	else:
+		_geology = _journey_geology.duplicate(true)
 	# Holds carry no generated details dict; the market derives from a
 	# seeded stub of mountain exports (ore, ingots, gems, stone).
 	_hold_market = SettlementEconomyService.settlement_market(SettlementEconomyService.hold_details_stub(_world_seed_hash), _world_seed_hash)
@@ -5616,6 +5623,10 @@ var _rock_crack_sprites: Dictionary = {}
 var _rock_crack_textures: Array[ImageTexture] = []
 ## This world's geologic profile (GeologyService), set with the seed.
 var _geology: Dictionary = {}
+## Geology carried in from the overworld tile the hold stands on; when
+## present it overrides the seed-derived profile so the pick finds what
+## that mountain's tooltip advertised.
+var _journey_geology: Dictionary = {}
 
 ## An ore appropriate to the current stratum, drawn from this world's
 ## metal list - the same list the overworld geology readout advertises.
