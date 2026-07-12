@@ -37,13 +37,10 @@ extends Node2D
 @export var scene3d_min_camera_distance: float = 2.4
 @export var scene3d_max_camera_distance: float = 9.5
 @export var globe_height_scale: float = 0.0
-## Fraction of globe longitude reserved for the synthesized ocean strip that
-## bridges the map's east and west edges so the sphere wrap has no seam.
-@export_range(0.0, 0.3, 0.01) var globe_seam_band: float = 0.08
-## Fraction of globe latitude reserved at the south pole for a synthesized
-## Antarctic ice cap (globe view only); the map is compressed northward so
-## its own bottom edge sits above the cap.
-@export_range(0.0, 0.3, 0.01) var globe_polar_band: float = 0.07
+## RimWorld-style globe: the playable map covers only this fraction of the
+## sphere (longitude span, latitude span), centered on the facing meridian;
+## undetailed procedural filler continents own the rest of the planet.
+@export var globe_map_patch_span := Vector2(0.4, 0.4)
 @export var scene3d_height_scale: float = 0.1
 @export var scene3d_mountain_compression: float = 0.35
 @export var scene3d_land_blend_power: float = 1.75
@@ -9277,15 +9274,16 @@ func _update_globe_texture() -> void:
 	globe_material.set_shader_parameter("mountain_compression", scene3d_mountain_compression)
 	globe_material.set_shader_parameter("land_blend_power", scene3d_land_blend_power)
 	globe_material.set_shader_parameter("height_scale", globe_height_scale)
-	globe_material.set_shader_parameter("seam_band", globe_seam_band)
-	globe_material.set_shader_parameter("polar_band", globe_polar_band)
-	globe_material.set_shader_parameter("bridge_ocean_color", _globe_bridge_ocean_color())
+	globe_material.set_shader_parameter("map_patch_span", globe_map_patch_span)
+	globe_material.set_shader_parameter("filler_ocean_color", _globe_bridge_ocean_color())
+	# Every world gets its own arrangement of scenery continents.
+	globe_material.set_shader_parameter("filler_seed", map_seed & 0x7FFFFFFF)
 	var ice_texture := _globe_polar_ice_texture()
 	if ice_texture != null:
 		globe_material.set_shader_parameter("polar_ice_texture", ice_texture)
-	# One snow tile per equator-sized map tile: planar pole units are radians
-	# from the pole, and a map tile spans TAU / map_width radians there.
-	globe_material.set_shader_parameter("polar_tile_density", float(map_size.x) / TAU)
+	# Snow tiles at the poles match the map patch's tile size: planar pole
+	# units are radians, and a patch tile spans span*TAU/map_width radians.
+	globe_material.set_shader_parameter("polar_tile_density", float(map_size.x) / (TAU * maxf(globe_map_patch_span.x, 0.05)))
 
 var _bridge_ocean_color := Color(0.14, 0.26, 0.4)
 var _bridge_ocean_color_cached := false
@@ -9316,9 +9314,8 @@ func _globe_polar_ice_texture() -> ImageTexture:
 	_polar_ice_texture_cache = ImageTexture.create_from_image(tile_image)
 	return _polar_ice_texture_cache
 
-## Average color of the water tile art. The globe's wrap-seam bridge
-## dissolves into this so it reads as open ocean even when the map's east
-## or west edge holds land instead of guaranteed sea.
+## Average color of the water tile art: the globe's filler oceans use it
+## so the scenery planet matches the map's real sea.
 func _globe_bridge_ocean_color() -> Color:
 	if _bridge_ocean_color_cached:
 		return _bridge_ocean_color
@@ -9477,15 +9474,15 @@ func _globe_tile_under_mouse() -> Vector2i:
 	# acos(y/r) from the north pole down.
 	var sphere_u := fposmod(atan2(hit.x, hit.z) / TAU, 1.0)
 	var sphere_v := acos(clampf(hit.y / maxf(radius, 0.0001), -1.0, 1.0)) / PI
-	# Invert the shader's seam/polar compression; the synthesized ocean
-	# bridge and ice cap describe no real tile.
-	var usable_u := maxf(1.0 - clampf(globe_seam_band, 0.0, 0.3), 0.001)
-	var usable_v := maxf(1.0 - clampf(globe_polar_band, 0.0, 0.3), 0.001)
-	if sphere_u >= usable_u or sphere_v >= usable_v:
+	# Invert the map patch placement; the filler planet around the patch
+	# describes no real tile.
+	var local_u := (sphere_u - 0.5) / maxf(globe_map_patch_span.x, 0.001) + 0.5
+	var local_v := (sphere_v - 0.5) / maxf(globe_map_patch_span.y, 0.001) + 0.5
+	if local_u < 0.0 or local_u > 1.0 or local_v < 0.0 or local_v > 1.0:
 		return miss
 	var coord := Vector2i(
-		int(sphere_u / usable_u * float(map_size.x)),
-		int(sphere_v / usable_v * float(map_size.y))
+		int(local_u * float(map_size.x)),
+		int(local_v * float(map_size.y))
 	)
 	if coord.x < 0 or coord.y < 0 or coord.x >= map_size.x or coord.y >= map_size.y:
 		return miss
@@ -9955,7 +9952,8 @@ func _build_road_tiles() -> void:
 			mask |= 4
 		if road_cells.has(cell + Vector2i.LEFT) or _is_road_endpoint(cell + Vector2i.LEFT):
 			mask |= 8
-		_roads_layer.set_cell(cell, _atlas_source_id, _road_tile_for_mask(mask, cell))
+		var segment := TILE_ATLAS_DEFS.road_segment_for_mask(mask, cell.x * 73856093 ^ cell.y * 19349663)
+		_roads_layer.set_cell(cell, _atlas_source_id, segment["atlas"] as Vector2i, int(segment["alt"]))
 		# Roads clear the woods they cut through, like the browser overlay.
 		if tree_layer != null and tree_layer.get_cell_source_id(cell) >= 0:
 			tree_layer.erase_cell(cell)
@@ -9974,33 +9972,6 @@ func _is_road_endpoint(cell: Vector2i) -> bool:
 		return true
 	return ROUTE_ELIGIBLE_STRUCTURE_IDS.has(String(tile_info.get("structure", "")))
 
-## Buckets the 4-neighbor mask (N=1 E=2 S=4 W=8) into the organic road
-## art, picking deterministic variants per cell.
-func _road_tile_for_mask(mask: int, cell: Vector2i) -> Vector2i:
-	var bucket := "stub"
-	match mask:
-		5:
-			bucket = "ns"
-		10:
-			bucket = "we"
-		6:
-			bucket = "corner_se"
-		12:
-			bucket = "corner_sw"
-		3:
-			bucket = "corner_ne"
-		9:
-			bucket = "corner_nw"
-		1, 4:
-			bucket = "ns"
-		2, 8:
-			bucket = "we"
-		_:
-			if mask != 0:
-				bucket = "junction"
-	var variants := TILE_ATLAS_DEFS.ROAD_TILES.get(bucket, TILE_ATLAS_DEFS.ROAD_TILES["stub"]) as Array
-	var pick := absi(cell.x * 73856093 ^ cell.y * 19349663) % variants.size()
-	return variants[pick] as Vector2i
 
 ## --- Desert cities ----------------------------------------------------------
 ## The atlas's unshipped desert set becomes a real civilization: golden
@@ -10306,7 +10277,8 @@ func _rebuild_labels_overlay() -> void:
 ## fonts must grow far beyond their 2D sizes to stay readable. Feeding the
 ## rescale path this virtual zoom does exactly that while preserving the
 ## importance hierarchy.
-const GLOBE_LABEL_VIRTUAL_ZOOM := 0.07
+## Tuned for the map patch covering ~40% of the sphere's longitude.
+const GLOBE_LABEL_VIRTUAL_ZOOM := 0.03
 
 func _update_labels_overlay_zoom_behavior() -> void:
 	# Shared occupancy for RimWorld-style decluttering: region names claim
