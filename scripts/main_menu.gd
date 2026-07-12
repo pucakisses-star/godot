@@ -93,7 +93,15 @@ func _show_scene_error(message: String) -> void:
 	var dialog := AcceptDialog.new()
 	dialog.title = "Scene failed to load"
 	dialog.dialog_text = message
+	_popup_transient(dialog)
+
+## Shows a one-shot dialog that frees itself on close — dialogs only
+## hide when dismissed, so without this every popup leaks a node.
+func _popup_transient(dialog: AcceptDialog) -> void:
 	add_child(dialog)
+	dialog.visibility_changed.connect(func() -> void:
+		if not dialog.visible:
+			dialog.queue_free())
 	dialog.popup_centered()
 
 func _on_options_button_pressed() -> void:
@@ -214,29 +222,27 @@ func _populate_slot_list() -> void:
 		var delete_button := Button.new()
 		delete_button.text = "Delete"
 		delete_button.modulate = Color(1.0, 0.75, 0.7, 1.0)
-		delete_button.pressed.connect(_on_slot_delete_pressed.bind(String(meta.get("slot_id", ""))))
+		var slot_id := String(meta.get("slot_id", ""))
+		delete_button.pressed.connect(
+			_on_slot_delete_pressed.bind(slot_id, String(meta.get("label", slot_id)))
+		)
 		row_box.add_child(delete_button)
 
 func _on_slot_load_pressed(slot_id: String) -> void:
 	var resume_scene: String = SaveGameService.load_slot(self, slot_id)
 	if resume_scene.is_empty():
 		# Silence here read as a dead button; say why nothing happened.
+		push_error("Save slot '%s' failed to load." % slot_id)
 		var dialog := AcceptDialog.new()
 		dialog.title = "Load failed"
 		dialog.dialog_text = "That save could not be loaded. The file may be missing or corrupted."
-		add_child(dialog)
-		dialog.popup_centered()
+		_popup_transient(dialog)
 		_populate_slot_list()
 		return
 	get_tree().change_scene_to_file(resume_scene)
 
 ## One misclick next to Load must not erase a world: confirm first.
-func _on_slot_delete_pressed(slot_id: String) -> void:
-	var label := slot_id
-	for meta: Dictionary in SaveGameService.list_saves():
-		if String(meta.get("slot_id", "")) == slot_id:
-			label = String(meta.get("label", slot_id))
-			break
+func _on_slot_delete_pressed(slot_id: String, label: String) -> void:
 	var dialog := ConfirmationDialog.new()
 	dialog.title = "Delete save?"
 	dialog.dialog_text = "Delete \"%s\"?\nThis cannot be undone." % label
@@ -245,5 +251,4 @@ func _on_slot_delete_pressed(slot_id: String) -> void:
 		SaveGameService.delete_slot(slot_id)
 		_populate_slot_list()
 		_refresh_load_button())
-	add_child(dialog)
-	dialog.popup_centered()
+	_popup_transient(dialog)

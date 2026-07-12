@@ -7,18 +7,24 @@ extends RefCounted
 
 const SETTINGS_PATH := "user://settings.cfg"
 
+## One cached ConfigFile for the process: re-loading from disk on every
+## read/write made each volume-slider tick a full file round-trip.
+static var _config: ConfigFile = null
+
+static func _ensure_config() -> ConfigFile:
+	if _config == null:
+		_config = ConfigFile.new()
+		# A missing file is fine: we start a fresh one.
+		_config.load(SETTINGS_PATH)
+	return _config
+
 static func save_setting(section: String, key: String, value: Variant) -> void:
-	var config := ConfigFile.new()
-	# A missing file is fine: we start a fresh one.
-	config.load(SETTINGS_PATH)
+	var config := _ensure_config()
 	config.set_value(section, key, value)
 	config.save(SETTINGS_PATH)
 
 static func get_setting(section: String, key: String, default_value: Variant) -> Variant:
-	var config := ConfigFile.new()
-	if config.load(SETTINGS_PATH) != OK:
-		return default_value
-	return config.get_value(section, key, default_value)
+	return _ensure_config().get_value(section, key, default_value)
 
 static func autosave_enabled() -> bool:
 	return bool(get_setting("gameplay", "autosave_enabled", true))

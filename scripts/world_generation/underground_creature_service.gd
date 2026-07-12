@@ -141,7 +141,11 @@ static func apply_boss_visuals(sprite: Sprite2D, spec: Dictionary, display_name:
 	label.add_theme_color_override("font_color", Color(1.0, 0.82, 0.55, 1.0))
 	label.add_theme_color_override("font_outline_color", Color(0.12, 0.06, 0.05, 0.95))
 	label.add_theme_constant_override("outline_size", 5)
-	label.z_index = 30
+	# Relative z 0: the tag inherits the boss sprite's own draw band and
+	# sits just above it in tree order. A high relative z lifted it over
+	# the hold's darkness quad, leaking the boss's position into
+	# unexplored black while the boss itself was hidden.
+	label.z_index = 0
 	var inverse := Vector2(
 		1.0 / maxf(absf(sprite.scale.x), 0.001),
 		1.0 / maxf(absf(sprite.scale.y), 0.001)

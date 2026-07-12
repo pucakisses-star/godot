@@ -100,8 +100,10 @@ func _perform_swap(target_path: String) -> void:
 			current.queue_free()
 
 	var incoming: Node = null
+	var revived := false
 	if not target_key.is_empty() and _parked.has(target_key):
 		incoming = _parked[target_key]
+		revived = true
 		_parked.erase(target_key)
 		_order.erase(target_key)
 	else:
@@ -119,6 +121,15 @@ func _perform_swap(target_path: String) -> void:
 		session.call("set_world_settings", settings)
 	if incoming.has_method("_on_scene_resumed"):
 		incoming.call("_on_scene_resumed")
+	# Parked AudioStreamPlayers stop on tree exit and _ready won't rerun:
+	# strike the revived scene's theme back up from the key its player
+	# carries, so no scene needs to remember its own resume one-liner.
+	if revived:
+		var music_player := incoming.get_node_or_null("MusicPlayer") as AudioStreamPlayer
+		if music_player != null and not music_player.playing:
+			var music_key := String(music_player.get_meta("music_key", ""))
+			if not music_key.is_empty():
+				GameAudioService.play_music(incoming, music_key)
 
 	while _order.size() > CACHE_LIMIT:
 		var evicted_key: String = _order.pop_front()

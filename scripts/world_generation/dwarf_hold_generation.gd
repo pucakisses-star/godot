@@ -3028,10 +3028,15 @@ func _render_world_rect(rect: Rect2i) -> void:
 				_place_tile(decor_layer, cell, decor_key)
 				if decor_key == "chest":
 					_ensure_chest_inventory(cell)
-	# Chunk streaming, digging and building all repaint base tiles through
-	# here, and _pick_base_tile knows nothing about staircases — without
-	# this re-stamp the stairway tile visibly vanishes (and stops working)
-	# the moment a nearby chunk streams in.
+	_stamp_active_stairs_in_rect(rect)
+
+## Re-stamps the active level's staircases inside a repainted rect.
+## Chunk streaming, digging and building all repaint base tiles through
+## _render_world_rect, and _pick_base_tile knows nothing about stairs —
+## without this the stairway tile visibly vanishes (and stops working)
+## the moment a nearby chunk streams in. Any future repaint path must
+## call this too.
+func _stamp_active_stairs_in_rect(rect: Rect2i) -> void:
 	for stair_key: String in ["up", "down"]:
 		if not _hold_state.active_level_stairs.has(stair_key):
 			continue
@@ -3042,6 +3047,7 @@ func _render_world_rect(rect: Rect2i) -> void:
 			continue
 		_place_tile(city_layer, stair_cell, "stairway_up" if stair_key == "up" else "stairway_down")
 		decor_layer.erase_cell(stair_cell)
+		_actor_passable_cache.erase(stair_cell)
 
 func _is_diggable_cell(cell: Vector2i) -> bool:
 	if _world_noise.is_empty():
@@ -5403,10 +5409,6 @@ func _on_scene_resumed() -> void:
 	_update_clock_label()
 	_update_hp_label()
 	_update_hunger_label()
-	# Parked AudioStreamPlayers stop on tree exit and _ready won't rerun;
-	# without this a revisited hold stays silent (the overworld does the
-	# same in its _on_scene_resumed).
-	GameAudioService.play_music(self, "hold")
 
 func _exit_tree() -> void:
 	_save_persistent_player_state()

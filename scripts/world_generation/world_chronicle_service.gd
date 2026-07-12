@@ -1553,8 +1553,11 @@ static func _family_link_child(people: Dictionary, parent_ids: Array[String], ch
 static func _family_first_name(gender: String, used_first: Dictionary, rng: RandomNumberGenerator, race: String = "Dwarf") -> String:
 	var pool: Array[String] = []
 	if race == "Human":
-		## Human name pools carry no gender split; ignore gender for them.
-		pool.append_array(NpcIdentityService.TOWNSFOLK_FIRST_NAMES)
+		pool.append_array(
+			NpcIdentityService.TOWNSFOLK_FIRST_NAMES_FEMALE
+			if gender == "female"
+			else NpcIdentityService.TOWNSFOLK_FIRST_NAMES_MALE
+		)
 	elif gender == "female":
 		pool.append_array(NpcIdentityService.DWARF_FIRST_NAMES_FEMALE)
 		pool.append_array(NpcIdentityService.DWARF_RULER_FIRST_NAMES_FEMALE)

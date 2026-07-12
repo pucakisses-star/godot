@@ -964,10 +964,13 @@ class FamilyTreeView:
 		var person := _person(String(node.get("id", "")))
 		var deceased := bool(node.get("deceased", false))
 		# "sitting" only means "the person this tree centers on" — every
-		# inspected citizen carries it. Only actual rulers wear the crown.
-		var crowned := bool(node.get("sitting", false)) and int(person.get("ruler_index", -1)) >= 0
+		# inspected citizen carries it. Only actual rulers wear the crown,
+		# but the focus person's bust always uses their real age (a child's
+		# portrait must not fall through to the adult-floored estimate).
+		var sitting := bool(node.get("sitting", false))
+		var crowned := sitting and int(person.get("ruler_index", -1)) >= 0
 		var age := int(person.get("age", 0))
-		if crowned:
+		if sitting:
 			age = _sitting_age
 		elif age <= 0:
 			var birth := int(person.get("birth", 0))

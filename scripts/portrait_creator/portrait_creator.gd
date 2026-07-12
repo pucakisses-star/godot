@@ -550,6 +550,10 @@ var _colors: Array[Vector3]
 
 var _selected := Images.PORTRAIT
 var _is_female := false
+## True once the player has edited the name box themselves (text_changed
+## only fires on user input, never on programmatic assignment); cleared
+## when Randomize rolls a fresh name.
+var _name_typed_by_player := false
 var _rng := RandomNumberGenerator.new()
 
 var _available_beards: Array[CompressedTexture2D]
@@ -714,9 +718,10 @@ func _setup_clothing_slider() -> void:
 func _on_clothing_changed(_value: float) -> void:
 	_refresh_dwarf_preview()
 
-## Every slider sits between a left and a right arrow Button the scene
-## never wired up — clicking them did nothing. Each press steps the
-## slider by one VISIBLE variant (one palette bucket / one style).
+## Every slider sits between a left arrow ("Button") and a right arrow
+## ("Button2") the scene never wired up — clicking them did nothing.
+## Each press steps the slider by one VISIBLE variant (one palette
+## bucket / one style).
 func _connect_slider_step_buttons() -> void:
 	var slider_steps: Array = [
 		[skin_color, 1.0 / float(DwarfSpriteComposer.SKIN_TONE_ROWS.size())],
@@ -730,21 +735,17 @@ func _connect_slider_step_buttons() -> void:
 		var slider := pair[0] as HSlider
 		if slider == null:
 			continue
-		var row: Node = slider.get_parent()
-		if row != null and not (row is HBoxContainer):
-			row = row.get_parent()
-		if not (row is HBoxContainer):
+		# Row layout: HBox [Button][CenterContainer[slider]][Button2].
+		var row := slider.get_parent().get_parent()
+		if row == null:
 			continue
-		var arrows: Array[Button] = []
-		for child in row.get_children():
-			var arrow := child as Button
-			if arrow != null:
-				arrows.append(arrow)
-		if arrows.size() < 2:
+		var prev_arrow := row.get_node_or_null("Button") as Button
+		var next_arrow := row.get_node_or_null("Button2") as Button
+		if prev_arrow == null or next_arrow == null:
 			continue
 		var step := float(pair[1])
-		arrows[0].pressed.connect(_step_slider.bind(slider, -step))
-		arrows[arrows.size() - 1].pressed.connect(_step_slider.bind(slider, step))
+		prev_arrow.pressed.connect(_step_slider.bind(slider, -step))
+		next_arrow.pressed.connect(_step_slider.bind(slider, step))
 
 func _step_slider(slider: HSlider, delta: float) -> void:
 	if slider == null or not slider.editable:
@@ -941,13 +942,10 @@ func _set_gender(is_female: bool) -> void:
 	_update_beard_style_availability()
 	## Recompose the pixel preview so the beard change shows immediately.
 	_refresh_dwarf_preview()
-	# Keep a typed given name — switching gender must not erase the
-	# player's input (Randomize rerolls the whole name itself afterwards).
-	var current_name := character_name.text.strip_edges()
-	var given_name := current_name
-	if current_name.contains(" "):
-		given_name = current_name.split(" ", false, 1)[0]
-	character_name.text = _generate_full_name(given_name)
+	# A given name the player TYPED survives a gender switch; an
+	# auto-rolled one rerolls from the newly-active gender's pool so a
+	# male-pool name doesn't silently linger on a female dwarf.
+	character_name.text = _generate_full_name(_current_given_name() if _name_typed_by_player else "")
 	_update_attribute_reminders()
 
 func _update_gender_button_selection_visuals() -> void:
@@ -1010,14 +1008,18 @@ func _generate_full_name(first_name: String = "") -> String:
 		return given_name
 	return "%s %s" % [given_name, clan]
 
-func _on_clan_selected(_index: int) -> void:
+## The first token of whatever stands in the name box right now.
+func _current_given_name() -> String:
 	var current_name := character_name.text.strip_edges()
-	var given_name := current_name
 	if current_name.contains(" "):
-		given_name = current_name.split(" ", false, 1)[0]
-	character_name.text = _generate_full_name(given_name)
+		return current_name.split(" ", false, 1)[0]
+	return current_name
+
+func _on_clan_selected(_index: int) -> void:
+	character_name.text = _generate_full_name(_current_given_name())
 
 func _on_name_changed(_new_text: String) -> void:
+	_name_typed_by_player = true
 	for curr_idx in AMOUNT_OF_IMAGES:
 		_colors[curr_idx].z = 1
 	var shader: ShaderMaterial = target_render.material
@@ -1250,6 +1252,7 @@ func _randomize_all_parts() -> void:
 	_update_stats_label()
 
 	character_name.text = _generate_full_name()
+	_name_typed_by_player = false
 	_update_attribute_reminders()
 
 func _play_randomize_sound() -> void:

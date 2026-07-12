@@ -509,6 +509,11 @@ func _place_traps() -> void:
 	_place_spike_plates()
 
 func _rect_overlaps_blocked(rect: Rect2i) -> bool:
+	# The staircase down counts as blocked ground for every area hazard:
+	# a trap footprint covering it would hide the way down and force
+	# damage to descend. (Sentinel coords before placement never match.)
+	if rect.has_point(_down_stairs_cell):
+		return true
 	for blocked_variant: Variant in _blocked_cells.keys():
 		if rect.has_point(blocked_variant as Vector2i):
 			return true
@@ -591,9 +596,6 @@ func _place_fire_traps() -> void:
 		)
 		if _rect_overlaps_blocked(Rect2i(origin, FIRE_BLOCK_CELLS)):
 			continue
-		# The eruption block must not swallow the staircase down.
-		if Rect2i(origin, FIRE_BLOCK_CELLS).has_point(_down_stairs_cell):
-			continue
 		var sprite := Sprite2D.new()
 		sprite.texture = FIRE_TRAP_TEXTURE
 		sprite.region_enabled = true
@@ -623,9 +625,6 @@ func _place_spike_pits() -> void:
 			_rng.randi_range(room.position.y + 1, room.end.y - 4)
 		)
 		if _is_safe_zone(origin) or _rect_overlaps_blocked(Rect2i(origin, Vector2i(3, 3))):
-			continue
-		# The pit area must not swallow the staircase down.
-		if Rect2i(origin, Vector2i(3, 3)).has_point(_down_stairs_cell):
 			continue
 		var sprite := Sprite2D.new()
 		sprite.texture = SPIKE_PIT_TEXTURE

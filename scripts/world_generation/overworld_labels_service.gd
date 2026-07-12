@@ -261,15 +261,22 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 				# 1/zoom (half-compensated). Scaling WITH zoom (the old code)
 				# double-magnified: specks when zoomed out, banners zoomed in.
 				scaled_font_size = maxf(8.0, (base_font_size + (base_font_size / safe_zoom)) * 0.5)
-			label.add_theme_font_size_override("font_size", int(round(scaled_font_size)))
+			var rounded_size := int(round(scaled_font_size))
 
-			# Re-derive the label rect from the scaled font, centered on the
-			# collision-resolved placement, so the text is never clipped by
-			# a stale, smaller rect after zooming in.
-			var anchor := label.get_meta("anchor_center", Vector2.ZERO) as Vector2
-			var scaled_box := label_box_size(label.text, int(round(scaled_font_size)))
-			label.position = anchor - scaled_box * 0.5
-			label.size = scaled_box
+			# Re-shape (font measure + rect) only when the rounded size
+			# actually changed: zoom_changed fires per FRAME during dive
+			# tweens, and re-measuring every label every frame is the
+			# worst-timed work the map does.
+			if int(label.get_meta("applied_font_size", -1)) != rounded_size:
+				label.set_meta("applied_font_size", rounded_size)
+				label.add_theme_font_size_override("font_size", rounded_size)
+				# Re-derive the label rect from the scaled font, centered on
+				# the collision-resolved placement, so the text is never
+				# clipped by a stale, smaller rect after zooming in.
+				var anchor := label.get_meta("anchor_center", Vector2.ZERO) as Vector2
+				var scaled_box := label_box_size(label.text, rounded_size)
+				label.position = anchor - scaled_box * 0.5
+				label.size = scaled_box
 
 			if constant_screen:
 				label.visible = true

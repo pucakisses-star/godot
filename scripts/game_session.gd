@@ -56,7 +56,15 @@ func get_world_settings_with_defaults(settings: Dictionary) -> Dictionary:
 	return WorldSettings.merge_with_defaults(settings)
 
 func set_player_character(character: Dictionary) -> void:
-	player_character = character.duplicate(true)
+	player_character = _normalize_character(character.duplicate(true))
+
+## One normalization point for legacy character data, so profession-keyed
+## tables downstream (stats, embark flavor, sprites) never need to know a
+## misspelling ever existed.
+static func _normalize_character(character: Dictionary) -> Dictionary:
+	if String(character.get("profession", "")).strip_edges().to_lower() == "shepard":
+		character["profession"] = "Shepherd"
+	return character
 
 func get_player_character() -> Dictionary:
 	return player_character.duplicate(true)
@@ -135,7 +143,7 @@ func load_from_file(path: String = SAVE_FILE_PATH) -> bool:
 	var loaded_settings: Dictionary = _decode_from_json(payload.get("world_settings", {})) as Dictionary
 	var loaded_character: Dictionary = _decode_from_json(payload.get("player_character", {})) as Dictionary
 	world_settings = WorldSettings.merge_with_defaults(loaded_settings)
-	player_character = loaded_character
+	player_character = _normalize_character(loaded_character)
 	return true
 
 static func _encode_for_json(value: Variant) -> Variant:

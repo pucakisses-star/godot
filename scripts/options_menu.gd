@@ -18,8 +18,18 @@ const RESOLUTIONS: Array[Vector2i] = [
 @onready var sfx_slider: HSlider = $Panel/MarginContainer/VBoxContainer/SfxVolumeRow/SfxVolumeSlider
 @onready var auto_save_check: CheckBox = $Panel/MarginContainer/VBoxContainer/AutoSaveCheckBox
 
+## Volume changes apply to the buses instantly but persist to disk on a
+## short debounce — value_changed fires per tick of a drag, and a file
+## write per tick can hitch on slow storage.
+var _volume_save_debounce: Timer
+
 
 func _ready() -> void:
+	_volume_save_debounce = Timer.new()
+	_volume_save_debounce.one_shot = true
+	_volume_save_debounce.wait_time = 0.4
+	_volume_save_debounce.timeout.connect(_persist_volumes)
+	add_child(_volume_save_debounce)
 	var mode := DisplayServer.window_get_mode()
 	var is_fullscreen := (
 		mode == DisplayServer.WINDOW_MODE_FULLSCREEN
@@ -63,17 +73,29 @@ func _on_fullscreen_toggled(toggled_on: bool) -> void:
 
 func _on_master_volume_value_changed(value: float) -> void:
 	GameSettingsService.apply_bus_volume("Master", value)
-	GameSettingsService.save_setting("audio", "master_volume", value)
+	_volume_save_debounce.start()
 
 
 func _on_music_volume_value_changed(value: float) -> void:
 	GameSettingsService.apply_bus_volume("Music", value)
-	GameSettingsService.save_setting("audio", "music_volume", value)
+	_volume_save_debounce.start()
 
 
 func _on_sfx_volume_value_changed(value: float) -> void:
 	GameSettingsService.apply_bus_volume("SFX", value)
-	GameSettingsService.save_setting("audio", "sfx_volume", value)
+	_volume_save_debounce.start()
+
+
+func _persist_volumes() -> void:
+	GameSettingsService.save_setting("audio", "master_volume", master_slider.value)
+	GameSettingsService.save_setting("audio", "music_volume", music_slider.value)
+	GameSettingsService.save_setting("audio", "sfx_volume", sfx_slider.value)
+
+
+func _exit_tree() -> void:
+	# Leaving before the debounce fires must not drop the last change.
+	if _volume_save_debounce != null and not _volume_save_debounce.is_stopped():
+		_persist_volumes()
 
 
 func _on_resolution_item_selected(index: int) -> void:
