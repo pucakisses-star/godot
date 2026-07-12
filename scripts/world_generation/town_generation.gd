@@ -1878,6 +1878,8 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 	# cellar rooms.
 	_paint_stair_tiles(augmented)
 	_paint_cellar_rock_tile(augmented)
+	# Wading shallows for wilds coasts and marsh pools.
+	_paint_water_shallow_tile(augmented)
 	# Lakeshore water plants (transparent decor over the animated water) and
 	# the snow-dusted copies of the two full-height trees.
 	_paint_water_plant_tiles(augmented)
@@ -2364,6 +2366,31 @@ func _paint_cellar_rock_tile(image: Image) -> void:
 				tone = Color(0.24, 0.21, 0.19, 1.0)
 			elif fleck % 67 == 1:
 				tone = Color(0.075, 0.06, 0.05, 1.0)
+			image.set_pixel(origin.x + tx, origin.y + ty, tone)
+
+## Wading shallows: the sheet ships no shallow-water art, so paint a pale
+## blue-green glaze with caustic ripple crests and sand grains showing
+## through the water - clearly lighter than the deep animated water, so
+## "walkable" reads at a glance. All wave terms use whole periods across
+## the tile (the vertical phase rides a periodic inner sine), so shallows
+## band together seamlessly.
+func _paint_water_shallow_tile(image: Image) -> void:
+	var coords := TILE_ATLAS.get("water_shallow", Vector2i(-1, -1)) as Vector2i
+	if coords.x < 0:
+		return
+	var origin := coords * tile_size
+	for ty: int in range(tile_size.y):
+		for tx: int in range(tile_size.x):
+			var wave := sin(float(tx) * TAU / float(tile_size.x) * 2.0 + sin(float(ty) * TAU / float(tile_size.y)) * 1.3)
+			wave += sin(float(ty) * TAU / float(tile_size.y) * 2.0 + 1.1) * 0.6
+			var tone := Color(0.42, 0.62, 0.66, 1.0)
+			if wave > 0.9:
+				tone = Color(0.56, 0.75, 0.76, 1.0)
+			elif wave < -0.95:
+				tone = Color(0.36, 0.55, 0.61, 1.0)
+			var grain := (tx * 73856093 ^ ty * 19349663) & 0x7fffffff
+			if grain % 41 == 0:
+				tone = Color(0.63, 0.62, 0.5, 1.0)
 			image.set_pixel(origin.x + tx, origin.y + ty, tone)
 
 ## --- painted water plants and snow trees --------------------------------------
