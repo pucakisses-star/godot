@@ -41,7 +41,17 @@ const WORLD_LAYOUTS := [
 	"Major Continent",
 	"Twin Continents",
 	"Inland Sea",
-	"Archipelago"
+	"Archipelago",
+	# Fixed painted maps (fixed_world_layouts.gd): the landmass, biomes and
+	# mountain ranges follow the named world; everything else is procedural.
+	"Earth",
+	"Middle-earth",
+	"Westeros",
+	"Azeroth",
+	"Tamriel",
+	"Hyrule",
+	"The Old World (Warhammer)",
+	"Faerûn"
 ]
 
 const CHRONOLOGY_YEAR_MIN := 0
