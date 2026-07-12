@@ -19,21 +19,26 @@ const ITEM_ICONS3_TEXTURE := preload("res://resources/images/items/item_icons3.p
 ## trinkets, potions, seeds, crops, animal produce, and travel gear.
 ## Entries with "sheet": 4.
 const ITEM_ICONS4_TEXTURE := preload("res://resources/images/items/item_icons4.png")
+## Fifth sheet: the ore family - one painted rock-chunk icon per metal
+## (iron, copper, gold, tin, lead, zinc, silver, nickel, platinum) plus
+## coal, each with its own vein color so a full mining haul reads at a
+## glance. Entries with "sheet": 5.
+const ITEM_ICONS5_TEXTURE := preload("res://resources/images/items/item_icons5.png")
 const ATLAS_COLUMNS := 12
 const ICON_SIZE := 32
 
 const ITEM_DEFS := {
 	# --- raw materials & ores ---
 	"Stone": {"icon": 44, "flavor": "Honest rock, the hold's first currency."},
-	"Iron Ore": {"icon": 45, "flavor": "Rust-red and heavy. The forge is hungry."},
-	"Copper Ore": {"icon": 15, "flavor": "Gleams warm even before the smelter."},
-	"Gold Ore": {"icon": 12, "flavor": "A sunrise trapped in stone."},
-	"Tin Ore": {"icon": 45, "flavor": "Dull alone; bronze remembers it fondly."},
-	"Lead Ore": {"icon": 45, "flavor": "Heavier than it has any right to be."},
-	"Zinc Ore": {"icon": 45, "flavor": "Sharp-smelling stone the brassworkers prize."},
-	"Nickel Ore": {"icon": 45, "flavor": "Stubborn metal from stubborn rock."},
-	"Platinum Ore": {"icon": 12, "flavor": "Pale fire from the world's deep bones."},
-	"Coal": {"icon": 44, "flavor": "Black stone that burns. The forge approves."},
+	"Iron Ore": {"icon": 0, "sheet": 5, "flavor": "Rust-red and heavy. The forge is hungry."},
+	"Copper Ore": {"icon": 1, "sheet": 5, "flavor": "Gleams warm even before the smelter."},
+	"Gold Ore": {"icon": 2, "sheet": 5, "flavor": "A sunrise trapped in stone."},
+	"Tin Ore": {"icon": 3, "sheet": 5, "flavor": "Dull alone; bronze remembers it fondly."},
+	"Lead Ore": {"icon": 4, "sheet": 5, "flavor": "Heavier than it has any right to be."},
+	"Zinc Ore": {"icon": 5, "sheet": 5, "flavor": "Sharp-smelling stone the brassworkers prize."},
+	"Nickel Ore": {"icon": 7, "sheet": 5, "flavor": "Stubborn metal from stubborn rock."},
+	"Platinum Ore": {"icon": 8, "sheet": 5, "flavor": "Pale fire from the world's deep bones."},
+	"Coal": {"icon": 9, "sheet": 5, "flavor": "Black stone that burns. The forge approves."},
 	"Gold Nugget": {"icon": 12, "flavor": "Enough to turn a merchant's head."},
 	"Gem Shard": {"icon": 88, "flavor": "A splinter of buried starlight."},
 	"Starmetal Ore": {"icon": 88, "flavor": "Sky-iron from the world's roots. It hums against the skin."},
@@ -331,7 +336,7 @@ const ITEM_DEFS := {
 	"Smithing Pick": {"icon": 120, "sheet": 2, "flavor": "For coaxing slag off a bloom."},
 	"Silver Ingot": {"icon": 121, "sheet": 2, "flavor": "Moonlight with a stamp on it."},
 	"Copper Rod": {"icon": 122, "sheet": 2, "flavor": "Conducts heat, lightning, and envy."},
-	"Silver Ore": {"icon": 123, "sheet": 2, "flavor": "Gray stone hiding a bright secret."},
+	"Silver Ore": {"icon": 6, "sheet": 5, "flavor": "Gray stone hiding a bright secret."},
 	"Smith's Tongs": {"icon": 124, "sheet": 2, "flavor": "The only safe handshake with iron."},
 	"Leather Sheet": {"icon": 125, "sheet": 2, "flavor": "Tanned flat and waiting."},
 	"Cured Leather": {"icon": 126, "sheet": 2, "flavor": "Supple enough to argue into any shape."},
@@ -654,6 +659,8 @@ static func icon_texture(item_name: String) -> Texture2D:
 	var icon_index := int(item_def.get("icon", 0))
 	var atlas := AtlasTexture.new()
 	match int(item_def.get("sheet", 1)):
+		5:
+			atlas.atlas = ITEM_ICONS5_TEXTURE
 		4:
 			atlas.atlas = ITEM_ICONS4_TEXTURE
 		3:
