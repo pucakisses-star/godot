@@ -188,6 +188,8 @@ var _hover_tooltip_layer: TileMapLayer
 var _sign_hover_label: Label
 var _sign_hover_cell := Vector2i(2147483647, 2147483647)
 var _npc_states: Array[Dictionary] = []
+## Venue cells (tavern, temple, market...) for the scheduler's objectives.
+var _npc_pois: Dictionary = {}
 var _settlement_factions: Array[Dictionary] = []
 var _factions_label: RichTextLabel
 var _faction_event_stamps: Dictionary = {}
@@ -2598,18 +2600,25 @@ func _assign_npc_daily_lives(grid: Dictionary) -> void:
 			building_cells_by_type[building_type] = []
 		(building_cells_by_type[building_type] as Array).append(building_cell_variant)
 	var street_cells: Array[Vector2i] = []
+	var house_cells: Array[Vector2i] = []
 	for grid_cell_variant: Variant in grid.keys():
 		var zone := int(grid[grid_cell_variant])
+		var lived_cell := grid_cell_variant as Vector2i
+		if zone == CELL_HOUSE and _is_walkable_cell(lived_cell):
+			house_cells.append(lived_cell)
 		if zone != CELL_HALL and zone != CELL_PLAZA:
 			continue
-		var street_cell := grid_cell_variant as Vector2i
-		if _is_walkable_cell(street_cell):
-			street_cells.append(street_cell)
+		if _is_walkable_cell(lived_cell):
+			street_cells.append(lived_cell)
 	var npc_count := _npc_states.size()
+	# The venue table drives off-shift objectives (tavern, temple, market
+	# visits); built once per generation and handed to every update.
+	_npc_pois = SettlementNpcScheduler.build_poi_table(building_cells_by_type, Callable(self, "_is_walkable_cell"))
 	SettlementNpcScheduler.assign_daily_lives(_npc_states, {
 		"bed_cells": _bed_cells,
 		"building_cells_by_type": building_cells_by_type,
 		"street_cells": street_cells,
+		"house_cells": house_cells,
 		"green_cells": [],
 		"is_walkable": Callable(self, "_is_walkable_cell"),
 		"rng": _rng,
@@ -5922,7 +5931,8 @@ func _update_npc_movement(delta: float) -> void:
 		delta, _scheduled_states(), city_layer, _rng,
 		tile_size, _game_hour,
 		Callable(self, "_is_npc_walkable_cell"),
-		Callable(self, "_cell_center_position")
+		Callable(self, "_cell_center_position"),
+		false, _npc_pois
 	)
 
 ## The dead answer to their hunger, not the clock.
