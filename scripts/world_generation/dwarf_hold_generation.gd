@@ -507,6 +507,21 @@ const DIG_FOSSIL_FINDS := [
 ]
 const DIG_FOSSIL_CHANCE_PERCENT := 7
 
+## Rock has durability: each pickaxe swing chips it, and it only breaks
+## once the accumulated damage reaches the rock's hit points. Bare hands
+## dig slowly; the best pickaxe carried in the backpack sets swing damage.
+const ROCK_DURABILITY_HP := 12
+const HAND_DIG_DAMAGE := 3
+## Damage tracks the economy's tool tiering (Rusty 6c ... Dwarven 30c).
+const DIG_TOOL_DAMAGE := {
+	"Dwarven Pickaxe": 12,
+	"Steel Pickaxe": 8,
+	"Miner's Pickaxe": 6,
+	"Copper Pick": 5,
+	"Worn Pickaxe": 4,
+	"Rusty Pickaxe": 4
+}
+
 ## Ore veins yield more than iron now and then.
 const ORE_VEIN_DROPS := [
 	{"name": "Iron Ore", "weight": 55, "min": 2, "max": 4},
@@ -1889,6 +1904,8 @@ func _show_level(target_level_index: int) -> void:
 	# This level's actor layer is about to be rebuilt (dropped-item sprites
 	# freed with it); drop the stale entries so they can't re-grant items.
 	_clear_ground_items()
+	# Mining damage is per-level state; a level switch restores full rock.
+	_clear_all_rock_damage()
 	_latest_zone_counts = level_data.get("zone_counts", {}) as Dictionary
 	_latest_requested_zone_counts = level_data.get("requested_zone_counts", {}) as Dictionary
 	_latest_civic_buildings_by_id = level_data.get("civic_buildings_by_id", {}) as Dictionary
@@ -2969,6 +2986,9 @@ func _evict_far_chunks(player_chunk: Vector2i) -> void:
 				if torch != null:
 					torch.queue_free()
 					_torch_sprites.erase(cell)
+				# Evicted rock regenerates at full durability.
+				if _rock_damage.has(cell) or _rock_crack_sprites.has(cell):
+					_clear_rock_crack(cell)
 		for index in range(_creature_states.size() - 1, -1, -1):
 			var state := _creature_states[index] as Dictionary
 			var creature_cell := state.get("cell", Vector2i(2147483647, 0)) as Vector2i
@@ -5584,7 +5604,92 @@ func _update_inventory_label() -> void:
 	_inventory_label.text = "🎒 " + ", ".join(parts)
 	_populate_backpack_slots()
 
+## Mining damage per rock cell (not persisted: chunk eviction, level
+## switches and reloads restore the rock to full durability).
+var _rock_damage: Dictionary = {}
+var _rock_crack_sprites: Dictionary = {}
+var _rock_crack_textures: Array[ImageTexture] = []
+
+## One pickaxe swing at a rock wall, gated by the shared swing cooldown so
+## click spam can't bypass durability. Damage comes from the best digging
+## tool carried; the rock breaks when its hit points run out.
+func _swing_at_rock(cell: Vector2i) -> void:
+	if _player_attack_timer > 0.0:
+		return
+	_player_attack_timer = PLAYER_ATTACK_COOLDOWN
+	var damage := HAND_DIG_DAMAGE
+	for tool_name: String in DIG_TOOL_DAMAGE.keys():
+		if int(_player_inventory.get(tool_name, 0)) > 0:
+			damage = maxi(damage, int(DIG_TOOL_DAMAGE[tool_name]))
+	var total_damage := int(_rock_damage.get(cell, 0)) + damage
+	if total_damage >= ROCK_DURABILITY_HP:
+		_dig_cell(cell)
+		return
+	_rock_damage[cell] = total_damage
+	_update_rock_crack(cell, float(total_damage) / float(ROCK_DURABILITY_HP))
+	# A small chip spray per swing; the full crumble plays on the last hit.
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.55, 0.53, 0.5, 1.0), 5)
+
+## Crack overlay stages drawn over the damaged wall tile.
+func _update_rock_crack(cell: Vector2i, damage_ratio: float) -> void:
+	_ensure_rock_crack_textures()
+	if _rock_crack_textures.is_empty():
+		return
+	var stage := clampi(int(damage_ratio * float(_rock_crack_textures.size())), 0, _rock_crack_textures.size() - 1)
+	var sprite := _rock_crack_sprites.get(cell) as Sprite2D
+	if sprite == null:
+		sprite = Sprite2D.new()
+		sprite.centered = true
+		sprite.position = _cell_center_position(cell)
+		sprite.z_index = 2
+		city_layer.add_child(sprite)
+		_rock_crack_sprites[cell] = sprite
+	sprite.texture = _rock_crack_textures[stage]
+
+func _clear_rock_crack(cell: Vector2i) -> void:
+	var sprite := _rock_crack_sprites.get(cell) as Sprite2D
+	if sprite != null:
+		sprite.queue_free()
+	_rock_crack_sprites.erase(cell)
+	_rock_damage.erase(cell)
+
+func _clear_all_rock_damage() -> void:
+	for cell_variant: Variant in _rock_crack_sprites.keys():
+		var sprite := _rock_crack_sprites.get(cell_variant) as Sprite2D
+		if sprite != null:
+			sprite.queue_free()
+	_rock_crack_sprites.clear()
+	_rock_damage.clear()
+
+## Three crack stages generated once: dark polyline fissures that spread
+## and darken as the rock takes damage.
+func _ensure_rock_crack_textures() -> void:
+	if not _rock_crack_textures.is_empty():
+		return
+	var crack_rng := RandomNumberGenerator.new()
+	crack_rng.seed = 0xC7AC4
+	for stage in range(3):
+		var image := Image.create(tile_size.x, tile_size.y, false, Image.FORMAT_RGBA8)
+		var crack_color := Color(0.07, 0.06, 0.05, 0.58 + float(stage) * 0.14)
+		for _crack_index in range(2 + stage * 2):
+			var pos := Vector2(
+				crack_rng.randf_range(5.0, float(tile_size.x) - 5.0),
+				crack_rng.randf_range(5.0, float(tile_size.y) - 5.0)
+			)
+			var direction := Vector2.RIGHT.rotated(crack_rng.randf_range(0.0, TAU))
+			for _step in range(crack_rng.randi_range(7, 13)):
+				var px := Vector2i(int(pos.x), int(pos.y))
+				if px.x >= 0 and px.y >= 0 and px.x < tile_size.x and px.y < tile_size.y:
+					image.set_pixelv(px, crack_color)
+					if px.x + 1 < tile_size.x:
+						image.set_pixel(px.x + 1, px.y, crack_color)
+				direction = direction.rotated(crack_rng.randf_range(-0.55, 0.55))
+				pos += direction
+		_rock_crack_textures.append(ImageTexture.create_from_image(image))
+
 func _dig_cell(cell: Vector2i) -> void:
+	# The rock is spent: clear its damage bookkeeping and crack overlay.
+	_clear_rock_crack(cell)
 	# Grab the wall art before it is re-rendered as open floor, so the break
 	# FX can crumble a ghost of the rock away.
 	var art := TileBreakFxService.tile_art(city_layer, cell)
@@ -5760,7 +5865,7 @@ func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 			_request_player_move_to_cell(approach_cell)
 		return
 	if _is_diggable_cell(target_cell) and _is_player_adjacent_to_cell(target_cell):
-		_dig_cell(target_cell)
+		_swing_at_rock(target_cell)
 		return
 	if _latest_grid.is_empty() or not _latest_grid.has(target_cell):
 		return
