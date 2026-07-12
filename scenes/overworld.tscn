@@ -3,7 +3,6 @@
 [ext_resource type="Script" path="res://scripts/world_generation/overworld_map.gd" id="1_1r0ns"]
 [ext_resource type="Script" path="res://scripts/world_generation/overworld_camera.gd" id="2_o0pfi"]
 [ext_resource type="Script" path="res://scripts/ui/overworld_scale_bar.gd" id="3_k8s2k"]
-[ext_resource type="Script" path="res://scripts/ui/population_pie_chart.gd" id="4_5b2fg"]
 [ext_resource type="Script" path="res://scripts/ui/population_history_chart.gd" id="5_qcr4g"]
 
 [sub_resource type="SphereMesh" id="SphereMesh_5ukes"]
@@ -490,24 +489,12 @@ autowrap_mode = 3
 horizontal_alignment = 2
 text = "—"
 
-[node name="TooltipPopulationBreakdown" type="VBoxContainer" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox"]
+[node name="TooltipHint" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox"]
 visible = false
-theme_override_constants/separation = 6
-
-[node name="PopulationBreakdownTitle" type="Label" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipPopulationBreakdown"]
-theme_override_font_sizes/font_size = 9
-text = "POPULATION BREAKDOWN"
-
-[node name="PopulationBreakdownContent" type="HBoxContainer" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipPopulationBreakdown"]
-theme_override_constants/separation = 10
-
-[node name="PopulationPieChart" type="Control" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipPopulationBreakdown/PopulationBreakdownContent"]
-custom_minimum_size = Vector2(96, 96)
-script = ExtResource("4_5b2fg")
-
-[node name="PopulationBreakdownList" type="VBoxContainer" parent="MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipPopulationBreakdown/PopulationBreakdownContent"]
-size_flags_horizontal = 3
-theme_override_constants/separation = 2
+modulate = Color(1, 1, 1, 0.55)
+theme_override_font_sizes/font_size = 10
+text = "Right-click — More information"
+horizontal_alignment = 2
 
 [node name="LoadingScreen" type="Control" parent="MapUi"]
 visible = false

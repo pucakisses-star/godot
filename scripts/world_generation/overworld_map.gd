@@ -602,15 +602,7 @@ var _is_generating := false
 @onready var tooltip_major_guilds: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipMajorGuilds")
 @onready var tooltip_major_exports: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipMajorExports")
 @onready var tooltip_hallmark: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipGrid/TooltipHallmark")
-@onready var tooltip_population_breakdown_section: Control = get_node_or_null(
-	"MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipPopulationBreakdown"
-)
-@onready var tooltip_population_breakdown_list: VBoxContainer = get_node_or_null(
-	"MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipPopulationBreakdown/PopulationBreakdownContent/PopulationBreakdownList"
-)
-@onready var tooltip_population_pie_chart: Control = get_node_or_null(
-	"MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipPopulationBreakdown/PopulationBreakdownContent/PopulationPieChart"
-)
+@onready var tooltip_hint: Label = get_node_or_null("MapUi/MapTooltip/TooltipMargin/TooltipVBox/TooltipHint")
 var _atlas_source_id := -1
 var _river_atlas_source_id := -1
 var _coast_layer: TileMapLayer
@@ -1642,13 +1634,22 @@ func _show_structure_details_modal(tile_coord: Vector2i, details: Dictionary) ->
 	var hallmark := String(details.get("hallmark", "")).strip_edges()
 	if hallmark.is_empty():
 		hallmark = String(details.get("description", "No notable records yet.")).strip_edges()
+	# The hover tooltip stays hand-sized, so the census detail lands here.
+	var breakdown_lines: Array[String] = []
+	for entry: Variant in details.get("population_breakdown", []):
+		if entry is Dictionary:
+			breakdown_lines.append(_format_population_breakdown_entry(entry as Dictionary))
+	var breakdown_text := ""
+	if not breakdown_lines.is_empty():
+		breakdown_text = "\n[b]Population breakdown:[/b] %s" % " · ".join(breakdown_lines)
 	_set_details_tab_text(
 		structure_details_main_label,
-		"[b]Name:[/b] %s\n[b]Type:[/b] %s\n[b]Population:[/b] %s\n[b]Ruler:[/b] %s\n\n%s" % [
+		"[b]Name:[/b] %s\n[b]Type:[/b] %s\n[b]Population:[/b] %s\n[b]Ruler:[/b] %s%s\n\n%s" % [
 			settlement_name,
 			settlement_type,
 			str(population),
 			ruler_display,
+			breakdown_text,
 			hallmark
 		]
 	)
@@ -8444,11 +8445,6 @@ func _set_tooltip_label(label: Label, text: String, should_show: bool) -> void:
 	if key_label != null:
 		key_label.visible = should_show
 
-func _set_tooltip_section_visible(node: CanvasItem, should_show: bool) -> void:
-	if node == null:
-		return
-	node.visible = should_show
-
 func _format_population_breakdown_entry(entry: Dictionary) -> String:
 	var label := String(entry.get("label", "")).strip_edges()
 	var percentage := float(entry.get("percentage", 0.0))
@@ -8461,32 +8457,6 @@ func _format_population_breakdown_entry(entry: Dictionary) -> String:
 	if population > 0:
 		parts.append("(%s)" % str(population))
 	return " ".join(parts)
-
-func _populate_population_breakdown_list(breakdown: Array) -> void:
-	if tooltip_population_breakdown_list == null:
-		return
-	# Free synchronously (not queue_free): a deferred free leaves the old rows
-	# parented for the rest of the frame, so a same-frame size measurement would
-	# double-count them and inflate the panel.
-	for child in tooltip_population_breakdown_list.get_children():
-		tooltip_population_breakdown_list.remove_child(child)
-		child.free()
-	var sorted_breakdown := breakdown.duplicate()
-	sorted_breakdown.sort_custom(
-		func(a: Dictionary, b: Dictionary) -> bool:
-			return int(b.get("population", 0)) < int(a.get("population", 0))
-	)
-	for entry: Dictionary in sorted_breakdown:
-		if float(entry.get("percentage", 0.0)) <= 0.0:
-			continue
-		if int(entry.get("population", 0)) <= 0:
-			continue
-		var label := Label.new()
-		label.text = _format_population_breakdown_entry(entry)
-		label.add_theme_font_size_override("font_size", 10)
-		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		tooltip_population_breakdown_list.add_child(label)
 
 func _humanize_biome(biome: String) -> String:
 	if biome.is_empty():
@@ -8894,77 +8864,23 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		ruler_text = ruler_text.strip_edges()
 		_set_tooltip_label(tooltip_ruler, ruler_text if not ruler_text.is_empty() else "Unknown", true)
 
-		var founded_value: Variant = data.get("founded_years_ago", null)
-		var founded_text := ""
-		if typeof(founded_value) == TYPE_INT or typeof(founded_value) == TYPE_FLOAT:
-			founded_text = "%s years ago" % str(maxi(1, int(round(float(founded_value)))))
-		_set_tooltip_label(
-			tooltip_founded,
-			founded_text if not founded_text.is_empty() else "Unknown",
-			true
-		)
-
-		var prominent_clan := _variant_to_clean_string(data.get("prominent_clan", ""))
-		_set_tooltip_label(
-			tooltip_prominent_clan,
-			prominent_clan if not prominent_clan.is_empty() else "Unknown",
-			true
-		)
-
-		var major_clans := _variant_array_to_strings(data.get("major_clans", []))
-		_set_tooltip_label(
-			tooltip_major_clans,
-			_format_resource_list(major_clans),
-			not major_clans.is_empty()
-		)
-
-		var major_guilds := _variant_array_to_strings(data.get("major_guilds", []))
-		_set_tooltip_label(
-			tooltip_major_guilds,
-			_format_resource_list(major_guilds),
-			not major_guilds.is_empty()
-		)
-
-		var major_exports := _variant_array_to_strings(data.get("major_exports", []))
-		_set_tooltip_label(
-			tooltip_major_exports,
-			_format_resource_list(major_exports),
-			not major_exports.is_empty()
-		)
-
-		var hallmark := _variant_to_clean_string(data.get("hallmark", ""))
-		_set_tooltip_label(
-			tooltip_hallmark,
-			hallmark,
-			not hallmark.is_empty()
-		)
-
-		var population_breakdown: Array = []
-		for entry: Variant in data.get("population_breakdown", []):
-			if entry is Dictionary:
-				population_breakdown.append(entry)
-		var has_breakdown := not population_breakdown.is_empty()
-		_set_tooltip_section_visible(tooltip_population_breakdown_section, has_breakdown)
-		if has_breakdown:
-			_populate_population_breakdown_list(population_breakdown)
-			if tooltip_population_pie_chart != null and tooltip_population_pie_chart.has_method("set_slices"):
-				tooltip_population_pie_chart.call("set_slices", population_breakdown)
-		elif tooltip_population_pie_chart != null and tooltip_population_pie_chart.has_method("set_slices"):
-			tooltip_population_pie_chart.call("set_slices", [])
-
 	else:
 		_set_tooltip_label(tooltip_settlement, "", false)
 		_set_tooltip_label(tooltip_population, "", false)
 		_set_tooltip_label(tooltip_ruler, "", false)
-		_set_tooltip_label(tooltip_founded, "", false)
-		_set_tooltip_label(tooltip_prominent_clan, "", false)
-		_set_tooltip_label(tooltip_major_clans, "", false)
-		_set_tooltip_label(tooltip_major_guilds, "", false)
-		_set_tooltip_label(tooltip_major_exports, "", false)
-		_set_tooltip_label(tooltip_hallmark, "", false)
-		_set_tooltip_section_visible(tooltip_population_breakdown_section, false)
-		if tooltip_population_pie_chart != null and tooltip_population_pie_chart.has_method("set_slices"):
-			tooltip_population_pie_chart.call("set_slices", [])
+
+	# The hover card stays HAND-SIZED: name, land and who holds it. The
+	# deep ledger (founding, clans, guilds, exports, hallmark, population
+	# breakdown) lives in right-click -> More information — a tooltip that
+	# ran taller than a small window was unreadable, not informative.
+	_set_tooltip_label(tooltip_founded, "", false)
+	_set_tooltip_label(tooltip_prominent_clan, "", false)
+	_set_tooltip_label(tooltip_major_clans, "", false)
+	_set_tooltip_label(tooltip_major_guilds, "", false)
+	_set_tooltip_label(tooltip_major_exports, "", false)
+	_set_tooltip_label(tooltip_hallmark, "", false)
+	if tooltip_hint != null:
+		tooltip_hint.visible = is_dwarfhold
 
 func _position_map_tooltip() -> void:
 	if tooltip_panel == null:
