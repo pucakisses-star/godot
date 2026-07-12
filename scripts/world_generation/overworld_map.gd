@@ -3695,6 +3695,15 @@ func _apply_rain_shadow(elevation: PackedFloat32Array, rainfall: PackedFloat32Ar
 		rainfall[i] = adjusted[i]
 
 
+## Deviation from the browser: it carried the lee-side dryness unchanged
+## across flat terrain, so a single range dried its whole row to the map edge
+## and deserts rendered as full-width horizontal stripes. Real rain shadows
+## fade with distance - air re-humidifies quickly over open water and the
+## column relaxes back toward the local base rainfall over flat land - so the
+## shadow now reaches a few dozen tiles leeward instead of the whole map.
+const RAIN_SHADOW_SEA_RECOVERY := 0.05
+const RAIN_SHADOW_LAND_RELAXATION := 0.045
+
 func _rain_shadow_sweep(
 	elevation: PackedFloat32Array,
 	rainfall: PackedFloat32Array,
@@ -3715,6 +3724,10 @@ func _rain_shadow_sweep(
 				carried -= slope * 0.5
 			elif slope < -0.05:
 				carried += (-slope) * 0.35
+			if float(elevation[idx]) < water_level:
+				carried += RAIN_SHADOW_SEA_RECOVERY
+			else:
+				carried = lerpf(carried, float(rainfall[idx]), RAIN_SHADOW_LAND_RELAXATION)
 			carried = clampf(carried, 0.0, 1.0)
 			adjusted[idx] = clampf((float(adjusted[idx]) * 2.0 + carried) / 3.0, 0.0, 1.0)
 			x += step
