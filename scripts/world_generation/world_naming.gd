@@ -90,6 +90,29 @@ const OCEAN_NAME_MOTIFS: Array[String] = [
 	"Sirens", "Stars", "Moons", "Whales", "Voyagers", "Storms", "Legends", "Coral", "Mists", "Echoes"
 ]
 
+const ISLAND_NAME_FIRST_PARTS: Array[String] = [
+	"Ash", "Storm", "Gull", "Black", "Ember", "Frost", "Drift", "Salt", "Crow", "Sun",
+	"Mist", "Copper", "Whale", "Thorn", "Moon", "Red", "Glass", "Iron", "Green", "Pearl",
+	"Bone", "Star", "King", "Hollow", "Tide", "Sea", "Cinder", "Wyrm", "Lantern", "Blue",
+	"Gold", "Dagger", "Stone", "Marrow", "Wind", "Coral", "Oath", "Raven", "Brine", "Dusk",
+	"Silver", "Honey", "Fox", "Anchor", "Deep", "Wolf", "Heron", "Kelp", "Spray", "Wreck"
+]
+const ISLAND_NAME_SECOND_PARTS: Array[String] = [
+	"reach", "haven", "wake", "wind", "rock", "spire", "fall", "hook", "grave", "reef",
+	"harbor", "tide", "water", "sand", "gull", "hollow", "mere", "crown", "briar", "shore",
+	"strand", "hold", "watch", "fin", "bell", "veil", "point", "rest", "wood", "light"
+]
+const ISLAND_NAME_SUFFIXES: Array[String] = ["Isle", "Island"]
+const ISLAND_NAME_TINY_SUFFIXES: Array[String] = ["Cay", "Rock", "Skerry", "Holm"]
+const ISLAND_OF_MOTIFS: Array[String] = [
+	"Larks", "Gulls", "Whales", "Sirens", "Lanterns", "Bones", "Mists", "Tides",
+	"Seals", "Sorrows", "Embers", "Pearls", "Reeds", "Wrecks"
+]
+const ISLAND_SAINT_NAMES: Array[String] = [
+	"Aberdeen", "Maria", "Brendan", "Morrow", "Elspeth", "Cassian", "Odile", "Rooke",
+	"Isolde", "Fenwick"
+]
+
 const LAKE_NAME_DESCRIPTORS: Array[String] = [
 	"Silver", "Crystal", "Mirror", "Still", "Glimmer", "Duskwater", "Bright", "Moon", "Amber", "Serene"
 ]
@@ -204,6 +227,41 @@ static func _generate_lake_name(rng: RandomNumberGenerator) -> String:
 		return "%s %s" % [noun, descriptor]
 	if not motif.is_empty() and rng.randf() < 0.6: return "The %s %s of the %s" % [descriptor, noun, motif]
 	return "The %s %s" % [descriptor, noun]
+
+## Island-flavored names (Ashen Isle, Stormreach, Ember Cay, Isle of Larks)
+## for small sea landmasses whose per-biome names would otherwise read as
+## inland terrain. island_size in tiles gates the tiny-island suffixes
+## (Cay/Rock/Skerry); used_names keeps names unique across one map build.
+static func generate_island_name(rng: RandomNumberGenerator, island_size: int, used_names: Dictionary) -> String:
+	var candidate := ""
+	for _attempt in range(12):
+		candidate = _compose_island_name(rng, island_size)
+		if not used_names.has(candidate):
+			return candidate
+	return candidate
+
+static func _compose_island_name(rng: RandomNumberGenerator, island_size: int) -> String:
+	var roll := rng.randf()
+	if roll < 0.08:
+		return "%s of %s" % [
+			"Isle" if rng.randf() < 0.7 else "Island",
+			_pick_random_entry(ISLAND_OF_MOTIFS, rng, "Larks")
+		]
+	if roll < 0.15:
+		return "St. %s %s" % [
+			_pick_random_entry(ISLAND_SAINT_NAMES, rng, "Maria"),
+			_pick_random_entry(ISLAND_NAME_SUFFIXES, rng, "Isle")
+		]
+	var first := _pick_random_entry(ISLAND_NAME_FIRST_PARTS, rng, "Drift")
+	var second := _pick_random_entry(ISLAND_NAME_SECOND_PARTS, rng, "wood")
+	if second == first.to_lower():
+		second = "haven"
+	var compound := first + second
+	if island_size <= 12 and roll < 0.45:
+		return "%s %s" % [compound, _pick_random_entry(ISLAND_NAME_TINY_SUFFIXES, rng, "Cay")]
+	if roll < 0.55:
+		return compound
+	return "%s %s" % [compound, _pick_random_entry(ISLAND_NAME_SUFFIXES, rng, "Isle")]
 
 static func _pick_random_entry(options: Array[String], rng: RandomNumberGenerator, fallback: String = "") -> String:
 	if options.is_empty(): return fallback

@@ -3225,7 +3225,55 @@ func _build_region_name_map(
 			if not region_name.is_empty():
 				for coord: Vector2i in cluster_cells:
 					region_names[coord] = region_name
+	_apply_island_region_names(biome_map, rng, region_names)
 	return {"names": region_names, "clusters": cluster_ids}
+
+## Small islands read as islands, not inland terrain: every land cell on a
+## landmass at or below the island size cutoff shares one island-style name
+## (Ashen Isle, Stormreach, Isle of Larks) instead of the per-biome
+## grassland/desert/marsh region names the cluster pass assigned above.
+func _apply_island_region_names(
+	biome_map: Dictionary,
+	rng: RandomNumberGenerator,
+	region_names: Dictionary
+) -> void:
+	var island_max_tiles := maxi(64, int(round(float(map_size.x * map_size.y) / 512.0)))
+	var visited := {}
+	var used_names := {}
+	for y in range(map_size.y):
+		for x in range(map_size.x):
+			var start := Vector2i(x, y)
+			if visited.has(start):
+				continue
+			if String(biome_map.get(start, BIOME_GRASSLAND)) == BIOME_WATER:
+				continue
+			var cells: Array[Vector2i] = []
+			var frontier: Array[Vector2i] = [start]
+			var touches_edge := false
+			visited[start] = true
+			while not frontier.is_empty():
+				var coord: Vector2i = frontier.pop_back()
+				cells.append(coord)
+				if coord.x == 0 or coord.y == 0 or coord.x == map_size.x - 1 or coord.y == map_size.y - 1:
+					touches_edge = true
+				for offset: Vector2i in NEIGHBOR_OFFSETS_8:
+					var neighbor: Vector2i = coord + offset
+					if neighbor.x < 0 or neighbor.y < 0 or neighbor.x >= map_size.x or neighbor.y >= map_size.y:
+						continue
+					if visited.has(neighbor):
+						continue
+					if String(biome_map.get(neighbor, BIOME_GRASSLAND)) == BIOME_WATER:
+						continue
+					visited[neighbor] = true
+					frontier.append(neighbor)
+			if touches_edge or cells.size() > island_max_tiles:
+				continue
+			var island_name := WORLD_NAMING.generate_island_name(rng, cells.size(), used_names)
+			if island_name.is_empty():
+				continue
+			used_names[island_name] = true
+			for coord: Vector2i in cells:
+				region_names[coord] = island_name
 
 func _water_region_type(start_coord: Vector2i, biome_map: Dictionary) -> String:
 	var lake_cells_variant: Variant = _landmass_masks.get("lake_cells", {})
