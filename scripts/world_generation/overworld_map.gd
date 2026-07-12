@@ -9274,6 +9274,48 @@ func _update_globe_texture() -> void:
 	globe_material.set_shader_parameter("height_scale", globe_height_scale)
 	globe_material.set_shader_parameter("seam_band", globe_seam_band)
 	globe_material.set_shader_parameter("polar_band", globe_polar_band)
+	globe_material.set_shader_parameter("bridge_ocean_color", _globe_bridge_ocean_color())
+
+var _bridge_ocean_color := Color(0.14, 0.26, 0.4)
+var _bridge_ocean_color_cached := false
+
+## Average color of the water tile art. The globe's wrap-seam bridge
+## dissolves into this so it reads as open ocean even when the map's east
+## or west edge holds land instead of guaranteed sea.
+func _globe_bridge_ocean_color() -> Color:
+	if _bridge_ocean_color_cached:
+		return _bridge_ocean_color
+	if map_layer == null or map_layer.tile_set == null or _atlas_source_id < 0:
+		return _bridge_ocean_color
+	var atlas_source := map_layer.tile_set.get_source(_atlas_source_id) as TileSetAtlasSource
+	if atlas_source == null or atlas_source.texture == null:
+		return _bridge_ocean_color
+	var atlas_image := atlas_source.texture.get_image()
+	if atlas_image == null:
+		return _bridge_ocean_color
+	if atlas_image.is_compressed() and atlas_image.decompress() != OK:
+		return _bridge_ocean_color
+	var region := atlas_source.get_tile_texture_region(WATER_TILE, 0)
+	var red_sum := 0.0
+	var green_sum := 0.0
+	var blue_sum := 0.0
+	var sample_count := 0
+	for row in range(region.size.y):
+		for column in range(region.size.x):
+			var pixel_pos := region.position + Vector2i(column, row)
+			if pixel_pos.x < 0 or pixel_pos.y < 0 or pixel_pos.x >= atlas_image.get_width() or pixel_pos.y >= atlas_image.get_height():
+				continue
+			var pixel := atlas_image.get_pixelv(pixel_pos)
+			if pixel.a < 0.5:
+				continue
+			red_sum += pixel.r
+			green_sum += pixel.g
+			blue_sum += pixel.b
+			sample_count += 1
+	if sample_count > 0:
+		_bridge_ocean_color = Color(red_sum / float(sample_count), green_sum / float(sample_count), blue_sum / float(sample_count))
+		_bridge_ocean_color_cached = true
+	return _bridge_ocean_color
 
 func _update_scene3d_texture() -> void:
 	if scene3d_mesh == null or map_viewport == null:
