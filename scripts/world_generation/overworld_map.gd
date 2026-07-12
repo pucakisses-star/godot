@@ -660,11 +660,15 @@ var _tile_population_groups: Dictionary = {}
 ## changes: they reshape at a stale, near-zero width, wrapping every word onto
 ## its own line, so a same-frame combined-minimum can be several screens tall
 ## (and Control.set_size clamps UP to that minimum, so it can't just be shrunk).
-## We therefore park the freshly-populated panel off-screen for one frame — laid
-## out, so the labels reshape at their real width — and only place it on-screen
-## once the measurement is trustworthy. This tracks that pending state and the
-## tile whose content is currently loaded.
+## We therefore park the freshly-populated panel off-screen — laid out, so the
+## labels reshape at their real width — and only place it on-screen once the
+## measured minimum comes back IDENTICAL on two consecutive frames. (The old
+## "taller than the viewport" plausibility test let any over-report that still
+## fit the screen through: on a 1876px-tall window a ~1770px ghost panel
+## flashed for one frame every time the hovered tile changed.) This tracks the
+## pending state, the last measurement, and the tile whose content is loaded.
 var _tooltip_settle_pending := false
+var _tooltip_last_measured_min := Vector2(-1.0, -1.0)
 var _tooltip_content_coord := Vector2i(-9999, -9999)
 var _height_map: Dictionary = {}
 var _height_buffer: PackedFloat32Array = PackedFloat32Array()
@@ -8762,26 +8766,21 @@ func _present_map_tooltip(coord: Vector2i) -> void:
 		_tooltip_content_coord = coord
 		_refresh_map_tooltip(coord)
 		_tooltip_settle_pending = true
+		# New content restarts the stability probe from scratch.
+		_tooltip_last_measured_min = Vector2(-1.0, -1.0)
 	tooltip_panel.visible = true
-	if _tooltip_settle_pending and not _tooltip_measurement_trustworthy():
-		# Keep it laid out (visible) so the labels reshape at their real width,
-		# but off-screen so the stale over-wrapped panel is invisible this frame.
-		tooltip_panel.position = Vector2(-100000.0, -100000.0)
-		return
-	_tooltip_settle_pending = false
+	if _tooltip_settle_pending:
+		var measured := tooltip_panel.get_combined_minimum_size()
+		if measured != _tooltip_last_measured_min:
+			# Still settling. Keep it laid out (visible) so the labels
+			# reshape at their real width, but off-screen so the stale
+			# over-wrapped panel is never seen — no matter how "plausible"
+			# its size looks on a tall window.
+			_tooltip_last_measured_min = measured
+			tooltip_panel.position = Vector2(-100000.0, -100000.0)
+			return
+		_tooltip_settle_pending = false
 	_position_map_tooltip()
-
-## A combined minimum taller than the viewport is the tell-tale of autowrap
-## labels reshaped before their width settled; a plausible height means the
-## measurement can be trusted for on-screen placement.
-func _tooltip_measurement_trustworthy() -> bool:
-	if tooltip_panel == null:
-		return true
-	var viewport := get_viewport()
-	var max_height := 720.0
-	if viewport != null:
-		max_height = viewport.get_visible_rect().size.y
-	return tooltip_panel.get_combined_minimum_size().y <= max_height + 1.0
 
 func _refresh_map_tooltip(coord: Vector2i) -> void:
 	if tooltip_panel == null:
