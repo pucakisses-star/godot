@@ -16,6 +16,7 @@ var show_return_to_map := false
 var _dimmer: ColorRect
 var _panel: PanelContainer
 var _status_label: Label
+var _resume_button: Button
 
 func _ready() -> void:
 	layer = 90
@@ -58,7 +59,7 @@ func _ready() -> void:
 	title.add_theme_color_override("font_color", Color(0.93, 0.87, 0.72, 1.0))
 	layout.add_child(title)
 
-	_add_button(layout, "Resume", _on_resume_pressed)
+	_resume_button = _add_button(layout, "Resume", _on_resume_pressed)
 	_add_button(layout, "Save Game", _on_save_pressed)
 	_add_button(layout, "Save to New Slot", _on_save_new_slot_pressed)
 	if show_return_to_map:
@@ -74,12 +75,13 @@ func _ready() -> void:
 
 	visible = false
 
-func _add_button(layout: VBoxContainer, label_text: String, handler: Callable) -> void:
+func _add_button(layout: VBoxContainer, label_text: String, handler: Callable) -> Button:
 	var button := Button.new()
 	button.text = label_text
 	button.custom_minimum_size = Vector2(220, 34)
 	button.pressed.connect(handler)
 	layout.add_child(button)
+	return button
 
 ## The scene's ESC handler is pause-blocked while the menu is open, so
 ## the menu (which processes during pause) closes itself.
@@ -103,6 +105,9 @@ func open() -> void:
 	_status_label.text = ""
 	visible = true
 	get_tree().paused = true
+	# Keyboard navigation is dead until something holds focus.
+	if _resume_button != null:
+		_resume_button.grab_focus()
 
 func close() -> void:
 	visible = false

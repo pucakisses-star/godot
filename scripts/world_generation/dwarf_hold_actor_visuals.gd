@@ -1,6 +1,12 @@
 extends RefCounted
 class_name DwarfHoldActorVisuals
 
+## Humanoid actors share one draw band with the other mobile sprites
+## (farm animals 11, wild creatures 12): at 0 the player and residents
+## rendered UNDER every cow and traveler. Kept below the dwarfhold
+## darkness quad (13) so darkness still swallows them.
+const ACTOR_Z_INDEX := 11
+
 ## Builds an NPC sprite. When the texture is a 12x8 character sheet
 ## (8 slots of 3 walk frames x 4 facings), the sprite uses an animated
 ## region that DwarfHoldTavernService.update_character_frame advances;
@@ -27,6 +33,7 @@ static func create_tavern_character_sprite(character_texture: Texture2D, charact
 				float(tile_size.x) / float(frame_width),
 				float(tile_size.y) / float(frame_height)
 			) * 0.9
+			sheet_sprite.z_index = ACTOR_Z_INDEX
 			return sheet_sprite
 
 	var sprite := Sprite2D.new()
@@ -35,6 +42,7 @@ static func create_tavern_character_sprite(character_texture: Texture2D, charact
 	sprite.centered = true
 	sprite.modulate = placeholder_actor_color(character_slot)
 	sprite.scale = Vector2(float(tile_size.x), float(tile_size.y)) * 0.45
+	sprite.z_index = ACTOR_Z_INDEX
 	return sprite
 
 ## The player wears a Shattered Pixel Dungeon hero sheet: 12x15 frames,
@@ -89,6 +97,7 @@ static func create_composed_player_sprite(texture: Texture2D, tile_size: Vector2
 		float(tile_size.x) / float(maxi(texture.get_width(), 1)),
 		float(tile_size.y) / float(maxi(texture.get_height(), 1))
 	) * 0.95
+	sprite.z_index = ACTOR_Z_INDEX
 	return sprite
 
 static func resolve_player_character_slot(context: Node) -> int:
@@ -110,6 +119,7 @@ static func create_player_character_sprite(shattered_player_texture: Texture2D, 
 	if shattered_player_texture == null:
 		var fallback_sprite := fallback_creator.call(0) as Sprite2D
 		fallback_sprite.modulate = Color(0.98, 0.95, 0.70, 1.0)
+		fallback_sprite.z_index = ACTOR_Z_INDEX
 		return fallback_sprite
 
 	var sprite := Sprite2D.new()
@@ -122,6 +132,7 @@ static func create_player_character_sprite(shattered_player_texture: Texture2D, 
 		float(tile_size.x) / HERO_FRAME_SIZE.x,
 		float(tile_size.y) / HERO_FRAME_SIZE.y
 	) * 0.9
+	sprite.z_index = ACTOR_Z_INDEX
 	return sprite
 
 static func create_placeholder_actor_texture() -> Texture2D:

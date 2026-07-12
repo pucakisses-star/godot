@@ -906,7 +906,13 @@ func _day_night_tint(hour: float) -> Color:
 
 func _update_day_night_tint() -> void:
 	# Tint only the map layers so the side panel stays readable at night.
-	var tint := _day_night_tint(_game_hour) * WeatherService.tint_multiplier(_current_weather)
+	# Sealed cellars see no sky: underground levels stay untinted, the
+	# same way the precipitation overlay already gates on the level.
+	var tint := (
+		Color.WHITE
+		if _is_underground_level()
+		else _day_night_tint(_game_hour) * WeatherService.tint_multiplier(_current_weather)
+	)
 	if tint.is_equal_approx(_applied_day_night_tint):
 		return
 	_applied_day_night_tint = tint
@@ -916,6 +922,10 @@ func _update_day_night_tint() -> void:
 		decor_layer.modulate = tint
 	if actor_layer != null:
 		actor_layer.modulate = tint
+	# Landmark icons (tents, pyres, great trees) live on a sibling layer
+	# that must darken with everything else or they glow at midnight.
+	if _surface_landmark_layer != null and is_instance_valid(_surface_landmark_layer):
+		_surface_landmark_layer.modulate = tint
 
 ## --- Weather -----------------------------------------------------------------
 ## The sky is WeatherService.weather_for_day(world seed, absolute day):
@@ -3468,6 +3478,10 @@ func _show_level(target_level_index: int) -> void:
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
 	_update_depth_controls()
+	# Crossing the surface/underground boundary changes the sky tint rule;
+	# drop the cache so the new level's tint applies this frame.
+	_applied_day_night_tint = Color(-1.0, -1.0, -1.0, -1.0)
+	_update_day_night_tint()
 	_update_weather_visuals()
 	if _wild_mode and _player_sprite != null:
 		_wild_needs_recenter = true

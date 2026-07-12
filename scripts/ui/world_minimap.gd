@@ -224,6 +224,11 @@ func _screen_right_edge() -> float:
 
 func _on_hide_pressed() -> void:
 	_collapsed = not _collapsed
+	# Hiding while expanded must also drop the expanded layout, or the
+	# collapsed header keeps the big map's width and stays floating
+	# dead-center of the screen instead of docking back to the corner.
+	if _collapsed and _expanded:
+		_expanded = false
 	_hide_button.text = "Show" if _collapsed else "Hide"
 	_zoom_in_button.visible = not _collapsed
 	_zoom_out_button.visible = not _collapsed

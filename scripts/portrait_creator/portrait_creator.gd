@@ -633,6 +633,7 @@ func _ready() -> void:
 	_setup_beard_style_slider()
 	_update_beard_style_availability()
 	_setup_hair_style_slider()
+	_connect_slider_step_buttons()
 	_configure_attribute_reminder_entries()
 	_refresh_random_name()
 	_update_attribute_reminders()
@@ -712,6 +713,43 @@ func _setup_clothing_slider() -> void:
 
 func _on_clothing_changed(_value: float) -> void:
 	_refresh_dwarf_preview()
+
+## Every slider sits between a left and a right arrow Button the scene
+## never wired up — clicking them did nothing. Each press steps the
+## slider by one VISIBLE variant (one palette bucket / one style).
+func _connect_slider_step_buttons() -> void:
+	var slider_steps: Array = [
+		[skin_color, 1.0 / float(DwarfSpriteComposer.SKIN_TONE_ROWS.size())],
+		[clothing_color, 1.0],
+		[hair_color, 1.0 / float(DwarfSpriteComposer.COLOR_COLUMN_COUNT)],
+		[hair_style, 1.0],
+		[beard_color, 1.0 / float(DwarfSpriteComposer.COLOR_COLUMN_COUNT)],
+		[beard_style, 1.0]
+	]
+	for pair: Array in slider_steps:
+		var slider := pair[0] as HSlider
+		if slider == null:
+			continue
+		var row: Node = slider.get_parent()
+		if row != null and not (row is HBoxContainer):
+			row = row.get_parent()
+		if not (row is HBoxContainer):
+			continue
+		var arrows: Array[Button] = []
+		for child in row.get_children():
+			var arrow := child as Button
+			if arrow != null:
+				arrows.append(arrow)
+		if arrows.size() < 2:
+			continue
+		var step := float(pair[1])
+		arrows[0].pressed.connect(_step_slider.bind(slider, -step))
+		arrows[arrows.size() - 1].pressed.connect(_step_slider.bind(slider, step))
+
+func _step_slider(slider: HSlider, delta: float) -> void:
+	if slider == null or not slider.editable:
+		return
+	slider.value = slider.value + delta
 
 ## Slider fractions map onto the sheet's discrete palettes, so a nudge
 ## of skin or hair color moves both views together.
@@ -903,7 +941,13 @@ func _set_gender(is_female: bool) -> void:
 	_update_beard_style_availability()
 	## Recompose the pixel preview so the beard change shows immediately.
 	_refresh_dwarf_preview()
-	character_name.text = _generate_full_name()
+	# Keep a typed given name — switching gender must not erase the
+	# player's input (Randomize rerolls the whole name itself afterwards).
+	var current_name := character_name.text.strip_edges()
+	var given_name := current_name
+	if current_name.contains(" "):
+		given_name = current_name.split(" ", false, 1)[0]
+	character_name.text = _generate_full_name(given_name)
 	_update_attribute_reminders()
 
 func _update_gender_button_selection_visuals() -> void:
@@ -931,12 +975,15 @@ func _update_gender_button_visual_state(button: Button, is_selected: bool) -> vo
 		_animate_gender_button(button, GENDER_BUTTON_BRIGHTNESS_NORMAL)
 
 func _update_beard_style_availability() -> void:
-	if beard_style == null:
-		return
-	beard_style.editable = not _is_female
-	beard_style.mouse_filter = Control.MOUSE_FILTER_IGNORE if _is_female else Control.MOUSE_FILTER_STOP
-	beard_style.focus_mode = Control.FOCUS_NONE if _is_female else Control.FOCUS_ALL
-	beard_style.modulate = BEARD_STYLE_DISABLED_MODULATE if _is_female else BEARD_STYLE_ENABLED_MODULATE
+	# Beard COLOR is as dead as beard style while female — grey it out
+	# too, or it sits live and does nothing.
+	for slider: HSlider in [beard_style, beard_color]:
+		if slider == null:
+			continue
+		slider.editable = not _is_female
+		slider.mouse_filter = Control.MOUSE_FILTER_IGNORE if _is_female else Control.MOUSE_FILTER_STOP
+		slider.focus_mode = Control.FOCUS_NONE if _is_female else Control.FOCUS_ALL
+		slider.modulate = BEARD_STYLE_DISABLED_MODULATE if _is_female else BEARD_STYLE_ENABLED_MODULATE
 	if _is_female:
 		beard = null
 
@@ -1007,7 +1054,10 @@ func _setup_hair_style_slider() -> void:
 		return
 	hair_style.min_value = 0
 	hair_style.step = 1
-	hair_style.max_value = maxi(_available_hairs.size() - 1, 0)
+	# The dwarf the player sees is the composer sprite: size the range
+	# from its style table, not from the legacy painted PNGs (which stay
+	# hidden at runtime and only have half as many styles).
+	hair_style.max_value = DwarfSpriteComposer.HAIR_STYLE_ROWS.size() - 1
 	hair_style.value = 0
 	_on_hair_style_changed(hair_style.value)
 
@@ -1023,7 +1073,9 @@ func _setup_beard_style_slider() -> void:
 		return
 	beard_style.min_value = 0
 	beard_style.step = 1
-	beard_style.max_value = _available_beards.size()
+	# Composer beard rows, plus one extra position at the top for
+	# "beardless" (checked against max_value elsewhere).
+	beard_style.max_value = DwarfSpriteComposer.BEARD_STYLE_ROWS.size()
 	beard_style.value = 0
 	_on_beard_style_changed(beard_style.value)
 
@@ -1085,15 +1137,19 @@ func _is_banker_selected() -> bool:
 		return false
 	return profession_choice.get_item_text(selected_index).to_lower() == "banker"
 
+## Heritage rides the same tone BUCKET the sprite shows, not the exact
+## slider endpoint — otherwise two identical-looking dwarfs could differ
+## in heritage depending on where in the bucket the slider stopped.
 func _is_dark_dwarf_selected() -> bool:
 	if skin_color == null:
 		return false
-	return is_equal_approx(skin_color.value, skin_color.max_value)
+	var tone_count := DwarfSpriteComposer.SKIN_TONE_ROWS.size()
+	return _fraction_to_index(_slider_fraction(skin_color), tone_count) == tone_count - 1
 
 func _is_grey_dwarf_selected() -> bool:
 	if skin_color == null:
 		return false
-	return is_equal_approx(skin_color.value, skin_color.min_value)
+	return _fraction_to_index(_slider_fraction(skin_color), DwarfSpriteComposer.SKIN_TONE_ROWS.size()) == 0
 
 func _is_beardless_selected() -> bool:
 	if beard_style == null:

@@ -2,6 +2,13 @@ extends Control
 
 var slices: Array = []
 
+func _ready() -> void:
+	# The chart lives inside the cursor-following map tooltip: it must
+	# never swallow clicks (a plain Control defaults to STOP, which ate
+	# map clicks whenever edge-clamping parked the tooltip under the
+	# cursor).
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+
 func set_slices(data: Array) -> void:
 	slices = data.duplicate()
 	queue_redraw()

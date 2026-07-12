@@ -262,6 +262,11 @@ layout_mode = 2
 theme = ExtResource("3_0yffs")
 text = "Hair Color"
 
+[node name="Label3" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=113500450]
+layout_mode = 2
+theme = ExtResource("3_0yffs")
+text = "Hair Style"
+
 [node name="HBoxContainer3" type="HBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=617553849]
 layout_mode = 2
 
@@ -284,16 +289,6 @@ layout_mode = 2
 icon = ExtResource("12_mdm0h")
 flat = true
 
-[node name="Label3" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=113500450]
-layout_mode = 2
-theme = ExtResource("3_0yffs")
-text = "Hair Style"
-
-[node name="Label4" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=113500451]
-layout_mode = 2
-theme = ExtResource("3_0yffs")
-text = "Beard Style"
-
 [node name="HBoxContainer4" type="HBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=150094808]
 layout_mode = 2
 
@@ -315,6 +310,16 @@ layout_mode = 2
 icon = ExtResource("12_mdm0h")
 flat = true
 
+[node name="Label4" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=113500451]
+layout_mode = 2
+theme = ExtResource("3_0yffs")
+text = "Beard Style"
+
+[node name="Label5" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=113500452]
+layout_mode = 2
+theme = ExtResource("3_0yffs")
+text = "Beard Color"
+
 [node name="HBoxContainer5" type="HBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=150094809]
 layout_mode = 2
 
@@ -335,11 +340,6 @@ max_value = 8.0
 layout_mode = 2
 icon = ExtResource("12_mdm0h")
 flat = true
-
-[node name="Label5" type="Label" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=113500452]
-layout_mode = 2
-theme = ExtResource("3_0yffs")
-text = "Beard Color"
 
 [node name="HBoxContainer6" type="HBoxContainer" parent="PanelContainer/VBoxContainer/MarginContainer/HBoxContainer/VBoxContainer/Grid" unique_id=150094810]
 layout_mode = 2
