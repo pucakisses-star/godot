@@ -231,7 +231,12 @@ static func rebuild(labels_overlay: Node2D, entries: Array[Dictionary], config: 
 		target_group.add_child(label)
 
 ## config: {"tile_size": int, "rescale_on_zoom": bool, "auto_visibility":
-##          bool, "min_screen_size": float, "max_screen_size": float}
+##          bool, "min_screen_size": float, "max_screen_size": float,
+##          "cull_overlaps": bool, "occupied_rects": Array}
+## cull_overlaps hides any label whose rescaled box intersects one already
+## kept (RimWorld-style declutter) - children are walked in importance
+## order, so the important names win. Passing the same occupied_rects
+## Array to several overlays makes them avoid each other too.
 static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, config: Dictionary) -> void:
 	if labels_overlay == null:
 		return
@@ -246,6 +251,8 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 	# auto-hidden while the overlay is up.
 	var constant_screen := bool(config.get("constant_screen_size", false))
 	var target_screen_px := float(config.get("target_screen_px", 15.0))
+	var cull_overlaps := bool(config.get("cull_overlaps", false))
+	var occupied_rects := config.get("occupied_rects", []) as Array
 	for group in labels_overlay.get_children():
 		for child in group.get_children():
 			var label := child as Label
@@ -277,6 +284,18 @@ static func update_zoom_behavior(labels_overlay: Node2D, zoom_factor: float, con
 				var scaled_box := label_box_size(label.text, rounded_size)
 				label.position = anchor - scaled_box * 0.5
 				label.size = scaled_box
+
+			if cull_overlaps:
+				var label_rect := Rect2(label.position, label.size)
+				var collides := false
+				for rect_variant: Variant in occupied_rects:
+					if (rect_variant as Rect2).intersects(label_rect):
+						collides = true
+						break
+				if collides:
+					label.visible = false
+					continue
+				occupied_rects.append(label_rect)
 
 			if constant_screen:
 				label.visible = true

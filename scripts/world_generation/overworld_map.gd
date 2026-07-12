@@ -37,13 +37,10 @@ extends Node2D
 @export var scene3d_min_camera_distance: float = 2.4
 @export var scene3d_max_camera_distance: float = 9.5
 @export var globe_height_scale: float = 0.0
-## Fraction of globe longitude reserved for the synthesized ocean strip that
-## bridges the map's east and west edges so the sphere wrap has no seam.
-@export_range(0.0, 0.3, 0.01) var globe_seam_band: float = 0.08
-## Fraction of globe latitude reserved at the south pole for a synthesized
-## Antarctic ice cap (globe view only); the map is compressed northward so
-## its own bottom edge sits above the cap.
-@export_range(0.0, 0.3, 0.01) var globe_polar_band: float = 0.07
+## RimWorld-style globe: the playable map covers only this fraction of the
+## sphere (longitude span, latitude span), centered on the facing meridian;
+## undetailed procedural filler continents own the rest of the planet.
+@export var globe_map_patch_span := Vector2(0.4, 0.4)
 @export var scene3d_height_scale: float = 0.1
 @export var scene3d_mountain_compression: float = 0.35
 @export var scene3d_land_blend_power: float = 1.75
@@ -9277,16 +9274,51 @@ func _update_globe_texture() -> void:
 	globe_material.set_shader_parameter("mountain_compression", scene3d_mountain_compression)
 	globe_material.set_shader_parameter("land_blend_power", scene3d_land_blend_power)
 	globe_material.set_shader_parameter("height_scale", globe_height_scale)
-	globe_material.set_shader_parameter("seam_band", globe_seam_band)
-	globe_material.set_shader_parameter("polar_band", globe_polar_band)
-	globe_material.set_shader_parameter("bridge_ocean_color", _globe_bridge_ocean_color())
+	globe_material.set_shader_parameter("map_patch_span", globe_map_patch_span)
+	# Fixed painted worlds (Earth, Azeroth, ...) ARE whole planets: wrap the
+	# entire sphere; only procedural worlds read as a region of a larger one.
+	globe_material.set_shader_parameter("map_full_wrap", 1.0 if not _fixed_layout_key.is_empty() else 0.0)
+	globe_material.set_shader_parameter("filler_ocean_color", _globe_bridge_ocean_color())
+	# Every world gets its own arrangement of scenery continents.
+	globe_material.set_shader_parameter("filler_seed", map_seed & 0x7FFFFFFF)
+	var ice_texture := _globe_polar_ice_texture()
+	if ice_texture != null:
+		globe_material.set_shader_parameter("polar_ice_texture", ice_texture)
+	# Snow tiles at the poles match the map patch's tile size: planar pole
+	# units are radians, and a patch tile spans span*TAU/map_width radians.
+	globe_material.set_shader_parameter("polar_tile_density", float(map_size.x) / (TAU * maxf(globe_map_patch_span.x, 0.05)))
 
 var _bridge_ocean_color := Color(0.14, 0.26, 0.4)
 var _bridge_ocean_color_cached := false
+var _polar_ice_texture_cache: ImageTexture = null
 
-## Average color of the water tile art. The globe's wrap-seam bridge
-## dissolves into this so it reads as open ocean even when the map's east
-## or west edge holds land instead of guaranteed sea.
+## The overworld's tundra tile art, extracted once from the atlas: the globe
+## builds its south polar cap out of real snow tiles instead of a flat glow.
+func _globe_polar_ice_texture() -> ImageTexture:
+	if _polar_ice_texture_cache != null:
+		return _polar_ice_texture_cache
+	if map_layer == null or map_layer.tile_set == null or _atlas_source_id < 0:
+		return null
+	var atlas_source := map_layer.tile_set.get_source(_atlas_source_id) as TileSetAtlasSource
+	if atlas_source == null or atlas_source.texture == null:
+		return null
+	var atlas_image := atlas_source.texture.get_image()
+	if atlas_image == null:
+		return null
+	if atlas_image.is_compressed() and atlas_image.decompress() != OK:
+		return null
+	var region := atlas_source.get_tile_texture_region(SNOW_TILE, 0)
+	if region.size.x <= 0 or region.size.y <= 0:
+		return null
+	var tile_image := atlas_image.get_region(region)
+	if tile_image == null:
+		return null
+	tile_image.generate_mipmaps()
+	_polar_ice_texture_cache = ImageTexture.create_from_image(tile_image)
+	return _polar_ice_texture_cache
+
+## Average color of the water tile art: the globe's filler oceans use it
+## so the scenery planet matches the map's real sea.
 func _globe_bridge_ocean_color() -> Color:
 	if _bridge_ocean_color_cached:
 		return _bridge_ocean_color
@@ -9445,15 +9477,18 @@ func _globe_tile_under_mouse() -> Vector2i:
 	# acos(y/r) from the north pole down.
 	var sphere_u := fposmod(atan2(hit.x, hit.z) / TAU, 1.0)
 	var sphere_v := acos(clampf(hit.y / maxf(radius, 0.0001), -1.0, 1.0)) / PI
-	# Invert the shader's seam/polar compression; the synthesized ocean
-	# bridge and ice cap describe no real tile.
-	var usable_u := maxf(1.0 - clampf(globe_seam_band, 0.0, 0.3), 0.001)
-	var usable_v := maxf(1.0 - clampf(globe_polar_band, 0.0, 0.3), 0.001)
-	if sphere_u >= usable_u or sphere_v >= usable_v:
+	# Fixed worlds wrap the whole sphere; procedural worlds invert the map
+	# patch placement, and the filler planet around it describes no tile.
+	var local_u := sphere_u
+	var local_v := sphere_v
+	if _fixed_layout_key.is_empty():
+		local_u = (sphere_u - 0.5) / maxf(globe_map_patch_span.x, 0.001) + 0.5
+		local_v = (sphere_v - 0.5) / maxf(globe_map_patch_span.y, 0.001) + 0.5
+	if local_u < 0.0 or local_u > 1.0 or local_v < 0.0 or local_v > 1.0:
 		return miss
 	var coord := Vector2i(
-		int(sphere_u / usable_u * float(map_size.x)),
-		int(sphere_v / usable_v * float(map_size.y))
+		int(local_u * float(map_size.x)),
+		int(local_v * float(map_size.y))
 	)
 	if coord.x < 0 or coord.y < 0 or coord.x >= map_size.x or coord.y >= map_size.y:
 		return miss
@@ -9923,7 +9958,8 @@ func _build_road_tiles() -> void:
 			mask |= 4
 		if road_cells.has(cell + Vector2i.LEFT) or _is_road_endpoint(cell + Vector2i.LEFT):
 			mask |= 8
-		_roads_layer.set_cell(cell, _atlas_source_id, _road_tile_for_mask(mask, cell))
+		var segment := TILE_ATLAS_DEFS.road_segment_for_mask(mask, cell.x * 73856093 ^ cell.y * 19349663)
+		_roads_layer.set_cell(cell, _atlas_source_id, segment["atlas"] as Vector2i, int(segment["alt"]))
 		# Roads clear the woods they cut through, like the browser overlay.
 		if tree_layer != null and tree_layer.get_cell_source_id(cell) >= 0:
 			tree_layer.erase_cell(cell)
@@ -9942,33 +9978,6 @@ func _is_road_endpoint(cell: Vector2i) -> bool:
 		return true
 	return ROUTE_ELIGIBLE_STRUCTURE_IDS.has(String(tile_info.get("structure", "")))
 
-## Buckets the 4-neighbor mask (N=1 E=2 S=4 W=8) into the organic road
-## art, picking deterministic variants per cell.
-func _road_tile_for_mask(mask: int, cell: Vector2i) -> Vector2i:
-	var bucket := "stub"
-	match mask:
-		5:
-			bucket = "ns"
-		10:
-			bucket = "we"
-		6:
-			bucket = "corner_se"
-		12:
-			bucket = "corner_sw"
-		3:
-			bucket = "corner_ne"
-		9:
-			bucket = "corner_nw"
-		1, 4:
-			bucket = "ns"
-		2, 8:
-			bucket = "we"
-		_:
-			if mask != 0:
-				bucket = "junction"
-	var variants := TILE_ATLAS_DEFS.ROAD_TILES.get(bucket, TILE_ATLAS_DEFS.ROAD_TILES["stub"]) as Array
-	var pick := absi(cell.x * 73856093 ^ cell.y * 19349663) % variants.size()
-	return variants[pick] as Vector2i
 
 ## --- Desert cities ----------------------------------------------------------
 ## The atlas's unshipped desert set becomes a real civilization: golden
@@ -10274,17 +10283,31 @@ func _rebuild_labels_overlay() -> void:
 ## fonts must grow far beyond their 2D sizes to stay readable. Feeding the
 ## rescale path this virtual zoom does exactly that while preserving the
 ## importance hierarchy.
-const GLOBE_LABEL_VIRTUAL_ZOOM := 0.07
+## Virtual zoom factors feeding the label rescale on the globe: fixed
+## worlds wrap the whole sphere, procedural maps cover only the ~40%
+## patch, so their labels must grow further to hold the same screen size.
+const GLOBE_LABEL_VIRTUAL_ZOOM_FULL_WRAP := 0.07
+const GLOBE_LABEL_VIRTUAL_ZOOM_PATCH := 0.03
+
+func _globe_label_virtual_zoom() -> float:
+	return GLOBE_LABEL_VIRTUAL_ZOOM_FULL_WRAP if not _fixed_layout_key.is_empty() else GLOBE_LABEL_VIRTUAL_ZOOM_PATCH
 
 func _update_labels_overlay_zoom_behavior() -> void:
-	_update_region_labels_zoom_behavior()
+	# Shared occupancy for RimWorld-style decluttering: region names claim
+	# their space first (they are the big geography names), settlement labels
+	# fill whatever is left, and anything that would overlap stays hidden
+	# instead of stacking.
+	var occupied_rects: Array = []
+	_update_region_labels_zoom_behavior(occupied_rects)
 	if labels_overlay == null:
 		return
 	if _is_globe_view:
-		OverworldLabelsService.update_zoom_behavior(labels_overlay, GLOBE_LABEL_VIRTUAL_ZOOM, {
+		OverworldLabelsService.update_zoom_behavior(labels_overlay, _globe_label_virtual_zoom(), {
 			"tile_size": tile_size,
 			"rescale_on_zoom": true,
 			"auto_visibility": false,
+			"cull_overlaps": true,
+			"occupied_rects": occupied_rects,
 			"min_screen_size": labels_overlay_min_screen_size,
 			"max_screen_size": labels_overlay_max_screen_size
 		})
@@ -10399,18 +10422,21 @@ func _rebuild_region_labels_overlay() -> void:
 	_update_region_labels_zoom_behavior()
 	_update_labels_overlay_visibility()
 
-func _update_region_labels_zoom_behavior() -> void:
+func _update_region_labels_zoom_behavior(occupied_rects: Array = []) -> void:
 	if _region_labels_overlay == null:
 		return
-	var zoom_factor := GLOBE_LABEL_VIRTUAL_ZOOM if _is_globe_view else (overworld_camera.zoom.x if overworld_camera != null else 1.0)
+	var zoom_factor := _globe_label_virtual_zoom() if _is_globe_view else (overworld_camera.zoom.x if overworld_camera != null else 1.0)
 	# Region names are overview aids: constant on-screen size at any zoom,
-	# never auto-hidden while the labels toggle is on.
+	# never auto-hidden while the labels toggle is on, decluttered so two
+	# region names can never stack on top of each other.
 	OverworldLabelsService.update_zoom_behavior(_region_labels_overlay, zoom_factor, {
 		"tile_size": tile_size,
 		"rescale_on_zoom": labels_overlay_rescale_on_zoom,
 		"auto_visibility": false,
 		"constant_screen_size": true,
 		"target_screen_px": REGION_LABEL_SCREEN_PX,
+		"cull_overlaps": true,
+		"occupied_rects": occupied_rects,
 		"min_screen_size": labels_overlay_min_screen_size,
 		"max_screen_size": labels_overlay_max_screen_size
 	})

@@ -23,9 +23,9 @@ static func build_tile_set(configured_tile_size: int, iceberg_tile_options: Arra
 	var tile_coords_list := _base_tile_coords_list()
 	for iceberg_tile_coord: Vector2i in iceberg_tile_options:
 		tile_coords_list.append(iceberg_tile_coord)
-	for road_bucket: Variant in TILE_ATLAS_DEFS.ROAD_TILES.values():
-		for road_tile: Vector2i in (road_bucket as Array):
-			tile_coords_list.append(road_tile)
+	for road_bucket: Variant in TILE_ATLAS_DEFS.ROAD_SEGMENTS.values():
+		for road_variant: Variant in (road_bucket as Array):
+			tile_coords_list.append((road_variant as Dictionary)["atlas"] as Vector2i)
 
 	var atlas_texture := load(TILE_ATLAS_DEFS.ATLAS_TEXTURE) as Texture2D
 	if atlas_texture == null:

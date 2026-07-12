@@ -248,12 +248,21 @@ static func _render_job_as_tiles(job: Dictionary) -> void:
 			var pick := _pick_cell_art(world_cell, noise_set, cell_biome, coast, detail, on_river, has_iceberg, iceberg_tile, danger, ruggedness, canopy, is_clearing, is_farm_field)
 			var base_art := pick.get("base", TILE_ATLAS_DEFS.GRASS_TILE) as Vector2i
 			var overlay_art := pick.get("overlay", Vector2i(-1, -1)) as Vector2i
+			var overlay_alt := 0
 			if on_road and not bool(pick.get("is_water", false)):
-				overlay_art = _road_art_for_cell(road_mask, road3x3, sx, sy, world_cell)
+				var segment := _road_art_for_cell(road_mask, road3x3, sx, sy, world_cell)
+				overlay_art = segment["atlas"] as Vector2i
+				overlay_alt = int(segment["alt"])
 			var dest := Vector2i(sx * atlas_px, sy * atlas_px)
 			image.blit_rect(tileset, art_rect.call(base_art) as Rect2i, dest)
 			if overlay_art.x >= 0:
-				image.blend_rect(tileset, art_rect.call(overlay_art) as Rect2i, dest)
+				if overlay_alt != 0:
+					# Transformed road pieces (the atlas only draws
+					# horizontal art) get flipped/transposed on the CPU.
+					var road_art := _transformed_road_art(tileset, art_rect.call(overlay_art) as Rect2i, overlay_alt)
+					image.blend_rect(road_art, Rect2i(Vector2i.ZERO, road_art.get_size()), dest)
+				else:
+					image.blend_rect(tileset, art_rect.call(overlay_art) as Rect2i, dest)
 			# Deep wilds read darker, same radial rule the walker feels.
 			var shade_level := int(round(clampf(danger, 0.0, 1.0) * 6.0))
 			if shade_level > 0:
@@ -398,7 +407,7 @@ static func _pick_cell_art(world_cell: Vector2i, noise_set: Dictionary, cell_bio
 ## The road art matching this cell's course: N/E/S/W bits from the mask
 ## (border cells also look across the tile edge) pick straight, corner,
 ## junction or stub art - the same buckets the world map lays.
-static func _road_art_for_cell(road_mask: PackedByteArray, road3x3: PackedFloat32Array, sx: int, sy: int, world_cell: Vector2i) -> Vector2i:
+static func _road_art_for_cell(road_mask: PackedByteArray, road3x3: PackedFloat32Array, sx: int, sy: int, world_cell: Vector2i) -> Dictionary:
 	var bits := 0
 	if (sy > 0 and road_mask[(sy - 1) * SUB_TILES + sx] != 0) or (sy == 0 and road3x3[1] >= 0.5):
 		bits |= 1
@@ -408,30 +417,21 @@ static func _road_art_for_cell(road_mask: PackedByteArray, road3x3: PackedFloat3
 		bits |= 4
 	if (sx > 0 and road_mask[sy * SUB_TILES + sx - 1] != 0) or (sx == 0 and road3x3[3] >= 0.5):
 		bits |= 8
-	var bucket := "stub"
-	match bits:
-		5:
-			bucket = "ns"
-		10:
-			bucket = "we"
-		6:
-			bucket = "corner_se"
-		12:
-			bucket = "corner_sw"
-		3:
-			bucket = "corner_ne"
-		9:
-			bucket = "corner_nw"
-		1, 4:
-			bucket = "ns"
-		2, 8:
-			bucket = "we"
-		_:
-			if bits != 0:
-				bucket = "junction"
-	var variants := TILE_ATLAS_DEFS.ROAD_TILES.get(bucket, TILE_ATLAS_DEFS.ROAD_TILES["stub"]) as Array
-	var pick := absi(world_cell.x * 73856093 ^ world_cell.y * 19349663) % variants.size()
-	return variants[pick] as Vector2i
+	return TILE_ATLAS_DEFS.road_segment_for_mask(bits, world_cell.x * 73856093 ^ world_cell.y * 19349663)
+
+## Applies packed TileSetAtlasSource TRANSFORM_* bits to a copied art
+## region: transpose first (rotate + mirror), then the axis flips —
+## matching how the tile renderer composes them.
+static func _transformed_road_art(tileset: Image, region: Rect2i, alt: int) -> Image:
+	var art := tileset.get_region(region)
+	if (alt & TileSetAtlasSource.TRANSFORM_TRANSPOSE) != 0:
+		art.rotate_90(CLOCKWISE)
+		art.flip_x()
+	if (alt & TileSetAtlasSource.TRANSFORM_FLIP_H) != 0:
+		art.flip_x()
+	if (alt & TileSetAtlasSource.TRANSFORM_FLIP_V) != 0:
+		art.flip_y()
+	return art
 
 ## Bilinear between tile centers so a field crosses tile boundaries
 ## smoothly instead of stair-stepping the tile grid.

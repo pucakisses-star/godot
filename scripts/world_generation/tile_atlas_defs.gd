@@ -132,18 +132,87 @@ const CENTAUR_ENCAMPMENT_TILE := Vector2i(10, 2)
 const PROSPECTOR_CAMP_TILE := Vector2i(7, 1)
 const OGRE_DEN_TILE := Vector2i(5, 1)
 
-## Winding dirt-road segments (row 5 of the atlas), bucketed by which
-## edges the trail leaves through. Organic art, so buckets hold variants.
-const ROAD_TILES := {
-	"ns": [Vector2i(7, 5), Vector2i(14, 5), Vector2i(16, 5)],
-	"we": [Vector2i(13, 5), Vector2i(15, 5), Vector2i(11, 5), Vector2i(21, 5)],
-	"corner_se": [Vector2i(10, 5)],
-	"corner_sw": [Vector2i(8, 5)],
-	"corner_ne": [Vector2i(9, 5)],
-	"corner_nw": [Vector2i(20, 5)],
-	"junction": [Vector2i(12, 5), Vector2i(17, 5)],
-	"stub": [Vector2i(18, 5), Vector2i(19, 5)]
+## Winding dirt-road segments (row 5 of the atlas), keyed by the edges the
+## trail actually leaves through - measured from the art's border pixels:
+##   straights (e+w): 8, 9, 14, 20      corners n+e: 7, 11, 13
+##   corners n+w: 12, 17                 tees n+e+w: 15, 16
+##   end caps: 19 (n), 10 and 21 (w)     isolated patch: 18
+## The row draws only horizontal-ish pieces, so every other orientation is
+## the same art transposed/flipped via TileSetAtlasSource TRANSFORM_* bits
+## packed into "alt". Transpose swaps N<->W and E<->S, then flip_h swaps
+## E<->W and flip_v swaps N<->S.
+const ROAD_SEGMENTS := {
+	"ew": [
+		{"atlas": Vector2i(8, 5), "alt": 0}, {"atlas": Vector2i(9, 5), "alt": 0},
+		{"atlas": Vector2i(14, 5), "alt": 0}, {"atlas": Vector2i(20, 5), "alt": 0}
+	],
+	"ns": [
+		{"atlas": Vector2i(8, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
+		{"atlas": Vector2i(9, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
+		{"atlas": Vector2i(14, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
+		{"atlas": Vector2i(20, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE}
+	],
+	"ne": [
+		{"atlas": Vector2i(7, 5), "alt": 0}, {"atlas": Vector2i(11, 5), "alt": 0},
+		{"atlas": Vector2i(13, 5), "alt": 0},
+		{"atlas": Vector2i(12, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H}
+	],
+	"nw": [
+		{"atlas": Vector2i(12, 5), "alt": 0}, {"atlas": Vector2i(17, 5), "alt": 0},
+		{"atlas": Vector2i(7, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H},
+		{"atlas": Vector2i(11, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H}
+	],
+	"se": [
+		{"atlas": Vector2i(7, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
+		{"atlas": Vector2i(11, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
+		{"atlas": Vector2i(13, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V}
+	],
+	"sw": [
+		{"atlas": Vector2i(12, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
+		{"atlas": Vector2i(17, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
+		{"atlas": Vector2i(7, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H | TileSetAtlasSource.TRANSFORM_FLIP_V}
+	],
+	"new": [{"atlas": Vector2i(15, 5), "alt": 0}, {"atlas": Vector2i(16, 5), "alt": 0}],
+	"sew": [
+		{"atlas": Vector2i(15, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
+		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V}
+	],
+	"nes": [
+		{"atlas": Vector2i(15, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE | TileSetAtlasSource.TRANSFORM_FLIP_H},
+		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE | TileSetAtlasSource.TRANSFORM_FLIP_H}
+	],
+	"nsw": [
+		{"atlas": Vector2i(15, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
+		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE}
+	],
+	"nesw": [
+		{"atlas": Vector2i(15, 5), "alt": 0},
+		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V},
+		{"atlas": Vector2i(15, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE},
+		{"atlas": Vector2i(16, 5), "alt": TileSetAtlasSource.TRANSFORM_TRANSPOSE | TileSetAtlasSource.TRANSFORM_FLIP_H}
+	],
+	"end_n": [{"atlas": Vector2i(19, 5), "alt": 0}],
+	"end_s": [{"atlas": Vector2i(19, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_V}],
+	"end_w": [{"atlas": Vector2i(10, 5), "alt": 0}, {"atlas": Vector2i(21, 5), "alt": 0}],
+	"end_e": [
+		{"atlas": Vector2i(10, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H},
+		{"atlas": Vector2i(21, 5), "alt": TileSetAtlasSource.TRANSFORM_FLIP_H}
+	],
+	"none": [{"atlas": Vector2i(18, 5), "alt": 0}]
 }
+
+## 4-neighbor road mask (N=1 E=2 S=4 W=8) -> segment signature.
+const ROAD_MASK_SIGNATURES := {
+	0: "none", 1: "end_n", 2: "end_e", 3: "ne", 4: "end_s", 5: "ns", 6: "se", 7: "nes",
+	8: "end_w", 9: "nw", 10: "ew", 11: "new", 12: "sw", 13: "nsw", 14: "sew", 15: "nesw"
+}
+
+## The road piece whose art leaves through exactly the mask's edges, with a
+## deterministic variant pick. Returns {"atlas": Vector2i, "alt": int}.
+static func road_segment_for_mask(mask: int, variant_hash: int) -> Dictionary:
+	var signature := String(ROAD_MASK_SIGNATURES.get(mask & 15, "none"))
+	var variants := ROAD_SEGMENTS.get(signature, ROAD_SEGMENTS["none"]) as Array
+	return variants[absi(variant_hash) % variants.size()] as Dictionary
 
 ## The desert city set: golden palace, sandstone walls and gate, hut,
 ## serpent statue, and desert vegetation.
