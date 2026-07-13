@@ -46,6 +46,82 @@ const COLOR_WALL := Color(0.42, 0.42, 0.45, 1.0)
 const COLOR_DECOR := Color(0.16, 0.34, 0.16, 1.0)
 const COLOR_GROUND := Color(0.28, 0.55, 0.28, 1.0)
 
+const TILE_ATLAS_DEFS := preload("res://scripts/world_generation/tile_atlas_defs.gd")
+
+## Rich per-tile palette: the map paints what the ground actually IS -
+## sand gold, snow white, shallow fords pale, marsh murk, hold streets
+## warm - instead of collapsing everything into grass green and barrier
+## gray. Prefix rules, first match wins, so specifics precede generics.
+const TILE_COLOR_RULES: Array = [
+	["water_shallow", Color(0.38, 0.62, 0.78, 1.0)],
+	["water", Color(0.20, 0.42, 0.68, 1.0)],
+	["massif_rock_dark", Color(0.30, 0.31, 0.36, 1.0)],
+	["massif_rock_top", Color(0.56, 0.57, 0.62, 1.0)],
+	["massif_rock", Color(0.44, 0.45, 0.50, 1.0)],
+	["sandstone", Color(0.72, 0.60, 0.42, 1.0)],
+	["sand", Color(0.79, 0.71, 0.46, 1.0)],
+	["snow_rock", Color(0.62, 0.66, 0.68, 1.0)],
+	["snow", Color(0.87, 0.89, 0.92, 1.0)],
+	["ice_brick", Color(0.66, 0.78, 0.86, 1.0)],
+	["grass_dark", Color(0.19, 0.40, 0.20, 1.0)],
+	["grass", Color(0.28, 0.55, 0.28, 1.0)],
+	["flowers", Color(0.62, 0.48, 0.58, 1.0)],
+	["tree", Color(0.10, 0.28, 0.13, 1.0)],
+	["hedge", Color(0.20, 0.42, 0.22, 1.0)],
+	["stump", Color(0.42, 0.32, 0.20, 1.0)],
+	["cactus", Color(0.30, 0.52, 0.26, 1.0)],
+	["palm", Color(0.28, 0.48, 0.24, 1.0)],
+	["desert_bones", Color(0.80, 0.78, 0.68, 1.0)],
+	["desert_rock", Color(0.60, 0.44, 0.32, 1.0)],
+	["gravestone", Color(0.58, 0.58, 0.62, 1.0)],
+	["stone_coffin", Color(0.58, 0.58, 0.62, 1.0)],
+	["statue", Color(0.62, 0.62, 0.66, 1.0)],
+	["fountain", Color(0.45, 0.60, 0.75, 1.0)],
+	["street_lamp", Color(0.95, 0.80, 0.40, 1.0)],
+	["chest", Color(0.76, 0.56, 0.26, 1.0)],
+	["ruin", Color(0.60, 0.60, 0.64, 1.0)],
+	["web", Color(0.78, 0.78, 0.80, 1.0)],
+	["plaza", Color(0.62, 0.59, 0.52, 1.0)],
+	["road", Color(0.62, 0.48, 0.30, 1.0)],
+	["floor", Color(0.56, 0.46, 0.32, 1.0)],
+	["wall", Color(0.38, 0.35, 0.33, 1.0)],
+	["door", Color(0.72, 0.52, 0.26, 1.0)],
+	["stairway", Color(0.92, 0.84, 0.46, 1.0)],
+	["fence", Color(0.50, 0.38, 0.24, 1.0)],
+	["bed", Color(0.62, 0.30, 0.30, 1.0)],
+	["table", Color(0.52, 0.40, 0.26, 1.0)],
+	["bench", Color(0.52, 0.40, 0.26, 1.0)],
+	["shelf", Color(0.52, 0.40, 0.26, 1.0)],
+	["dresser", Color(0.52, 0.40, 0.26, 1.0)],
+	["stool", Color(0.52, 0.40, 0.26, 1.0)],
+	["barrel", Color(0.55, 0.40, 0.24, 1.0)],
+	["keg", Color(0.55, 0.40, 0.24, 1.0)],
+	["sack", Color(0.66, 0.56, 0.38, 1.0)],
+	["grain_bag", Color(0.66, 0.56, 0.38, 1.0)],
+	["anvil", Color(0.40, 0.40, 0.44, 1.0)],
+	["workbench", Color(0.52, 0.40, 0.26, 1.0)],
+	["armor_stand", Color(0.55, 0.55, 0.60, 1.0)],
+	["mud", Color(0.40, 0.32, 0.22, 1.0)],
+	["dirt", Color(0.46, 0.36, 0.25, 1.0)]
+]
+
+## The hold's own kit (the embedded dwarfhold city, tile source 1) gets
+## explicit colors so its streets, walls and stairways read on the map.
+const HOLD_TILE_COLORS := {
+	"wall": Color(0.33, 0.30, 0.29, 1.0),
+	"floor": Color(0.58, 0.48, 0.34, 1.0),
+	"dirt": Color(0.46, 0.36, 0.25, 1.0),
+	"dirt_alt": Color(0.42, 0.33, 0.23, 1.0),
+	"dirt_shadow": Color(0.38, 0.30, 0.21, 1.0),
+	"door": Color(0.80, 0.60, 0.30, 1.0),
+	"stairway_down": Color(0.95, 0.85, 0.45, 1.0),
+	"stairway_up": Color(0.95, 0.85, 0.45, 1.0)
+}
+
+## Reverse atlas lookups (coords -> tile key), built lazily on first use.
+var _town_key_by_coords: Dictionary = {}
+var _hold_key_by_coords: Dictionary = {}
+
 const COLOR_PLAYER := Color(1.0, 0.95, 0.45, 1.0)
 const COLOR_PLAYER_EDGE := Color(0.15, 0.12, 0.05, 1.0)
 const COLOR_NPC := Color(0.85, 0.90, 1.0, 1.0)
@@ -328,23 +404,65 @@ func _draw_body() -> void:
 
 
 func _color_for_cell(cell: Vector2i, city: TileMapLayer, decor: TileMapLayer, roads: Dictionary, blocked: Dictionary, biome_ctx: Dictionary, world_origin: Vector2i) -> Color:
-	if city.get_cell_source_id(cell) < 0:
+	var source_id := city.get_cell_source_id(cell)
+	if source_id < 0:
 		# Not streamed: paint from the overworld biome field so the map shows
 		# the surrounding land and sea instead of black.
 		if biome_ctx.is_empty():
 			return COLOR_UNGENERATED
 		return _biome_color(SurfaceWorldService.biome_for_world_cell(biome_ctx, cell + world_origin))
+	# The embedded dwarfhold city paints from the hold's own kit.
+	if source_id == 1:
+		var hold_key := _tile_key_for(city.get_cell_atlas_coords(cell), true)
+		if HOLD_TILE_COLORS.has(hold_key):
+			return HOLD_TILE_COLORS[hold_key] as Color
+		var hold_rule := _rule_color(hold_key)
+		return hold_rule if hold_rule.a > 0.0 else COLOR_GROUND
+	var city_key := _tile_key_for(city.get_cell_atlas_coords(cell), false)
 	if bool(_scene.call("_is_water_cell", cell)):
 		return COLOR_WATER
 	if roads.has(cell):
 		return COLOR_ROAD
-	# Walls, buildings, mountains and other barriers read as gray; passable
-	# vegetation stays green so paths and open ground stand out.
+	# Decor draws over its ground: canopies, lamps, graves, furniture.
+	if decor != null and decor.get_cell_source_id(cell) >= 0:
+		var decor_color := _rule_color(_tile_key_for(decor.get_cell_atlas_coords(cell), false))
+		if decor_color.a > 0.0:
+			return decor_color
+	# Barriers whose tile the palette knows keep their own look (a stone
+	# range reads gray-blue, a timber wall brown); the rest stay gray.
 	if blocked.has(cell) or not bool(_scene.call("_is_walkable_cell", cell)):
-		return COLOR_WALL
+		var barrier_color := _rule_color(city_key)
+		return barrier_color if barrier_color.a > 0.0 else COLOR_WALL
 	if decor != null and decor.get_cell_source_id(cell) >= 0:
 		return COLOR_DECOR
-	return COLOR_GROUND
+	var ground_color := _rule_color(city_key)
+	return ground_color if ground_color.a > 0.0 else COLOR_GROUND
+
+## First matching prefix rule, or transparent when the key is unknown so
+## the caller can fall back to its coarse family color.
+func _rule_color(tile_key: String) -> Color:
+	if tile_key.is_empty():
+		return Color(0, 0, 0, 0)
+	for rule: Array in TILE_COLOR_RULES:
+		if tile_key.begins_with(String(rule[0])):
+			return rule[1] as Color
+	return Color(0, 0, 0, 0)
+
+## Reverse lookup from painted atlas coords to the tile key that put them
+## there, for both the town atlas (source 0) and the hold kit (source 1).
+func _tile_key_for(coords: Vector2i, hold_source: bool) -> String:
+	if _town_key_by_coords.is_empty():
+		for key_variant: Variant in TILE_ATLAS_DEFS.TOWN_TILE_ATLAS.keys():
+			var coords_variant: Variant = TILE_ATLAS_DEFS.TOWN_TILE_ATLAS[key_variant]
+			if coords_variant is Vector2i:
+				_town_key_by_coords[coords_variant] = String(key_variant)
+		for key_variant: Variant in TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS.keys():
+			var coords_variant: Variant = TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS[key_variant]
+			if coords_variant is Vector2i:
+				_hold_key_by_coords[coords_variant] = String(key_variant)
+	if hold_source:
+		return String(_hold_key_by_coords.get(coords, ""))
+	return String(_town_key_by_coords.get(coords, ""))
 
 
 ## Overworld-biome colour for cells the wilds have not streamed in, so the

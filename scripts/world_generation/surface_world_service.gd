@@ -302,27 +302,28 @@ static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, 
 		TILE_ATLAS_DEFS.BIOME_BADLANDS:
 			return {"base": "sand_pebbles" if detail > -0.2 else "sand", "decor": ""}
 		TILE_ATLAS_DEFS.BIOME_MOUNTAIN:
-			# Rocky fringes: pebble crags with sparse dark conifers and drier
-			# grass in the folds. Crags are impassable rock; the low valley
-			# folds and lower slopes stay walkable so a range is a real
-			# barrier with passes threaded through it, not a solid wall.
+			# A range is SOLID STONE for the most part: the blocked mass
+			# draws as real grey crag rock (the same minable massif tiles
+			# a hold is carved from), not pebbly ground with invisible
+			# walls. Only the deepest valley folds stay open, percolating
+			# into narrow passes a walker can thread - or a pick can widen.
+			if detail > -0.15:
+				var scatter := (cell.x * 73856093 ^ cell.y * 19349663) & 0x7fffffff
+				var rock_key := "massif_rock"
+				if detail > 0.55:
+					rock_key = "massif_rock_dark"
+				elif scatter % 9 == 0:
+					rock_key = "massif_rock_top"
+				return {"base": rock_key, "decor": "", "blocked": true}
 			var base := "sand_pebbles"
-			if detail < -0.35:
+			if detail < -0.45:
 				base = "grass_dark"
-			elif detail < 0.05:
+			elif detail < -0.3:
 				base = "sand"
 			var decor := ""
-			if forest > 0.35 and detail > 0.55:
+			if forest > 0.35 and detail < -0.4:
 				decor = "tree_dark"
-			# Crags block; folds and lower slopes below the threshold stay
-			# open. The detail noise is high-frequency, so the threshold is
-			# tuned to -0.1: above it the range is a clear majority of rock,
-			# below it the open cells still percolate into continuous valley
-			# passes a walker can thread from one side to the other.
-			var mountain_terrain := {"base": base, "decor": decor}
-			if detail > -0.1:
-				mountain_terrain["blocked"] = true
-			return mountain_terrain
+			return {"base": base, "decor": decor}
 		TILE_ATLAS_DEFS.BIOME_HILLS:
 			# Greener than the peaks, still stony on the ridgelines.
 			var base := "grass_dark"
