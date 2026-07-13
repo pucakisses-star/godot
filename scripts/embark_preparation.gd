@@ -263,7 +263,7 @@ func _refresh_summary_text() -> void:
 	summary_map_size.text = "%s — %s" % [map_size["name"], map_size["dimensions"]]
 	summary_layout.text = world_layout_select.get_item_text(world_layout_select.selected)
 	summary_seed.text = seed_input.text.strip_edges() if not seed_input.text.strip_edges().is_empty() else "Random"
-	summary_chronology.text = "Year %d, Age %d" % [int(year_input.value), int(age_input.value)]
+	summary_chronology.text = "Year %d, Age %d — %s" % [int(year_input.value), int(age_input.value), GameCalendar.year_title(int(year_input.value), true)]
 
 func _update_map_preview() -> void:
 	if map_preview == null:

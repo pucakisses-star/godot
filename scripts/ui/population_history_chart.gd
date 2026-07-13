@@ -41,7 +41,7 @@ func _get_tooltip(at_position: Vector2) -> String:
 	var entry := points[index] as Dictionary
 	var year := int(entry.get("year", index + 1))
 	var population := int(entry.get("population", 0))
-	return "Year %d\nPopulation: %d" % [year, population]
+	return "Year %d — %s\nPopulation: %d" % [year, GameCalendar.year_title(year), population]
 
 func _chart_area() -> Rect2:
 	var rect_size := size

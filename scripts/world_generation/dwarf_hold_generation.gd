@@ -4893,7 +4893,7 @@ func _ruler_dialogue_line(state: Dictionary) -> String:
 	var pool: Array[String] = [
 		"I am %s of %s. Speak plainly; the stone listens." % [throne_title, hold_label],
 		"Every gate and gallery of %s answers to this seat. Keep its peace." % hold_label,
-		"I have ruled %s since the year %d. It has cost me more than gold." % [hold_label, since]
+		"I have ruled %s since the year %d — %s. It has cost me more than gold." % [hold_label, since, GameCalendar.year_title(since)]
 	]
 	var lineage := state.get("ruler_lineage", []) as Array
 	if lineage.size() > 1:

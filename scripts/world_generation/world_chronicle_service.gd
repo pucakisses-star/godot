@@ -506,14 +506,14 @@ static func _simulate_hold_falls(
 			if enemy == String(record.get("state", "")):
 				enemy = String(war_cause.get("defender", ""))
 			var fall_text := "The gates were breached by the armies of %s during %s; the hold fell, and its halls have been silent since." % [_realm_ref(enemy), _war_ref(String(war_cause.get("name", "the war")))]
-			record["fall_text"] = "Fell to the armies of %s, year %d" % [_realm_ref(enemy), fall_year]
+			record["fall_text"] = "Fell to the armies of %s, year %d — %s" % [_realm_ref(enemy), fall_year, GameCalendar.year_title(fall_year)]
 			_push_event(record, all_events, fall_year, "fall", fall_text, hold_name)
 		else:
 			var beast := _pick_hold_felling_beast(beasts, rng)
 			beast["lair"] = hold_name
 			var beast_display := String(beast.get("display", "a beast"))
 			var fall_text := "%s rose from the deeps; the hold fell, and its halls have been silent since." % _capitalize_first(beast_display)
-			record["fall_text"] = "Fell to %s, year %d" % [beast_display, fall_year]
+			record["fall_text"] = "Fell to %s, year %d — %s" % [beast_display, fall_year, GameCalendar.year_title(fall_year)]
 			record["fall_beast"] = String(beast.get("name", ""))
 			_push_event(record, all_events, fall_year, "fall", fall_text, hold_name)
 		_push_mark(record, fall_year, "fall", 1.0)
@@ -660,7 +660,7 @@ static func _simulate_razings(
 				enemy = String(war.get("defender", ""))
 			raze_year = clampi(rng.randi_range(int(war.get("start", raze_year)), int(war.get("end", raze_year))), founded_year + 1, current_year - 1)
 			record["fell_year"] = raze_year
-			record["fall_text"] = "Razed by the armies of %s, year %d" % [_realm_ref(enemy), raze_year]
+			record["fall_text"] = "Razed by the armies of %s, year %d — %s" % [_realm_ref(enemy), raze_year, GameCalendar.year_title(raze_year)]
 			_push_event(
 				record, all_events, raze_year, "razing",
 				"Razed by the armies of %s during %s; the survivors scattered, and only ruins remain." % [_realm_ref(enemy), _war_ref(String(war.get("name", "the war")))],
@@ -669,7 +669,7 @@ static func _simulate_razings(
 		else:
 			var beast := beasts[rng.randi_range(0, beasts.size() - 1)] as Dictionary
 			var beast_display := String(beast.get("display", "a beast"))
-			record["fall_text"] = "Razed by %s, year %d" % [beast_display, raze_year]
+			record["fall_text"] = "Razed by %s, year %d — %s" % [beast_display, raze_year, GameCalendar.year_title(raze_year)]
 			_push_event(
 				record, all_events, raze_year, "razing",
 				"%s burned the settlement to its footings; the survivors scattered, and only ruins remain." % _capitalize_first(beast_display),
@@ -712,7 +712,7 @@ static func _simulate_local_calamities(
 					settlement_name
 				)
 				_push_mark(record, event_year, "plague", rng.randf_range(0.28, 0.42))
-				(record["rumors"] as Array).append("The old folk still speak of %s, back in the year %d. The dead outnumbered the living." % [plague_name, event_year])
+				(record["rumors"] as Array).append("The old folk still speak of %s, back in the year %d — %s. The dead outnumbered the living." % [plague_name, event_year, GameCalendar.year_title(event_year)])
 			elif kind_roll < 0.65:
 				_push_event(
 					record, all_events, event_year, "famine",
@@ -1682,7 +1682,7 @@ static func _finalize_settlements(
 				var fallen := records[best_key] as Dictionary
 				var fallen_name := String(fallen.get("name", ""))
 				if bool(fallen.get("razed", false)):
-					(record["rumors"] as Array).append("Nobody rebuilds %s. Not after the year %d." % [fallen_name, int(fallen.get("fell_year", 0))])
+					(record["rumors"] as Array).append("Nobody rebuilds %s. Not after year %d — %s." % [fallen_name, int(fallen.get("fell_year", 0)), GameCalendar.year_title(int(fallen.get("fell_year", 0)))])
 					(record["agenda_goals"] as Array).append("to avenge the razing of %s" % fallen_name)
 				else:
 					var beast_name := String(fallen.get("fall_beast", ""))
@@ -1761,10 +1761,11 @@ static func _build_world_rumors(chronicle: Dictionary, rng: RandomNumberGenerato
 	for beast_variant: Variant in (chronicle.get("beasts", []) as Array):
 		var beast := beast_variant as Dictionary
 		if String(beast.get("status", "")) == "slain":
-			rumors.append("%s is dead, they say — %s slew it in the year %d. I'd still not whistle in the deeps." % [
+			rumors.append("%s is dead, they say — %s slew it in the year %d, %s. I'd still not whistle in the deeps." % [
 				_capitalize_first(String(beast.get("display", "the beast"))),
 				String(beast.get("slain_by", "a hero")),
-				int(beast.get("slain_year", 0))
+				int(beast.get("slain_year", 0)),
+				GameCalendar.year_title(int(beast.get("slain_year", 0)))
 			])
 		elif not String(beast.get("lair", "")).is_empty():
 			rumors.append("They say %s still nests where %s fell." % [String(beast.get("display", "the beast")), String(beast.get("lair", ""))])
@@ -2216,7 +2217,7 @@ static func settlement_events_bbcode(events: Array, current_year: int) -> String
 		var event_year := int(event.get("year", 0))
 		var years_ago := maxi(0, current_year - event_year)
 		var ago_label := "this year" if years_ago == 0 else ("%d year%s ago" % [years_ago, "" if years_ago == 1 else "s"])
-		rows.append("• [color=#d4a64a][b]Year %d[/b][/color] ([i]%s[/i]) — %s" % [event_year, ago_label, text])
+		rows.append("• [color=#d4a64a][b]Year %d[/b], %s[/color] ([i]%s[/i]) — %s" % [event_year, GameCalendar.year_title(event_year), ago_label, text])
 	return "\n".join(rows)
 
 ## BBCode for the World Chronicle dialog: the loudest events of the age.
@@ -2230,7 +2231,8 @@ static func overview_bbcode(chronicle: Dictionary) -> String:
 		rows.append("[i]The age has been quiet; the chroniclers recorded little.[/i]")
 	for event_variant: Variant in world_events:
 		var event := event_variant as Dictionary
-		rows.append("[color=#d4a64a][b]Year %d[/b][/color] — %s" % [int(event.get("year", 0)), String(event.get("text", ""))])
+		var overview_year := int(event.get("year", 0))
+		rows.append("[color=#d4a64a][b]Year %d[/b], %s[/color] — %s" % [overview_year, GameCalendar.year_title(overview_year), String(event.get("text", ""))])
 	var beasts := chronicle.get("beasts", []) as Array
 	var beast_rows: Array[String] = []
 	for beast_variant: Variant in beasts:
