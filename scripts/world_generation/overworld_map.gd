@@ -1451,6 +1451,10 @@ func _store_selected_dwarfhold_scene_context(seed_text: String, tile_coord: Vect
 	settings[DWARFHOLD_SCENE_GEOLOGY_KEY] = GeologyService.profile_for_tile(tile_coord, details, map_seed)
 	# ...and its factions carry the guild names the tooltip advertises.
 	settings["dwarfhold_scene_guilds"] = details.get("major_guilds", [])
+	# The legacy direct descent lands in the hold's own city level: a
+	# stale surface-stair flag from an earlier gate journey would land
+	# it in the underhalls and wire the exit to a stale town context.
+	settings["dwarfhold_scene_from_surface_stair"] = false
 	settings["underdeep_sites"] = _build_underdeep_sites(tile_coord)
 	game_session.call("set_world_settings", settings)
 

@@ -2016,13 +2016,19 @@ func _show_level(target_level_index: int) -> void:
 	# EVERY level is an open, diggable underground: rock beyond the halls
 	# streams in as deterministic noise-carved chunks, each level with
 	# its own cavern layout. (Level 0 keeps its original seed so old
-	# saves' galleries still line up.)
+	# saves' galleries still line up.) Discovery flags are per-level
+	# state exactly like the chunks that carry them: binding a shared
+	# dict across levels left stale flags that blocked chunk eviction
+	# on every OTHER level, stranding tiles and creatures forever.
 	if not level_data.has("generated_chunks"):
 		level_data["generated_chunks"] = {}
 	if not level_data.has("dug_cells"):
 		level_data["dug_cells"] = {}
+	if not level_data.has("discovery_chunks"):
+		level_data["discovery_chunks"] = {}
 	_generated_chunks = level_data.get("generated_chunks", {}) as Dictionary
 	_dug_cells = level_data.get("dug_cells", {}) as Dictionary
+	_discovery_chunks = level_data.get("discovery_chunks", {}) as Dictionary
 	_world_noise = UndergroundWorldService.make_noise_set(_level_world_seed(_hold_state.current_level_index))
 	_last_player_chunk = Vector2i(2147483647, 2147483647)
 	_streamed_chunks = {}
@@ -3121,14 +3127,18 @@ func _stream_world_chunks() -> void:
 const EVICT_CHUNK_RADIUS := 4
 
 ## Sites and discoveries stamp structures that spill past their chunk;
-## evicting any chunk they touch would tear holes in them.
+## evicting any chunk they touch would tear holes in them. Underdeep
+## sites only stamp on the DEEPEST level, so only that level's chunks
+## earn their protection - guarding them everywhere left unstamped
+## chunks on shallow levels unevictable.
 func _chunk_neighborhood_has_stamp(chunk: Vector2i) -> bool:
+	var sites_stamp_here := _hold_state.current_level_index == _hold_state.generated_levels.size() - 1
 	for dy in range(-1, 2):
 		for dx in range(-1, 2):
 			var neighbor := chunk + Vector2i(dx, dy)
 			if _discovery_chunks.has(neighbor):
 				return true
-			if not (_sites_by_chunk.get(UndergroundWorldService.chunk_key(neighbor), []) as Array).is_empty():
+			if sites_stamp_here and not (_sites_by_chunk.get(UndergroundWorldService.chunk_key(neighbor), []) as Array).is_empty():
 				return true
 	return false
 
