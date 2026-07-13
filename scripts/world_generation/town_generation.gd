@@ -7553,6 +7553,10 @@ func _plan_dwarfhold_main_floor(landmark: Dictionary, rng: RandomNumberGenerator
 		var street_zone := int(zone_grid[cell_variant])
 		if street_zone != CELL_HALL and street_zone != CELL_PLAZA:
 			continue
+		# The zone grid still calls the mouth a hall after the seal
+		# overwrote it; no torch stands on the gate slabs.
+		if String(ground.get(street_cell, "")) == "sealed_gate":
+			continue
 		var hugs_wall := false
 		for offset: Vector2i in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1)]:
 			var neighbor_zone := int(zone_grid.get(street_cell + offset, CELL_ROCK))
@@ -7569,6 +7573,8 @@ func _plan_dwarfhold_main_floor(landmark: Dictionary, rng: RandomNumberGenerator
 	for cell_variant: Variant in zone_grid.keys():
 		var open_zone := int(zone_grid[cell_variant])
 		if open_zone != CELL_HALL and open_zone != CELL_PLAZA:
+			continue
+		if String(ground.get(cell_variant as Vector2i, "")) == "sealed_gate":
 			continue
 		if (hash("ward_spawn|%d|%d" % [(cell_variant as Vector2i).x, (cell_variant as Vector2i).y]) & 0xffff) % 9 == 0:
 			spawn_cells.append(cell_variant)
@@ -8842,7 +8848,12 @@ func _spawn_ward_dwarves(anchor: Vector2i, ward_cells: Dictionary, rng: RandomNu
 			"timer": rng.randf_range(0.8, 2.4),
 			"identity": identity,
 			"npc_name": String(identity.get("name", "A dwarf")),
-			"traveler": dwarf_index == 0
+			"traveler": dwarf_index == 0,
+			# Each hold's peddler keys their OWN stock: without an anchor
+			# every peddler in the wilds fell back to one shared constant,
+			# so hold B's pack showed hold A's leftover wares. Stable per
+			# gate, so the pack also survives evict/re-stamp.
+			"shop_anchor": Vector2i(2500000 + absi(hash(gate_key)) % 400000, 0)
 		})
 
 func _ward_dwarf_at_cell(cell: Vector2i) -> Dictionary:
