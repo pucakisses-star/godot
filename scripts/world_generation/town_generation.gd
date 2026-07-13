@@ -6323,16 +6323,38 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 	var gate_rect := Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7))
 	match String(site.get("class", "")):
 		"dwarfhold":
-			# The mouth and the whole surface ward are walked freely in
+			# The mouth and the WHOLE MAIN FLOOR are walked freely in
 			# THIS scene; the only transition left is DESCENDING, so the
-			# trigger is the ward's stair down to the city proper.
+			# trigger is the great hall's stair down to the deeps.
 			trigger_cells = [_hold_ward_stair_cell(anchor)]
-			# A hold's gate is a whole mountain massif, far bigger than a
+			# A hold's gate is a whole mountain city, far bigger than a
 			# clearing: the rect must cover every stone cell so eviction
 			# knows to re-stamp the full mountain on return.
 			gate_rect = Rect2i(
-				anchor - Vector2i(HOLD_MASSIF_HALF_WIDTH + 1, HOLD_MASSIF_HALF_HEIGHT * 2 + 1),
-				Vector2i(HOLD_MASSIF_HALF_WIDTH * 2 + 3, HOLD_MASSIF_HALF_HEIGHT * 2 + 5))
+				anchor - Vector2i(HOLD_CITY_HALF_W + 1, HOLD_CITY_HALF_H * 2 + 1),
+				Vector2i(HOLD_CITY_HALF_W * 2 + 3, HOLD_CITY_HALF_H * 2 + 5))
+			# The city's streets, stone and interiors stream chunk by
+			# chunk as a landmark plan keyed to the same site.
+			var already_registered := false
+			for landmark: Dictionary in _surface_landmarks:
+				if String(landmark.get("key", "")) == site_key:
+					already_registered = true
+					break
+			if not already_registered:
+				_surface_landmarks.append({
+					"key": site_key,
+					"tile": tile,
+					"anchor": anchor,
+					"tile_atlas": Vector2i(-1, -1),
+					"structure": "dwarfhold_city",
+					"name": String(site.get("name", "")),
+					"plan": {},
+					"rect": Rect2i(
+						anchor - Vector2i(HOLD_CITY_HALF_W + 1, HOLD_CITY_HALF_H * 2 + 1),
+						Vector2i(HOLD_CITY_HALF_W * 2 + 3, HOLD_CITY_HALF_H * 2 + 3)),
+					"stamped_chunks": {},
+					"nodes_by_chunk": {}
+				})
 		"dungeon":
 			trigger_cells = [anchor, anchor + Vector2i(0, 1)]
 	_surface_gates.append({
@@ -6605,9 +6627,15 @@ func _apply_landmark_plan_slice(landmark: Dictionary, plan: Dictionary, chunk: V
 		var cell := cell_variant as Vector2i
 		if not chunk_rect.has_point(cell) or _latest_grid.has(cell):
 			continue
+		var ground_key := String(ground[cell])
+		# "hold:" keys come from the hold's own tilesheet (a dwarfhold
+		# city's floors, walls and doors) and take no danger shading.
+		if ground_key.begins_with("hold:"):
+			_place_hold_tile(city_layer, cell, ground_key.substr(5))
+			continue
 		# Stamps wear the same danger gloom as the terrain around them, so
 		# a deep-wild chapel doesn't sit on an artificially sunlit square.
-		_place_surface_tile(city_layer, cell, String(ground[cell]), SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells))
+		_place_surface_tile(city_layer, cell, ground_key, SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells))
 	var decor := plan.get("decor", {}) as Dictionary
 	for cell_variant: Variant in decor.keys():
 		var cell := cell_variant as Vector2i
@@ -6618,6 +6646,9 @@ func _apply_landmark_plan_slice(landmark: Dictionary, plan: Dictionary, chunk: V
 			decor_layer.erase_cell(cell)
 		else:
 			_place_surface_tile(decor_layer, cell, decor_key, SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells))
+			# A stamped strongbox opens through the shared chest panel.
+			if decor_key == "chest":
+				_ensure_chest_inventory(cell)
 		_actor_passable_cache.erase(cell)
 	var blocked := plan.get("blocked", {}) as Dictionary
 	for cell_variant: Variant in blocked.keys():
@@ -6676,6 +6707,10 @@ func _apply_landmark_plan_slice(landmark: Dictionary, plan: Dictionary, chunk: V
 		var chunk_nodes := nodes_by_chunk.get(chunk, []) as Array
 		chunk_nodes.append_array(nodes)
 		nodes_by_chunk[chunk] = chunk_nodes
+	# A hold city's slice may have just re-stoned cells the player once
+	# dug through; the persisted galleries re-open with their chunk.
+	if String(plan.get("kind", "")) == "dwarfhold_city":
+		_apply_ward_digs(site_key, chunk_rect)
 
 ## The grounded overworld-icon sprite (the pre-footprint landmark look),
 ## bottom-anchored on its cell so the art "sits" on the ground.
@@ -7113,6 +7148,8 @@ func _plan_landmark_footprint(landmark: Dictionary) -> Dictionary:
 	var structure_id := String(landmark.get("structure", ""))
 	var rng := _landmark_rng(landmark.get("tile", Vector2i.ZERO) as Vector2i)
 	var plan: Dictionary = {}
+	if structure_id == "dwarfhold_city":
+		return _plan_dwarfhold_main_floor(landmark, rng)
 	if AMBIENT_BUILDING_RECIPES.has(structure_id):
 		plan = _plan_landmark_building(landmark, AMBIENT_BUILDING_RECIPES[structure_id] as Dictionary, rng)
 	elif AMBIENT_CAMP_RECIPES.has(structure_id):
@@ -7198,6 +7235,216 @@ func _plan_landmark_building(landmark: Dictionary, recipe: Dictionary, rng: Rand
 		"ok": true, "kind": "building", "anchor": anchor,
 		"ground": ground, "decor": decor, "blocked": blocked,
 		"sprites": sprites, "bounds": apron.grow(1)
+	}
+
+## THE HOLD'S ENTIRE MAIN FLOOR, on the surface level, carved into the
+## mountain: a great-hall plaza with the descend-stair at its heart, a
+## ring gallery and four arteries, and NINE big multi-room buildings -
+## palace, forge, tavern, store, barracks and homes - each subdivided by
+## the shared BSP planner and dressed by the same themed furnishers the
+## rest of the world uses (rugs, beds, hearths, counters). Everything
+## else inside the bounds is solid minable stone, ragged at the rim so
+## it blends into the mountain biome around it. Streamed chunk by chunk
+## like any landmark; the gate adds darkness, sconces and dwarves.
+func _plan_dwarfhold_main_floor(landmark: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
+	var anchor := landmark.get("anchor", Vector2i.ZERO) as Vector2i
+	var center := anchor + Vector2i(0, -HOLD_CITY_HALF_H)
+	var rect := Rect2i(
+		Vector2i(anchor.x - HOLD_CITY_HALF_W, anchor.y - HOLD_CITY_HALF_H * 2),
+		Vector2i(HOLD_CITY_HALF_W * 2 + 1, HOLD_CITY_HALF_H * 2 + 1))
+	var zone_grid: Dictionary = {}
+	# The great hall: paved plaza around the stair down to the deeps.
+	var plaza := Rect2i(center + Vector2i(-5, -3), Vector2i(11, 7))
+	for y in range(plaza.position.y, plaza.end.y):
+		for x in range(plaza.position.x, plaza.end.x):
+			zone_grid[Vector2i(x, y)] = CELL_PLAZA
+	# Arteries (3 wide) and the ring gallery (2 thick) carve the streets.
+	for y in range(center.y - 10, center.y - 3):
+		for x in range(center.x - 1, center.x + 2):
+			zone_grid[Vector2i(x, y)] = CELL_HALL
+	for y in range(center.y + 4, anchor.y + 1):
+		for x in range(center.x - 1, center.x + 2):
+			zone_grid[Vector2i(x, y)] = CELL_HALL
+	for x in range(center.x + 6, center.x + 15):
+		for y in range(center.y - 1, center.y + 2):
+			zone_grid[Vector2i(x, y)] = CELL_HALL
+	for x in range(center.x - 14, center.x - 5):
+		for y in range(center.y - 1, center.y + 2):
+			zone_grid[Vector2i(x, y)] = CELL_HALL
+	for y in range(center.y - 11, center.y + 12):
+		for x in range(center.x - 16, center.x + 17):
+			var ring_cell := Vector2i(x, y)
+			var dx := absi(x - center.x)
+			var dy := absi(y - center.y)
+			if (dx == 15 or dx == 16) and dy <= 11:
+				zone_grid[ring_cell] = CELL_HALL
+			elif (dy == 10 or dy == 11) and dx <= 16:
+				zone_grid[ring_cell] = CELL_HALL
+	# Nine building plots, each flush against a street so its doors have
+	# somewhere to open. Palace and workshops ring the plaza; homes and
+	# the barracks take the outer blocks.
+	var plots: Array[Dictionary] = [
+		{"rect": Rect2i(center + Vector2i(-14, -9), Vector2i(13, 6)), "type": "high_kings_palace"},
+		{"rect": Rect2i(center + Vector2i(2, -9), Vector2i(13, 6)), "type": "forge"},
+		{"rect": Rect2i(center + Vector2i(-14, 4), Vector2i(13, 6)), "type": "tavern"},
+		{"rect": Rect2i(center + Vector2i(2, 4), Vector2i(13, 6)), "type": "general_goods_shop"},
+		{"rect": Rect2i(center + Vector2i(-8, -16), Vector2i(16, 5)), "type": "barracks"},
+		{"rect": Rect2i(center + Vector2i(-23, -5), Vector2i(7, 8)), "type": "house"},
+		{"rect": Rect2i(center + Vector2i(17, -5), Vector2i(7, 8)), "type": "house"},
+		{"rect": Rect2i(center + Vector2i(-13, 12), Vector2i(12, 5)), "type": "house"},
+		{"rect": Rect2i(center + Vector2i(2, 12), Vector2i(12, 5)), "type": "house"}
+	]
+	var door_cells: Dictionary = {}
+	for plot: Dictionary in plots:
+		var plot_rect := plot.get("rect", Rect2i()) as Rect2i
+		for y in range(plot_rect.position.y, plot_rect.end.y):
+			for x in range(plot_rect.position.x, plot_rect.end.x):
+				zone_grid[Vector2i(x, y)] = CELL_BUILDING
+		var rooms: Array[Rect2i] = SettlementArchitectureService.subdivide_structure(zone_grid, plot_rect, rng, 4)
+		SettlementArchitectureService.punch_internal_doors(zone_grid, rooms, CELL_BUILDING, door_cells, rng)
+		SettlementArchitectureService.punch_exterior_doors(zone_grid, plot_rect, CELL_BUILDING, door_cells, rng, false)
+	# Render the zones into hold tiles over a solid stone field, ragged
+	# at the rim so the mountain reads as one mass with the biome.
+	var ground: Dictionary = {}
+	var decor: Dictionary = {}
+	var blocked: Dictionary = {}
+	var sprites: Array = []
+	for y in range(rect.position.y, rect.end.y):
+		for x in range(rect.position.x, rect.end.x):
+			var cell := Vector2i(x, y)
+			var rim := mini(mini(x - rect.position.x, rect.end.x - 1 - x), mini(y - rect.position.y, rect.end.y - 1 - y))
+			var zone := int(zone_grid.get(cell, CELL_ROCK))
+			if zone == CELL_ROCK:
+				# The rim frays by hash so the city's stone melts into
+				# the range instead of ending on a hard rectangle: the
+				# outermost ring keeps a third of its stone, the next
+				# ring two thirds, and everything deeper is solid.
+				if rim < 2 and (hash("hold_rim|%d|%d" % [cell.x, cell.y]) & 0xffff) % 3 < (2 - rim):
+					continue
+				var fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
+				var rock_key := "massif_rock"
+				if fold % 9 == 0:
+					rock_key = "massif_rock_top"
+				elif fold % 4 == 0:
+					rock_key = "massif_rock_dark"
+				ground[cell] = rock_key
+				decor[cell] = ""
+				continue
+			decor[cell] = ""
+			if door_cells.has(cell):
+				ground[cell] = "hold:door"
+			elif zone == CELL_WALL:
+				ground[cell] = "hold:wall"
+			elif zone == CELL_HALL:
+				var hall_fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
+				ground[cell] = "hold:dirt_alt" if hall_fold % 5 == 0 else "hold:dirt"
+			elif zone == CELL_PLAZA:
+				ground[cell] = "hold:floor"
+			else:
+				# CELL_BUILDING: the ring is wall, the inside is floor.
+				var plot_edge := false
+				for plot: Dictionary in plots:
+					var plot_rect := plot.get("rect", Rect2i()) as Rect2i
+					if not plot_rect.has_point(cell):
+						continue
+					plot_edge = x == plot_rect.position.x or y == plot_rect.position.y \
+						or x == plot_rect.end.x - 1 or y == plot_rect.end.y - 1
+					break
+				ground[cell] = "hold:wall" if plot_edge else "hold:floor"
+	ground[center] = "hold:stairway_down"
+	# Themed interiors: every BSP room is its own component, dressed by
+	# the same planners the villages use; light-throwing pieces double as
+	# lights for the ward's darkness shader.
+	var light_cells: Array = []
+	var furnished: Dictionary = {}
+	var is_occupied := func(check_cell: Vector2i) -> bool:
+		return furnished.has(check_cell)
+	for component_variant: Variant in RoomFurnishingService.collect_zone_components(zone_grid, CELL_BUILDING):
+		var component: Array[Vector2i] = []
+		for cell_variant: Variant in (component_variant as Array):
+			component.append(cell_variant as Vector2i)
+		if component.is_empty():
+			continue
+		var dress_type := "house"
+		for plot: Dictionary in plots:
+			if (plot.get("rect", Rect2i()) as Rect2i).has_point(component[0]):
+				dress_type = String(plot.get("type", "house"))
+				break
+		var placements: Array[Dictionary] = []
+		if dress_type == "house":
+			placements = RoomFurnishingService.plan_house_furnishing(component, is_occupied, door_cells, rng, zone_grid)
+		else:
+			placements = RoomFurnishingService.plan_shop_dressing(component, dress_type, is_occupied, door_cells, rng, zone_grid)
+		for placement: Dictionary in placements:
+			var piece_name := String(placement.get("piece", ""))
+			var base_cell := placement.get("cell", Vector2i.ZERO) as Vector2i
+			sprites.append({"type": "piece", "cell": base_cell, "piece": piece_name})
+			if int((RoomFurnishingService.PIECES.get(piece_name, {}) as Dictionary).get("rows_block", 1)) > 0:
+				for footprint_cell: Vector2i in RoomFurnishingService.footprint_cells(piece_name, base_cell):
+					blocked[footprint_cell] = true
+					furnished[footprint_cell] = true
+			if RoomFurnishingService.piece_emits_light(piece_name):
+				sprites.append({"type": "glow", "cell": base_cell, "radius": 2.4, "color": AMBIENT_GLOW_WARM})
+				light_cells.append(base_cell)
+	# Every home keeps one lootable strongbox on a clear floor cell,
+	# wired to the same chest panel the rest of the town uses.
+	for plot: Dictionary in plots:
+		if String(plot.get("type", "")) != "house":
+			continue
+		var plot_rect := plot.get("rect", Rect2i()) as Rect2i
+		var chest_placed := false
+		for y in range(plot_rect.position.y + 1, plot_rect.end.y - 1):
+			if chest_placed:
+				break
+			for x in range(plot_rect.position.x + 1, plot_rect.end.x - 1):
+				var chest_cell := Vector2i(x, y)
+				if String(ground.get(chest_cell, "")) != "hold:floor":
+					continue
+				if furnished.has(chest_cell) or door_cells.has(chest_cell):
+					continue
+				var beside_door := false
+				for offset: Vector2i in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1)]:
+					if door_cells.has(chest_cell + offset):
+						beside_door = true
+						break
+				if beside_door:
+					continue
+				decor[chest_cell] = "chest"
+				furnished[chest_cell] = true
+				chest_placed = true
+				break
+	# Sconce torches pace the streets wherever they hug stone or a wall.
+	var sconce_cells: Array = []
+	for cell_variant: Variant in zone_grid.keys():
+		var street_cell := cell_variant as Vector2i
+		var street_zone := int(zone_grid[cell_variant])
+		if street_zone != CELL_HALL and street_zone != CELL_PLAZA:
+			continue
+		var hugs_wall := false
+		for offset: Vector2i in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1)]:
+			var neighbor_zone := int(zone_grid.get(street_cell + offset, CELL_ROCK))
+			if neighbor_zone == CELL_ROCK or neighbor_zone == CELL_WALL or neighbor_zone == CELL_BUILDING:
+				hugs_wall = true
+				break
+		if not hugs_wall:
+			continue
+		if (hash("ward_sconce|%d|%d" % [street_cell.x, street_cell.y]) & 0xffff) % WARD_SCONCE_SPACING != 0:
+			continue
+		sconce_cells.append(street_cell)
+	# Dwarves walk the streets; spawn picks come from the open hall pool.
+	var spawn_cells: Array = []
+	for cell_variant: Variant in zone_grid.keys():
+		var open_zone := int(zone_grid[cell_variant])
+		if open_zone != CELL_HALL and open_zone != CELL_PLAZA:
+			continue
+		if (hash("ward_spawn|%d|%d" % [(cell_variant as Vector2i).x, (cell_variant as Vector2i).y]) & 0xffff) % 9 == 0:
+			spawn_cells.append(cell_variant)
+	return {
+		"ok": true, "kind": "dwarfhold_city", "anchor": anchor,
+		"ground": ground, "decor": decor, "blocked": blocked,
+		"sprites": sprites, "bounds": rect.grow(1),
+		"sconces": sconce_cells, "light_cells": light_cells,
+		"spawn_cells": spawn_cells, "stair": center
 	}
 
 ## A camp: roundish dirt clearing, campfire (or burning pyre) with a warm
@@ -8314,7 +8561,12 @@ func _stamp_gates_in_rect(rect: Rect2i) -> void:
 		gate_label.add_theme_color_override("font_color", Color(0.98, 0.94, 0.82, 1.0))
 		gate_label.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.06, 1.0))
 		gate_label.add_theme_constant_override("outline_size", 5)
-		gate_label.position = city_layer.map_to_local(anchor + Vector2i(-2, -4))
+		# A hold's name floats over its great hall at the city's heart;
+		# every other site names itself above its doorstep.
+		var label_cell := anchor + Vector2i(-2, -4)
+		if String(site.get("class", "")) == "dwarfhold":
+			label_cell = _hold_ward_stair_cell(anchor) + Vector2i(-2, -3)
+		gate_label.position = city_layer.map_to_local(label_cell)
 		gate_label.z_index = 30
 		city_layer.add_child(gate_label)
 		_surface_gate_labels.append(gate_label)
@@ -8342,8 +8594,10 @@ func _stamp_settlement_clearing(gate_rect: Rect2i, anchor: Vector2i) -> void:
 ## is the hold's surface district, walked into through the mouth with no
 ## scene change at all. Descending to the city proper happens at the
 ## ward's stair.
-const HOLD_MASSIF_HALF_WIDTH := 11
-const HOLD_MASSIF_HALF_HEIGHT := 7
+## The city's half extents in cells: the main floor spans the full
+## rect (width 2w+1, height 2h+1) with the mouth at the south center.
+const HOLD_CITY_HALF_W := 24
+const HOLD_CITY_HALF_H := 17
 const HOLD_TILE_SOURCE_ID := 1
 const HOLD_TILESHEET_PATH := "res://resources/images/dwarfhold/map.png"
 
@@ -8353,108 +8607,19 @@ var _hold_passable_atlas_set: Dictionary = {}
 var _ward_dwarves: Array[Dictionary] = []
 
 ## Where the embedded ward's descend-stair sits relative to the gate
-## anchor - shared by the stamp and the journey trigger.
+## anchor - the great hall's heart, shared by the plan and the trigger.
 func _hold_ward_stair_cell(anchor: Vector2i) -> Vector2i:
-	return anchor + Vector2i(0, -HOLD_MASSIF_HALF_HEIGHT)
+	return anchor + Vector2i(0, -HOLD_CITY_HALF_H)
 
 func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
-	# The massif bulges north behind the mouth: an ellipse with a
-	# hash-ragged edge so no two holds share a silhouette. Its INTERIOR
-	# is the hold's surface ward - real carved streets in the hold's own
-	# tiles, in the SAME grid as the wilds outside.
-	var massif_center := Vector2(float(anchor.x), float(anchor.y - HOLD_MASSIF_HALF_HEIGHT) + 1.0)
-	var ward_cells: Dictionary = {}
-	for y in range(anchor.y - HOLD_MASSIF_HALF_HEIGHT * 2, anchor.y + 1):
-		for x in range(anchor.x - HOLD_MASSIF_HALF_WIDTH, anchor.x + HOLD_MASSIF_HALF_WIDTH + 1):
-			var cell := Vector2i(x, y)
-			# The mountain buries even traced roads; the trail ends at
-			# the mountain's foot and the mouth is the only way in.
-			if _latest_grid.has(cell):
-				continue
-			var dx := (float(x) - massif_center.x) / float(HOLD_MASSIF_HALF_WIDTH)
-			var dy := (float(y) - massif_center.y) / float(HOLD_MASSIF_HALF_HEIGHT)
-			var edge_noise := float(hash("hold_massif|%d|%d" % [cell.x, cell.y]) & 0xffff) / 65535.0
-			var reach := dx * dx + dy * dy
-			if reach > 0.72 + edge_noise * 0.42:
-				continue
-			if reach <= 0.5:
-				# Inside the mountain: the ward's dug ground, in hold
-				# tiles. Buildings and the stair stamp over it below.
-				var fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
-				_place_hold_tile(city_layer, cell, "dirt_alt" if fold % 5 == 0 else "dirt")
-				decor_layer.erase_cell(cell)
-				_surface_blocked_cells.erase(cell)
-				ward_cells[cell] = true
-			else:
-				# The rock shell: grey crag, darker at the foot, lit at
-				# the shoulders.
-				var shell_fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
-				var rock_key := "massif_rock"
-				if reach > 0.62:
-					rock_key = "massif_rock_dark"
-				elif shell_fold % 7 == 0:
-					rock_key = "massif_rock_top"
-				_place_tile(city_layer, cell, rock_key)
-				decor_layer.erase_cell(cell)
-				_surface_blocked_cells[cell] = true
-	# Stone buildings in the ward's quadrants: hold walls and floors, a
-	# door on each south face.
-	var ward_rng := RandomNumberGenerator.new()
-	ward_rng.seed = hash("hold_ward|%s|%d|%d" % [_surface_world_seed_text, anchor.x, anchor.y])
-	var ward_center := Vector2i(anchor.x, anchor.y - HOLD_MASSIF_HALF_HEIGHT)
-	for quadrant: Vector2i in [Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:
-		if ward_rng.randf() < 0.2:
-			continue
-		var house_w := ward_rng.randi_range(4, 5)
-		var house_h := ward_rng.randi_range(3, 4)
-		var house_origin := ward_center + Vector2i(
-			quadrant.x * ward_rng.randi_range(3, 5) - house_w / 2,
-			quadrant.y * ward_rng.randi_range(2, 3) - house_h / 2
-		)
-		# Only build where every cell is ward ground.
-		var fits := true
-		for hy in range(house_origin.y, house_origin.y + house_h):
-			for hx in range(house_origin.x, house_origin.x + house_w):
-				if not ward_cells.has(Vector2i(hx, hy)):
-					fits = false
-					break
-			if not fits:
-				break
-		if not fits:
-			continue
-		for hy in range(house_origin.y, house_origin.y + house_h):
-			for hx in range(house_origin.x, house_origin.x + house_w):
-				var house_cell := Vector2i(hx, hy)
-				var edge := hx == house_origin.x or hy == house_origin.y or hx == house_origin.x + house_w - 1 or hy == house_origin.y + house_h - 1
-				_place_hold_tile(city_layer, house_cell, "wall" if edge else "floor")
-		_place_hold_tile(city_layer, Vector2i(house_origin.x + house_w / 2, house_origin.y + house_h - 1), "door")
-		# Most hold houses keep a stocked chest on the floor - the same
-		# lootable chest panel the town uses, right in the ward.
-		if ward_rng.randf() < 0.8:
-			var chest_cell := Vector2i(
-				house_origin.x + ward_rng.randi_range(1, house_w - 2),
-				house_origin.y + ward_rng.randi_range(1, house_h - 2))
-			_place_tile(decor_layer, chest_cell, "chest")
-			_ensure_chest_inventory(chest_cell)
-	# The heart: a small stone plaza around the stair down into the city
-	# proper - descending is the only remaining transition.
-	for py in range(ward_center.y - 1, ward_center.y + 2):
-		for px in range(ward_center.x - 1, ward_center.x + 2):
-			var plaza_cell := Vector2i(px, py)
-			if ward_cells.has(plaza_cell):
-				_place_hold_tile(city_layer, plaza_cell, "floor")
-	_place_hold_tile(city_layer, _hold_ward_stair_cell(anchor), "stairway_down")
-	# The mouth: an open carved passage from the south face into the
-	# ward - hold ground the whole way, framed by lit pillar stone.
-	for mouth_y in range(ward_center.y + 1, anchor.y + 1):
-		var mouth_cell := Vector2i(anchor.x, mouth_y)
-		_place_hold_tile(city_layer, mouth_cell, "dirt")
-		decor_layer.erase_cell(mouth_cell)
-		_surface_blocked_cells.erase(mouth_cell)
-		if not ward_cells.has(Vector2i(anchor.x - 1, mouth_y)):
-			_place_tile(city_layer, Vector2i(anchor.x - 1, mouth_y), "massif_rock_top")
-		if not ward_cells.has(Vector2i(anchor.x + 1, mouth_y)):
-			_place_tile(city_layer, Vector2i(anchor.x + 1, mouth_y), "massif_rock_top")
+	# The city itself - stone, streets, buildings, furnishings - streams
+	# chunk by chunk as the "dwarfhold_city" landmark plan. The facade
+	# stamp owns what is GATE-scoped: the apron outside the mouth, the
+	# darkness overlay with its sconce torches, and the ward dwarves.
+	var gate_key := _ward_site_key_for_cell(anchor)
+	var plan := _dwarfhold_city_plan(gate_key)
+	# The doorstep: a paved apron just outside the mouth, hedge-flanked,
+	# where the trail from the wilds arrives.
 	for y in range(anchor.y + 1, anchor.y + 3):
 		for x in range(anchor.x - 2, anchor.x + 3):
 			var cell := Vector2i(x, y)
@@ -8466,37 +8631,36 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 	_place_tile(decor_layer, Vector2i(anchor.x - 3, anchor.y + 1), "hedge")
 	_place_tile(decor_layer, Vector2i(anchor.x + 3, anchor.y + 1), "hedge_alt")
 	# Player-dug galleries re-open on every stamp.
-	_apply_ward_digs(_ward_site_key_for_cell(anchor))
-	# Wall sconces hug the shell rock and the house faces, two more flank
-	# the stair plaza, and the whole interior falls under the ward's
-	# darkness overlay - inside the mountain it is properly dark.
+	_apply_ward_digs(gate_key)
 	var sconce_cells: Array[Vector2i] = []
-	for cell_variant: Variant in ward_cells.keys():
-		var ward_cell := cell_variant as Vector2i
-		if city_layer.get_cell_source_id(ward_cell) != HOLD_TILE_SOURCE_ID:
+	for sconce_variant: Variant in plan.get("sconces", []) as Array:
+		sconce_cells.append(sconce_variant as Vector2i)
+	var light_cells: Array[Vector2i] = []
+	for light_variant: Variant in plan.get("light_cells", []) as Array:
+		light_cells.append(light_variant as Vector2i)
+	_spawn_ward_overlay(gate_key, anchor, sconce_cells, light_cells)
+	var spawn_cells: Dictionary = {}
+	for spawn_variant: Variant in plan.get("spawn_cells", []) as Array:
+		spawn_cells[spawn_variant as Vector2i] = true
+	var ward_rng := RandomNumberGenerator.new()
+	ward_rng.seed = hash("hold_ward|%s|%d|%d" % [_surface_world_seed_text, anchor.x, anchor.y])
+	_spawn_ward_dwarves(anchor, spawn_cells, ward_rng)
+
+## The city plan for a hold gate, shared with the landmark streamer (and
+## computed here first if the facade stamps before any city chunk).
+func _dwarfhold_city_plan(gate_key: String) -> Dictionary:
+	for landmark: Dictionary in _surface_landmarks:
+		if String(landmark.get("key", "")) != gate_key:
 			continue
-		if not _is_hold_passable_atlas_tile(city_layer.get_cell_atlas_coords(ward_cell)):
+		if String(landmark.get("structure", "")) != "dwarfhold_city":
 			continue
-		var hugs_wall := false
-		for offset: Vector2i in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1)]:
-			var step := ward_cell + offset
-			if _surface_blocked_cells.has(step) or (
-					city_layer.get_cell_source_id(step) == HOLD_TILE_SOURCE_ID
-					and not _is_hold_passable_atlas_tile(city_layer.get_cell_atlas_coords(step))):
-				hugs_wall = true
-				break
-		if not hugs_wall:
-			continue
-		if (hash("ward_sconce|%d|%d" % [ward_cell.x, ward_cell.y]) & 0xffff) % WARD_SCONCE_SPACING != 0:
-			continue
-		sconce_cells.append(ward_cell)
-	for flank: Vector2i in [ward_center + Vector2i(-2, 0), ward_center + Vector2i(2, 0)]:
-		if city_layer.get_cell_source_id(flank) == HOLD_TILE_SOURCE_ID \
-				and _is_hold_passable_atlas_tile(city_layer.get_cell_atlas_coords(flank)) \
-				and not sconce_cells.has(flank):
-			sconce_cells.append(flank)
-	_spawn_ward_overlay(_ward_site_key_for_cell(anchor), anchor, sconce_cells)
-	_spawn_ward_dwarves(anchor, ward_cells, ward_rng)
+		var plan := landmark.get("plan", {}) as Dictionary
+		if plan.is_empty():
+			plan = _plan_landmark_footprint(landmark)
+			landmark["plan"] = plan
+			landmark["rect"] = plan.get("bounds", landmark.get("rect", Rect2i())) as Rect2i
+		return plan
+	return {}
 
 ## A few of the hold's folk walk their surface ward: lightweight
 ## wanderers stepping cell to cell on hold ground, freed with the gate.
@@ -8514,7 +8678,9 @@ func _spawn_ward_dwarves(anchor: Vector2i, ward_cells: Dictionary, rng: RandomNu
 		open_cells.append(cell_variant as Vector2i)
 	if open_cells.is_empty():
 		return
-	var dwarf_count := rng.randi_range(3, 5)
+	# A full main floor houses a real population of walkers; the tiny
+	# pocket wards of older saves keep their handful.
+	var dwarf_count := clampi(open_cells.size() / 4, 3, 14)
 	var ward_professions: Array[String] = ["Miner", "Mason", "Brewer", "Smith", "Engraver"]
 	for dwarf_index in range(dwarf_count):
 		var spawn_cell := open_cells[rng.randi_range(0, open_cells.size() - 1)]
@@ -8562,12 +8728,13 @@ func _free_ward_dwarves_for_key(gate_key: String) -> void:
 ## sconces on the shell rock, daylight spilling through the mouth and
 ## lamplight up the stairwell. One sprite and one shader per hold,
 ## freed with its gate like everything else in the ward.
-const WARD_LIGHT_MAX := 24
+const WARD_LIGHT_MAX := 96
 const WARD_PLAYER_LIGHT_TILES := 5.0
 const WARD_SCONCE_LIGHT_TILES := 3.6
+const WARD_FURNISHING_LIGHT_TILES := 2.6
 const WARD_MOUTH_LIGHT_TILES := 4.5
 const WARD_STAIR_LIGHT_TILES := 3.0
-const WARD_SCONCE_SPACING := 3
+const WARD_SCONCE_SPACING := 4
 const WARD_DARKNESS_SHADER := """
 shader_type canvas_item;
 uniform vec2 overlay_origin;
@@ -8575,8 +8742,8 @@ uniform vec2 overlay_size;
 uniform vec2 ward_center_px;
 uniform vec2 ward_half_px;
 uniform int light_count = 0;
-uniform vec2 light_pos[24];
-uniform float light_radius[24];
+uniform vec2 light_pos[96];
+uniform float light_radius[96];
 uniform vec4 darkness_color : source_color = vec4(0.02, 0.03, 0.055, 0.93);
 
 void fragment() {
@@ -8601,13 +8768,13 @@ var _ward_overlays: Dictionary = {}
 var _ward_torch_frames: SpriteFrames = null
 var _ward_torch_texture: Texture2D = null
 
-func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array[Vector2i]) -> void:
+func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array[Vector2i], light_cells: Array[Vector2i] = []) -> void:
 	if gate_key.is_empty() or _ward_overlays.has(gate_key):
 		return
 	var tile_px := Vector2(float(tile_size.x), float(tile_size.y))
-	var top_left := Vector2i(anchor.x - HOLD_MASSIF_HALF_WIDTH - 2, anchor.y - HOLD_MASSIF_HALF_HEIGHT * 2 - 2)
+	var top_left := Vector2i(anchor.x - HOLD_CITY_HALF_W - 2, anchor.y - HOLD_CITY_HALF_H * 2 - 2)
 	var origin_px := _cell_center_position(top_left) - tile_px * 0.5
-	var size_px := Vector2(float(HOLD_MASSIF_HALF_WIDTH * 2 + 5), float(HOLD_MASSIF_HALF_HEIGHT * 2 + 4)) * tile_px
+	var size_px := Vector2(float(HOLD_CITY_HALF_W * 2 + 5), float(HOLD_CITY_HALF_H * 2 + 4)) * tile_px
 	var quad_image := Image.create(4, 4, false, Image.FORMAT_RGBA8)
 	quad_image.fill(Color.WHITE)
 	var overlay_sprite := Sprite2D.new()
@@ -8622,21 +8789,30 @@ func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array
 	overlay_material.shader = shader
 	overlay_material.set_shader_parameter("overlay_origin", origin_px)
 	overlay_material.set_shader_parameter("overlay_size", size_px)
-	overlay_material.set_shader_parameter("ward_center_px", _cell_center_position(Vector2i(anchor.x, anchor.y - HOLD_MASSIF_HALF_HEIGHT + 1)))
-	overlay_material.set_shader_parameter("ward_half_px", Vector2(float(HOLD_MASSIF_HALF_WIDTH) * tile_px.x, float(HOLD_MASSIF_HALF_HEIGHT) * tile_px.y))
+	# The mask ellipse inscribes the whole city rect with a feather past
+	# its rim: the carved floor sits deep inside, the stone corners fall
+	# outside and keep their mountain daylight.
+	overlay_material.set_shader_parameter("ward_center_px", _cell_center_position(_hold_ward_stair_cell(anchor)))
+	overlay_material.set_shader_parameter("ward_half_px", Vector2(float(HOLD_CITY_HALF_W + 3) * tile_px.x, float(HOLD_CITY_HALF_H + 3) * tile_px.y))
 	overlay_sprite.material = overlay_material
 	overlay_sprite.visible = _lighting_enabled
 	actor_layer.add_child(overlay_sprite)
 	var nodes: Array = [overlay_sprite]
 	var sconces: Array = []
 	for sconce_cell: Vector2i in sconce_cells:
-		if sconces.size() >= WARD_LIGHT_MAX - 3:
-			break
 		nodes.append(_spawn_ward_sconce(sconce_cell))
 		sconces.append({
 			"pos": _cell_center_position(sconce_cell),
 			"radius": WARD_SCONCE_LIGHT_TILES * tile_px.x,
 			"phase": float(absi(sconce_cell.x * 7 + sconce_cell.y * 13))
+		})
+	# The buildings' own hearths and candelabras light their rooms too
+	# (their glow sprites live with the landmark; the shader pool here).
+	for light_cell: Vector2i in light_cells:
+		sconces.append({
+			"pos": _cell_center_position(light_cell),
+			"radius": WARD_FURNISHING_LIGHT_TILES * tile_px.x,
+			"phase": float(absi(light_cell.x * 11 + light_cell.y * 5))
 		})
 	# Daylight through the mouth, lamplight up the stairwell: two fixed
 	# pools that keep the way in and the way down readable.
@@ -8736,21 +8912,29 @@ func _update_ward_darkness() -> void:
 	if _ward_overlays.is_empty() or not _lighting_enabled:
 		return
 	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
+	var player_position := _player_sprite.position if _player_sprite != null else Vector2.ZERO
 	for overlay_variant: Variant in _ward_overlays.values():
 		var overlay := overlay_variant as Dictionary
 		var ward_material := overlay.get("material") as ShaderMaterial
 		if ward_material == null:
 			continue
+		# A full main floor carries more fires than the shader holds:
+		# when over budget the NEAREST pools to the player win the slots,
+		# exactly as the hold scene picks its own lights.
+		var flames := (overlay.get("sconces", []) as Array).duplicate()
+		if flames.size() > WARD_LIGHT_MAX - 3:
+			flames.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+				return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
 		var positions := PackedVector2Array()
 		var radii := PackedFloat32Array()
 		if _player_sprite != null:
-			positions.append(_player_sprite.position)
+			positions.append(player_position)
 			radii.append(WARD_PLAYER_LIGHT_TILES * float(tile_size.x))
 		for light_variant: Variant in overlay.get("static_lights", []) as Array:
 			var light := light_variant as Dictionary
 			positions.append(light.get("pos", Vector2.ZERO) as Vector2)
 			radii.append(float(light.get("radius", 0.0)))
-		for sconce_variant: Variant in overlay.get("sconces", []) as Array:
+		for sconce_variant: Variant in flames:
 			if positions.size() >= WARD_LIGHT_MAX:
 				break
 			var sconce := sconce_variant as Dictionary
@@ -8798,7 +8982,7 @@ func _ward_geology_for_cell(cell: Vector2i) -> Dictionary:
 		if String(site.get("class", "")) != "dwarfhold":
 			continue
 		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
-		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_MASSIF_HALF_WIDTH * 2 + 4:
+		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_CITY_HALF_H * 2 + 6:
 			var geology_variant: Variant = site.get("geology")
 			if geology_variant is Dictionary:
 				return geology_variant as Dictionary
@@ -8810,7 +8994,7 @@ func _ward_site_key_for_cell(cell: Vector2i) -> String:
 		if String(site.get("class", "")) != "dwarfhold":
 			continue
 		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
-		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_MASSIF_HALF_WIDTH * 2 + 4:
+		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_CITY_HALF_H * 2 + 6:
 			return String(gate.get("key", ""))
 	return ""
 
@@ -8869,8 +9053,9 @@ func _record_ward_dig(cell: Vector2i) -> void:
 	settings[WARD_DUG_SETTINGS_KEY] = dug
 	_store_world_settings(settings)
 
-## Re-opens previously dug massif cells after a (re)stamp.
-func _apply_ward_digs(site_key: String) -> void:
+## Re-opens previously dug massif cells after a (re)stamp. Pass a rect
+## to limit the pass to one chunk's slice (the landmark streamer's case).
+func _apply_ward_digs(site_key: String, within_rect: Rect2i = Rect2i()) -> void:
 	if site_key.is_empty():
 		return
 	var settings: Dictionary = _world_settings_snapshot()
@@ -8880,6 +9065,8 @@ func _apply_ward_digs(site_key: String) -> void:
 		if parts.size() != 2:
 			continue
 		var cell := Vector2i(int(parts[0]), int(parts[1]))
+		if within_rect.has_area() and not within_rect.has_point(cell):
+			continue
 		_place_hold_tile(city_layer, cell, "dirt")
 		decor_layer.erase_cell(cell)
 		_surface_blocked_cells.erase(cell)
