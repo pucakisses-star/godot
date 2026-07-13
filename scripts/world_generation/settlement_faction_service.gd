@@ -194,7 +194,7 @@ const FLAVOR_WORDS: Array[String] = [
 
 ## Rolls the settlement's factions. kind is "dwarf" or "town";
 ## building_cells_by_type maps building type -> Array of cells.
-static func generate_factions(kind: String, population: int, building_cells_by_type: Dictionary, rng: RandomNumberGenerator) -> Array[Dictionary]:
+static func generate_factions(kind: String, population: int, building_cells_by_type: Dictionary, rng: RandomNumberGenerator, preferred_names: Array = []) -> Array[Dictionary]:
 	var pool := (DWARF_ARCHETYPES if kind == "dwarf" else TOWN_ARCHETYPES).duplicate()
 	var count := clampi(2 + population / 900, 2, 4)
 	var factions: Array[Dictionary] = []
@@ -233,6 +233,21 @@ static func generate_factions(kind: String, population: int, building_cells_by_t
 		})
 		if bool(archetype.get("secret", false)):
 			picked_secret = true
+	# The settlement's ADVERTISED guilds (the overworld tooltip's list)
+	# are these factions by name: the open lodges adopt them in order -
+	# a secret society is not the sort of thing a map tooltip lists -
+	# so the map's promise and the sidebar's roster agree. Archetypes,
+	# meeting halls and recruitment stay exactly as rolled.
+	var preferred_index := 0
+	for faction: Dictionary in factions:
+		if preferred_index >= preferred_names.size():
+			break
+		if bool(faction.get("secret", false)):
+			continue
+		var preferred := String(preferred_names[preferred_index]).strip_edges()
+		if not preferred.is_empty():
+			faction["name"] = preferred
+		preferred_index += 1
 	return factions
 
 ## A settlement that remembers the chronicle — a battle lost, a hold that
