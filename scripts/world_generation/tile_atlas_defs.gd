@@ -176,6 +176,19 @@ static func road_segment_for_mask(mask: int, variant_hash: int) -> Dictionary:
 	var variants := ROAD_SEGMENTS.get(signature, ROAD_SEGMENTS["none"]) as Array
 	return variants[absi(variant_hash) % variants.size()] as Dictionary
 
+## Diagonal trail connectors (atlas row 8): transparent overlay pieces
+## whose strokes run from the tile CENTER to each linked corner, wobble
+## fading to zero at both ends so neighbours meet exactly at the shared
+## corner. Drawn on the diagonal roads layer OVER the orthogonal piece
+## whenever a route steps diagonally with no orthogonal cell bridging
+## it. Mask bits: NE=1, SE=2, SW=4, NW=8; atlas x = mask - 1.
+const ROAD_DIAGONAL_ROW := 8
+static func road_diagonal_for_mask(mask: int) -> Vector2i:
+	var clamped := mask & 15
+	if clamped == 0:
+		return Vector2i(-1, -1)
+	return Vector2i(clamped - 1, ROAD_DIAGONAL_ROW)
+
 ## The desert city set: golden palace, sandstone walls and gate, hut,
 ## serpent statue, and desert vegetation.
 const DESERT_CITY_TILE := Vector2i(8, 3)

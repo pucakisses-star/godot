@@ -26,6 +26,9 @@ static func build_tile_set(configured_tile_size: int, iceberg_tile_options: Arra
 	for road_bucket: Variant in TILE_ATLAS_DEFS.ROAD_SEGMENTS.values():
 		for road_variant: Variant in (road_bucket as Array):
 			tile_coords_list.append((road_variant as Dictionary)["atlas"] as Vector2i)
+	# The diagonal trail connectors: one tile per corner-link mask 1..15.
+	for diagonal_mask in range(1, 16):
+		tile_coords_list.append(TILE_ATLAS_DEFS.road_diagonal_for_mask(diagonal_mask))
 
 	var atlas_texture := load(TILE_ATLAS_DEFS.ATLAS_TEXTURE) as Texture2D
 	if atlas_texture == null:
