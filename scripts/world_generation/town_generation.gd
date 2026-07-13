@@ -1811,6 +1811,32 @@ func _configure_tile_layer() -> void:
 			tile_data.set_collision_polygons_count(0, 1)
 			tile_data.set_collision_polygon_points(0, 0, collision_polygon)
 
+	# The dwarfhold's own tilesheet rides the SAME tileset as source 1:
+	# a hold's surface ward renders its true carved-stone streets inside
+	# the town scene's world - one grid, two atlases. Stage 1 of merging
+	# the hold into the walkable world.
+	var hold_texture := load(HOLD_TILESHEET_PATH) as Texture2D
+	if hold_texture != null:
+		var hold_atlas := TileSetAtlasSource.new()
+		hold_atlas.texture = hold_texture
+		hold_atlas.texture_region_size = tile_size
+		var hold_coords_seen: Dictionary = {}
+		for hold_coords_variant: Variant in TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS.values():
+			var hold_coords := hold_coords_variant as Vector2i
+			if hold_coords_seen.has(hold_coords):
+				continue
+			hold_coords_seen[hold_coords] = true
+			hold_atlas.create_tile(hold_coords)
+			var hold_tile_data := hold_atlas.get_tile_data(hold_coords, 0)
+			if hold_tile_data == null:
+				continue
+			if _is_hold_passable_atlas_tile(hold_coords):
+				hold_tile_data.set_collision_polygons_count(0, 0)
+			else:
+				hold_tile_data.set_collision_polygons_count(0, 1)
+				hold_tile_data.set_collision_polygon_points(0, 0, collision_polygon)
+		tile_set.add_source(hold_atlas, HOLD_TILE_SOURCE_ID)
+
 	# Frame-based water animation: each water tile cycles through the frames
 	# painted beside it at atlas build, pixel-art style (no shader waves).
 	for water_key: String in TILE_ATLAS_DEFS.town_water_animated_keys():
@@ -3235,6 +3261,23 @@ func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 				_passable_atlas_set[coords] = true
 	return _passable_atlas_set.has(atlas_coords)
 
+## Hold-source tiles carry the HOLD atlas's walkability: dirt, floors,
+## doors and stairs walk; stone and walls block.
+func _is_hold_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
+	if _hold_passable_atlas_set.is_empty():
+		for tile_key: String in TILE_ATLAS_DEFS.DWARFHOLD_PASSABLE_TILE_KEYS:
+			var coords := TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS.get(tile_key, Vector2i(-1, -1)) as Vector2i
+			if coords != Vector2i(-1, -1):
+				_hold_passable_atlas_set[coords] = true
+	return _hold_passable_atlas_set.has(atlas_coords)
+
+## Source-aware walkability: cells painted from the hold's atlas (source
+## 1) answer with hold rules, town cells with town rules.
+func _is_passable_layer_cell(layer: TileMapLayer, cell: Vector2i) -> bool:
+	if layer.get_cell_source_id(cell) == HOLD_TILE_SOURCE_ID:
+		return _is_hold_passable_atlas_tile(layer.get_cell_atlas_coords(cell))
+	return _is_passable_atlas_tile(layer.get_cell_atlas_coords(cell))
+
 func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
 	# NPCs test candidate cells every step, so verdicts are cached; any
 	# tile write or blocked-cell change invalidates the affected entry.
@@ -3261,11 +3304,11 @@ func _compute_passable_cell_for_actor(cell: Vector2i) -> bool:
 		return false
 	if city_layer.get_cell_source_id(cell) < 0:
 		return false
-	if not _is_passable_atlas_tile(city_layer.get_cell_atlas_coords(cell)):
+	if not _is_passable_layer_cell(city_layer, cell):
 		return false
 	if decor_layer.get_cell_source_id(cell) < 0:
 		return true
-	return _is_passable_atlas_tile(decor_layer.get_cell_atlas_coords(cell))
+	return _is_passable_layer_cell(decor_layer, cell)
 
 func _apply_cached_town_scene_seed() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -6256,9 +6299,10 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 	var gate_rect := Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7))
 	match String(site.get("class", "")):
 		"dwarfhold":
-			# The hold has no door: stepping INTO the stone mouth is the
-			# entrance, so the triggers sit inside the carved passage.
-			trigger_cells = [anchor, anchor + Vector2i(0, -1)]
+			# The mouth and the whole surface ward are walked freely in
+			# THIS scene; the only transition left is DESCENDING, so the
+			# trigger is the ward's stair down to the city proper.
+			trigger_cells = [_hold_ward_stair_cell(anchor)]
 			# A hold's gate is a whole mountain massif, far bigger than a
 			# clearing: the rect must cover every stone cell so eviction
 			# knows to re-stamp the full mountain on return.
@@ -6310,6 +6354,7 @@ func _unplan_surface_site(site_key: String) -> void:
 		if gate_label != null and is_instance_valid(gate_label):
 			_surface_gate_labels.erase(gate_label)
 			gate_label.queue_free()
+		_free_ward_dwarves_for_key(site_key)
 		# A hold massif's stamped stone must not haunt the wilds after the
 		# mountain is unplanned; natural crag flags in the same rect come
 		# back when their chunks repaint from terrain.
@@ -8268,21 +8313,37 @@ func _stamp_settlement_clearing(gate_rect: Rect2i, anchor: Vector2i) -> void:
 ## one door at its center. Only the door (and the apron cell before it)
 ## descends; every other approach meets solid rock. Roads are left alone,
 ## so a traced trail still carves its pass up to the door.
-const HOLD_MASSIF_HALF_WIDTH := 8
-const HOLD_MASSIF_HALF_HEIGHT := 5
+## The massif grew to hold a real WARD inside: the mountain's interior
+## is the hold's surface district, walked into through the mouth with no
+## scene change at all. Descending to the city proper happens at the
+## ward's stair.
+const HOLD_MASSIF_HALF_WIDTH := 11
+const HOLD_MASSIF_HALF_HEIGHT := 7
+const HOLD_TILE_SOURCE_ID := 1
+const HOLD_TILESHEET_PATH := "res://resources/images/dwarfhold/map.png"
+
+var _hold_passable_atlas_set: Dictionary = {}
+## Ward dwarves: lightweight wanderers walking the embedded district,
+## keyed by gate site key so they free with their gate.
+var _ward_dwarves: Array[Dictionary] = []
+
+## Where the embedded ward's descend-stair sits relative to the gate
+## anchor - shared by the stamp and the journey trigger.
+func _hold_ward_stair_cell(anchor: Vector2i) -> Vector2i:
+	return anchor + Vector2i(0, -HOLD_MASSIF_HALF_HEIGHT)
 
 func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
-	# The massif bulges north behind the door, its south slope reaching
-	# the door row: an ellipse with a hash-ragged edge so no two holds
-	# share a silhouette.
+	# The massif bulges north behind the mouth: an ellipse with a
+	# hash-ragged edge so no two holds share a silhouette. Its INTERIOR
+	# is the hold's surface ward - real carved streets in the hold's own
+	# tiles, in the SAME grid as the wilds outside.
 	var massif_center := Vector2(float(anchor.x), float(anchor.y - HOLD_MASSIF_HALF_HEIGHT) + 1.0)
+	var ward_cells: Dictionary = {}
 	for y in range(anchor.y - HOLD_MASSIF_HALF_HEIGHT * 2, anchor.y + 1):
 		for x in range(anchor.x - HOLD_MASSIF_HALF_WIDTH, anchor.x + HOLD_MASSIF_HALF_WIDTH + 1):
 			var cell := Vector2i(x, y)
-			# The mountain buries even traced roads: skipping road cells
-			# tunneled a bare channel straight through the rock and split
-			# the massif into lobes. The trail now ends at the mountain's
-			# foot and the gate is the only way in.
+			# The mountain buries even traced roads; the trail ends at
+			# the mountain's foot and the mouth is the only way in.
 			if _latest_grid.has(cell):
 				continue
 			var dx := (float(x) - massif_center.x) / float(HOLD_MASSIF_HALF_WIDTH)
@@ -8291,38 +8352,76 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 			var reach := dx * dx + dy * dy
 			if reach > 0.72 + edge_noise * 0.42:
 				continue
-			# Unmistakably a mountain: grey crag body, a darker rim where
-			# the rock meets the ground, light catching the high middle.
-			# The blocked set still stops walkers either way.
-			var fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
-			var rock_key := "massif_rock"
-			if reach > 0.52:
-				rock_key = "massif_rock_dark"
-			elif reach < 0.2 and fold % 3 != 0:
-				rock_key = "massif_rock_top"
-			elif fold % 7 == 0:
-				rock_key = "massif_rock_dark"
-			_place_tile(city_layer, cell, rock_key)
-			decor_layer.erase_cell(cell)
-			_surface_blocked_cells[cell] = true
-	# The mouth: no door at all - an OPENING in the stone, a dark carved
-	# passage leading into the mountain, framed by light-catching pillar
-	# stone. Walking into the passage IS entering the hold.
-	for y in range(anchor.y - 2, anchor.y + 1):
-		for x in range(anchor.x - 3, anchor.x + 4):
-			var cell := Vector2i(x, y)
-			if _latest_grid.has(cell):
-				continue
-			_place_tile(city_layer, cell, "massif_rock_dark")
-			decor_layer.erase_cell(cell)
-			_surface_blocked_cells[cell] = true
-	for mouth_y in range(anchor.y - 1, anchor.y + 1):
+			if reach <= 0.5:
+				# Inside the mountain: the ward's dug ground, in hold
+				# tiles. Buildings and the stair stamp over it below.
+				var fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
+				_place_hold_tile(city_layer, cell, "dirt_alt" if fold % 5 == 0 else "dirt")
+				decor_layer.erase_cell(cell)
+				_surface_blocked_cells.erase(cell)
+				ward_cells[cell] = true
+			else:
+				# The rock shell: grey crag, darker at the foot, lit at
+				# the shoulders.
+				var shell_fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
+				var rock_key := "massif_rock"
+				if reach > 0.62:
+					rock_key = "massif_rock_dark"
+				elif shell_fold % 7 == 0:
+					rock_key = "massif_rock_top"
+				_place_tile(city_layer, cell, rock_key)
+				decor_layer.erase_cell(cell)
+				_surface_blocked_cells[cell] = true
+	# Stone buildings in the ward's quadrants: hold walls and floors, a
+	# door on each south face.
+	var ward_rng := RandomNumberGenerator.new()
+	ward_rng.seed = hash("hold_ward|%s|%d|%d" % [_surface_world_seed_text, anchor.x, anchor.y])
+	var ward_center := Vector2i(anchor.x, anchor.y - HOLD_MASSIF_HALF_HEIGHT)
+	for quadrant: Vector2i in [Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:
+		if ward_rng.randf() < 0.2:
+			continue
+		var house_w := ward_rng.randi_range(4, 5)
+		var house_h := ward_rng.randi_range(3, 4)
+		var house_origin := ward_center + Vector2i(
+			quadrant.x * ward_rng.randi_range(3, 5) - house_w / 2,
+			quadrant.y * ward_rng.randi_range(2, 3) - house_h / 2
+		)
+		# Only build where every cell is ward ground.
+		var fits := true
+		for hy in range(house_origin.y, house_origin.y + house_h):
+			for hx in range(house_origin.x, house_origin.x + house_w):
+				if not ward_cells.has(Vector2i(hx, hy)):
+					fits = false
+					break
+			if not fits:
+				break
+		if not fits:
+			continue
+		for hy in range(house_origin.y, house_origin.y + house_h):
+			for hx in range(house_origin.x, house_origin.x + house_w):
+				var house_cell := Vector2i(hx, hy)
+				var edge := hx == house_origin.x or hy == house_origin.y or hx == house_origin.x + house_w - 1 or hy == house_origin.y + house_h - 1
+				_place_hold_tile(city_layer, house_cell, "wall" if edge else "floor")
+		_place_hold_tile(city_layer, Vector2i(house_origin.x + house_w / 2, house_origin.y + house_h - 1), "door")
+	# The heart: a small stone plaza around the stair down into the city
+	# proper - descending is the only remaining transition.
+	for py in range(ward_center.y - 1, ward_center.y + 2):
+		for px in range(ward_center.x - 1, ward_center.x + 2):
+			var plaza_cell := Vector2i(px, py)
+			if ward_cells.has(plaza_cell):
+				_place_hold_tile(city_layer, plaza_cell, "floor")
+	_place_hold_tile(city_layer, _hold_ward_stair_cell(anchor), "stairway_down")
+	# The mouth: an open carved passage from the south face into the
+	# ward - hold ground the whole way, framed by lit pillar stone.
+	for mouth_y in range(ward_center.y + 1, anchor.y + 1):
 		var mouth_cell := Vector2i(anchor.x, mouth_y)
-		_place_tile(city_layer, mouth_cell, "ruin_floor")
+		_place_hold_tile(city_layer, mouth_cell, "dirt")
 		decor_layer.erase_cell(mouth_cell)
 		_surface_blocked_cells.erase(mouth_cell)
-		_place_tile(city_layer, Vector2i(anchor.x - 1, mouth_y), "massif_rock_top")
-		_place_tile(city_layer, Vector2i(anchor.x + 1, mouth_y), "massif_rock_top")
+		if not ward_cells.has(Vector2i(anchor.x - 1, mouth_y)):
+			_place_tile(city_layer, Vector2i(anchor.x - 1, mouth_y), "massif_rock_top")
+		if not ward_cells.has(Vector2i(anchor.x + 1, mouth_y)):
+			_place_tile(city_layer, Vector2i(anchor.x + 1, mouth_y), "massif_rock_top")
 	for y in range(anchor.y + 1, anchor.y + 3):
 		for x in range(anchor.x - 2, anchor.x + 3):
 			var cell := Vector2i(x, y)
@@ -8333,6 +8432,70 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 			_surface_blocked_cells.erase(cell)
 	_place_tile(decor_layer, Vector2i(anchor.x - 3, anchor.y + 1), "hedge")
 	_place_tile(decor_layer, Vector2i(anchor.x + 3, anchor.y + 1), "hedge_alt")
+	_spawn_ward_dwarves(anchor, ward_cells, ward_rng)
+
+## A few of the hold's folk walk their surface ward: lightweight
+## wanderers stepping cell to cell on hold ground, freed with the gate.
+func _spawn_ward_dwarves(anchor: Vector2i, ward_cells: Dictionary, rng: RandomNumberGenerator) -> void:
+	var gate_key := ""
+	for gate: Dictionary in _surface_gates:
+		if (gate.get("anchor", Vector2i.ZERO) as Vector2i) == anchor:
+			gate_key = String(gate.get("key", ""))
+			break
+	for dwarf: Dictionary in _ward_dwarves:
+		if String(dwarf.get("key", "")) == gate_key:
+			return
+	var open_cells: Array[Vector2i] = []
+	for cell_variant: Variant in ward_cells.keys():
+		open_cells.append(cell_variant as Vector2i)
+	if open_cells.is_empty():
+		return
+	var dwarf_count := rng.randi_range(3, 5)
+	for _dwarf_index in range(dwarf_count):
+		var spawn_cell := open_cells[rng.randi_range(0, open_cells.size() - 1)]
+		var sprite := DwarfHoldActorVisuals.create_tavern_character_sprite(DwarfHoldActorVisuals.DWARF_CHARACTERS_TEXTURE, rng.randi_range(0, 7), tile_size)
+		if sprite == null:
+			continue
+		sprite.position = _cell_center_position(spawn_cell)
+		sprite.z_index = 11
+		actor_layer.add_child(sprite)
+		_ward_dwarves.append({
+			"key": gate_key,
+			"sprite": sprite,
+			"cell": spawn_cell,
+			"timer": rng.randf_range(0.8, 2.4)
+		})
+
+func _free_ward_dwarves_for_key(gate_key: String) -> void:
+	for dwarf_index in range(_ward_dwarves.size() - 1, -1, -1):
+		var dwarf := _ward_dwarves[dwarf_index]
+		if String(dwarf.get("key", "")) != gate_key:
+			continue
+		var sprite := dwarf.get("sprite") as Sprite2D
+		if sprite != null and is_instance_valid(sprite):
+			sprite.queue_free()
+		_ward_dwarves.remove_at(dwarf_index)
+
+## One random step every couple of seconds, on walkable ground only.
+func _update_ward_dwarves(delta: float) -> void:
+	for dwarf: Dictionary in _ward_dwarves:
+		dwarf["timer"] = float(dwarf.get("timer", 1.0)) - delta
+		if float(dwarf["timer"]) > 0.0:
+			continue
+		dwarf["timer"] = randf_range(1.2, 3.0)
+		var cell := dwarf.get("cell", Vector2i.ZERO) as Vector2i
+		var options: Array[Vector2i] = []
+		for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var step := cell + offset
+			if _is_passable_cell_for_actor(step) and step != _player_cell:
+				options.append(step)
+		if options.is_empty():
+			continue
+		var next_cell := options[randi_range(0, options.size() - 1)]
+		dwarf["cell"] = next_cell
+		var sprite := dwarf.get("sprite") as Sprite2D
+		if sprite != null and is_instance_valid(sprite):
+			sprite.position = _cell_center_position(next_cell)
 
 ## A dungeon shows barely anything: a ring of old stone open to the
 ## south, a dark doorway at its heart.
@@ -8430,6 +8593,9 @@ func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 				_surface_gate_labels.erase(stale_label)
 				stale_label.queue_free()
 			gate["label"] = null
+			# Ward dwarves evaporate with their ward's ground; the
+			# re-stamp on return spawns them anew.
+			_free_ward_dwarves_for_key(String(gate.get("key", "")))
 		# Landmark footprints release this chunk's slice (sprites, blocked
 		# cells); the cached plan re-stamps it identically on return.
 		for landmark: Dictionary in _surface_landmarks:
@@ -8444,6 +8610,7 @@ func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 func _update_surface_life(delta: float) -> void:
 	if _surface_noise.is_empty() or _player_sprite == null:
 		return
+	_update_ward_dwarves(delta)
 	var danger: float = SurfaceLifeService.danger_for_cell(_player_cell, _surface_anchor_cells)
 	_surface_spawn_timer -= delta
 	if _surface_spawn_timer <= 0.0:
@@ -10159,6 +10326,15 @@ func _cell_center_position(cell: Vector2i) -> Vector2:
 
 func _place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -> void:
 	DwarfHoldTileService.place_tile(target_layer, cell, tile_key, TILE_ATLAS)
+	_actor_passable_cache.erase(cell)
+
+## Places a tile from the HOLD's atlas (tileset source 1): the embedded
+## ward draws the hold's true carved-stone art inside the town's world.
+func _place_hold_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -> void:
+	var coords := TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS.get(tile_key, Vector2i(-1, -1)) as Vector2i
+	if coords.x < 0:
+		return
+	target_layer.set_cell(cell, HOLD_TILE_SOURCE_ID, coords)
 	_actor_passable_cache.erase(cell)
 
 func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
