@@ -1660,7 +1660,12 @@ func _generate_city() -> void:
 		level_count = maxi(1, _rng.randi_range(minimum_levels, maximum_levels))
 	for level_index in range(level_count):
 		var level_seed := "%s::depth_%d" % [seed_text, level_index]
-		_hold_state.generated_levels.append(_generate_single_level(level_seed, level_index, level_count))
+		var level_data := _generate_single_level(level_seed, level_index, level_count)
+		# Level 0 is the hold's main-floor city (now shown on the surface);
+		# everything below it is a dug underhall. A future unified column
+		# reads these kinds to route surface vs deep generation.
+		level_data["kind"] = "hold_city" if level_index == 0 else "underhall"
+		_hold_state.generated_levels.append(level_data)
 
 	if _from_surface_stair and _hold_state.generated_levels.size() > 1:
 		# Stage 4: the main floor lives on the SURFACE. Descending the

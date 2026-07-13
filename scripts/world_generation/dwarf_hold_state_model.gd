@@ -55,6 +55,24 @@ func current_level() -> Dictionary:
 func display_level() -> int:
 	return current_level_index + 1
 
+## The kind of level the walker stands on. Levels carry it in their own
+## dict ("surface", "surface_wild", "cellar", "hold_city", "underhall",
+## ...); a level with none reads as surface at the top of the column and
+## generic underground below. This is the vocabulary the eventual mixed
+## surface<->deep column routes generation and rendering by - a signed
+## column asks "what kind is this z", not "what raw index is this".
+func current_depth_kind() -> String:
+	var explicit := String(current_level().get("kind", ""))
+	if not explicit.is_empty():
+		return explicit
+	return "surface" if is_top_level() else "underground"
+
+## True when the current level sits below the surface. Kept index-based
+## (the top of the column is above ground in both scenes) so it stays the
+## exact equivalent of the inline check both scenes used.
+func is_underground() -> bool:
+	return not is_top_level()
+
 func apply_world_settings(settings: Dictionary, seed_key: String, population_key: String) -> String:
 	var scene_seed := String(settings.get(seed_key, "")).strip_edges()
 	selected_hold_population = maxi(0, int(settings.get(population_key, 0)))
