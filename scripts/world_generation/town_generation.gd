@@ -1811,6 +1811,32 @@ func _configure_tile_layer() -> void:
 			tile_data.set_collision_polygons_count(0, 1)
 			tile_data.set_collision_polygon_points(0, 0, collision_polygon)
 
+	# The dwarfhold's own tilesheet rides the SAME tileset as source 1:
+	# a hold's surface ward renders its true carved-stone streets inside
+	# the town scene's world - one grid, two atlases. Stage 1 of merging
+	# the hold into the walkable world.
+	var hold_texture := load(HOLD_TILESHEET_PATH) as Texture2D
+	if hold_texture != null:
+		var hold_atlas := TileSetAtlasSource.new()
+		hold_atlas.texture = hold_texture
+		hold_atlas.texture_region_size = tile_size
+		var hold_coords_seen: Dictionary = {}
+		for hold_coords_variant: Variant in TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS.values():
+			var hold_coords := hold_coords_variant as Vector2i
+			if hold_coords_seen.has(hold_coords):
+				continue
+			hold_coords_seen[hold_coords] = true
+			hold_atlas.create_tile(hold_coords)
+			var hold_tile_data := hold_atlas.get_tile_data(hold_coords, 0)
+			if hold_tile_data == null:
+				continue
+			if _is_hold_passable_atlas_tile(hold_coords):
+				hold_tile_data.set_collision_polygons_count(0, 0)
+			else:
+				hold_tile_data.set_collision_polygons_count(0, 1)
+				hold_tile_data.set_collision_polygon_points(0, 0, collision_polygon)
+		tile_set.add_source(hold_atlas, HOLD_TILE_SOURCE_ID)
+
 	# Frame-based water animation: each water tile cycles through the frames
 	# painted beside it at atlas build, pixel-art style (no shader waves).
 	for water_key: String in TILE_ATLAS_DEFS.town_water_animated_keys():
@@ -3235,6 +3261,23 @@ func _is_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
 				_passable_atlas_set[coords] = true
 	return _passable_atlas_set.has(atlas_coords)
 
+## Hold-source tiles carry the HOLD atlas's walkability: dirt, floors,
+## doors and stairs walk; stone and walls block.
+func _is_hold_passable_atlas_tile(atlas_coords: Vector2i) -> bool:
+	if _hold_passable_atlas_set.is_empty():
+		for tile_key: String in TILE_ATLAS_DEFS.DWARFHOLD_PASSABLE_TILE_KEYS:
+			var coords := TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS.get(tile_key, Vector2i(-1, -1)) as Vector2i
+			if coords != Vector2i(-1, -1):
+				_hold_passable_atlas_set[coords] = true
+	return _hold_passable_atlas_set.has(atlas_coords)
+
+## Source-aware walkability: cells painted from the hold's atlas (source
+## 1) answer with hold rules, town cells with town rules.
+func _is_passable_layer_cell(layer: TileMapLayer, cell: Vector2i) -> bool:
+	if layer.get_cell_source_id(cell) == HOLD_TILE_SOURCE_ID:
+		return _is_hold_passable_atlas_tile(layer.get_cell_atlas_coords(cell))
+	return _is_passable_atlas_tile(layer.get_cell_atlas_coords(cell))
+
 func _is_passable_cell_for_actor(cell: Vector2i) -> bool:
 	# NPCs test candidate cells every step, so verdicts are cached; any
 	# tile write or blocked-cell change invalidates the affected entry.
@@ -3261,11 +3304,11 @@ func _compute_passable_cell_for_actor(cell: Vector2i) -> bool:
 		return false
 	if city_layer.get_cell_source_id(cell) < 0:
 		return false
-	if not _is_passable_atlas_tile(city_layer.get_cell_atlas_coords(cell)):
+	if not _is_passable_layer_cell(city_layer, cell):
 		return false
 	if decor_layer.get_cell_source_id(cell) < 0:
 		return true
-	return _is_passable_atlas_tile(decor_layer.get_cell_atlas_coords(cell))
+	return _is_passable_layer_cell(decor_layer, cell)
 
 func _apply_cached_town_scene_seed() -> void:
 	var game_session := get_node_or_null("/root/GameSession")
@@ -4149,6 +4192,13 @@ func _apply_lighting_state() -> void:
 	for glow: Node2D in _glow_sprites:
 		if is_instance_valid(glow):
 			glow.visible = _lighting_enabled
+	# Ward darkness and its sconces ride the same switch: lighting off
+	# means a plain, undarkened ward.
+	for overlay_variant: Variant in _ward_overlays.values():
+		for node_variant: Variant in (overlay_variant as Dictionary).get("nodes", []) as Array:
+			var ward_node := node_variant as Node2D
+			if ward_node != null and is_instance_valid(ward_node):
+				ward_node.visible = _lighting_enabled
 
 func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	if city_layer.tile_set == null:
@@ -5701,6 +5751,11 @@ func _create_placeholder_actor_texture() -> Texture2D:
 ## was claimed; unclaimed right-presses fall through to map panning.
 func _handle_player_right_click(mouse_position: Vector2) -> bool:
 	var clicked_cell := _cell_from_mouse_position(mouse_position)
+	# Ward dwarves carry the full dossier: same card, same DF tabs.
+	var ward_dwarf := _ward_dwarf_at_cell(clicked_cell)
+	if not ward_dwarf.is_empty():
+		_open_npc_inspection(ward_dwarf)
+		return true
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	# The risen dead have no pockets worth rifling.
 	if npc_state.is_empty() or SettlementAfflictionService.is_active_zombie(npc_state):
@@ -5744,6 +5799,18 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 			return
 		if _try_ranged_attack_town(creature_index, clicked_cell):
 			return
+	# The ward's folk: the peddler trades, the rest offer a word.
+	var ward_dwarf := _ward_dwarf_at_cell(clicked_cell)
+	if not ward_dwarf.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
+		if bool(ward_dwarf.get("traveler", false)) and _try_open_traveler_trade(ward_dwarf):
+			return
+		_spawn_floating_text("Rock and stone!", _cell_center_position(clicked_cell) + Vector2(0, -12), Color(0.9, 0.85, 0.7, 1.0))
+		return
+	# The mountain digs from inside: an adjacent swing at massif rock
+	# chips it away by the hold's own geology.
+	if _is_ward_rock_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
+		_swing_at_ward_rock(clicked_cell)
+		return
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
 		# You don't chat with the risen dead - you put them down.
@@ -6256,7 +6323,10 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 	var gate_rect := Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7))
 	match String(site.get("class", "")):
 		"dwarfhold":
-			trigger_cells = [anchor, anchor + Vector2i(0, 1)]
+			# The mouth and the whole surface ward are walked freely in
+			# THIS scene; the only transition left is DESCENDING, so the
+			# trigger is the ward's stair down to the city proper.
+			trigger_cells = [_hold_ward_stair_cell(anchor)]
 			# A hold's gate is a whole mountain massif, far bigger than a
 			# clearing: the rect must cover every stone cell so eviction
 			# knows to re-stamp the full mountain on return.
@@ -6278,6 +6348,11 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 		# One connecting road per settlement, to the nearest anchor already
 		# in the network (the entered town's center seeds it). Distant
 		# outliers stay roadless, as the old nearest-few rule left them.
+		# A hold's trail aims at the paved apron BELOW its gate - a road
+		# ending on the buried anchor would vanish under the massif.
+		var road_target := anchor
+		if String(site.get("class", "")) == "dwarfhold":
+			road_target = anchor + Vector2i(0, 3)
 		var nearest := Vector2i(2147483647, 2147483647)
 		var nearest_distance := 2147483647
 		for known_anchor: Vector2i in _surface_anchor_cells:
@@ -6286,7 +6361,7 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 				nearest_distance = known_distance
 				nearest = known_anchor
 		if nearest.x != 2147483647 and nearest_distance <= SURFACE_ROAD_MAX_CELLS:
-			_trace_surface_road(nearest, anchor)
+			_trace_surface_road(nearest, road_target)
 			_surface_site_road_traced[site_key] = true
 	_surface_anchor_cells.append(anchor)
 
@@ -6303,6 +6378,8 @@ func _unplan_surface_site(site_key: String) -> void:
 		if gate_label != null and is_instance_valid(gate_label):
 			_surface_gate_labels.erase(gate_label)
 			gate_label.queue_free()
+		_free_ward_dwarves_for_key(site_key)
+		_free_ward_overlay_for_key(site_key)
 		# A hold massif's stamped stone must not haunt the wilds after the
 		# mountain is unplanned; natural crag flags in the same rect come
 		# back when their chunks repaint from terrain.
@@ -8261,18 +8338,38 @@ func _stamp_settlement_clearing(gate_rect: Rect2i, anchor: Vector2i) -> void:
 ## one door at its center. Only the door (and the apron cell before it)
 ## descends; every other approach meets solid rock. Roads are left alone,
 ## so a traced trail still carves its pass up to the door.
-const HOLD_MASSIF_HALF_WIDTH := 8
-const HOLD_MASSIF_HALF_HEIGHT := 5
+## The massif grew to hold a real WARD inside: the mountain's interior
+## is the hold's surface district, walked into through the mouth with no
+## scene change at all. Descending to the city proper happens at the
+## ward's stair.
+const HOLD_MASSIF_HALF_WIDTH := 11
+const HOLD_MASSIF_HALF_HEIGHT := 7
+const HOLD_TILE_SOURCE_ID := 1
+const HOLD_TILESHEET_PATH := "res://resources/images/dwarfhold/map.png"
+
+var _hold_passable_atlas_set: Dictionary = {}
+## Ward dwarves: lightweight wanderers walking the embedded district,
+## keyed by gate site key so they free with their gate.
+var _ward_dwarves: Array[Dictionary] = []
+
+## Where the embedded ward's descend-stair sits relative to the gate
+## anchor - shared by the stamp and the journey trigger.
+func _hold_ward_stair_cell(anchor: Vector2i) -> Vector2i:
+	return anchor + Vector2i(0, -HOLD_MASSIF_HALF_HEIGHT)
 
 func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
-	# The massif bulges north behind the door, its south slope reaching
-	# the door row: an ellipse with a hash-ragged edge so no two holds
-	# share a silhouette.
+	# The massif bulges north behind the mouth: an ellipse with a
+	# hash-ragged edge so no two holds share a silhouette. Its INTERIOR
+	# is the hold's surface ward - real carved streets in the hold's own
+	# tiles, in the SAME grid as the wilds outside.
 	var massif_center := Vector2(float(anchor.x), float(anchor.y - HOLD_MASSIF_HALF_HEIGHT) + 1.0)
+	var ward_cells: Dictionary = {}
 	for y in range(anchor.y - HOLD_MASSIF_HALF_HEIGHT * 2, anchor.y + 1):
 		for x in range(anchor.x - HOLD_MASSIF_HALF_WIDTH, anchor.x + HOLD_MASSIF_HALF_WIDTH + 1):
 			var cell := Vector2i(x, y)
-			if _latest_grid.has(cell) or _surface_road_cells.has(cell):
+			# The mountain buries even traced roads; the trail ends at
+			# the mountain's foot and the mouth is the only way in.
+			if _latest_grid.has(cell):
 				continue
 			var dx := (float(x) - massif_center.x) / float(HOLD_MASSIF_HALF_WIDTH)
 			var dy := (float(y) - massif_center.y) / float(HOLD_MASSIF_HALF_HEIGHT)
@@ -8280,35 +8377,84 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 			var reach := dx * dx + dy * dy
 			if reach > 0.72 + edge_noise * 0.42:
 				continue
-			# Unmistakably a mountain: grey crag body, a darker rim where
-			# the rock meets the ground, light catching the high middle.
-			# The blocked set still stops walkers either way.
-			var fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
-			var rock_key := "massif_rock"
-			if reach > 0.52:
-				rock_key = "massif_rock_dark"
-			elif reach < 0.2 and fold % 3 != 0:
-				rock_key = "massif_rock_top"
-			elif fold % 7 == 0:
-				rock_key = "massif_rock_dark"
-			_place_tile(city_layer, cell, rock_key)
-			decor_layer.erase_cell(cell)
-			_surface_blocked_cells[cell] = true
-	# The carved front set into the south face: dressed stone with the
-	# hold's single door. These cells trade the crag's blocked flag for
-	# their own tile passability (walls block, the door opens).
-	for y in range(anchor.y - 2, anchor.y + 1):
-		for x in range(anchor.x - 3, anchor.x + 4):
-			var cell := Vector2i(x, y)
-			if _latest_grid.has(cell):
-				continue
-			var wall_key := "wall_alt" if y == anchor.y - 2 else "wall"
-			_place_tile(city_layer, cell, wall_key)
-			decor_layer.erase_cell(cell)
-			_surface_blocked_cells.erase(cell)
-	_place_tile(city_layer, anchor, "door")
-	decor_layer.erase_cell(anchor)
-	_surface_blocked_cells.erase(anchor)
+			if reach <= 0.5:
+				# Inside the mountain: the ward's dug ground, in hold
+				# tiles. Buildings and the stair stamp over it below.
+				var fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
+				_place_hold_tile(city_layer, cell, "dirt_alt" if fold % 5 == 0 else "dirt")
+				decor_layer.erase_cell(cell)
+				_surface_blocked_cells.erase(cell)
+				ward_cells[cell] = true
+			else:
+				# The rock shell: grey crag, darker at the foot, lit at
+				# the shoulders.
+				var shell_fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
+				var rock_key := "massif_rock"
+				if reach > 0.62:
+					rock_key = "massif_rock_dark"
+				elif shell_fold % 7 == 0:
+					rock_key = "massif_rock_top"
+				_place_tile(city_layer, cell, rock_key)
+				decor_layer.erase_cell(cell)
+				_surface_blocked_cells[cell] = true
+	# Stone buildings in the ward's quadrants: hold walls and floors, a
+	# door on each south face.
+	var ward_rng := RandomNumberGenerator.new()
+	ward_rng.seed = hash("hold_ward|%s|%d|%d" % [_surface_world_seed_text, anchor.x, anchor.y])
+	var ward_center := Vector2i(anchor.x, anchor.y - HOLD_MASSIF_HALF_HEIGHT)
+	for quadrant: Vector2i in [Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:
+		if ward_rng.randf() < 0.2:
+			continue
+		var house_w := ward_rng.randi_range(4, 5)
+		var house_h := ward_rng.randi_range(3, 4)
+		var house_origin := ward_center + Vector2i(
+			quadrant.x * ward_rng.randi_range(3, 5) - house_w / 2,
+			quadrant.y * ward_rng.randi_range(2, 3) - house_h / 2
+		)
+		# Only build where every cell is ward ground.
+		var fits := true
+		for hy in range(house_origin.y, house_origin.y + house_h):
+			for hx in range(house_origin.x, house_origin.x + house_w):
+				if not ward_cells.has(Vector2i(hx, hy)):
+					fits = false
+					break
+			if not fits:
+				break
+		if not fits:
+			continue
+		for hy in range(house_origin.y, house_origin.y + house_h):
+			for hx in range(house_origin.x, house_origin.x + house_w):
+				var house_cell := Vector2i(hx, hy)
+				var edge := hx == house_origin.x or hy == house_origin.y or hx == house_origin.x + house_w - 1 or hy == house_origin.y + house_h - 1
+				_place_hold_tile(city_layer, house_cell, "wall" if edge else "floor")
+		_place_hold_tile(city_layer, Vector2i(house_origin.x + house_w / 2, house_origin.y + house_h - 1), "door")
+		# Most hold houses keep a stocked chest on the floor - the same
+		# lootable chest panel the town uses, right in the ward.
+		if ward_rng.randf() < 0.8:
+			var chest_cell := Vector2i(
+				house_origin.x + ward_rng.randi_range(1, house_w - 2),
+				house_origin.y + ward_rng.randi_range(1, house_h - 2))
+			_place_tile(decor_layer, chest_cell, "chest")
+			_ensure_chest_inventory(chest_cell)
+	# The heart: a small stone plaza around the stair down into the city
+	# proper - descending is the only remaining transition.
+	for py in range(ward_center.y - 1, ward_center.y + 2):
+		for px in range(ward_center.x - 1, ward_center.x + 2):
+			var plaza_cell := Vector2i(px, py)
+			if ward_cells.has(plaza_cell):
+				_place_hold_tile(city_layer, plaza_cell, "floor")
+	_place_hold_tile(city_layer, _hold_ward_stair_cell(anchor), "stairway_down")
+	# The mouth: an open carved passage from the south face into the
+	# ward - hold ground the whole way, framed by lit pillar stone.
+	for mouth_y in range(ward_center.y + 1, anchor.y + 1):
+		var mouth_cell := Vector2i(anchor.x, mouth_y)
+		_place_hold_tile(city_layer, mouth_cell, "dirt")
+		decor_layer.erase_cell(mouth_cell)
+		_surface_blocked_cells.erase(mouth_cell)
+		if not ward_cells.has(Vector2i(anchor.x - 1, mouth_y)):
+			_place_tile(city_layer, Vector2i(anchor.x - 1, mouth_y), "massif_rock_top")
+		if not ward_cells.has(Vector2i(anchor.x + 1, mouth_y)):
+			_place_tile(city_layer, Vector2i(anchor.x + 1, mouth_y), "massif_rock_top")
 	for y in range(anchor.y + 1, anchor.y + 3):
 		for x in range(anchor.x - 2, anchor.x + 3):
 			var cell := Vector2i(x, y)
@@ -8319,6 +8465,445 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 			_surface_blocked_cells.erase(cell)
 	_place_tile(decor_layer, Vector2i(anchor.x - 3, anchor.y + 1), "hedge")
 	_place_tile(decor_layer, Vector2i(anchor.x + 3, anchor.y + 1), "hedge_alt")
+	# Player-dug galleries re-open on every stamp.
+	_apply_ward_digs(_ward_site_key_for_cell(anchor))
+	# Wall sconces hug the shell rock and the house faces, two more flank
+	# the stair plaza, and the whole interior falls under the ward's
+	# darkness overlay - inside the mountain it is properly dark.
+	var sconce_cells: Array[Vector2i] = []
+	for cell_variant: Variant in ward_cells.keys():
+		var ward_cell := cell_variant as Vector2i
+		if city_layer.get_cell_source_id(ward_cell) != HOLD_TILE_SOURCE_ID:
+			continue
+		if not _is_hold_passable_atlas_tile(city_layer.get_cell_atlas_coords(ward_cell)):
+			continue
+		var hugs_wall := false
+		for offset: Vector2i in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1)]:
+			var step := ward_cell + offset
+			if _surface_blocked_cells.has(step) or (
+					city_layer.get_cell_source_id(step) == HOLD_TILE_SOURCE_ID
+					and not _is_hold_passable_atlas_tile(city_layer.get_cell_atlas_coords(step))):
+				hugs_wall = true
+				break
+		if not hugs_wall:
+			continue
+		if (hash("ward_sconce|%d|%d" % [ward_cell.x, ward_cell.y]) & 0xffff) % WARD_SCONCE_SPACING != 0:
+			continue
+		sconce_cells.append(ward_cell)
+	for flank: Vector2i in [ward_center + Vector2i(-2, 0), ward_center + Vector2i(2, 0)]:
+		if city_layer.get_cell_source_id(flank) == HOLD_TILE_SOURCE_ID \
+				and _is_hold_passable_atlas_tile(city_layer.get_cell_atlas_coords(flank)) \
+				and not sconce_cells.has(flank):
+			sconce_cells.append(flank)
+	_spawn_ward_overlay(_ward_site_key_for_cell(anchor), anchor, sconce_cells)
+	_spawn_ward_dwarves(anchor, ward_cells, ward_rng)
+
+## A few of the hold's folk walk their surface ward: lightweight
+## wanderers stepping cell to cell on hold ground, freed with the gate.
+func _spawn_ward_dwarves(anchor: Vector2i, ward_cells: Dictionary, rng: RandomNumberGenerator) -> void:
+	var gate_key := ""
+	for gate: Dictionary in _surface_gates:
+		if (gate.get("anchor", Vector2i.ZERO) as Vector2i) == anchor:
+			gate_key = String(gate.get("key", ""))
+			break
+	for dwarf: Dictionary in _ward_dwarves:
+		if String(dwarf.get("key", "")) == gate_key:
+			return
+	var open_cells: Array[Vector2i] = []
+	for cell_variant: Variant in ward_cells.keys():
+		open_cells.append(cell_variant as Vector2i)
+	if open_cells.is_empty():
+		return
+	var dwarf_count := rng.randi_range(3, 5)
+	var ward_professions: Array[String] = ["Miner", "Mason", "Brewer", "Smith", "Engraver"]
+	for dwarf_index in range(dwarf_count):
+		var spawn_cell := open_cells[rng.randi_range(0, open_cells.size() - 1)]
+		var sprite := DwarfHoldActorVisuals.create_tavern_character_sprite(DwarfHoldActorVisuals.DWARF_CHARACTERS_TEXTURE, rng.randi_range(0, 7), tile_size)
+		if sprite == null:
+			continue
+		sprite.position = _cell_center_position(spawn_cell)
+		sprite.z_index = 11
+		actor_layer.add_child(sprite)
+		# The first dwarf of every ward keeps a peddler's pack, so the
+		# surface district trades like a real outpost; the rest carry
+		# proper hold trades and full right-click dossiers.
+		var profession := "Peddler" if dwarf_index == 0 else ward_professions[rng.randi_range(0, ward_professions.size() - 1)]
+		var identity := NpcIdentityService.generate(rng, profession, "dwarf")
+		_ward_dwarves.append({
+			"key": gate_key,
+			"sprite": sprite,
+			"cell": spawn_cell,
+			"timer": rng.randf_range(0.8, 2.4),
+			"identity": identity,
+			"npc_name": String(identity.get("name", "A dwarf")),
+			"traveler": dwarf_index == 0
+		})
+
+func _ward_dwarf_at_cell(cell: Vector2i) -> Dictionary:
+	for dwarf: Dictionary in _ward_dwarves:
+		if (dwarf.get("cell", Vector2i(2147483647, 0)) as Vector2i) == cell:
+			return dwarf
+	return {}
+
+func _free_ward_dwarves_for_key(gate_key: String) -> void:
+	for dwarf_index in range(_ward_dwarves.size() - 1, -1, -1):
+		var dwarf := _ward_dwarves[dwarf_index]
+		if String(dwarf.get("key", "")) != gate_key:
+			continue
+		var sprite := dwarf.get("sprite") as Sprite2D
+		if sprite != null and is_instance_valid(sprite):
+			sprite.queue_free()
+		_ward_dwarves.remove_at(dwarf_index)
+
+## --- The dark under the mountain ---------------------------------------------
+## The ward is interior space, so it is properly dark in there: an
+## ellipse-masked darkness quad rides each stamped massif in the SAME
+## scene, opened by warm pools - the player's own light, flickering wall
+## sconces on the shell rock, daylight spilling through the mouth and
+## lamplight up the stairwell. One sprite and one shader per hold,
+## freed with its gate like everything else in the ward.
+const WARD_LIGHT_MAX := 24
+const WARD_PLAYER_LIGHT_TILES := 5.0
+const WARD_SCONCE_LIGHT_TILES := 3.6
+const WARD_MOUTH_LIGHT_TILES := 4.5
+const WARD_STAIR_LIGHT_TILES := 3.0
+const WARD_SCONCE_SPACING := 3
+const WARD_DARKNESS_SHADER := """
+shader_type canvas_item;
+uniform vec2 overlay_origin;
+uniform vec2 overlay_size;
+uniform vec2 ward_center_px;
+uniform vec2 ward_half_px;
+uniform int light_count = 0;
+uniform vec2 light_pos[24];
+uniform float light_radius[24];
+uniform vec4 darkness_color : source_color = vec4(0.02, 0.03, 0.055, 0.93);
+
+void fragment() {
+	vec2 world = overlay_origin + UV * overlay_size;
+	vec2 e = (world - ward_center_px) / ward_half_px;
+	float reach = dot(e, e);
+	// Dark across the ward and its rock shell, feathered out just past
+	// the massif's ragged edge so the wilds keep their daylight.
+	float mask = 1.0 - smoothstep(0.72, 1.15, reach);
+	float reveal = 0.0;
+	for (int i = 0; i < light_count; i++) {
+		float d = distance(world, light_pos[i]);
+		reveal = max(reveal, 1.0 - smoothstep(light_radius[i] * 0.35, light_radius[i], d));
+	}
+	// Lit ground warms before it clears - torchlight, not a cutout.
+	vec3 tinted = mix(darkness_color.rgb, vec3(0.42, 0.26, 0.11), reveal * 0.55);
+	COLOR = vec4(tinted, darkness_color.a * mask * (1.0 - reveal * 0.92));
+}
+"""
+
+var _ward_overlays: Dictionary = {}
+var _ward_torch_frames: SpriteFrames = null
+var _ward_torch_texture: Texture2D = null
+
+func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array[Vector2i]) -> void:
+	if gate_key.is_empty() or _ward_overlays.has(gate_key):
+		return
+	var tile_px := Vector2(float(tile_size.x), float(tile_size.y))
+	var top_left := Vector2i(anchor.x - HOLD_MASSIF_HALF_WIDTH - 2, anchor.y - HOLD_MASSIF_HALF_HEIGHT * 2 - 2)
+	var origin_px := _cell_center_position(top_left) - tile_px * 0.5
+	var size_px := Vector2(float(HOLD_MASSIF_HALF_WIDTH * 2 + 5), float(HOLD_MASSIF_HALF_HEIGHT * 2 + 4)) * tile_px
+	var quad_image := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+	quad_image.fill(Color.WHITE)
+	var overlay_sprite := Sprite2D.new()
+	overlay_sprite.texture = ImageTexture.create_from_image(quad_image)
+	overlay_sprite.centered = false
+	overlay_sprite.position = origin_px
+	overlay_sprite.scale = size_px / 4.0
+	overlay_sprite.z_index = 12
+	var shader := Shader.new()
+	shader.code = WARD_DARKNESS_SHADER
+	var overlay_material := ShaderMaterial.new()
+	overlay_material.shader = shader
+	overlay_material.set_shader_parameter("overlay_origin", origin_px)
+	overlay_material.set_shader_parameter("overlay_size", size_px)
+	overlay_material.set_shader_parameter("ward_center_px", _cell_center_position(Vector2i(anchor.x, anchor.y - HOLD_MASSIF_HALF_HEIGHT + 1)))
+	overlay_material.set_shader_parameter("ward_half_px", Vector2(float(HOLD_MASSIF_HALF_WIDTH) * tile_px.x, float(HOLD_MASSIF_HALF_HEIGHT) * tile_px.y))
+	overlay_sprite.material = overlay_material
+	overlay_sprite.visible = _lighting_enabled
+	actor_layer.add_child(overlay_sprite)
+	var nodes: Array = [overlay_sprite]
+	var sconces: Array = []
+	for sconce_cell: Vector2i in sconce_cells:
+		if sconces.size() >= WARD_LIGHT_MAX - 3:
+			break
+		nodes.append(_spawn_ward_sconce(sconce_cell))
+		sconces.append({
+			"pos": _cell_center_position(sconce_cell),
+			"radius": WARD_SCONCE_LIGHT_TILES * tile_px.x,
+			"phase": float(absi(sconce_cell.x * 7 + sconce_cell.y * 13))
+		})
+	# Daylight through the mouth, lamplight up the stairwell: two fixed
+	# pools that keep the way in and the way down readable.
+	var static_lights: Array = [
+		{"pos": _cell_center_position(Vector2i(anchor.x, anchor.y + 1)), "radius": WARD_MOUTH_LIGHT_TILES * tile_px.x},
+		{"pos": _cell_center_position(_hold_ward_stair_cell(anchor)), "radius": WARD_STAIR_LIGHT_TILES * tile_px.x}
+	]
+	_ward_overlays[gate_key] = {
+		"material": overlay_material,
+		"nodes": nodes,
+		"sconces": sconces,
+		"static_lights": static_lights
+	}
+
+## A wall torch in the ward: the hold's own stick-and-collar sprite with
+## an animated swaying flame and a breathing warm glow.
+func _spawn_ward_sconce(cell: Vector2i) -> Sprite2D:
+	if _ward_torch_texture == null:
+		_ward_torch_texture = _create_ward_torch_texture()
+	var sconce := Sprite2D.new()
+	sconce.texture = _ward_torch_texture
+	sconce.centered = true
+	sconce.position = _cell_center_position(cell)
+	sconce.z_index = 13
+	sconce.visible = _lighting_enabled
+	var flame := AnimatedSprite2D.new()
+	flame.sprite_frames = _ward_torch_flame_frames()
+	flame.animation = &"burn"
+	flame.position = Vector2(0.0, -10.0)
+	flame.frame = absi(cell.x * 7 + cell.y * 13) % 3
+	sconce.add_child(flame)
+	var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(Vector2.ZERO, 2.4 * float(tile_size.x), Color(1.0, 0.72, 0.35, 1.0))
+	glow.position = Vector2(0.0, -6.0)
+	sconce.add_child(glow)
+	actor_layer.add_child(sconce)
+	flame.play()
+	var glow_base_scale := glow.scale
+	var glow_period := 0.5 + float(absi(cell.x * 31 + cell.y * 17) % 40) * 0.01
+	var glow_pulse := glow.create_tween().set_loops()
+	glow_pulse.tween_property(glow, "scale", glow_base_scale * 1.12, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	glow_pulse.tween_property(glow, "scale", glow_base_scale, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	return sconce
+
+## The torch stick alone - the flame is a separate animated sprite so it
+## can sway (mirrors the hold's own torch art).
+func _create_ward_torch_texture() -> Texture2D:
+	var image := Image.create(8, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	for y in range(7, 15):
+		image.set_pixel(3, y, Color(0.45, 0.3, 0.16, 1.0))
+		image.set_pixel(4, y, Color(0.36, 0.24, 0.13, 1.0))
+	image.set_pixel(2, 7, Color(0.3, 0.3, 0.34, 1.0))
+	image.set_pixel(5, 7, Color(0.3, 0.3, 0.34, 1.0))
+	image.resize(16, 32, Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(image)
+
+func _ward_torch_flame_frames() -> SpriteFrames:
+	if _ward_torch_frames != null:
+		return _ward_torch_frames
+	var frames := SpriteFrames.new()
+	frames.remove_animation(&"default")
+	frames.add_animation(&"burn")
+	frames.set_animation_speed(&"burn", 7.0)
+	frames.set_animation_loop(&"burn", true)
+	for sway in range(3):
+		var image := Image.create(8, 8, false, Image.FORMAT_RGBA8)
+		image.fill(Color(0, 0, 0, 0))
+		var tip_x := [3, 4, 5][sway] as int
+		var body := Color(1.0, 0.62, 0.15, 1.0)
+		var core := Color(1.0, 0.85, 0.3, 1.0)
+		for y in range(3, 7):
+			for x in range(2, 6):
+				if (x == 2 or x == 5) and y == 3:
+					continue
+				image.set_pixel(x, y, body if y > 4 else core)
+		image.set_pixel(tip_x, 2, core)
+		image.set_pixel(tip_x, 1, Color(1.0, 0.95, 0.6, 1.0))
+		image.resize(16, 16, Image.INTERPOLATE_NEAREST)
+		frames.add_frame(&"burn", ImageTexture.create_from_image(image))
+	_ward_torch_frames = frames
+	return frames
+
+func _free_ward_overlay_for_key(gate_key: String) -> void:
+	if not _ward_overlays.has(gate_key):
+		return
+	var overlay := _ward_overlays[gate_key] as Dictionary
+	for node_variant: Variant in overlay.get("nodes", []) as Array:
+		var node := node_variant as Node2D
+		if node != null and is_instance_valid(node):
+			node.queue_free()
+	_ward_overlays.erase(gate_key)
+
+## Feeds each ward shader its lights every frame: the player first, then
+## the mouth and stairwell pools, then every sconce riding a slow sine
+## flicker phase-keyed per cell so no two throb in unison.
+func _update_ward_darkness() -> void:
+	if _ward_overlays.is_empty() or not _lighting_enabled:
+		return
+	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
+	for overlay_variant: Variant in _ward_overlays.values():
+		var overlay := overlay_variant as Dictionary
+		var ward_material := overlay.get("material") as ShaderMaterial
+		if ward_material == null:
+			continue
+		var positions := PackedVector2Array()
+		var radii := PackedFloat32Array()
+		if _player_sprite != null:
+			positions.append(_player_sprite.position)
+			radii.append(WARD_PLAYER_LIGHT_TILES * float(tile_size.x))
+		for light_variant: Variant in overlay.get("static_lights", []) as Array:
+			var light := light_variant as Dictionary
+			positions.append(light.get("pos", Vector2.ZERO) as Vector2)
+			radii.append(float(light.get("radius", 0.0)))
+		for sconce_variant: Variant in overlay.get("sconces", []) as Array:
+			if positions.size() >= WARD_LIGHT_MAX:
+				break
+			var sconce := sconce_variant as Dictionary
+			positions.append(sconce.get("pos", Vector2.ZERO) as Vector2)
+			var flicker := 1.0 + 0.07 * sin(flicker_phase * 8.0 + float(sconce.get("phase", 0.0)))
+			radii.append(float(sconce.get("radius", 0.0)) * flicker)
+		ward_material.set_shader_parameter("light_count", positions.size())
+		ward_material.set_shader_parameter("light_pos", positions)
+		ward_material.set_shader_parameter("light_radius", radii)
+
+## --- Digging the massif from inside -----------------------------------------
+## The mountain is minable in the SAME scene: adjacent clicks swing at
+## massif rock with the hold's tool ladder, durability follows the hold
+## site's own geology, breaks pay Stone (and sometimes the tile's
+## advertised ore), and dug cells persist per site in world settings so
+## carved galleries survive streaming and reloads.
+const WARD_DIG_TOOL_DAMAGE := {
+	"Dwarven Pickaxe": 12, "Steel Pickaxe": 8, "Miner's Pick": 6,
+	"Copper Pick": 5, "Worn Pickaxe": 4, "Rusty Pick": 4
+}
+const WARD_HAND_DIG_DAMAGE := 3
+const WARD_DIG_ORE_CHANCE_PERCENT := 9
+const WARD_SWING_COOLDOWN := 0.35
+const WARD_DUG_SETTINGS_KEY := "hold_ward_dug"
+
+var _ward_rock_damage: Dictionary = {}
+var _ward_swing_timer := 0.0
+var _massif_rock_coords_set: Dictionary = {}
+
+func _is_ward_rock_cell(cell: Vector2i) -> bool:
+	if city_layer.get_cell_source_id(cell) != 0:
+		return false
+	if _massif_rock_coords_set.is_empty():
+		for rock_key: String in ["massif_rock", "massif_rock_dark", "massif_rock_top"]:
+			var coords := TILE_ATLAS.get(rock_key, Vector2i(-1, -1)) as Vector2i
+			if coords.x >= 0:
+				_massif_rock_coords_set[coords] = true
+	return _massif_rock_coords_set.has(city_layer.get_cell_atlas_coords(cell))
+
+## The geology the swing digs by: the nearest hold gate's recorded tile
+## profile (the same one its tooltip and mines advertise).
+func _ward_geology_for_cell(cell: Vector2i) -> Dictionary:
+	for gate: Dictionary in _surface_gates:
+		var site := gate.get("site", {}) as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_MASSIF_HALF_WIDTH * 2 + 4:
+			var geology_variant: Variant = site.get("geology")
+			if geology_variant is Dictionary:
+				return geology_variant as Dictionary
+	return {}
+
+func _ward_site_key_for_cell(cell: Vector2i) -> String:
+	for gate: Dictionary in _surface_gates:
+		var site := gate.get("site", {}) as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_MASSIF_HALF_WIDTH * 2 + 4:
+			return String(gate.get("key", ""))
+	return ""
+
+func _swing_at_ward_rock(cell: Vector2i) -> void:
+	if _ward_swing_timer > 0.0:
+		return
+	_ward_swing_timer = WARD_SWING_COOLDOWN
+	var damage := WARD_HAND_DIG_DAMAGE
+	for tool_name: String in WARD_DIG_TOOL_DAMAGE.keys():
+		if int(_player_inventory.get(tool_name, 0)) > 0:
+			damage = maxi(damage, int(WARD_DIG_TOOL_DAMAGE[tool_name]))
+	var geology := _ward_geology_for_cell(cell)
+	var rock_hp := 12
+	if not geology.is_empty():
+		var layer := GeologyService.layer_class_for_depth(geology, 0)
+		rock_hp = int(GeologyService.LAYER_DURABILITY.get(layer, 12))
+	var total_damage := int(_ward_rock_damage.get(cell, 0)) + damage
+	if total_damage >= rock_hp:
+		_dig_ward_rock(cell, geology)
+		return
+	_ward_rock_damage[cell] = total_damage
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.55, 0.55, 0.58, 1.0), 5)
+
+func _dig_ward_rock(cell: Vector2i, geology: Dictionary) -> void:
+	_ward_rock_damage.erase(cell)
+	var art := TileBreakFxService.tile_art(city_layer, cell)
+	_place_hold_tile(city_layer, cell, "dirt")
+	decor_layer.erase_cell(cell)
+	_surface_blocked_cells.erase(cell)
+	_add_to_inventory("Stone", 1)
+	# The pick finds what the tile's tooltip promised.
+	if not geology.is_empty() and randi_range(1, 100) <= WARD_DIG_ORE_CHANCE_PERCENT:
+		var metals := geology.get("metals", []) as Array
+		if not metals.is_empty():
+			var ore := "%s Ore" % String(metals[randi_range(0, metals.size() - 1)])
+			_add_to_inventory(ore, 1)
+			_spawn_floating_text("Struck %s!" % ore, _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
+	if not art.is_empty():
+		TileBreakFxService.topple_ghost(city_layer, _cell_center_position(cell), art["texture"] as Texture2D, art["region"] as Rect2, 1.0)
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.55, 0.55, 0.58, 1.0), 12)
+	_record_ward_dig(cell)
+
+## Dug galleries persist per hold site: {site_key: ["x,y", ...]} in the
+## shared world settings, re-applied whenever the massif re-stamps.
+func _record_ward_dig(cell: Vector2i) -> void:
+	var site_key := _ward_site_key_for_cell(cell)
+	if site_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var dug: Dictionary = settings.get(WARD_DUG_SETTINGS_KEY, {}) as Dictionary if settings.get(WARD_DUG_SETTINGS_KEY) is Dictionary else {}
+	var cells: Array = dug.get(site_key, []) as Array
+	var cell_key := "%d,%d" % [cell.x, cell.y]
+	if not cells.has(cell_key):
+		cells.append(cell_key)
+	dug[site_key] = cells
+	settings[WARD_DUG_SETTINGS_KEY] = dug
+	_store_world_settings(settings)
+
+## Re-opens previously dug massif cells after a (re)stamp.
+func _apply_ward_digs(site_key: String) -> void:
+	if site_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var dug: Dictionary = settings.get(WARD_DUG_SETTINGS_KEY, {}) as Dictionary if settings.get(WARD_DUG_SETTINGS_KEY) is Dictionary else {}
+	for cell_key_variant: Variant in (dug.get(site_key, []) as Array):
+		var parts := String(cell_key_variant).split(",")
+		if parts.size() != 2:
+			continue
+		var cell := Vector2i(int(parts[0]), int(parts[1]))
+		_place_hold_tile(city_layer, cell, "dirt")
+		decor_layer.erase_cell(cell)
+		_surface_blocked_cells.erase(cell)
+
+## One random step every couple of seconds, on walkable ground only.
+func _update_ward_dwarves(delta: float) -> void:
+	for dwarf: Dictionary in _ward_dwarves:
+		dwarf["timer"] = float(dwarf.get("timer", 1.0)) - delta
+		if float(dwarf["timer"]) > 0.0:
+			continue
+		dwarf["timer"] = randf_range(1.2, 3.0)
+		var cell := dwarf.get("cell", Vector2i.ZERO) as Vector2i
+		var options: Array[Vector2i] = []
+		for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var step := cell + offset
+			if _is_passable_cell_for_actor(step) and step != _player_cell:
+				options.append(step)
+		if options.is_empty():
+			continue
+		var next_cell := options[randi_range(0, options.size() - 1)]
+		dwarf["cell"] = next_cell
+		var sprite := dwarf.get("sprite") as Sprite2D
+		if sprite != null and is_instance_valid(sprite):
+			sprite.position = _cell_center_position(next_cell)
 
 ## A dungeon shows barely anything: a ring of old stone open to the
 ## south, a dark doorway at its heart.
@@ -8416,6 +9001,10 @@ func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 				_surface_gate_labels.erase(stale_label)
 				stale_label.queue_free()
 			gate["label"] = null
+			# Ward dwarves, sconces and the darkness quad evaporate with
+			# their ward's ground; the re-stamp on return rebuilds them.
+			_free_ward_dwarves_for_key(String(gate.get("key", "")))
+			_free_ward_overlay_for_key(String(gate.get("key", "")))
 		# Landmark footprints release this chunk's slice (sprites, blocked
 		# cells); the cached plan re-stamps it identically on return.
 		for landmark: Dictionary in _surface_landmarks:
@@ -8430,6 +9019,9 @@ func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 func _update_surface_life(delta: float) -> void:
 	if _surface_noise.is_empty() or _player_sprite == null:
 		return
+	_update_ward_dwarves(delta)
+	_update_ward_darkness()
+	_ward_swing_timer = maxf(0.0, _ward_swing_timer - delta)
 	var danger: float = SurfaceLifeService.danger_for_cell(_player_cell, _surface_anchor_cells)
 	_surface_spawn_timer -= delta
 	if _surface_spawn_timer <= 0.0:
@@ -10145,6 +10737,15 @@ func _cell_center_position(cell: Vector2i) -> Vector2:
 
 func _place_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -> void:
 	DwarfHoldTileService.place_tile(target_layer, cell, tile_key, TILE_ATLAS)
+	_actor_passable_cache.erase(cell)
+
+## Places a tile from the HOLD's atlas (tileset source 1): the embedded
+## ward draws the hold's true carved-stone art inside the town's world.
+func _place_hold_tile(target_layer: TileMapLayer, cell: Vector2i, tile_key: String) -> void:
+	var coords := TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS.get(tile_key, Vector2i(-1, -1)) as Vector2i
+	if coords.x < 0:
+		return
+	target_layer.set_cell(cell, HOLD_TILE_SOURCE_ID, coords)
 	_actor_passable_cache.erase(cell)
 
 func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:

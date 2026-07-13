@@ -451,6 +451,7 @@ const DWARFHOLD_SCENE_POPULATION_KEY := "dwarfhold_scene_population"
 const DWARFHOLD_SCENE_NAME_KEY := "dwarfhold_scene_name"
 const DWARFHOLD_SCENE_FALL_KEY := "dwarfhold_scene_fall_text"
 const DWARFHOLD_SCENE_GEOLOGY_KEY := "dwarfhold_scene_geology"
+const DWARFHOLD_SCENE_OVERLAND_KEY := "dwarfhold_scene_overland_arrival"
 
 ## Identity carried in from the overworld chronicle: the hold's name and,
 ## for abandoned ruins, the fall summary ("Fell to <beast>, year <y>").
@@ -1548,6 +1549,12 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 		_lair_beast = WorldChronicleService.lair_beast_for_tile(settings, _hold_tile)
 	var geology_variant: Variant = settings.get(DWARFHOLD_SCENE_GEOLOGY_KEY, null)
 	_journey_geology = (geology_variant as Dictionary).duplicate(true) if geology_variant is Dictionary else {}
+	# One-shot: an overland walk-in spawns at the south gate; consumed so
+	# later level moves and reloads keep their own spawn logic.
+	_overland_arrival = bool(settings.get(DWARFHOLD_SCENE_OVERLAND_KEY, false))
+	if settings.has(DWARFHOLD_SCENE_OVERLAND_KEY):
+		settings.erase(DWARFHOLD_SCENE_OVERLAND_KEY)
+		_store_world_settings(settings)
 	var chronology := settings.get("chronology", {}) as Dictionary
 	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
 	_underdeep_sites = []
@@ -2625,12 +2632,17 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	)
 	_player_sprite = result.get("player_sprite")
 	_player_cell = result.get("player_cell", _player_cell)
-	# A stair arrival chose its own spawn; only fresh entries (no pending
-	# cell) get pulled to the Great Hall.
+	# A stair arrival chose its own spawn; overland walk-ins step out of
+	# the mountain mouth at the south gate; every other fresh entry gets
+	# pulled to the Great Hall.
 	var arrived_via_stairs := _pending_player_spawn_cell.x != 2147483647
 	_pending_player_spawn_cell = Vector2i(2147483647, 2147483647)
 	if not arrived_via_stairs:
-		_relocate_player_to_city_heart(grid)
+		if _overland_arrival:
+			_overland_arrival = false
+			_relocate_player_to_south_gate(grid)
+		else:
+			_relocate_player_to_city_heart(grid)
 	# The lantern pool spawns wherever the dwarf now stands; the per-frame
 	# uniform update carries it from here.
 	_update_light_uniforms()
@@ -2669,6 +2681,34 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 ## On the district city level the player arrives at the Great Hall, the
 ## one spot guaranteed to connect to every quarter, rather than a random
 ## alley pocket.
+## The overland walk-in continues INTO the hold: the player appears at
+## the city's southern edge near its horizontal center - the inside of
+## the mountain mouth they just stepped through - instead of teleporting
+## to the Great Hall.
+func _relocate_player_to_south_gate(grid: Dictionary) -> void:
+	if _player_sprite == null or grid.is_empty():
+		return
+	var bounds := _find_bounds(grid)
+	var center_x := bounds.position.x + bounds.size.x / 2
+	var best := Vector2i(2147483647, 2147483647)
+	var best_score := -2147483647
+	for cell_variant: Variant in grid.keys():
+		var cell := cell_variant as Vector2i
+		var zone := int(grid[cell_variant])
+		if zone != CELL_HALL and zone != CELL_PLAZA:
+			continue
+		# Southernmost first; near the center column as tie-break.
+		var score := cell.y * 1000 - absi(cell.x - center_x)
+		if score > best_score:
+			best_score = score
+			best = cell
+	if best.x == 2147483647:
+		_relocate_player_to_city_heart(grid)
+		return
+	_player_cell = best
+	_actor_sprite_to_cell(_player_sprite, best)
+	_center_view_on_world_position(_player_sprite.position)
+
 func _relocate_player_to_city_heart(grid: Dictionary) -> void:
 	if _player_sprite == null or _latest_district_labels.is_empty():
 		return
@@ -6217,6 +6257,9 @@ var _geology: Dictionary = {}
 ## present it overrides the seed-derived profile so the pick finds what
 ## that mountain's tooltip advertised.
 var _journey_geology: Dictionary = {}
+## True when the player walked in overland through the mountain mouth
+## (vs a map journey or stairs): they spawn at the hold's south gate.
+var _overland_arrival := false
 
 ## An ore appropriate to the current stratum, drawn from this world's
 ## metal list - the same list the overworld geology readout advertises.

@@ -196,6 +196,7 @@ text = "Show zone overlay"
 [node name="LightingToggle" type="CheckButton" parent="Margin/Layout/Controls" unique_id=1664598420]
 unique_name_in_owner = true
 layout_mode = 2
+button_pressed = true
 text = "Enable lighting"
 
 [node name="ZoneLegend" type="RichTextLabel" parent="Margin/Layout/Controls" unique_id=1078314459]
