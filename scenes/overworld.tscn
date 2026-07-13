@@ -661,6 +661,16 @@ scroll_active = true
 fit_content = false
 text = ""
 
+[node name="Policies" type="VBoxContainer" parent="MapUi/StructureDetailsDialog/DetailsMargin/DetailsTabs"]
+
+[node name="PoliciesText" type="RichTextLabel" parent="MapUi/StructureDetailsDialog/DetailsMargin/DetailsTabs/Policies"]
+layout_mode = 2
+size_flags_vertical = 3
+bbcode_enabled = true
+scroll_active = true
+fit_content = false
+text = ""
+
 [node name="Dimmer" type="ColorRect" parent="MapUi/LoadingScreen"]
 layout_mode = 1
 anchors_preset = 15
