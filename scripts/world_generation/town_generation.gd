@@ -6256,7 +6256,9 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 	var gate_rect := Rect2i(anchor - Vector2i(3, 3), Vector2i(7, 7))
 	match String(site.get("class", "")):
 		"dwarfhold":
-			trigger_cells = [anchor, anchor + Vector2i(0, 1)]
+			# The hold has no door: stepping INTO the stone mouth is the
+			# entrance, so the triggers sit inside the carved passage.
+			trigger_cells = [anchor, anchor + Vector2i(0, -1)]
 			# A hold's gate is a whole mountain massif, far bigger than a
 			# clearing: the rect must cover every stone cell so eviction
 			# knows to re-stamp the full mountain on return.
@@ -6278,6 +6280,11 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 		# One connecting road per settlement, to the nearest anchor already
 		# in the network (the entered town's center seeds it). Distant
 		# outliers stay roadless, as the old nearest-few rule left them.
+		# A hold's trail aims at the paved apron BELOW its gate - a road
+		# ending on the buried anchor would vanish under the massif.
+		var road_target := anchor
+		if String(site.get("class", "")) == "dwarfhold":
+			road_target = anchor + Vector2i(0, 3)
 		var nearest := Vector2i(2147483647, 2147483647)
 		var nearest_distance := 2147483647
 		for known_anchor: Vector2i in _surface_anchor_cells:
@@ -6286,7 +6293,7 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 				nearest_distance = known_distance
 				nearest = known_anchor
 		if nearest.x != 2147483647 and nearest_distance <= SURFACE_ROAD_MAX_CELLS:
-			_trace_surface_road(nearest, anchor)
+			_trace_surface_road(nearest, road_target)
 			_surface_site_road_traced[site_key] = true
 	_surface_anchor_cells.append(anchor)
 
@@ -8272,7 +8279,11 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 	for y in range(anchor.y - HOLD_MASSIF_HALF_HEIGHT * 2, anchor.y + 1):
 		for x in range(anchor.x - HOLD_MASSIF_HALF_WIDTH, anchor.x + HOLD_MASSIF_HALF_WIDTH + 1):
 			var cell := Vector2i(x, y)
-			if _latest_grid.has(cell) or _surface_road_cells.has(cell):
+			# The mountain buries even traced roads: skipping road cells
+			# tunneled a bare channel straight through the rock and split
+			# the massif into lobes. The trail now ends at the mountain's
+			# foot and the gate is the only way in.
+			if _latest_grid.has(cell):
 				continue
 			var dx := (float(x) - massif_center.x) / float(HOLD_MASSIF_HALF_WIDTH)
 			var dy := (float(y) - massif_center.y) / float(HOLD_MASSIF_HALF_HEIGHT)
@@ -8294,21 +8305,24 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 			_place_tile(city_layer, cell, rock_key)
 			decor_layer.erase_cell(cell)
 			_surface_blocked_cells[cell] = true
-	# The carved front set into the south face: dressed stone with the
-	# hold's single door. These cells trade the crag's blocked flag for
-	# their own tile passability (walls block, the door opens).
+	# The mouth: no door at all - an OPENING in the stone, a dark carved
+	# passage leading into the mountain, framed by light-catching pillar
+	# stone. Walking into the passage IS entering the hold.
 	for y in range(anchor.y - 2, anchor.y + 1):
 		for x in range(anchor.x - 3, anchor.x + 4):
 			var cell := Vector2i(x, y)
 			if _latest_grid.has(cell):
 				continue
-			var wall_key := "wall_alt" if y == anchor.y - 2 else "wall"
-			_place_tile(city_layer, cell, wall_key)
+			_place_tile(city_layer, cell, "massif_rock_dark")
 			decor_layer.erase_cell(cell)
-			_surface_blocked_cells.erase(cell)
-	_place_tile(city_layer, anchor, "door")
-	decor_layer.erase_cell(anchor)
-	_surface_blocked_cells.erase(anchor)
+			_surface_blocked_cells[cell] = true
+	for mouth_y in range(anchor.y - 1, anchor.y + 1):
+		var mouth_cell := Vector2i(anchor.x, mouth_y)
+		_place_tile(city_layer, mouth_cell, "ruin_floor")
+		decor_layer.erase_cell(mouth_cell)
+		_surface_blocked_cells.erase(mouth_cell)
+		_place_tile(city_layer, Vector2i(anchor.x - 1, mouth_y), "massif_rock_top")
+		_place_tile(city_layer, Vector2i(anchor.x + 1, mouth_y), "massif_rock_top")
 	for y in range(anchor.y + 1, anchor.y + 3):
 		for x in range(anchor.x - 2, anchor.x + 3):
 			var cell := Vector2i(x, y)
