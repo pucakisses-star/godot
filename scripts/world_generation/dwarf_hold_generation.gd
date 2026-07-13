@@ -293,13 +293,13 @@ const CANDLE_LIGHT_TILES := 4.0
 const HEARTH_LIGHT_PIECES := ["int_hearth_arch", "int_kiln_beehive", "int_fireplace_dark"]
 ## Ceiling on lights fed to the overlay shader in one frame (must match the
 ## shader's MAX_LIGHTS). The player lantern always claims one slot.
-const MAX_DYNAMIC_LIGHTS := 64
-## Torches beyond this range never touch what the player can see, so they
-## are culled before filling the light slots.
+const MAX_DYNAMIC_LIGHTS := 128
+## Floor for the light cull range; the real range grows with the visible
+## view so a zoomed-out camera never shows an unlit lamp on screen.
 const LIGHT_CULL_TILES := 48.0
 const DARKNESS_SHADER_CODE := "shader_type canvas_item;
 
-const int MAX_LIGHTS = 64;
+const int MAX_LIGHTS = 128;
 // Raymarch resolution from a fragment toward each in-range light. 24 steps
 // comfortably catches a one-cell-thick wall over a 7-9 tile light radius.
 const int OCCLUSION_STEPS = 24;
@@ -2327,49 +2327,61 @@ func _refresh_occlusion_cell(cell: Vector2i) -> void:
 func _update_light_uniforms() -> void:
 	if _darkness_material == null:
 		return
-	var positions := PackedVector2Array()
-	var radii := PackedFloat32Array()
-	if _player_sprite != null:
-		positions.append(_player_sprite.position)
-		radii.append(PLAYER_LIGHT_TILES * float(tile_size.x))
-	var cull_sq := pow(LIGHT_CULL_TILES * float(tile_size.x), 2.0)
+	# Every source becomes a candidate first, then the NEAREST ones claim
+	# the shader's slots. The old fixed class order (placed torches, then
+	# furnishings, then sconces) starved whole classes in a dense city:
+	# a wall sconce would draw its glow sprite yet never carve the
+	# darkness, reading as a bright blob in a black void.
+	var player_position := _player_sprite.position if _player_sprite != null else Vector2.ZERO
+	# Cull to what the camera can actually show, not a fixed ring around
+	# the player - a zoomed-out view must never show an unlit lamp.
+	var cull_px := LIGHT_CULL_TILES * float(tile_size.x)
+	if city_panel != null and _zoom_level > 0.0:
+		cull_px = maxf(cull_px, (city_panel.size * 0.5).length() / _zoom_level + TORCH_LIGHT_TILES * float(tile_size.x))
+	var cull_sq := cull_px * cull_px
 	# Firelight breathes: torch and hearth radii ride a slow per-source
 	# sine so the pools flicker like flame, Core Keeper style. Phases are
 	# keyed by cell so neighboring fires never pulse in lockstep.
 	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
+	var candidates: Array = []
 	for torch_cell_variant: Variant in _torch_sprites.keys():
-		if positions.size() >= MAX_DYNAMIC_LIGHTS:
-			break
 		var torch_cell := torch_cell_variant as Vector2i
 		var torch_position := _cell_center_position(torch_cell)
-		if _player_sprite != null and torch_position.distance_squared_to(_player_sprite.position) > cull_sq:
+		if torch_position.distance_squared_to(player_position) > cull_sq:
 			continue
-		positions.append(torch_position)
 		var torch_flicker := 1.0 + 0.05 * sin(flicker_phase * 8.0 + float(torch_cell.x * 7 + torch_cell.y * 13))
-		radii.append(TORCH_LIGHT_TILES * float(tile_size.x) * torch_flicker)
+		candidates.append({"pos": torch_position, "radius": TORCH_LIGHT_TILES * float(tile_size.x) * torch_flicker})
 	# The settlement's own fires and candles light their pools, so districts
 	# glow around their hearths instead of being uniformly bright.
 	for light_cell: Vector2i in _light_furnishing_cells:
-		if positions.size() >= MAX_DYNAMIC_LIGHTS:
-			break
 		var light_position := _cell_center_position(light_cell)
-		if _player_sprite != null and light_position.distance_squared_to(_player_sprite.position) > cull_sq:
+		if light_position.distance_squared_to(player_position) > cull_sq:
 			continue
 		var is_hearth := HEARTH_LIGHT_PIECES.has(String(_furnishing_by_cell.get(light_cell, "")))
-		positions.append(light_position)
 		var hearth_flicker := 1.0 + (0.04 if is_hearth else 0.0) * sin(flicker_phase * 6.0 + float(light_cell.x * 11 + light_cell.y * 5))
-		radii.append((HEARTH_LIGHT_TILES if is_hearth else CANDLE_LIGHT_TILES) * float(tile_size.x) * hearth_flicker)
-	# The generated street sconces claim whatever light slots remain.
+		candidates.append({"pos": light_position, "radius": (HEARTH_LIGHT_TILES if is_hearth else CANDLE_LIGHT_TILES) * float(tile_size.x) * hearth_flicker})
 	for sconce_variant: Variant in _auto_sconce_cells.keys():
-		if positions.size() >= MAX_DYNAMIC_LIGHTS:
-			break
 		var sconce_cell := sconce_variant as Vector2i
 		var sconce_position := _cell_center_position(sconce_cell)
-		if _player_sprite != null and sconce_position.distance_squared_to(_player_sprite.position) > cull_sq:
+		if sconce_position.distance_squared_to(player_position) > cull_sq:
 			continue
-		positions.append(sconce_position)
 		var sconce_flicker := 1.0 + 0.05 * sin(flicker_phase * 8.0 + float(sconce_cell.x * 5 + sconce_cell.y * 11))
-		radii.append(float(_auto_sconce_cells[sconce_variant]) * float(tile_size.x) * sconce_flicker)
+		candidates.append({"pos": sconce_position, "radius": float(_auto_sconce_cells[sconce_variant]) * float(tile_size.x) * sconce_flicker})
+	# Only sort when over budget; the far end of the list is what drops.
+	if candidates.size() > MAX_DYNAMIC_LIGHTS - 1:
+		candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
+	var positions := PackedVector2Array()
+	var radii := PackedFloat32Array()
+	if _player_sprite != null:
+		positions.append(player_position)
+		radii.append(PLAYER_LIGHT_TILES * float(tile_size.x))
+	for candidate_variant: Variant in candidates:
+		if positions.size() >= MAX_DYNAMIC_LIGHTS:
+			break
+		var candidate := candidate_variant as Dictionary
+		positions.append(candidate.get("pos") as Vector2)
+		radii.append(float(candidate.get("radius", 0.0)))
 	_darkness_material.set_shader_parameter("light_count", positions.size())
 	_darkness_material.set_shader_parameter("light_pos", positions)
 	_darkness_material.set_shader_parameter("light_radius", radii)
@@ -4893,7 +4905,7 @@ func _ruler_dialogue_line(state: Dictionary) -> String:
 	var pool: Array[String] = [
 		"I am %s of %s. Speak plainly; the stone listens." % [throne_title, hold_label],
 		"Every gate and gallery of %s answers to this seat. Keep its peace." % hold_label,
-		"I have ruled %s since the year %d. It has cost me more than gold." % [hold_label, since]
+		"I have ruled %s since the year %d — %s. It has cost me more than gold." % [hold_label, since, GameCalendar.year_title(since)]
 	]
 	var lineage := state.get("ruler_lineage", []) as Array
 	if lineage.size() > 1:

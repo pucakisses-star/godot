@@ -10349,6 +10349,7 @@ func _update_world_name_label() -> void:
 	_world_name_label.text = "🌍 %s — Year %d" % [display_name, _chronology_year]
 	if _is_first_age:
 		_world_name_label.text += " of the First Age"
+	_world_name_label.text += ", %s" % GameCalendar.year_title(_chronology_year)
 
 func _update_routes_overlay_visibility() -> void:
 	_update_caravans_visibility()

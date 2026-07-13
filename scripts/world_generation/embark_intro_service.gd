@@ -85,10 +85,11 @@ static func compose(character: Dictionary, world_name: String, year: int, place:
 
 	var chronicle := "your tale" if key != "dwarfhold" else "dwarven history"
 	var closing := ""
+	var arrival_year := maxi(year, 1)
 	if not world_name.strip_edges().is_empty():
-		closing = "A new chapter of %s begins here, in %s, in the year %d." % [chronicle, world_name.strip_edges(), maxi(year, 1)]
+		closing = "A new chapter of %s begins here, in %s, in the year %d — %s." % [chronicle, world_name.strip_edges(), arrival_year, GameCalendar.year_title(arrival_year)]
 	else:
-		closing = "A new chapter of %s begins here, in the year %d." % [chronicle, maxi(year, 1)]
+		closing = "A new chapter of %s begins here, in the year %d — %s." % [chronicle, arrival_year, GameCalendar.year_title(arrival_year)]
 
 	var call_line := _call(key)
 	var body := "[b]%s[/b]\n\n%s\n\n%s\n\n%s\n\n%s\n[color=#8fdf7f][b]%s[/b][/color]" % [
