@@ -4192,6 +4192,13 @@ func _apply_lighting_state() -> void:
 	for glow: Node2D in _glow_sprites:
 		if is_instance_valid(glow):
 			glow.visible = _lighting_enabled
+	# Ward darkness and its sconces ride the same switch: lighting off
+	# means a plain, undarkened ward.
+	for overlay_variant: Variant in _ward_overlays.values():
+		for node_variant: Variant in (overlay_variant as Dictionary).get("nodes", []) as Array:
+			var ward_node := node_variant as Node2D
+			if ward_node != null and is_instance_valid(ward_node):
+				ward_node.visible = _lighting_enabled
 
 func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	if city_layer.tile_set == null:
@@ -6372,6 +6379,7 @@ func _unplan_surface_site(site_key: String) -> void:
 			_surface_gate_labels.erase(gate_label)
 			gate_label.queue_free()
 		_free_ward_dwarves_for_key(site_key)
+		_free_ward_overlay_for_key(site_key)
 		# A hold massif's stamped stone must not haunt the wilds after the
 		# mountain is unplanned; natural crag flags in the same rect come
 		# back when their chunks repaint from terrain.
@@ -8420,6 +8428,14 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 				var edge := hx == house_origin.x or hy == house_origin.y or hx == house_origin.x + house_w - 1 or hy == house_origin.y + house_h - 1
 				_place_hold_tile(city_layer, house_cell, "wall" if edge else "floor")
 		_place_hold_tile(city_layer, Vector2i(house_origin.x + house_w / 2, house_origin.y + house_h - 1), "door")
+		# Most hold houses keep a stocked chest on the floor - the same
+		# lootable chest panel the town uses, right in the ward.
+		if ward_rng.randf() < 0.8:
+			var chest_cell := Vector2i(
+				house_origin.x + ward_rng.randi_range(1, house_w - 2),
+				house_origin.y + ward_rng.randi_range(1, house_h - 2))
+			_place_tile(decor_layer, chest_cell, "chest")
+			_ensure_chest_inventory(chest_cell)
 	# The heart: a small stone plaza around the stair down into the city
 	# proper - descending is the only remaining transition.
 	for py in range(ward_center.y - 1, ward_center.y + 2):
@@ -8451,6 +8467,35 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 	_place_tile(decor_layer, Vector2i(anchor.x + 3, anchor.y + 1), "hedge_alt")
 	# Player-dug galleries re-open on every stamp.
 	_apply_ward_digs(_ward_site_key_for_cell(anchor))
+	# Wall sconces hug the shell rock and the house faces, two more flank
+	# the stair plaza, and the whole interior falls under the ward's
+	# darkness overlay - inside the mountain it is properly dark.
+	var sconce_cells: Array[Vector2i] = []
+	for cell_variant: Variant in ward_cells.keys():
+		var ward_cell := cell_variant as Vector2i
+		if city_layer.get_cell_source_id(ward_cell) != HOLD_TILE_SOURCE_ID:
+			continue
+		if not _is_hold_passable_atlas_tile(city_layer.get_cell_atlas_coords(ward_cell)):
+			continue
+		var hugs_wall := false
+		for offset: Vector2i in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1)]:
+			var step := ward_cell + offset
+			if _surface_blocked_cells.has(step) or (
+					city_layer.get_cell_source_id(step) == HOLD_TILE_SOURCE_ID
+					and not _is_hold_passable_atlas_tile(city_layer.get_cell_atlas_coords(step))):
+				hugs_wall = true
+				break
+		if not hugs_wall:
+			continue
+		if (hash("ward_sconce|%d|%d" % [ward_cell.x, ward_cell.y]) & 0xffff) % WARD_SCONCE_SPACING != 0:
+			continue
+		sconce_cells.append(ward_cell)
+	for flank: Vector2i in [ward_center + Vector2i(-2, 0), ward_center + Vector2i(2, 0)]:
+		if city_layer.get_cell_source_id(flank) == HOLD_TILE_SOURCE_ID \
+				and _is_hold_passable_atlas_tile(city_layer.get_cell_atlas_coords(flank)) \
+				and not sconce_cells.has(flank):
+			sconce_cells.append(flank)
+	_spawn_ward_overlay(_ward_site_key_for_cell(anchor), anchor, sconce_cells)
 	_spawn_ward_dwarves(anchor, ward_cells, ward_rng)
 
 ## A few of the hold's folk walk their surface ward: lightweight
@@ -8509,6 +8554,212 @@ func _free_ward_dwarves_for_key(gate_key: String) -> void:
 		if sprite != null and is_instance_valid(sprite):
 			sprite.queue_free()
 		_ward_dwarves.remove_at(dwarf_index)
+
+## --- The dark under the mountain ---------------------------------------------
+## The ward is interior space, so it is properly dark in there: an
+## ellipse-masked darkness quad rides each stamped massif in the SAME
+## scene, opened by warm pools - the player's own light, flickering wall
+## sconces on the shell rock, daylight spilling through the mouth and
+## lamplight up the stairwell. One sprite and one shader per hold,
+## freed with its gate like everything else in the ward.
+const WARD_LIGHT_MAX := 24
+const WARD_PLAYER_LIGHT_TILES := 5.0
+const WARD_SCONCE_LIGHT_TILES := 3.6
+const WARD_MOUTH_LIGHT_TILES := 4.5
+const WARD_STAIR_LIGHT_TILES := 3.0
+const WARD_SCONCE_SPACING := 3
+const WARD_DARKNESS_SHADER := """
+shader_type canvas_item;
+uniform vec2 overlay_origin;
+uniform vec2 overlay_size;
+uniform vec2 ward_center_px;
+uniform vec2 ward_half_px;
+uniform int light_count = 0;
+uniform vec2 light_pos[24];
+uniform float light_radius[24];
+uniform vec4 darkness_color : source_color = vec4(0.02, 0.03, 0.055, 0.93);
+
+void fragment() {
+	vec2 world = overlay_origin + UV * overlay_size;
+	vec2 e = (world - ward_center_px) / ward_half_px;
+	float reach = dot(e, e);
+	// Dark across the ward and its rock shell, feathered out just past
+	// the massif's ragged edge so the wilds keep their daylight.
+	float mask = 1.0 - smoothstep(0.72, 1.15, reach);
+	float reveal = 0.0;
+	for (int i = 0; i < light_count; i++) {
+		float d = distance(world, light_pos[i]);
+		reveal = max(reveal, 1.0 - smoothstep(light_radius[i] * 0.35, light_radius[i], d));
+	}
+	// Lit ground warms before it clears - torchlight, not a cutout.
+	vec3 tinted = mix(darkness_color.rgb, vec3(0.42, 0.26, 0.11), reveal * 0.55);
+	COLOR = vec4(tinted, darkness_color.a * mask * (1.0 - reveal * 0.92));
+}
+"""
+
+var _ward_overlays: Dictionary = {}
+var _ward_torch_frames: SpriteFrames = null
+var _ward_torch_texture: Texture2D = null
+
+func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array[Vector2i]) -> void:
+	if gate_key.is_empty() or _ward_overlays.has(gate_key):
+		return
+	var tile_px := Vector2(float(tile_size.x), float(tile_size.y))
+	var top_left := Vector2i(anchor.x - HOLD_MASSIF_HALF_WIDTH - 2, anchor.y - HOLD_MASSIF_HALF_HEIGHT * 2 - 2)
+	var origin_px := _cell_center_position(top_left) - tile_px * 0.5
+	var size_px := Vector2(float(HOLD_MASSIF_HALF_WIDTH * 2 + 5), float(HOLD_MASSIF_HALF_HEIGHT * 2 + 4)) * tile_px
+	var quad_image := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+	quad_image.fill(Color.WHITE)
+	var overlay_sprite := Sprite2D.new()
+	overlay_sprite.texture = ImageTexture.create_from_image(quad_image)
+	overlay_sprite.centered = false
+	overlay_sprite.position = origin_px
+	overlay_sprite.scale = size_px / 4.0
+	overlay_sprite.z_index = 12
+	var shader := Shader.new()
+	shader.code = WARD_DARKNESS_SHADER
+	var overlay_material := ShaderMaterial.new()
+	overlay_material.shader = shader
+	overlay_material.set_shader_parameter("overlay_origin", origin_px)
+	overlay_material.set_shader_parameter("overlay_size", size_px)
+	overlay_material.set_shader_parameter("ward_center_px", _cell_center_position(Vector2i(anchor.x, anchor.y - HOLD_MASSIF_HALF_HEIGHT + 1)))
+	overlay_material.set_shader_parameter("ward_half_px", Vector2(float(HOLD_MASSIF_HALF_WIDTH) * tile_px.x, float(HOLD_MASSIF_HALF_HEIGHT) * tile_px.y))
+	overlay_sprite.material = overlay_material
+	overlay_sprite.visible = _lighting_enabled
+	actor_layer.add_child(overlay_sprite)
+	var nodes: Array = [overlay_sprite]
+	var sconces: Array = []
+	for sconce_cell: Vector2i in sconce_cells:
+		if sconces.size() >= WARD_LIGHT_MAX - 3:
+			break
+		nodes.append(_spawn_ward_sconce(sconce_cell))
+		sconces.append({
+			"pos": _cell_center_position(sconce_cell),
+			"radius": WARD_SCONCE_LIGHT_TILES * tile_px.x,
+			"phase": float(absi(sconce_cell.x * 7 + sconce_cell.y * 13))
+		})
+	# Daylight through the mouth, lamplight up the stairwell: two fixed
+	# pools that keep the way in and the way down readable.
+	var static_lights: Array = [
+		{"pos": _cell_center_position(Vector2i(anchor.x, anchor.y + 1)), "radius": WARD_MOUTH_LIGHT_TILES * tile_px.x},
+		{"pos": _cell_center_position(_hold_ward_stair_cell(anchor)), "radius": WARD_STAIR_LIGHT_TILES * tile_px.x}
+	]
+	_ward_overlays[gate_key] = {
+		"material": overlay_material,
+		"nodes": nodes,
+		"sconces": sconces,
+		"static_lights": static_lights
+	}
+
+## A wall torch in the ward: the hold's own stick-and-collar sprite with
+## an animated swaying flame and a breathing warm glow.
+func _spawn_ward_sconce(cell: Vector2i) -> Sprite2D:
+	if _ward_torch_texture == null:
+		_ward_torch_texture = _create_ward_torch_texture()
+	var sconce := Sprite2D.new()
+	sconce.texture = _ward_torch_texture
+	sconce.centered = true
+	sconce.position = _cell_center_position(cell)
+	sconce.z_index = 13
+	sconce.visible = _lighting_enabled
+	var flame := AnimatedSprite2D.new()
+	flame.sprite_frames = _ward_torch_flame_frames()
+	flame.animation = &"burn"
+	flame.position = Vector2(0.0, -10.0)
+	flame.frame = absi(cell.x * 7 + cell.y * 13) % 3
+	sconce.add_child(flame)
+	var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(Vector2.ZERO, 2.4 * float(tile_size.x), Color(1.0, 0.72, 0.35, 1.0))
+	glow.position = Vector2(0.0, -6.0)
+	sconce.add_child(glow)
+	actor_layer.add_child(sconce)
+	flame.play()
+	var glow_base_scale := glow.scale
+	var glow_period := 0.5 + float(absi(cell.x * 31 + cell.y * 17) % 40) * 0.01
+	var glow_pulse := glow.create_tween().set_loops()
+	glow_pulse.tween_property(glow, "scale", glow_base_scale * 1.12, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	glow_pulse.tween_property(glow, "scale", glow_base_scale, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	return sconce
+
+## The torch stick alone - the flame is a separate animated sprite so it
+## can sway (mirrors the hold's own torch art).
+func _create_ward_torch_texture() -> Texture2D:
+	var image := Image.create(8, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	for y in range(7, 15):
+		image.set_pixel(3, y, Color(0.45, 0.3, 0.16, 1.0))
+		image.set_pixel(4, y, Color(0.36, 0.24, 0.13, 1.0))
+	image.set_pixel(2, 7, Color(0.3, 0.3, 0.34, 1.0))
+	image.set_pixel(5, 7, Color(0.3, 0.3, 0.34, 1.0))
+	image.resize(16, 32, Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(image)
+
+func _ward_torch_flame_frames() -> SpriteFrames:
+	if _ward_torch_frames != null:
+		return _ward_torch_frames
+	var frames := SpriteFrames.new()
+	frames.remove_animation(&"default")
+	frames.add_animation(&"burn")
+	frames.set_animation_speed(&"burn", 7.0)
+	frames.set_animation_loop(&"burn", true)
+	for sway in range(3):
+		var image := Image.create(8, 8, false, Image.FORMAT_RGBA8)
+		image.fill(Color(0, 0, 0, 0))
+		var tip_x := [3, 4, 5][sway] as int
+		var body := Color(1.0, 0.62, 0.15, 1.0)
+		var core := Color(1.0, 0.85, 0.3, 1.0)
+		for y in range(3, 7):
+			for x in range(2, 6):
+				if (x == 2 or x == 5) and y == 3:
+					continue
+				image.set_pixel(x, y, body if y > 4 else core)
+		image.set_pixel(tip_x, 2, core)
+		image.set_pixel(tip_x, 1, Color(1.0, 0.95, 0.6, 1.0))
+		image.resize(16, 16, Image.INTERPOLATE_NEAREST)
+		frames.add_frame(&"burn", ImageTexture.create_from_image(image))
+	_ward_torch_frames = frames
+	return frames
+
+func _free_ward_overlay_for_key(gate_key: String) -> void:
+	if not _ward_overlays.has(gate_key):
+		return
+	var overlay := _ward_overlays[gate_key] as Dictionary
+	for node_variant: Variant in overlay.get("nodes", []) as Array:
+		var node := node_variant as Node2D
+		if node != null and is_instance_valid(node):
+			node.queue_free()
+	_ward_overlays.erase(gate_key)
+
+## Feeds each ward shader its lights every frame: the player first, then
+## the mouth and stairwell pools, then every sconce riding a slow sine
+## flicker phase-keyed per cell so no two throb in unison.
+func _update_ward_darkness() -> void:
+	if _ward_overlays.is_empty() or not _lighting_enabled:
+		return
+	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
+	for overlay_variant: Variant in _ward_overlays.values():
+		var overlay := overlay_variant as Dictionary
+		var ward_material := overlay.get("material") as ShaderMaterial
+		if ward_material == null:
+			continue
+		var positions := PackedVector2Array()
+		var radii := PackedFloat32Array()
+		if _player_sprite != null:
+			positions.append(_player_sprite.position)
+			radii.append(WARD_PLAYER_LIGHT_TILES * float(tile_size.x))
+		for light_variant: Variant in overlay.get("static_lights", []) as Array:
+			var light := light_variant as Dictionary
+			positions.append(light.get("pos", Vector2.ZERO) as Vector2)
+			radii.append(float(light.get("radius", 0.0)))
+		for sconce_variant: Variant in overlay.get("sconces", []) as Array:
+			if positions.size() >= WARD_LIGHT_MAX:
+				break
+			var sconce := sconce_variant as Dictionary
+			positions.append(sconce.get("pos", Vector2.ZERO) as Vector2)
+			var flicker := 1.0 + 0.07 * sin(flicker_phase * 8.0 + float(sconce.get("phase", 0.0)))
+			radii.append(float(sconce.get("radius", 0.0)) * flicker)
+		ward_material.set_shader_parameter("light_count", positions.size())
+		ward_material.set_shader_parameter("light_pos", positions)
+		ward_material.set_shader_parameter("light_radius", radii)
 
 ## --- Digging the massif from inside -----------------------------------------
 ## The mountain is minable in the SAME scene: adjacent clicks swing at
@@ -8750,9 +9001,10 @@ func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 				_surface_gate_labels.erase(stale_label)
 				stale_label.queue_free()
 			gate["label"] = null
-			# Ward dwarves evaporate with their ward's ground; the
-			# re-stamp on return spawns them anew.
+			# Ward dwarves, sconces and the darkness quad evaporate with
+			# their ward's ground; the re-stamp on return rebuilds them.
 			_free_ward_dwarves_for_key(String(gate.get("key", "")))
+			_free_ward_overlay_for_key(String(gate.get("key", "")))
 		# Landmark footprints release this chunk's slice (sprites, blocked
 		# cells); the cached plan re-stamps it identically on return.
 		for landmark: Dictionary in _surface_landmarks:
@@ -8768,6 +9020,7 @@ func _update_surface_life(delta: float) -> void:
 	if _surface_noise.is_empty() or _player_sprite == null:
 		return
 	_update_ward_dwarves(delta)
+	_update_ward_darkness()
 	_ward_swing_timer = maxf(0.0, _ward_swing_timer - delta)
 	var danger: float = SurfaceLifeService.danger_for_cell(_player_cell, _surface_anchor_cells)
 	_surface_spawn_timer -= delta
