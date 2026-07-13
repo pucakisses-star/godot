@@ -7384,7 +7384,9 @@ func _plan_dwarfhold_main_floor(landmark: Dictionary, rng: RandomNumberGenerator
 					blocked[footprint_cell] = true
 					furnished[footprint_cell] = true
 			if RoomFurnishingService.piece_emits_light(piece_name):
-				sprites.append({"type": "glow", "cell": base_cell, "radius": 2.4, "color": AMBIENT_GLOW_WARM})
+				# Corona-sized: the ward shader lights the room's pool
+				# (via light_cells); the sprite is the flame's own shine.
+				sprites.append({"type": "glow", "cell": base_cell, "radius": 0.9, "color": AMBIENT_GLOW_WARM})
 				light_cells.append(base_cell)
 	# Every home keeps one lootable strongbox on a clear floor cell,
 	# wired to the same chest panel the rest of the town uses.
@@ -8844,7 +8846,9 @@ func _spawn_ward_sconce(cell: Vector2i) -> Sprite2D:
 	flame.position = Vector2(0.0, -10.0)
 	flame.frame = absi(cell.x * 7 + cell.y * 13) % 3
 	sconce.add_child(flame)
-	var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(Vector2.ZERO, 2.4 * float(tile_size.x), Color(1.0, 0.72, 0.35, 1.0))
+	# Corona only: the ward's darkness shader carves the real pool, so
+	# the sprite just hugs the flame instead of fogging the street.
+	var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(Vector2.ZERO, 0.9 * float(tile_size.x), Color(1.0, 0.72, 0.35, 1.0))
 	glow.position = Vector2(0.0, -6.0)
 	sconce.add_child(glow)
 	actor_layer.add_child(sconce)
