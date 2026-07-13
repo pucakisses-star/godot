@@ -24,6 +24,11 @@ const DF_FURNITURE_TEXTURE := preload("res://resources/images/dwarfhold/df_furni
 ## stocked counters and houseplants (16px art like the house sheets).
 const INTERIOR_TILESET_TEXTURE := preload("res://resources/images/dwarfhold/Interior_Tileset_2x.png")
 
+## Purpose-painted grand-hall pieces the reference interiors demanded:
+## the throne, the purple candelabra, the grandfather clock, the bathtub
+## and the iron stove (2x sheet like the others).
+const EXTRA_FURNITURE_TEXTURE := preload("res://resources/images/dwarfhold/extra_furniture_2x.png")
+
 ## Interior partition wall (matches SettlementSceneBase.CELL_WALL): floor
 ## cells beside a partition still count as interior, so rooms carved out
 ## of a larger building keep a furnishable floor.
@@ -101,7 +106,14 @@ const PIECES := {
 	"int_table_flower_blue": {"sheet": "interior", "rect": Rect2(450, 317, 12, 17), "cells_w": 1, "rows_block": 1, "z": 8},
 	"int_table_flower_white": {"sheet": "interior", "rect": Rect2(466, 317, 12, 17), "cells_w": 1, "rows_block": 1, "z": 8},
 	"int_table_flower_pot": {"sheet": "interior", "rect": Rect2(482, 319, 12, 15), "cells_w": 1, "rows_block": 1, "z": 8},
-	"int_table_plant_fern": {"sheet": "interior", "rect": Rect2(497, 317, 15, 17), "cells_w": 1, "rows_block": 1, "z": 8}
+	"int_table_plant_fern": {"sheet": "interior", "rect": Rect2(497, 317, 15, 17), "cells_w": 1, "rows_block": 1, "z": 8},
+	## The grand-hall kit: seat of honor, ceremonial light, the ticking
+	## heirloom, and the comforts of a proper dwarven home.
+	"throne_red": {"sheet": "extra", "rect": Rect2(0, 0, 14, 22), "cells_w": 1, "rows_block": 1, "z": 8},
+	"candelabra_purple": {"sheet": "extra", "rect": Rect2(16, 0, 14, 24), "cells_w": 1, "rows_block": 1, "z": 8, "light": true},
+	"grandfather_clock": {"sheet": "extra", "rect": Rect2(32, 0, 13, 26), "cells_w": 1, "rows_block": 1, "z": 8},
+	"bathtub_white": {"sheet": "extra", "rect": Rect2(48, 0, 26, 17), "cells_w": 2, "rows_block": 1, "z": 8},
+	"stove_iron": {"sheet": "extra", "rect": Rect2(48, 18, 26, 15), "cells_w": 2, "rows_block": 1, "z": 8, "light": true}
 }
 
 ## Building types whose interiors read as stocked shops. The dwarfhold's
@@ -430,7 +442,7 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 		"study":
 			place_center_rug.call(true)
 			# A wall of books, then a desk with a cushioned chair on the rug.
-			place_run.call(north_line, ["int_bookshelf_wide", "int_bookshelf_red", "int_cabinet_tall", "int_bookshelf_wide"])
+			place_run.call(north_line, ["int_bookshelf_wide", "grandfather_clock", "int_bookshelf_red", "int_cabinet_tall", "int_bookshelf_wide"])
 			place_run.call(east_line, ["int_bookshelf_red", "int_cabinet_tall"])
 			if try_place.call("desk", center_top):
 				for chair_offset: Vector2i in [Vector2i(0, 1), Vector2i(1, 1), Vector2i(-1, 0)]:
@@ -440,8 +452,11 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 				try_place.call("int_chair_cushion", center_top)
 		"bath":
 			place_center_rug.call(true)
-			# A washroom: basins and jugs stand in for tub and stand, with
-			# clay pots, urns and greenery around them.
+			# A washroom with a proper tub against the north wall, basins
+			# and jugs beside it, clay pots, urns and greenery around.
+			for tub_x: int in range(box.position.x, box.end.x - 2):
+				if try_place.call("bathtub_white", Vector2i(tub_x, box.position.y)):
+					break
 			place_run.call(north_line, ["int_counter_crockery", "int_counter_jugs", "int_cupboard_doors"])
 			place_run.call(south_line, ["int_urn_basket", "int_pot_clay", "int_table_flower_pot"])
 			place_run.call(west_line, ["int_plant_potted"])
@@ -461,7 +476,7 @@ static func plan_house_furnishing(component: Array[Vector2i], is_occupied: Calla
 			if not seated and box.size.x >= 3 and box.size.y >= 3:
 				if not try_place.call("round_table", center_top):
 					try_place.call("long_table", center_top)
-			place_run.call(north_line, ["int_cupboard_doors", "int_candle_stand", "cabinet", "int_candle_stand"])
+			place_run.call(north_line, ["int_cupboard_doors", "candelabra_purple", "grandfather_clock", "cabinet", "int_candle_stand"])
 			place_run.call(south_line, ["bench_long"])
 
 	# --- Corners and clutter ---------------------------------------------
@@ -609,18 +624,25 @@ static func plan_shop_dressing(component: Array[Vector2i], building_type: String
 			for x: int in range(box.position.x, box.end.x - 1):
 				if try_place.call("int_kiln_beehive", Vector2i(x, box.position.y)):
 					break
-			place_run.call(north_line, ["int_counter_crockery", "int_counter_jugs", "int_cupboard_doors"])
+			place_run.call(north_line, ["stove_iron", "int_counter_crockery", "int_counter_jugs", "int_cupboard_doors"])
 			place_run.call(south_line, ["int_counter_linens", "int_counter_crockery", "int_urn_basket"])
 			place_run.call(west_line, ["int_pot_clay", "int_shelf_small"])
 			try_place.call("int_roast_bird", center_top + Vector2i(1, 0))
 			try_place.call("int_stump_table", center_top)
 		"stately":
 			place_center_rug.call("int_rug_red_long" if rng.randf() < 0.5 else "int_rug_green_long")
+			# The seat of honor faces the hall from the north wall, flanked
+			# by the purple candelabras of the reference throne room.
+			for throne_x: int in range(box.position.x + 1, box.end.x - 1):
+				if try_place.call("throne_red", Vector2i(throne_x, box.position.y)):
+					try_place.call("candelabra_purple", Vector2i(throne_x + 1, box.position.y))
+					try_place.call("candelabra_purple", Vector2i(throne_x - 1, box.position.y))
+					break
 			for candle_offset: Vector2i in [Vector2i(-1, 0), Vector2i(2, 0)]:
-				try_place.call("int_candle_stand", center_top + candle_offset)
-			place_run.call(north_line, ["int_bookshelf_wide", "int_bookshelf_red", "int_cabinet_tall"])
+				try_place.call("candelabra_purple", center_top + candle_offset)
+			place_run.call(north_line, ["int_bookshelf_wide", "grandfather_clock", "int_bookshelf_red", "int_cabinet_tall"])
 			place_run.call(east_line, ["int_bookshelf_red", "int_plant_tree"])
-			place_run.call(west_line, ["int_cabinet_tall", "int_table_flower_white"])
+			place_run.call(west_line, ["grandfather_clock", "int_cabinet_tall", "int_table_flower_white"])
 			# A reading table with a cushioned chair beside the rug turns
 			# the hall from a bare library into a working office.
 			if box.size.x >= 4 and box.size.y >= 4:
@@ -821,6 +843,8 @@ static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_si
 			sprite.texture = TAVERN_BAR_TEXTURE
 		"interior":
 			sprite.texture = INTERIOR_TILESET_TEXTURE
+		"extra":
+			sprite.texture = EXTRA_FURNITURE_TEXTURE
 		_:
 			sprite.texture = HOUSE_INTERIOR_TEXTURE
 	sprite.region_enabled = true

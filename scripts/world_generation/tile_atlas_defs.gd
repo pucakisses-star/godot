@@ -295,7 +295,10 @@ const TOWN_MULTI_CELL_TILES := {
 	# tundra ground: white caps on the crown tops, dusted shoulders along the
 	# upper branch silhouettes.
 	Vector2i(0, 47): {"size": Vector2i(3, 2), "origin": Vector2i(0, -16)},
-	Vector2i(0, 49): {"size": Vector2i(3, 3), "origin": Vector2i(0, -32)}
+	Vector2i(0, 49): {"size": Vector2i(3, 3), "origin": Vector2i(0, -32)},
+	# The desert palm: trunk on its anchor cell, crown rising one tile
+	# above (painted at atlas build, town_generation._paint_desert_flora_tiles).
+	Vector2i(12, 52): {"size": Vector2i(1, 2), "origin": Vector2i(0, -32)}
 }
 
 const TOWN_TILE_ATLAS := {
@@ -700,6 +703,25 @@ const TOWN_TILE_ATLAS := {
 	"ice_brick_worn": Vector2i(10, 45),
 	"ruin_tower": Vector2i(11, 45),
 	"web": Vector2i(12, 45),
+	# Desert dressing on appended row 52, painted at atlas build time
+	# (town_generation._paint_sand_pattern_tiles / _paint_desert_flora_tiles
+	# / _paint_sandstone_ruin_tiles): rippled dune sand, wind streaks,
+	# saguaro and barrel cacti, sun-bleached bones, a red mesa rock, the
+	# sandstone ruin kit, and a 1x2 palm whose canopy rides the row below
+	# via TOWN_MULTI_CELL_TILES.
+	"sand_ripple": Vector2i(0, 52),
+	"sand_ripple_alt": Vector2i(1, 52),
+	"sand_streak": Vector2i(2, 52),
+	"cactus": Vector2i(3, 52),
+	"cactus_small": Vector2i(4, 52),
+	"desert_bones": Vector2i(5, 52),
+	"desert_rock": Vector2i(6, 52),
+	"ruin_floor_sand": Vector2i(7, 52),
+	"ruin_floor_sand_cracked": Vector2i(8, 52),
+	"sandstone_brick": Vector2i(9, 52),
+	"sandstone_brick_worn": Vector2i(10, 52),
+	"ruin_tower_sand": Vector2i(11, 52),
+	"palm": Vector2i(12, 52),
 	# Lakeshore water plants, painted into appended row 46 at atlas build time
 	# (town_generation._paint_water_plant_tiles; the shipped sheet has no
 	# aquatic plant art at all — verified by full-sheet inventory). Transparent
@@ -833,7 +855,12 @@ const TOWN_PASSABLE_TILE_KEYS := [
 	# Carved snow walks like snow; ruin floors and webs walk like any
 	# courtyard. The ice bricks, ruin towers and snow rocks are
 	# deliberately absent - broken walls still stop a walker.
-	"snow_swirl", "snow_carved", "ruin_floor", "ruin_floor_cracked", "web"
+	"snow_swirl", "snow_carved", "ruin_floor", "ruin_floor_cracked", "web",
+	# Rippled and wind-streaked sand walks like sand; bleached bones are
+	# ground clutter. Cacti, palms, mesa rocks and the sandstone ruin
+	# walls/towers are deliberately absent - all of them stop a walker.
+	"sand_ripple", "sand_ripple_alt", "sand_streak", "desert_bones",
+	"ruin_floor_sand", "ruin_floor_sand_cracked"
 ]
 
 static func validate_atlas_no_duplicates(atlas_name: String, atlas: Dictionary) -> bool:

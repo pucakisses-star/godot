@@ -277,12 +277,28 @@ static func _blend_land_biome(biomes3x3: PackedStringArray, land_own: String, ce
 static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, forest: float, detail: float, danger: float, noise_set: Dictionary = {}) -> Dictionary:
 	match biome:
 		TILE_ATLAS_DEFS.BIOME_DESERT:
+			# Rippled dune fields with wind streaks, saguaros and barrel
+			# cacti, rare palms, bleached bones and red mesa rocks.
 			var base := "sand"
 			if detail > 0.3:
 				base = "sand_pebbles"
 			elif detail > 0.0:
 				base = "sand_alt"
-			return {"base": base, "decor": ""}
+			elif detail > -0.3:
+				base = "sand_ripple" if ((cell.x + cell.y) & 1) == 0 else "sand_ripple_alt"
+			elif detail < -0.66:
+				base = "sand_streak"
+			var decor := ""
+			var scatter := (cell.x * 73856093 ^ cell.y * 19349663) & 0x7fffffff
+			if detail > 0.5 and scatter % 41 == 0:
+				decor = "cactus" if scatter % 82 < 41 else "cactus_small"
+			elif detail < -0.5 and scatter % 89 == 0:
+				decor = "palm"
+			elif scatter % 331 == 0:
+				decor = "desert_bones"
+			elif detail > 0.2 and scatter % 97 == 0:
+				decor = "desert_rock"
+			return {"base": base, "decor": decor}
 		TILE_ATLAS_DEFS.BIOME_BADLANDS:
 			return {"base": "sand_pebbles" if detail > -0.2 else "sand", "decor": ""}
 		TILE_ATLAS_DEFS.BIOME_MOUNTAIN:
