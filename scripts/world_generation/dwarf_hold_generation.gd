@@ -122,6 +122,13 @@ var _mining_cursor_texture: Texture2D
 ## Minecart rails and the carts that ride them. Rails and cart positions
 ## live on the level data and the hold-diffs ledger, so track networks
 ## survive level switches, chunk eviction and full regeneration.
+## Auto-generated street lighting: wall-mounted torches and candle
+## stands spawned deterministically along the city's carved halls and
+## beside building doors, so the hold glows lived-in instead of pitch
+## dark between the player's lantern and the hearths.
+var _auto_sconce_sprites: Dictionary = {}
+var _auto_sconce_cells: Dictionary = {}
+var _candle_sconce_texture: Texture2D
 var _rail_cells: Dictionary = {}
 var _rail_sprites: Dictionary = {}
 var _rail_textures: Dictionary = {}
@@ -2065,6 +2072,14 @@ func _set_light_glows_visible(glows_on: bool) -> void:
 			var glow := child as Sprite2D
 			if glow != null:
 				glow.visible = glows_on
+	for sconce_variant: Variant in _auto_sconce_sprites.values():
+		var sconce := sconce_variant as Sprite2D
+		if sconce == null:
+			continue
+		for child: Node in sconce.get_children():
+			var glow := child as Sprite2D
+			if glow != null:
+				glow.visible = glows_on
 
 func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	if city_layer.tile_set == null:
@@ -2337,6 +2352,17 @@ func _update_light_uniforms() -> void:
 		positions.append(light_position)
 		var hearth_flicker := 1.0 + (0.04 if is_hearth else 0.0) * sin(flicker_phase * 6.0 + float(light_cell.x * 11 + light_cell.y * 5))
 		radii.append((HEARTH_LIGHT_TILES if is_hearth else CANDLE_LIGHT_TILES) * float(tile_size.x) * hearth_flicker)
+	# The generated street sconces claim whatever light slots remain.
+	for sconce_variant: Variant in _auto_sconce_cells.keys():
+		if positions.size() >= MAX_DYNAMIC_LIGHTS:
+			break
+		var sconce_cell := sconce_variant as Vector2i
+		var sconce_position := _cell_center_position(sconce_cell)
+		if _player_sprite != null and sconce_position.distance_squared_to(_player_sprite.position) > cull_sq:
+			continue
+		positions.append(sconce_position)
+		var sconce_flicker := 1.0 + 0.05 * sin(flicker_phase * 8.0 + float(sconce_cell.x * 5 + sconce_cell.y * 11))
+		radii.append(float(_auto_sconce_cells[sconce_variant]) * float(tile_size.x) * sconce_flicker)
 	_darkness_material.set_shader_parameter("light_count", positions.size())
 	_darkness_material.set_shader_parameter("light_pos", positions)
 	_darkness_material.set_shader_parameter("light_radius", radii)
@@ -2620,11 +2646,15 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_clear_torch_sprites()
 	_clear_rail_sprites()
 	_clear_minecart_sprites()
+	_clear_auto_sconces()
 	_clear_creatures()
 	_end_fishing("")
 	var shown_level := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	for torch_cell_variant: Variant in (shown_level.get("torches", []) as Array):
 		_spawn_torch_at(torch_cell_variant as Vector2i)
+	# The city lights itself: sconces along the carved streets and at
+	# the building doors, rebuilt per level from the grid.
+	_spawn_auto_sconces()
 	# The level's rail network and parked carts come back with it.
 	_rail_cells = {}
 	for rail_cell_variant: Variant in (shown_level.get("rails", []) as Array):
@@ -3693,6 +3723,117 @@ func _clear_torch_sprites() -> void:
 		if torch != null:
 			torch.queue_free()
 	_torch_sprites = {}
+
+## --- Generated street lighting ---------------------------------------------
+## Every SCONCE_SPACING-th street cell that hugs a wall carries a torch
+## or candle stand, and building doors get a torch beside them - the
+## hold's own folk keep their halls lit. Deterministic per cell, rebuilt
+## with each level, and fed to the darkness shader after the player's
+## own lights.
+const SCONCE_SPACING := 6
+const SCONCE_LIGHT_TILES := 6.5
+const CANDLE_SCONCE_LIGHT_TILES := 4.5
+
+func _clear_auto_sconces() -> void:
+	for sconce_variant: Variant in _auto_sconce_sprites.values():
+		var sconce := sconce_variant as Sprite2D
+		if sconce != null:
+			sconce.queue_free()
+	_auto_sconce_sprites = {}
+	_auto_sconce_cells = {}
+
+func _spawn_auto_sconces() -> void:
+	if _latest_grid.is_empty() or not _city_bounds.has_area():
+		return
+	for cell_variant: Variant in _latest_grid.keys():
+		var cell := cell_variant as Vector2i
+		if not _city_bounds.has_point(cell):
+			continue
+		var zone := int(_latest_grid[cell_variant])
+		if zone != CELL_HALL and zone != CELL_PLAZA:
+			continue
+		# Sconces hang on walls: the cell must hug rock or a building
+		# face.
+		var against_wall := false
+		for offset: Vector2i in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1)]:
+			var neighbor_zone := int(_latest_grid.get(cell + offset, CELL_ROCK))
+			if neighbor_zone == CELL_ROCK or neighbor_zone == CELL_BUILDING or neighbor_zone == CELL_HOUSE or neighbor_zone == CELL_WALL:
+				against_wall = true
+				break
+		if not against_wall:
+			continue
+		var roll := hash("sconce|%d|%d|%d" % [_world_seed_hash, cell.x, cell.y])
+		if (roll & 0xffff) % SCONCE_SPACING != 0:
+			continue
+		_spawn_sconce_at(cell, ((roll >> 16) & 0xff) % 3 == 0)
+	# A torch beside most building doors, so thresholds glow welcome.
+	for door_variant: Variant in _door_cells.keys():
+		var door_cell := door_variant as Vector2i
+		var roll := hash("door_sconce|%d|%d|%d" % [_world_seed_hash, door_cell.x, door_cell.y])
+		if (roll & 0xffff) % 5 == 0:
+			continue
+		for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var beside := door_cell + offset
+			if _auto_sconce_cells.has(beside) or _torch_sprites.has(beside):
+				continue
+			var zone := int(_latest_grid.get(beside, CELL_ROCK))
+			if zone == CELL_HALL or zone == CELL_PLAZA:
+				_spawn_sconce_at(beside, false)
+				break
+
+func _spawn_sconce_at(cell: Vector2i, is_candle: bool) -> void:
+	if _auto_sconce_sprites.has(cell) or _torch_sprites.has(cell):
+		return
+	var sconce := Sprite2D.new()
+	if is_candle:
+		if _candle_sconce_texture == null:
+			_candle_sconce_texture = _create_candle_sconce_texture()
+		sconce.texture = _candle_sconce_texture
+	else:
+		if _torch_texture == null:
+			_torch_texture = _create_torch_texture()
+		sconce.texture = _torch_texture
+	sconce.centered = true
+	sconce.position = _cell_center_position(cell)
+	sconce.z_index = 14
+	lighting_layer.add_child(sconce)
+	if not is_candle:
+		var flame := AnimatedSprite2D.new()
+		flame.sprite_frames = _torch_flame_frames()
+		flame.animation = &"burn"
+		flame.position = Vector2(0.0, -10.0)
+		flame.play()
+		flame.frame = absi(cell.x * 7 + cell.y * 13) % 3
+		sconce.add_child(flame)
+	var radius_tiles := CANDLE_SCONCE_LIGHT_TILES if is_candle else SCONCE_LIGHT_TILES
+	var glow := _create_glow_sprite(radius_tiles)
+	glow.position = Vector2.ZERO
+	glow.visible = _lighting_enabled
+	sconce.add_child(glow)
+	_attach_glow_pulse(glow, cell)
+	_auto_sconce_sprites[cell] = sconce
+	_auto_sconce_cells[cell] = radius_tiles
+
+## A cluster of three lit candles on a small iron dish.
+func _create_candle_sconce_texture() -> Texture2D:
+	var image := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var wax := Color(0.93, 0.89, 0.78, 1.0)
+	var flame := Color(1.0, 0.8, 0.3, 1.0)
+	var dish := Color(0.28, 0.27, 0.3, 1.0)
+	for candle_index in range(3):
+		var cx := [5, 8, 11][candle_index] as int
+		var top := [7, 5, 8][candle_index] as int
+		for y in range(top, 12):
+			image.set_pixel(cx, y, wax)
+			image.set_pixel(cx + 1, y, wax)
+		image.set_pixel(cx, top - 1, flame)
+		image.set_pixel(cx + 1, top - 2, Color(1.0, 0.95, 0.6, 1.0))
+	for x in range(3, 14):
+		image.set_pixel(x, 12, dish)
+		image.set_pixel(x, 13, dish)
+	image.resize(32, 32, Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(image)
 
 ## --- Minecarts -------------------------------------------------------------
 ## Core Keeper-style rails: lay track cell by cell (R, 1 Timber + 1
