@@ -5744,6 +5744,11 @@ func _create_placeholder_actor_texture() -> Texture2D:
 ## was claimed; unclaimed right-presses fall through to map panning.
 func _handle_player_right_click(mouse_position: Vector2) -> bool:
 	var clicked_cell := _cell_from_mouse_position(mouse_position)
+	# Ward dwarves carry the full dossier: same card, same DF tabs.
+	var ward_dwarf := _ward_dwarf_at_cell(clicked_cell)
+	if not ward_dwarf.is_empty():
+		_open_npc_inspection(ward_dwarf)
+		return true
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	# The risen dead have no pockets worth rifling.
 	if npc_state.is_empty() or SettlementAfflictionService.is_active_zombie(npc_state):
@@ -5787,6 +5792,18 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 			return
 		if _try_ranged_attack_town(creature_index, clicked_cell):
 			return
+	# The ward's folk: the peddler trades, the rest offer a word.
+	var ward_dwarf := _ward_dwarf_at_cell(clicked_cell)
+	if not ward_dwarf.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
+		if bool(ward_dwarf.get("traveler", false)) and _try_open_traveler_trade(ward_dwarf):
+			return
+		_spawn_floating_text("Rock and stone!", _cell_center_position(clicked_cell) + Vector2(0, -12), Color(0.9, 0.85, 0.7, 1.0))
+		return
+	# The mountain digs from inside: an adjacent swing at massif rock
+	# chips it away by the hold's own geology.
+	if _is_ward_rock_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
+		_swing_at_ward_rock(clicked_cell)
+		return
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
 		# You don't chat with the risen dead - you put them down.
@@ -8432,6 +8449,8 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 			_surface_blocked_cells.erase(cell)
 	_place_tile(decor_layer, Vector2i(anchor.x - 3, anchor.y + 1), "hedge")
 	_place_tile(decor_layer, Vector2i(anchor.x + 3, anchor.y + 1), "hedge_alt")
+	# Player-dug galleries re-open on every stamp.
+	_apply_ward_digs(_ward_site_key_for_cell(anchor))
 	_spawn_ward_dwarves(anchor, ward_cells, ward_rng)
 
 ## A few of the hold's folk walk their surface ward: lightweight
@@ -8451,7 +8470,8 @@ func _spawn_ward_dwarves(anchor: Vector2i, ward_cells: Dictionary, rng: RandomNu
 	if open_cells.is_empty():
 		return
 	var dwarf_count := rng.randi_range(3, 5)
-	for _dwarf_index in range(dwarf_count):
+	var ward_professions: Array[String] = ["Miner", "Mason", "Brewer", "Smith", "Engraver"]
+	for dwarf_index in range(dwarf_count):
 		var spawn_cell := open_cells[rng.randi_range(0, open_cells.size() - 1)]
 		var sprite := DwarfHoldActorVisuals.create_tavern_character_sprite(DwarfHoldActorVisuals.DWARF_CHARACTERS_TEXTURE, rng.randi_range(0, 7), tile_size)
 		if sprite == null:
@@ -8459,12 +8479,26 @@ func _spawn_ward_dwarves(anchor: Vector2i, ward_cells: Dictionary, rng: RandomNu
 		sprite.position = _cell_center_position(spawn_cell)
 		sprite.z_index = 11
 		actor_layer.add_child(sprite)
+		# The first dwarf of every ward keeps a peddler's pack, so the
+		# surface district trades like a real outpost; the rest carry
+		# proper hold trades and full right-click dossiers.
+		var profession := "Peddler" if dwarf_index == 0 else ward_professions[rng.randi_range(0, ward_professions.size() - 1)]
+		var identity := NpcIdentityService.generate(rng, profession, "dwarf")
 		_ward_dwarves.append({
 			"key": gate_key,
 			"sprite": sprite,
 			"cell": spawn_cell,
-			"timer": rng.randf_range(0.8, 2.4)
+			"timer": rng.randf_range(0.8, 2.4),
+			"identity": identity,
+			"npc_name": String(identity.get("name", "A dwarf")),
+			"traveler": dwarf_index == 0
 		})
+
+func _ward_dwarf_at_cell(cell: Vector2i) -> Dictionary:
+	for dwarf: Dictionary in _ward_dwarves:
+		if (dwarf.get("cell", Vector2i(2147483647, 0)) as Vector2i) == cell:
+			return dwarf
+	return {}
 
 func _free_ward_dwarves_for_key(gate_key: String) -> void:
 	for dwarf_index in range(_ward_dwarves.size() - 1, -1, -1):
@@ -8475,6 +8509,129 @@ func _free_ward_dwarves_for_key(gate_key: String) -> void:
 		if sprite != null and is_instance_valid(sprite):
 			sprite.queue_free()
 		_ward_dwarves.remove_at(dwarf_index)
+
+## --- Digging the massif from inside -----------------------------------------
+## The mountain is minable in the SAME scene: adjacent clicks swing at
+## massif rock with the hold's tool ladder, durability follows the hold
+## site's own geology, breaks pay Stone (and sometimes the tile's
+## advertised ore), and dug cells persist per site in world settings so
+## carved galleries survive streaming and reloads.
+const WARD_DIG_TOOL_DAMAGE := {
+	"Dwarven Pickaxe": 12, "Steel Pickaxe": 8, "Miner's Pick": 6,
+	"Copper Pick": 5, "Worn Pickaxe": 4, "Rusty Pick": 4
+}
+const WARD_HAND_DIG_DAMAGE := 3
+const WARD_DIG_ORE_CHANCE_PERCENT := 9
+const WARD_SWING_COOLDOWN := 0.35
+const WARD_DUG_SETTINGS_KEY := "hold_ward_dug"
+
+var _ward_rock_damage: Dictionary = {}
+var _ward_swing_timer := 0.0
+var _massif_rock_coords_set: Dictionary = {}
+
+func _is_ward_rock_cell(cell: Vector2i) -> bool:
+	if city_layer.get_cell_source_id(cell) != 0:
+		return false
+	if _massif_rock_coords_set.is_empty():
+		for rock_key: String in ["massif_rock", "massif_rock_dark", "massif_rock_top"]:
+			var coords := TILE_ATLAS.get(rock_key, Vector2i(-1, -1)) as Vector2i
+			if coords.x >= 0:
+				_massif_rock_coords_set[coords] = true
+	return _massif_rock_coords_set.has(city_layer.get_cell_atlas_coords(cell))
+
+## The geology the swing digs by: the nearest hold gate's recorded tile
+## profile (the same one its tooltip and mines advertise).
+func _ward_geology_for_cell(cell: Vector2i) -> Dictionary:
+	for gate: Dictionary in _surface_gates:
+		var site := gate.get("site", {}) as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_MASSIF_HALF_WIDTH * 2 + 4:
+			var geology_variant: Variant = site.get("geology")
+			if geology_variant is Dictionary:
+				return geology_variant as Dictionary
+	return {}
+
+func _ward_site_key_for_cell(cell: Vector2i) -> String:
+	for gate: Dictionary in _surface_gates:
+		var site := gate.get("site", {}) as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_MASSIF_HALF_WIDTH * 2 + 4:
+			return String(gate.get("key", ""))
+	return ""
+
+func _swing_at_ward_rock(cell: Vector2i) -> void:
+	if _ward_swing_timer > 0.0:
+		return
+	_ward_swing_timer = WARD_SWING_COOLDOWN
+	var damage := WARD_HAND_DIG_DAMAGE
+	for tool_name: String in WARD_DIG_TOOL_DAMAGE.keys():
+		if int(_player_inventory.get(tool_name, 0)) > 0:
+			damage = maxi(damage, int(WARD_DIG_TOOL_DAMAGE[tool_name]))
+	var geology := _ward_geology_for_cell(cell)
+	var rock_hp := 12
+	if not geology.is_empty():
+		var layer := GeologyService.layer_class_for_depth(geology, 0)
+		rock_hp = int(GeologyService.LAYER_DURABILITY.get(layer, 12))
+	var total_damage := int(_ward_rock_damage.get(cell, 0)) + damage
+	if total_damage >= rock_hp:
+		_dig_ward_rock(cell, geology)
+		return
+	_ward_rock_damage[cell] = total_damage
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.55, 0.55, 0.58, 1.0), 5)
+
+func _dig_ward_rock(cell: Vector2i, geology: Dictionary) -> void:
+	_ward_rock_damage.erase(cell)
+	var art := TileBreakFxService.tile_art(city_layer, cell)
+	_place_hold_tile(city_layer, cell, "dirt")
+	decor_layer.erase_cell(cell)
+	_surface_blocked_cells.erase(cell)
+	_add_to_inventory("Stone", 1)
+	# The pick finds what the tile's tooltip promised.
+	if not geology.is_empty() and randi_range(1, 100) <= WARD_DIG_ORE_CHANCE_PERCENT:
+		var metals := geology.get("metals", []) as Array
+		if not metals.is_empty():
+			var ore := "%s Ore" % String(metals[randi_range(0, metals.size() - 1)])
+			_add_to_inventory(ore, 1)
+			_spawn_floating_text("Struck %s!" % ore, _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
+	if not art.is_empty():
+		TileBreakFxService.topple_ghost(city_layer, _cell_center_position(cell), art["texture"] as Texture2D, art["region"] as Rect2, 1.0)
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.55, 0.55, 0.58, 1.0), 12)
+	_record_ward_dig(cell)
+
+## Dug galleries persist per hold site: {site_key: ["x,y", ...]} in the
+## shared world settings, re-applied whenever the massif re-stamps.
+func _record_ward_dig(cell: Vector2i) -> void:
+	var site_key := _ward_site_key_for_cell(cell)
+	if site_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var dug: Dictionary = settings.get(WARD_DUG_SETTINGS_KEY, {}) as Dictionary if settings.get(WARD_DUG_SETTINGS_KEY) is Dictionary else {}
+	var cells: Array = dug.get(site_key, []) as Array
+	var cell_key := "%d,%d" % [cell.x, cell.y]
+	if not cells.has(cell_key):
+		cells.append(cell_key)
+	dug[site_key] = cells
+	settings[WARD_DUG_SETTINGS_KEY] = dug
+	_store_world_settings(settings)
+
+## Re-opens previously dug massif cells after a (re)stamp.
+func _apply_ward_digs(site_key: String) -> void:
+	if site_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var dug: Dictionary = settings.get(WARD_DUG_SETTINGS_KEY, {}) as Dictionary if settings.get(WARD_DUG_SETTINGS_KEY) is Dictionary else {}
+	for cell_key_variant: Variant in (dug.get(site_key, []) as Array):
+		var parts := String(cell_key_variant).split(",")
+		if parts.size() != 2:
+			continue
+		var cell := Vector2i(int(parts[0]), int(parts[1]))
+		_place_hold_tile(city_layer, cell, "dirt")
+		decor_layer.erase_cell(cell)
+		_surface_blocked_cells.erase(cell)
 
 ## One random step every couple of seconds, on walkable ground only.
 func _update_ward_dwarves(delta: float) -> void:
@@ -8611,6 +8768,7 @@ func _update_surface_life(delta: float) -> void:
 	if _surface_noise.is_empty() or _player_sprite == null:
 		return
 	_update_ward_dwarves(delta)
+	_ward_swing_timer = maxf(0.0, _ward_swing_timer - delta)
 	var danger: float = SurfaceLifeService.danger_for_cell(_player_cell, _surface_anchor_cells)
 	_surface_spawn_timer -= delta
 	if _surface_spawn_timer <= 0.0:
