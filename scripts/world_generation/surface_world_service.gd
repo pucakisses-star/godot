@@ -302,28 +302,19 @@ static func _terrain_for_biome(biome: String, cell: Vector2i, elevation: float, 
 		TILE_ATLAS_DEFS.BIOME_BADLANDS:
 			return {"base": "sand_pebbles" if detail > -0.2 else "sand", "decor": ""}
 		TILE_ATLAS_DEFS.BIOME_MOUNTAIN:
-			# A range is SOLID STONE for the most part: the blocked mass
-			# draws as real grey crag rock (the same minable massif tiles
-			# a hold is carved from), not pebbly ground with invisible
-			# walls. Only the deepest valley folds stay open, percolating
-			# into narrow passes a walker can thread - or a pick can widen.
-			if detail > -0.15:
-				var scatter := (cell.x * 73856093 ^ cell.y * 19349663) & 0x7fffffff
-				var rock_key := "massif_rock"
-				if detail > 0.55:
-					rock_key = "massif_rock_dark"
-				elif scatter % 9 == 0:
-					rock_key = "massif_rock_top"
-				return {"base": rock_key, "decor": "", "blocked": true}
-			var base := "sand_pebbles"
-			if detail < -0.45:
-				base = "grass_dark"
-			elif detail < -0.3:
-				base = "sand"
-			var decor := ""
-			if forest > 0.35 and detail < -0.4:
-				decor = "tree_dark"
-			return {"base": base, "decor": decor}
+			# SOLID STONE all the way through: a range is ONE unbroken
+			# mass of grey crag rock - the same minable massif tiles a
+			# hold is carved from - with no pebbly folds or speckled
+			# passes breaking it up. Roads carve the only ways through,
+			# and a pick makes more. Shade accents are sparse so the
+			# mass reads as coherent stone, not per-cell noise.
+			var scatter := (cell.x * 73856093 ^ cell.y * 19349663) & 0x7fffffff
+			var rock_key := "massif_rock"
+			if detail > 0.5:
+				rock_key = "massif_rock_dark"
+			elif scatter % 13 == 0:
+				rock_key = "massif_rock_top"
+			return {"base": rock_key, "decor": "", "blocked": true}
 		TILE_ATLAS_DEFS.BIOME_HILLS:
 			# Greener than the peaks, still stony on the ridgelines.
 			var base := "grass_dark"
