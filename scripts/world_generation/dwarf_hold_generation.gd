@@ -119,6 +119,20 @@ var _torch_sprites: Dictionary = {}
 ## rock face under the cursor when the dwarf is close enough to swing.
 var _mining_cursor: Sprite2D = null
 var _mining_cursor_texture: Texture2D
+## Minecart rails and the carts that ride them. Rails and cart positions
+## live on the level data and the hold-diffs ledger, so track networks
+## survive level switches, chunk eviction and full regeneration.
+var _rail_cells: Dictionary = {}
+var _rail_sprites: Dictionary = {}
+var _rail_textures: Dictionary = {}
+var _minecart_sprites: Dictionary = {}
+var _minecart_texture: Texture2D
+var _cart_riding := false
+var _cart_cell := Vector2i.ZERO
+var _cart_origin_cell := Vector2i.ZERO
+var _cart_dir := Vector2i.ZERO
+var _cart_desired_dir := Vector2i.ZERO
+var _cart_progress := 0.0
 ## Streamed wild chunks currently resident, chunk coords -> true. The
 ## city core never appears here and is never evicted.
 var _streamed_chunks: Dictionary = {}
@@ -653,15 +667,15 @@ const FISH_CATCH_TABLE := [
 const CIVIC_BUILDING_TYPES := {
 	"high_kings_palace": {
 		"placement_weight": 0.0,
-		"preferred_footprint_min": Vector2i(5, 4),
-		"preferred_footprint_max": Vector2i(7, 5),
+		"preferred_footprint_min": Vector2i(7, 5),
+		"preferred_footprint_max": Vector2i(10, 7),
 		"decor_tile_pool": ["sign", "chest", "armor_stand", "table_alt"],
 		"adjacency_preferences": {}
 	},
 	"forge": {
 		"placement_weight": 1.25,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["anvil", "workbench", "armor_stand", "water_bucket"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -670,8 +684,8 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"engineering_workshop": {
 		"placement_weight": 0.8,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(8, 5),
 		"decor_tile_pool": ["workbench", "anvil", "desk", "water_bucket"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -680,36 +694,36 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"leatherworking_shop": {
 		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["workbench", "table", "chest", "water_bucket"],
 		"adjacency_preferences": {}
 	},
 	"tailoring_shop": {
 		"placement_weight": 0.5,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["table", "stool", "shelf", "chest"],
 		"adjacency_preferences": {}
 	},
 	"enchanting_study": {
 		"placement_weight": 0.42,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["sign", "desk", "shelf", "table_alt"],
 		"adjacency_preferences": {}
 	},
 	"alchemy_laboratory": {
 		"placement_weight": 0.5,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["water_bucket", "table_alt", "desk", "chest"],
 		"adjacency_preferences": {}
 	},
 	"auction_house": {
 		"placement_weight": 0.45,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(8, 5),
 		"decor_tile_pool": ["desk", "table_alt", "sign", "chest"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -718,15 +732,15 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"general_goods_shop": {
 		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["shelf", "table", "chest", "grain_bag"],
 		"adjacency_preferences": {}
 	},
 	"weapon_shop": {
 		"placement_weight": 0.65,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["target", "anvil", "workbench", "armor_stand"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -735,8 +749,8 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"armor_shop": {
 		"placement_weight": 0.62,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["armor_stand", "workbench", "chest", "table"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -745,15 +759,15 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"trade_supply_store": {
 		"placement_weight": 0.6,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["grain_bag", "keg", "chest", "table"],
 		"adjacency_preferences": {}
 	},
 	"bank_vaults": {
 		"placement_weight": 0.35,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["chest", "desk", "sign", "table_alt"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -762,8 +776,8 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"tavern": {
 		"placement_weight": 0.9,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(8, 5),
 		"decor_tile_pool": ["keg", "mug", "table_alt", "stool"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -772,15 +786,15 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"barber_shop": {
 		"placement_weight": 0.35,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["stool", "desk", "water_bucket", "mug"],
 		"adjacency_preferences": {}
 	},
 	"guild_hall": {
 		"placement_weight": 0.5,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(8, 5),
 		"decor_tile_pool": ["table", "table_alt", "sign", "chest"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -789,29 +803,29 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"storage_warehouse": {
 		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(8, 5),
 		"decor_tile_pool": ["chest", "grain_bag", "keg", "shelf"],
 		"adjacency_preferences": {}
 	},
 	"brewery": {
 		"placement_weight": 1.05,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["keg", "winepress", "mug", "table_alt"],
 		"adjacency_preferences": {}
 	},
 	"granary": {
 		"placement_weight": 0.95,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["grain_bag", "flour", "shelf", "table"],
 		"adjacency_preferences": {}
 	},
 	"armory": {
 		"placement_weight": 0.9,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["armor_stand", "target", "anvil", "workbench"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -820,22 +834,22 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"workshop": {
 		"placement_weight": 1.1,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["workbench", "desk", "shelf", "butcher_table"],
 		"adjacency_preferences": {}
 	},
 	"kitchen": {
 		"placement_weight": 0.85,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["butcher_table", "table", "stool", "water_bucket"],
 		"adjacency_preferences": {}
 	},
 	"barracks": {
 		"placement_weight": 0.8,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(8, 5),
 		"decor_tile_pool": ["bed", "chest", "armor_stand", "target"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -844,8 +858,8 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"temple": {
 		"placement_weight": 0.65,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["table_alt", "sign", "mug", "stool"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -854,22 +868,22 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"mushroom_farm": {
 		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(3, 3),
-		"preferred_footprint_max": Vector2i(5, 4),
+		"preferred_footprint_min": Vector2i(5, 4),
+		"preferred_footprint_max": Vector2i(8, 6),
 		"decor_tile_pool": ["mushroom_crops", "mushroom_crop_wild", "grain_bag", "water_bucket"],
 		"adjacency_preferences": {}
 	},
 	"archives": {
 		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["shelf", "desk", "sign", "chest"],
 		"adjacency_preferences": {}
 	},
 	"infirmary": {
 		"placement_weight": 0.6,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["bed", "table", "water_bucket", "chest"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -878,8 +892,8 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"miners_guild": {
 		"placement_weight": 0.75,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(8, 5),
 		"decor_tile_pool": ["stone", "target", "workbench", "chest"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -888,15 +902,15 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"mason_lodge": {
 		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["stone", "table", "desk", "workbench"],
 		"adjacency_preferences": {}
 	},
 	"engineers_foundry": {
 		"placement_weight": 0.65,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["anvil", "workbench", "desk", "water_bucket"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -905,15 +919,15 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"gemcutters_studio": {
 		"placement_weight": 0.6,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["table_alt", "chest", "sign", "desk"],
 		"adjacency_preferences": {}
 	},
 	"runesmith_sanctum": {
 		"placement_weight": 0.5,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["anvil", "sign", "shelf", "desk"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -922,8 +936,8 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"smeltery": {
 		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(3, 2),
-		"preferred_footprint_max": Vector2i(5, 3),
+		"preferred_footprint_min": Vector2i(5, 3),
+		"preferred_footprint_max": Vector2i(8, 5),
 		"decor_tile_pool": ["anvil", "water_bucket", "stone", "workbench"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -932,15 +946,15 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"cartographers_office": {
 		"placement_weight": 0.45,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["desk", "sign", "table", "shelf"],
 		"adjacency_preferences": {}
 	},
 	"explorers_guild": {
 		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["target", "table", "chest", "water_bucket"],
 		"adjacency_preferences": {
 			"prefers_hall_arteries": true,
@@ -949,57 +963,57 @@ const CIVIC_BUILDING_TYPES := {
 	},
 	"merchants_counting_house": {
 		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["desk", "chest", "table_alt", "shelf"],
 		"adjacency_preferences": {}
 	},
 	"butchery": {
 		"placement_weight": 0.75,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["butcher_table", "table", "water_bucket", "chest"],
 		"adjacency_preferences": {}
 	},
 	"bakery": {
 		"placement_weight": 0.7,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["table_alt", "flour", "grain_bag", "stool"],
 		"adjacency_preferences": {}
 	},
 	"cooperage": {
 		"placement_weight": 0.6,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["keg", "workbench", "chest", "table"],
 		"adjacency_preferences": {}
 	},
 	"tannery": {
 		"placement_weight": 0.55,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["water_bucket", "workbench", "chest", "table_alt"],
 		"adjacency_preferences": {}
 	},
 	"millhouse": {
 		"placement_weight": 0.65,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(4, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(7, 5),
 		"decor_tile_pool": ["flour", "grain_bag", "table", "shelf"],
 		"adjacency_preferences": {}
 	},
 	"cobblers_shop": {
 		"placement_weight": 0.45,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["stool", "chest", "table", "desk"],
 		"adjacency_preferences": {}
 	},
 	"ropemakers_hall": {
 		"placement_weight": 0.45,
-		"preferred_footprint_min": Vector2i(2, 2),
-		"preferred_footprint_max": Vector2i(3, 3),
+		"preferred_footprint_min": Vector2i(4, 3),
+		"preferred_footprint_max": Vector2i(6, 5),
 		"decor_tile_pool": ["table", "workbench", "chest", "stool"],
 		"adjacency_preferences": {}
 	}
@@ -1168,6 +1182,7 @@ func _update_wild_darkness(delta: float) -> void:
 		if _player_sprite != null:
 			_player_glow.position = _player_sprite.position
 	_update_light_uniforms()
+	_update_minecart(delta)
 	_update_player_turn_movement(delta)
 	_update_npc_movement(delta)
 
@@ -1236,6 +1251,14 @@ func _unhandled_input(event: InputEvent) -> void:
 	var key_event := event as InputEventKey
 	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_T and not _is_text_input_focused():
 		_place_torch()
+		get_viewport().set_input_as_handled()
+		return
+	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_R and not _is_text_input_focused():
+		_place_rail()
+		get_viewport().set_input_as_handled()
+		return
+	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_C and not _is_text_input_focused():
+		_handle_cart_key()
 		get_viewport().set_input_as_handled()
 		return
 	if key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_F and not _is_text_input_focused():
@@ -2595,11 +2618,21 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 	_apply_affliction_visuals()
 	_apply_identity_appearances()
 	_clear_torch_sprites()
+	_clear_rail_sprites()
+	_clear_minecart_sprites()
 	_clear_creatures()
 	_end_fishing("")
 	var shown_level := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	for torch_cell_variant: Variant in (shown_level.get("torches", []) as Array):
 		_spawn_torch_at(torch_cell_variant as Vector2i)
+	# The level's rail network and parked carts come back with it.
+	_rail_cells = {}
+	for rail_cell_variant: Variant in (shown_level.get("rails", []) as Array):
+		_rail_cells[rail_cell_variant as Vector2i] = true
+	for rail_cell_variant: Variant in _rail_cells.keys():
+		_spawn_rail_at(rail_cell_variant as Vector2i)
+	for cart_cell_variant: Variant in (shown_level.get("carts", []) as Array):
+		_spawn_minecart_at(cart_cell_variant as Vector2i)
 	# The body was just rebuilt; re-hang whatever the player is holding.
 	_refresh_held_item()
 
@@ -3012,6 +3045,16 @@ func _evict_far_chunks(player_chunk: Vector2i) -> void:
 				# Evicted rock regenerates at full durability.
 				if _rock_damage.has(cell) or _rock_crack_sprites.has(cell):
 					_clear_rock_crack(cell)
+				# Rails and parked carts release their sprites with the
+				# chunk; the level data re-raises them on return.
+				var rail := _rail_sprites.get(cell) as Sprite2D
+				if rail != null:
+					rail.queue_free()
+					_rail_sprites.erase(cell)
+				var cart := _minecart_sprites.get(cell) as Sprite2D
+				if cart != null and not (_cart_riding and cell == _cart_cell):
+					cart.queue_free()
+					_minecart_sprites.erase(cell)
 		for index in range(_creature_states.size() - 1, -1, -1):
 			var state := _creature_states[index] as Dictionary
 			var creature_cell := state.get("cell", Vector2i(2147483647, 0)) as Vector2i
@@ -3023,8 +3066,8 @@ func _evict_far_chunks(player_chunk: Vector2i) -> void:
 		_streamed_chunks.erase(chunk)
 		_generated_chunks.erase(UndergroundWorldService.chunk_key(chunk))
 
-## Walked back into an evicted area: the recorded torches get their
-## sprites back.
+## Walked back into an evicted area: the recorded torches, rails and
+## carts get their sprites back.
 func _respawn_torches_in_rect(rect: Rect2i) -> void:
 	if _hold_state.generated_levels.is_empty():
 		return
@@ -3033,6 +3076,15 @@ func _respawn_torches_in_rect(rect: Rect2i) -> void:
 		var cell := torch_cell_variant as Vector2i
 		if rect.has_point(cell):
 			_spawn_torch_at(cell)
+	for rail_cell_variant: Variant in (level_data.get("rails", []) as Array):
+		var cell := rail_cell_variant as Vector2i
+		if rect.has_point(cell):
+			_spawn_rail_at(cell)
+			_refresh_rail_art_around(cell)
+	for cart_cell_variant: Variant in (level_data.get("carts", []) as Array):
+		var cell := cart_cell_variant as Vector2i
+		if rect.has_point(cell):
+			_spawn_minecart_at(cell)
 
 func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 	for chunk_dy in range(-2, 3):
@@ -3578,13 +3630,62 @@ func _spawn_torch_at(cell: Vector2i) -> void:
 	torch.position = _cell_center_position(cell)
 	torch.z_index = 14
 	lighting_layer.add_child(torch)
+	# The living flame: an animated sprite riding the torch head, its
+	# tongue swaying frame to frame like the reference candles.
+	var flame := AnimatedSprite2D.new()
+	flame.sprite_frames = _torch_flame_frames()
+	flame.animation = &"burn"
+	flame.position = Vector2(0.0, -10.0)
+	flame.play()
+	# Stagger phases so a corridor of torches never dances in unison.
+	flame.frame = absi(cell.x * 7 + cell.y * 13) % 3
+	torch.add_child(flame)
 	var glow := _create_glow_sprite(TORCH_LIGHT_TILES)
 	glow.position = Vector2.ZERO
 	glow.visible = _lighting_enabled
 	torch.add_child(glow)
+	_attach_glow_pulse(glow, cell)
 	_torch_sprites[cell] = torch
 	# A fresh torch is a new light pool; hand it to the shader at once.
 	_update_light_uniforms()
+
+## A soft breathing pulse on a light's warm halo, phase-varied per cell
+## so neighboring fires never throb together.
+func _attach_glow_pulse(glow: Sprite2D, cell: Vector2i) -> void:
+	var base_scale := glow.scale
+	var period := 0.5 + float(absi(cell.x * 31 + cell.y * 17) % 40) * 0.01
+	var pulse := glow.create_tween().set_loops()
+	pulse.tween_property(glow, "scale", base_scale * 1.12, period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	pulse.tween_property(glow, "scale", base_scale, period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+var _torch_flame_frames_cache: SpriteFrames = null
+
+## Three flame frames, tip swaying left-center-right.
+func _torch_flame_frames() -> SpriteFrames:
+	if _torch_flame_frames_cache != null:
+		return _torch_flame_frames_cache
+	var frames := SpriteFrames.new()
+	frames.remove_animation(&"default")
+	frames.add_animation(&"burn")
+	frames.set_animation_speed(&"burn", 7.0)
+	frames.set_animation_loop(&"burn", true)
+	for sway in range(3):
+		var image := Image.create(8, 8, false, Image.FORMAT_RGBA8)
+		image.fill(Color(0, 0, 0, 0))
+		var tip_x := [3, 4, 5][sway] as int
+		var body := Color(1.0, 0.62, 0.15, 1.0)
+		var core := Color(1.0, 0.85, 0.3, 1.0)
+		for y in range(3, 7):
+			for x in range(2, 6):
+				if (x == 2 or x == 5) and y == 3:
+					continue
+				image.set_pixel(x, y, body if y > 4 else core)
+		image.set_pixel(tip_x, 2, core)
+		image.set_pixel(tip_x, 1, Color(1.0, 0.95, 0.6, 1.0))
+		image.resize(16, 16, Image.INTERPOLATE_NEAREST)
+		frames.add_frame(&"burn", ImageTexture.create_from_image(image))
+	_torch_flame_frames_cache = frames
+	return frames
 
 func _clear_torch_sprites() -> void:
 	for torch_variant: Variant in _torch_sprites.values():
@@ -3593,18 +3694,334 @@ func _clear_torch_sprites() -> void:
 			torch.queue_free()
 	_torch_sprites = {}
 
+## --- Minecarts -------------------------------------------------------------
+## Core Keeper-style rails: lay track cell by cell (R, 1 Timber + 1
+## Stone), set a cart on it (C, 2 Iron Ingots), climb aboard (C beside
+## the cart) and pick a direction - the cart barrels along the track,
+## following corners, steered at junctions by whatever direction is
+## held, and stops at the end of the line. C steps off a stopped cart.
+
+const RAIL_TIMBER_COST := 1
+const RAIL_STONE_COST := 1
+const CART_INGOT_COST := 2
+const CART_SPEED_TILES := 7.0
+
+func _place_rail() -> void:
+	if _player_sprite == null:
+		return
+	var cell := _player_cell
+	if _rail_cells.has(cell):
+		_set_save_status("Rails already run here", Color(0.85, 0.8, 0.7, 1.0))
+		return
+	if int(_player_inventory.get("Timber", 0)) < RAIL_TIMBER_COST or int(_player_inventory.get("Stone", 0)) < RAIL_STONE_COST:
+		_set_save_status("Need %d Timber and %d Stone to lay rails" % [RAIL_TIMBER_COST, RAIL_STONE_COST], Color(0.95, 0.75, 0.45, 1.0))
+		return
+	_add_to_inventory("Timber", -RAIL_TIMBER_COST)
+	_add_to_inventory("Stone", -RAIL_STONE_COST)
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	if not level_data.has("rails"):
+		level_data["rails"] = []
+	(level_data["rails"] as Array).append(cell)
+	_record_hold_edit("rails", cell)
+	_rail_cells[cell] = true
+	_spawn_rail_at(cell)
+	_refresh_rail_art_around(cell)
+	_set_save_status("Rails laid", Color(0.85, 0.82, 0.7, 1.0))
+
+func _spawn_rail_at(cell: Vector2i) -> void:
+	_rail_cells[cell] = true
+	if _rail_sprites.has(cell):
+		return
+	var rail := Sprite2D.new()
+	rail.texture = _rail_texture_for(_rail_signature(cell))
+	rail.centered = true
+	rail.position = _cell_center_position(cell)
+	# Above the floor, below every actor (player/NPCs 11, creatures 12).
+	rail.z_index = 4
+	lighting_layer.add_child(rail)
+	_rail_sprites[cell] = rail
+
+## Re-derives the connection art of a cell and its four neighbors after
+## the network changes.
+func _refresh_rail_art_around(cell: Vector2i) -> void:
+	for offset: Vector2i in [Vector2i.ZERO, Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		var neighbor := cell + offset
+		var sprite := _rail_sprites.get(neighbor) as Sprite2D
+		if sprite != null:
+			sprite.texture = _rail_texture_for(_rail_signature(neighbor))
+
+func _clear_rail_sprites() -> void:
+	for rail_variant: Variant in _rail_sprites.values():
+		var rail := rail_variant as Sprite2D
+		if rail != null:
+			rail.queue_free()
+	_rail_sprites = {}
+
+## Which arms this rail cell extends toward its rail neighbors: "ns",
+## "ew", corners, or the full cross; a stub follows its one neighbor's
+## axis, an orphan lies east-west.
+func _rail_signature(cell: Vector2i) -> String:
+	var north := _rail_cells.has(cell + Vector2i(0, -1))
+	var east := _rail_cells.has(cell + Vector2i(1, 0))
+	var south := _rail_cells.has(cell + Vector2i(0, 1))
+	var west := _rail_cells.has(cell + Vector2i(-1, 0))
+	var count := (1 if north else 0) + (1 if east else 0) + (1 if south else 0) + (1 if west else 0)
+	if count >= 3:
+		return "cross"
+	if north and south:
+		return "ns"
+	if east and west:
+		return "ew"
+	if north and east:
+		return "ne"
+	if north and west:
+		return "nw"
+	if south and east:
+		return "se"
+	if south and west:
+		return "sw"
+	if north or south:
+		return "ns"
+	return "ew"
+
+## Track art painted on demand per signature: iron rails riding wooden
+## sleepers, arms reaching the tile edges they connect toward.
+func _rail_texture_for(signature: String) -> Texture2D:
+	var cached_variant: Variant = _rail_textures.get(signature)
+	if cached_variant is Texture2D:
+		return cached_variant as Texture2D
+	var arms := {
+		"ns": [true, false, true, false], "ew": [false, true, false, true],
+		"ne": [true, true, false, false], "nw": [true, false, false, true],
+		"se": [false, true, true, false], "sw": [false, false, true, true],
+		"cross": [true, true, true, true]
+	}.get(signature, [false, true, false, true]) as Array
+	var image := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var sleeper := Color(0.42, 0.29, 0.17, 1.0)
+	var iron := Color(0.55, 0.53, 0.5, 1.0)
+	var iron_dark := Color(0.34, 0.33, 0.32, 1.0)
+	# Vertical arm: sleepers span x4..11 every 3px, rails at x5 and x10.
+	if bool(arms[0]) or bool(arms[2]):
+		var y_start := 0 if bool(arms[0]) else 7
+		var y_end := 16 if bool(arms[2]) else 9
+		for ty in range(y_start, y_end):
+			if ty % 3 == 1:
+				for tx in range(4, 12):
+					image.set_pixel(tx, ty, sleeper)
+		for ty in range(y_start, y_end):
+			image.set_pixel(5, ty, iron)
+			image.set_pixel(6, ty, iron_dark)
+			image.set_pixel(10, ty, iron)
+			image.set_pixel(11, ty, iron_dark)
+	if bool(arms[1]) or bool(arms[3]):
+		var x_start := 7 if not bool(arms[3]) else 0
+		var x_end := 9 if not bool(arms[1]) else 16
+		for tx in range(x_start, x_end):
+			if tx % 3 == 1:
+				for ty in range(4, 12):
+					image.set_pixel(tx, ty, sleeper)
+		for tx in range(x_start, x_end):
+			image.set_pixel(tx, 5, iron)
+			image.set_pixel(tx, 6, iron_dark)
+			image.set_pixel(tx, 10, iron)
+			image.set_pixel(tx, 11, iron_dark)
+	image.resize(int(tile_size.x), int(tile_size.y), Image.INTERPOLATE_NEAREST)
+	var texture := ImageTexture.create_from_image(image)
+	_rail_textures[signature] = texture
+	return texture
+
+func _create_minecart_texture() -> Texture2D:
+	var image := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var body := Color(0.36, 0.3, 0.26, 1.0)
+	var rim := Color(0.55, 0.48, 0.4, 1.0)
+	var hollow := Color(0.16, 0.13, 0.11, 1.0)
+	var wheel := Color(0.12, 0.12, 0.13, 1.0)
+	for ty in range(4, 13):
+		for tx in range(3, 13):
+			var tone := body
+			if ty == 4 or ty == 12 or tx == 3 or tx == 12:
+				tone = rim
+			elif ty >= 6 and ty <= 10 and tx >= 5 and tx <= 10:
+				tone = hollow
+			image.set_pixel(tx, ty, tone)
+	for wheel_x: int in [4, 11]:
+		image.set_pixel(wheel_x, 13, wheel)
+		image.set_pixel(wheel_x + 1, 13, wheel)
+	image.resize(int(tile_size.x), int(tile_size.y), Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(image)
+
+func _spawn_minecart_at(cell: Vector2i) -> void:
+	if _minecart_sprites.has(cell):
+		return
+	if _minecart_texture == null:
+		_minecart_texture = _create_minecart_texture()
+	var cart := Sprite2D.new()
+	cart.texture = _minecart_texture
+	cart.centered = true
+	cart.position = _cell_center_position(cell)
+	cart.z_index = 10
+	lighting_layer.add_child(cart)
+	_minecart_sprites[cell] = cart
+
+func _clear_minecart_sprites() -> void:
+	for cart_variant: Variant in _minecart_sprites.values():
+		var cart := cart_variant as Sprite2D
+		if cart != null:
+			cart.queue_free()
+	_minecart_sprites = {}
+	_cart_riding = false
+	_cart_dir = Vector2i.ZERO
+
+## C beside (or atop) a cart mounts it; C on your own rail with ingots
+## to spare builds one; C aboard a stopped cart steps off.
+func _handle_cart_key() -> void:
+	if _player_sprite == null:
+		return
+	if _cart_riding:
+		if _cart_dir == Vector2i.ZERO:
+			_dismount_cart()
+		else:
+			_set_save_status("Hold on!", Color(0.9, 0.8, 0.6, 1.0))
+		return
+	var mount_cell := Vector2i(2147483647, 2147483647)
+	if _minecart_sprites.has(_player_cell):
+		mount_cell = _player_cell
+	else:
+		for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			if _minecart_sprites.has(_player_cell + offset):
+				mount_cell = _player_cell + offset
+				break
+	if mount_cell.x != 2147483647:
+		_mount_cart(mount_cell)
+		return
+	_place_minecart()
+
+func _place_minecart() -> void:
+	var cell := _player_cell
+	if not _rail_cells.has(cell):
+		_set_save_status("A minecart needs rails beneath it (R to lay track)", Color(0.95, 0.75, 0.45, 1.0))
+		return
+	if _minecart_sprites.has(cell):
+		_set_save_status("A cart already waits here", Color(0.85, 0.8, 0.7, 1.0))
+		return
+	if int(_player_inventory.get("Iron Ingot", 0)) < CART_INGOT_COST:
+		_set_save_status("Need %d Iron Ingots to build a minecart" % CART_INGOT_COST, Color(0.95, 0.75, 0.45, 1.0))
+		return
+	_add_to_inventory("Iron Ingot", -CART_INGOT_COST)
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	if not level_data.has("carts"):
+		level_data["carts"] = []
+	(level_data["carts"] as Array).append(cell)
+	_record_hold_edit("cart_at", cell, true)
+	_spawn_minecart_at(cell)
+	_set_save_status("Minecart built - press C beside it to ride", Color(0.85, 0.82, 0.7, 1.0))
+
+func _mount_cart(cell: Vector2i) -> void:
+	_cart_riding = true
+	_cart_cell = cell
+	_cart_origin_cell = cell
+	_cart_dir = Vector2i.ZERO
+	_cart_desired_dir = Vector2i.ZERO
+	_cart_progress = 0.0
+	_player_move_path.clear()
+	_player_is_moving = false
+	_player_cell = cell
+	_player_sprite.position = _cell_center_position(cell)
+	_center_view_on_world_position(_player_sprite.position)
+	_set_save_status("Aboard - hold a direction to ride, C to step off", Color(0.85, 0.82, 0.7, 1.0))
+
+func _dismount_cart() -> void:
+	_cart_riding = false
+	_cart_dir = Vector2i.ZERO
+	# Step off onto the first open non-rail neighbor; failing that, any
+	# open neighbor; failing THAT, stay put on the cart cell.
+	for prefer_off_rail: bool in [true, false]:
+		for offset: Vector2i in [Vector2i(0, 1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, -1)]:
+			var step_cell := _cart_cell + offset
+			if not _is_walkable_cell(step_cell) or _is_cell_occupied_by_npc(step_cell):
+				continue
+			if bool(prefer_off_rail) and _rail_cells.has(step_cell):
+				continue
+			_player_cell = step_cell
+			_player_sprite.position = _cell_center_position(step_cell)
+			_center_view_on_world_position(_player_sprite.position)
+			return
+
+## The ride itself: the cart barrels toward the next rail cell, follows
+## lone corners, honors the held direction at junctions, and brakes at
+## the end of the line (recording its new resting place in the ledger).
+func _update_minecart(delta: float) -> void:
+	if not _cart_riding or _cart_dir == Vector2i.ZERO:
+		return
+	_cart_progress += delta * CART_SPEED_TILES
+	while _cart_progress >= 1.0 and _cart_dir != Vector2i.ZERO:
+		_cart_progress -= 1.0
+		_move_cart_to(_cart_cell + _cart_dir)
+		_cart_dir = _next_cart_direction()
+		if _cart_dir == Vector2i.ZERO:
+			_settle_cart()
+	var cart := _minecart_sprites.get(_cart_cell) as Sprite2D
+	var glide := _cell_center_position(_cart_cell)
+	if _cart_dir != Vector2i.ZERO:
+		glide += Vector2(_cart_dir) * Vector2(tile_size) * clampf(_cart_progress, 0.0, 1.0)
+	if cart != null:
+		cart.position = glide
+	_player_sprite.position = glide
+	_center_view_on_world_position(glide)
+
+func _move_cart_to(next_cell: Vector2i) -> void:
+	var cart := _minecart_sprites.get(_cart_cell) as Sprite2D
+	_minecart_sprites.erase(_cart_cell)
+	_cart_cell = next_cell
+	_player_cell = next_cell
+	if cart != null:
+		_minecart_sprites[next_cell] = cart
+
+## Straight ahead first, then the held direction, then a lone corner;
+## never straight back the way it came.
+func _next_cart_direction() -> Vector2i:
+	var candidates: Array[Vector2i] = []
+	if _cart_desired_dir != Vector2i.ZERO and _cart_desired_dir != -_cart_dir and _rail_cells.has(_cart_cell + _cart_desired_dir):
+		return _cart_desired_dir
+	if _rail_cells.has(_cart_cell + _cart_dir):
+		return _cart_dir
+	for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		if offset == -_cart_dir:
+			continue
+		if _rail_cells.has(_cart_cell + offset):
+			candidates.append(offset)
+	if candidates.size() == 1:
+		return candidates[0]
+	return Vector2i.ZERO
+
+## The cart came to rest: move its ledger entry from where it started to
+## where it stopped so regeneration rebuilds it here.
+func _settle_cart() -> void:
+	_cart_progress = 0.0
+	if _cart_origin_cell == _cart_cell:
+		return
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	var carts := level_data.get("carts", []) as Array
+	carts.erase(_cart_origin_cell)
+	if not carts.has(_cart_cell):
+		carts.append(_cart_cell)
+	level_data["carts"] = carts
+	_record_hold_edit("cart_at", _cart_origin_cell, false)
+	_record_hold_edit("cart_at", _cart_cell, true)
+	_cart_origin_cell = _cart_cell
+
 func _create_torch_texture() -> Texture2D:
+	# Just the stick and its iron collar - the flame is a separate
+	# ANIMATED sprite so it can sway (see _torch_flame_frames).
 	var image := Image.create(8, 16, false, Image.FORMAT_RGBA8)
 	image.fill(Color(0, 0, 0, 0))
 	for y in range(7, 15):
 		image.set_pixel(3, y, Color(0.45, 0.3, 0.16, 1.0))
 		image.set_pixel(4, y, Color(0.36, 0.24, 0.13, 1.0))
-	for y in range(2, 7):
-		for x in range(2, 6):
-			var flame := Color(1.0, 0.62, 0.15, 1.0) if y > 3 else Color(1.0, 0.85, 0.3, 1.0)
-			if (x == 2 or x == 5) and y == 2:
-				continue
-			image.set_pixel(x, y, flame)
+	image.set_pixel(2, 7, Color(0.3, 0.3, 0.34, 1.0))
+	image.set_pixel(5, 7, Color(0.3, 0.3, 0.34, 1.0))
 	image.resize(16, 32, Image.INTERPOLATE_NEAREST)
 	return ImageTexture.create_from_image(image)
 
@@ -5531,6 +5948,26 @@ func _apply_hold_diffs_to_level(level_data: Dictionary, grid: Dictionary) -> voi
 		var cell := _parse_cell_key(String(key_variant))
 		if not torches.has(cell):
 			torches.append(cell)
+	# Rails come back as the laid network; carts come back wherever they
+	# last came to rest (cart_at retires old cells with a false).
+	if not level_data.has("rails"):
+		level_data["rails"] = []
+	var rails := level_data["rails"] as Array
+	for key_variant: Variant in (diff.get("rails", []) as Array):
+		var cell := _parse_cell_key(String(key_variant))
+		if not rails.has(cell):
+			rails.append(cell)
+	if not level_data.has("carts"):
+		level_data["carts"] = []
+	var carts := level_data["carts"] as Array
+	var cart_edits := diff.get("cart_at", {}) as Dictionary
+	for key_variant: Variant in cart_edits.keys():
+		var cell := _parse_cell_key(String(key_variant))
+		if bool(cart_edits[key_variant]):
+			if not carts.has(cell):
+				carts.append(cell)
+		else:
+			carts.erase(cell)
 	_restoring_hold_diffs = false
 
 ## Chunk streaming regenerates terrain from noise, which would refill
@@ -5939,6 +6376,9 @@ func _nearest_walkable_neighbor(cell: Vector2i) -> Vector2i:
 func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 	if _player_sprite == null or not _player_control_enabled:
 		return
+	# Click-to-walk stays parked while riding a cart; the keys steer.
+	if _cart_riding:
+		return
 	if target_cell == _player_cell:
 		_player_move_path.clear()
 		return
@@ -6081,6 +6521,16 @@ func _screen_position_from_cell(cell: Vector2i) -> Vector2:
 func _try_move_player(direction: Vector2i) -> bool:
 	if direction == Vector2i.ZERO:
 		return false
+	# Aboard a minecart the keys steer the CART: launch along a rail, or
+	# queue the turn taken at the next junction. Walking is suspended.
+	if _cart_riding:
+		if absi(direction.x) + absi(direction.y) != 1:
+			return false
+		_cart_desired_dir = direction
+		if _cart_dir == Vector2i.ZERO and _rail_cells.has(_cart_cell + direction):
+			_cart_dir = direction
+			_cart_progress = 0.0
+		return true
 	# One tile per step, always - a longer vector would glide the sprite
 	# across intermediate cells nothing ever walkability-checked.
 	if absi(direction.x) > 1 or absi(direction.y) > 1:
@@ -6249,6 +6699,8 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 				Color(1.0, 0.72, 0.35, 1.0)
 			)
 			actor_layer.add_child(glow)
+			# Candles and hearths breathe like the torches do.
+			_attach_glow_pulse(glow, base_cell)
 			_furnishing_sprites.append(glow)
 
 func _actor_sprite_to_cell(sprite: Sprite2D, cell: Vector2i) -> void:

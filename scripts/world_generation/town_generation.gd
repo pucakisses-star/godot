@@ -1885,6 +1885,11 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 	_paint_snow_pattern_tiles(augmented)
 	_paint_snow_rock_tile(augmented)
 	_paint_ruin_tiles(augmented)
+	# Desert dressing and the sandstone-ruin set (rippled dunes, wind
+	# streaks, cacti, palm, bones, mesa rock).
+	_paint_sand_pattern_tiles(augmented)
+	_paint_desert_flora_tiles(augmented)
+	_paint_sandstone_ruin_tiles(augmented)
 	# Lakeshore water plants (transparent decor over the animated water) and
 	# the snow-dusted copies of the two full-height trees.
 	_paint_water_plant_tiles(augmented)
@@ -2574,6 +2579,249 @@ func _paint_ruin_tiles(image: Image) -> void:
 				var ty := int(round(sin(angle) * ring_radius))
 				if tx < tile_size.x and ty < tile_size.y:
 					image.set_pixel(origin.x + tx, origin.y + ty, faint)
+
+## Rippled dune sand: the shipped sand base engraved with darker wind
+## ripples (and a streak variant whose pale gusts sweep diagonally),
+## marks kept off the tile edges so mixed sand butts seamlessly.
+func _paint_sand_pattern_tiles(image: Image) -> void:
+	var sand_coords := TILE_ATLAS.get("sand", Vector2i(-1, -1)) as Vector2i
+	if sand_coords.x < 0:
+		return
+	for variant_index: int in range(3):
+		var key := ["sand_ripple", "sand_ripple_alt", "sand_streak"][variant_index] as String
+		var coords := TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var origin := coords * tile_size
+		image.blit_rect(image, Rect2i(sand_coords * tile_size, tile_size), origin)
+		if variant_index < 2:
+			var groove := Color(0.66, 0.55, 0.36, 1.0)
+			var crest := Color(0.9, 0.82, 0.62, 1.0)
+			var stroke_count := 3 + variant_index
+			for stroke_index in range(stroke_count):
+				var base_y := 5 + stroke_index * (tile_size.y - 10) / stroke_count + variant_index * 2
+				var span_start := 3 + ((stroke_index * 5 + variant_index * 7) % 6)
+				var span_end := tile_size.x - 3 - ((stroke_index * 3 + variant_index * 5) % 6)
+				for tx in range(span_start, span_end):
+					var arc := sin(float(tx - span_start) / float(maxi(span_end - span_start, 1)) * PI)
+					var wave := sin(float(tx) * 0.5 + float(stroke_index) * 1.9 + float(variant_index) * 0.8) * 1.7
+					var ty := base_y + int(round(wave * arc))
+					if ty < 2 or ty > tile_size.y - 3:
+						continue
+					image.set_pixel(origin.x + tx, origin.y + ty, groove)
+					image.set_pixel(origin.x + tx, origin.y + ty + 1, crest)
+		else:
+			# Pale wind gusts sweeping up-right.
+			var gust := Color(0.97, 0.94, 0.86, 0.6)
+			for gust_index in range(2):
+				var start := Vector2(5.0 + float(gust_index) * 11.0, float(tile_size.y - 5 - gust_index * 4))
+				for step in range(14):
+					var px := start + Vector2(float(step) * 1.0, -float(step) * 0.7 + sin(float(step) * 0.9) * 1.2)
+					if px.x < 2.0 or px.y < 2.0 or px.x > float(tile_size.x - 3) or px.y > float(tile_size.y - 3):
+						continue
+					image.set_pixel(origin.x + int(px.x), origin.y + int(px.y), gust)
+
+## The desert's standing life and litter, all on transparent surrounds:
+## a saguaro with two arms, a clump of barrel cacti, sun-bleached bones,
+## a red mesa boulder, and the 1x2 palm (crown row above the trunk row).
+func _paint_desert_flora_tiles(image: Image) -> void:
+	var cactus_body := Color(0.28, 0.52, 0.3, 1.0)
+	var cactus_dark := Color(0.18, 0.38, 0.22, 1.0)
+	var cactus_light := Color(0.42, 0.66, 0.4, 1.0)
+	var cactus_coords := TILE_ATLAS.get("cactus", Vector2i(-1, -1)) as Vector2i
+	if cactus_coords.x >= 0:
+		var origin := cactus_coords * tile_size
+		var mid := tile_size.x / 2
+		for ty in range(4, tile_size.y - 1):
+			for tx in range(mid - 3, mid + 3):
+				var tone := cactus_body
+				if tx == mid - 3 or tx == mid + 2:
+					tone = cactus_dark
+				elif tx == mid - 1:
+					tone = cactus_light
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+		# Two arms: out then up.
+		for tx in range(mid - 9, mid - 3):
+			image.set_pixel(origin.x + tx, origin.y + 14, cactus_dark)
+			image.set_pixel(origin.x + tx, origin.y + 13, cactus_body)
+		for ty in range(8, 14):
+			image.set_pixel(origin.x + mid - 9, origin.y + ty, cactus_dark)
+			image.set_pixel(origin.x + mid - 8, origin.y + ty, cactus_body)
+		for tx in range(mid + 3, mid + 8):
+			image.set_pixel(origin.x + tx, origin.y + 18, cactus_dark)
+			image.set_pixel(origin.x + tx, origin.y + 17, cactus_body)
+		for ty in range(12, 18):
+			image.set_pixel(origin.x + mid + 6, origin.y + ty, cactus_body)
+			image.set_pixel(origin.x + mid + 7, origin.y + ty, cactus_dark)
+	var clump_coords := TILE_ATLAS.get("cactus_small", Vector2i(-1, -1)) as Vector2i
+	if clump_coords.x >= 0:
+		var origin := clump_coords * tile_size
+		for blob_index in range(3):
+			var blob_center := [Vector2(9.0, 22.0), Vector2(19.0, 18.0), Vector2(24.0, 25.0)][blob_index] as Vector2
+			var blob_radius := [6.0, 7.0, 5.0][blob_index] as float
+			for ty in range(tile_size.y):
+				for tx in range(tile_size.x):
+					var delta := Vector2(float(tx), float(ty)) - blob_center
+					var d := delta.length() / blob_radius
+					if d > 1.0:
+						continue
+					var tone := cactus_body
+					if d > 0.78:
+						tone = cactus_dark
+					elif delta.x < -1.0 and delta.y < 0.0:
+						tone = cactus_light
+					image.set_pixel(origin.x + tx, origin.y + ty, tone)
+	var bones_coords := TILE_ATLAS.get("desert_bones", Vector2i(-1, -1)) as Vector2i
+	if bones_coords.x >= 0:
+		var origin := bones_coords * tile_size
+		var bone := Color(0.93, 0.9, 0.8, 1.0)
+		var bone_shade := Color(0.76, 0.72, 0.6, 1.0)
+		# A longhorn skull: dome, snout, two out-swept horns.
+		for ty in range(12, 20):
+			for tx in range(12, 21):
+				var tone := bone if ty < 17 else bone_shade
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+		for tx in range(14, 19):
+			image.set_pixel(origin.x + tx, origin.y + 20, bone_shade)
+		image.set_pixel(origin.x + 14, origin.y + 15, Color(0.2, 0.16, 0.12, 1.0))
+		image.set_pixel(origin.x + 18, origin.y + 15, Color(0.2, 0.16, 0.12, 1.0))
+		for horn_step in range(6):
+			image.set_pixel(origin.x + 11 - horn_step, origin.y + 13 - horn_step / 2, bone)
+			image.set_pixel(origin.x + 21 + horn_step, origin.y + 13 - horn_step / 2, bone)
+	var rock_coords := TILE_ATLAS.get("desert_rock", Vector2i(-1, -1)) as Vector2i
+	if rock_coords.x >= 0:
+		var origin := rock_coords * tile_size
+		var center := Vector2(float(tile_size.x) * 0.5, float(tile_size.y) * 0.6)
+		var radius := Vector2(float(tile_size.x) * 0.33, float(tile_size.y) * 0.28)
+		for ty in range(tile_size.y):
+			for tx in range(tile_size.x):
+				var dx := (float(tx) - center.x) / radius.x
+				var dy := (float(ty) - center.y) / radius.y
+				var d := dx * dx + dy * dy
+				if d > 1.0:
+					if d < 1.5 and dy > 0.4:
+						image.set_pixel(origin.x + tx, origin.y + ty, Color(0.45, 0.34, 0.24, 0.35))
+					continue
+				var tone := Color(0.62, 0.4, 0.3, 1.0)
+				if dy < -0.2 - dx * dx * 0.3:
+					tone = Color(0.76, 0.53, 0.4, 1.0)
+				elif d > 0.62:
+					tone = Color(0.46, 0.29, 0.22, 1.0)
+				var grain := (tx * 73856093 ^ ty * 19349663) & 0x7fffffff
+				if grain % 29 == 0:
+					tone = Color(0.52, 0.34, 0.25, 1.0)
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+	# The palm: crown on the mapped row, trunk on the row beneath.
+	var palm_coords := TILE_ATLAS.get("palm", Vector2i(-1, -1)) as Vector2i
+	if palm_coords.x >= 0:
+		var origin := palm_coords * tile_size
+		var trunk := Color(0.5, 0.34, 0.2, 1.0)
+		var trunk_dark := Color(0.38, 0.25, 0.15, 1.0)
+		var frond := Color(0.24, 0.5, 0.28, 1.0)
+		var frond_dark := Color(0.15, 0.36, 0.2, 1.0)
+		var mid := tile_size.x / 2
+		# Trunk (lower tile): gently bowed with ring shadows.
+		for ty in range(0, tile_size.y - 2):
+			var bow := int(round(sin(float(ty) * 0.1) * 2.0))
+			var tx0 := mid - 2 + bow
+			for tx in range(tx0, tx0 + 4):
+				var tone := trunk if tx > tx0 else trunk_dark
+				if ty % 5 == 4:
+					tone = trunk_dark
+				image.set_pixel(origin.x + tx, origin.y + tile_size.y + ty, tone)
+		# Crown (upper tile): fronds fanning from the crown point.
+		var crown := Vector2(float(mid), float(tile_size.y - 4))
+		for frond_index in range(7):
+			var angle := PI + float(frond_index) * PI / 6.0
+			for step in range(13):
+				var droop := float(step) * float(step) * 0.045
+				var px := crown + Vector2(cos(angle) * float(step) * 1.15, sin(angle) * float(step) * 0.55 + droop)
+				if px.x < 1.0 or px.y < 1.0 or px.x > float(tile_size.x - 2) or px.y > float(tile_size.y - 1):
+					continue
+				image.set_pixel(origin.x + int(px.x), origin.y + int(px.y), frond)
+				image.set_pixel(origin.x + int(px.x), origin.y + int(px.y) + 1, frond_dark)
+
+## The sandstone recolor of the ruin kit for desert forts.
+func _paint_sandstone_ruin_tiles(image: Image) -> void:
+	var floor_dark := Color(0.42, 0.33, 0.23, 1.0)
+	var floor_grout := Color(0.33, 0.25, 0.17, 1.0)
+	var floor_light := Color(0.5, 0.4, 0.28, 1.0)
+	var brick_face := Color(0.82, 0.68, 0.46, 1.0)
+	var brick_shade := Color(0.68, 0.55, 0.37, 1.0)
+	var brick_mortar := Color(0.52, 0.41, 0.28, 1.0)
+	for key: String in ["ruin_floor_sand", "ruin_floor_sand_cracked"]:
+		var coords := TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var origin := coords * tile_size
+		for ty in range(tile_size.y):
+			for tx in range(tile_size.x):
+				var tone := floor_dark
+				if (tx % 16 == 0) or (ty % 16 == 0):
+					tone = floor_grout
+				else:
+					var grain := (tx * 73856093 ^ ty * 19349663) & 0x7fffffff
+					if grain % 23 == 0:
+						tone = floor_light
+					elif grain % 29 == 1:
+						tone = floor_grout
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+		if key == "ruin_floor_sand_cracked":
+			var crack_y := 6.0
+			for tx in range(3, tile_size.x - 3):
+				crack_y += sin(float(tx) * 1.7) * 1.4 + 0.55
+				var ty := clampi(int(crack_y), 2, tile_size.y - 3)
+				image.set_pixel(origin.x + tx, origin.y + ty, floor_grout)
+	var brick_coords := TILE_ATLAS.get("sandstone_brick", Vector2i(-1, -1)) as Vector2i
+	if brick_coords.x >= 0:
+		var origin := brick_coords * tile_size
+		for ty in range(tile_size.y):
+			for tx in range(tile_size.x):
+				var course := ty / 8
+				var offset := (course % 2) * 8
+				var tone := brick_face
+				if ty % 8 >= 6:
+					tone = brick_mortar
+				elif (tx + offset) % 16 >= 14:
+					tone = brick_mortar
+				elif ty % 8 >= 4:
+					tone = brick_shade
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+	var worn_coords := TILE_ATLAS.get("sandstone_brick_worn", Vector2i(-1, -1)) as Vector2i
+	var floor_coords := TILE_ATLAS.get("ruin_floor_sand", Vector2i(-1, -1)) as Vector2i
+	if worn_coords.x >= 0 and floor_coords.x >= 0:
+		var origin := worn_coords * tile_size
+		image.blit_rect(image, Rect2i(floor_coords * tile_size, tile_size), origin)
+		for tx in range(tile_size.x):
+			var break_y := 12 + int(round(sin(float(tx) * 0.9) * 3.0)) + ((tx * 7) % 3)
+			for ty in range(break_y, tile_size.y):
+				var course := ty / 8
+				var offset := (course % 2) * 8
+				var tone := brick_face
+				if ty % 8 >= 6:
+					tone = brick_mortar
+				elif (tx + offset) % 16 >= 14:
+					tone = brick_mortar
+				elif ty % 8 >= 4:
+					tone = brick_shade
+				if ty == break_y:
+					tone = brick_shade
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+	var tower_coords := TILE_ATLAS.get("ruin_tower_sand", Vector2i(-1, -1)) as Vector2i
+	if tower_coords.x >= 0:
+		var origin := tower_coords * tile_size
+		var left := tile_size.x / 2 - 6
+		var right := tile_size.x / 2 + 6
+		for ty in range(2, tile_size.y):
+			for tx in range(left, right):
+				var tone := brick_face
+				if ty < 5:
+					tone = Color(0.88, 0.76, 0.55, 1.0)
+				elif ty % 6 >= 4:
+					tone = brick_mortar
+				elif tx >= right - 3:
+					tone = brick_shade
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
 
 ## --- painted water plants and snow trees --------------------------------------
 
@@ -6147,6 +6395,13 @@ func _apply_landmark_plan_slice(landmark: Dictionary, plan: Dictionary, chunk: V
 					sprite_def.get("color", AMBIENT_GLOW_WARM) as Color)
 				glow_sprite.visible = _lighting_enabled
 				actor_layer.add_child(glow_sprite)
+				# Firelight breathes: a slow scale pulse, phase-varied per
+				# cell so neighboring glows never throb in unison.
+				var glow_base_scale := glow_sprite.scale
+				var glow_period := 0.5 + float(absi(cell.x * 31 + cell.y * 17) % 40) * 0.01
+				var glow_pulse := glow_sprite.create_tween().set_loops()
+				glow_pulse.tween_property(glow_sprite, "scale", glow_base_scale * 1.12, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+				glow_pulse.tween_property(glow_sprite, "scale", glow_base_scale, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 				_glow_sprites.append(glow_sprite)
 				nodes.append(glow_sprite)
 			"icon":
@@ -7077,6 +7332,19 @@ const SNOW_RUIN_CHANCE := 0.3
 const SNOW_RUIN_MAX_HALF := 9
 const SNOW_RUIN_GATE_CLEARANCE := 26
 
+## Which painted kit a ruin builds from, by the biome it stands in:
+## ice-brick forts on the tundra, sandstone forts in the desert.
+const RUIN_STYLES := {
+	TILE_ATLAS_DEFS.BIOME_TUNDRA: {
+		"floor": "ruin_floor", "cracked": "ruin_floor_cracked",
+		"brick": "ice_brick", "worn": "ice_brick_worn", "tower": "ruin_tower"
+	},
+	TILE_ATLAS_DEFS.BIOME_DESERT: {
+		"floor": "ruin_floor_sand", "cracked": "ruin_floor_sand_cracked",
+		"brick": "sandstone_brick", "worn": "sandstone_brick_worn", "tower": "ruin_tower_sand"
+	}
+}
+
 var _snow_ruin_layouts: Dictionary = {}
 
 func _stamp_snow_ruins_in_chunk(rect: Rect2i) -> void:
@@ -7110,8 +7378,9 @@ func _stamp_snow_ruins_in_chunk(rect: Rect2i) -> void:
 					_place_tile(decor_layer, cell, decor_key)
 
 ## The block's LOCAL-space ruin anchor, or the sentinel when the block
-## rolled no ruin, its ground is not snow, or a site gate is too close
-## (the fort must never collide with a hold massif or clearing).
+## rolled no ruin, its ground carries no ruin style (only tundra and
+## desert forts exist), or a site gate is too close (the fort must never
+## collide with a hold massif or clearing).
 func _snow_ruin_anchor(block: Vector2i) -> Vector2i:
 	var sentinel := Vector2i(2147483647, 2147483647)
 	var roll := hash("snow_ruin|%s|%d|%d" % [_surface_world_seed_text, block.x, block.y])
@@ -7122,7 +7391,7 @@ func _snow_ruin_anchor(block: Vector2i) -> Vector2i:
 		SNOW_RUIN_MAX_HALF + 1 + (roll >> 16) % span,
 		SNOW_RUIN_MAX_HALF + 1 + (roll >> 32) % span
 	)
-	if SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, world_anchor) != (TILE_ATLAS_DEFS.BIOME_TUNDRA as String):
+	if not RUIN_STYLES.has(SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, world_anchor)):
 		return sentinel
 	var anchor := world_anchor - _surface_world_origin
 	for gate: Dictionary in _surface_gates:
@@ -7140,6 +7409,10 @@ func _snow_ruin_layout(anchor: Vector2i) -> Dictionary:
 	if _snow_ruin_layouts.size() > 24:
 		_snow_ruin_layouts.clear()
 	var world_anchor := anchor + _surface_world_origin
+	var style := RUIN_STYLES.get(
+		SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, world_anchor),
+		RUIN_STYLES[TILE_ATLAS_DEFS.BIOME_TUNDRA]
+	) as Dictionary
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash("snow_ruin_layout|%s|%d|%d" % [_surface_world_seed_text, world_anchor.x, world_anchor.y])
 	var layout: Dictionary = {}
@@ -7154,7 +7427,7 @@ func _snow_ruin_layout(anchor: Vector2i) -> Dictionary:
 			if dx * dx + dy * dy > 0.66 + edge * 0.45:
 				continue
 			layout[anchor + Vector2i(x, y)] = {
-				"base": "ruin_floor_cracked" if rng.randf() < 0.28 else "ruin_floor",
+				"base": String(style["cracked"]) if rng.randf() < 0.28 else String(style["floor"]),
 				"decor": ""
 			}
 	# Broken wall runs: straight courses with collapse gaps, a share worn
@@ -7173,7 +7446,7 @@ func _snow_ruin_layout(anchor: Vector2i) -> Dictionary:
 			if not layout.has(cell):
 				continue
 			layout[cell] = {
-				"base": "ice_brick_worn" if rng.randf() < 0.35 else "ice_brick",
+				"base": String(style["worn"]) if rng.randf() < 0.35 else String(style["brick"]),
 				"decor": ""
 			}
 	# Snow-capped columns on the rim.
@@ -7186,7 +7459,7 @@ func _snow_ruin_layout(anchor: Vector2i) -> Dictionary:
 		if layout.has(rim_cell):
 			var rim_entry := layout[rim_cell] as Dictionary
 			if String(rim_entry.get("base", "")).begins_with("ruin_floor"):
-				rim_entry["decor"] = "ruin_tower"
+				rim_entry["decor"] = String(style["tower"])
 	# Webs where floor meets standing wall.
 	var web_budget := rng.randi_range(3, 5)
 	for cell_variant: Variant in layout.keys():
@@ -7199,7 +7472,10 @@ func _snow_ruin_layout(anchor: Vector2i) -> Dictionary:
 		var wall_beside := false
 		for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 			var neighbor_entry_variant: Variant = layout.get(cell + offset)
-			if neighbor_entry_variant is Dictionary and String((neighbor_entry_variant as Dictionary).get("base", "")).begins_with("ice_brick"):
+			if not (neighbor_entry_variant is Dictionary):
+				continue
+			var neighbor_base := String((neighbor_entry_variant as Dictionary).get("base", ""))
+			if neighbor_base == String(style["brick"]) or neighbor_base == String(style["worn"]):
 				wall_beside = true
 				break
 		if wall_beside and rng.randf() < 0.3:
