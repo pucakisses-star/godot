@@ -1335,6 +1335,19 @@ func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 		return
 
 	if _is_dwarfhold_structure(details):
+		# Stage 4 of the hold merge: the hold's whole main floor lives in
+		# the SURFACE scene. Journeys land in the wilds on the mountain's
+		# doorstep - the site window streams the carved city - and the
+		# walker enters through the mouth like any overland arrival.
+		var approach := _hold_approach_tile(tile_coord)
+		if approach.x != 2147483647:
+			var approach_details := _tile_data.get(approach, {}) as Dictionary
+			var approach_seed := _wild_scene_seed_for_tile(approach, approach_details)
+			_store_selected_wild_scene_context(approach_seed, approach, approach_details)
+			SceneCacheService.request_change(self, TOWN_GENERATION_SCENE_PATH)
+			return
+		# No open ground on any side (a hold ringed by sea or cities):
+		# fall back to the legacy direct descent.
 		var dwarfhold_seed := _dwarfhold_scene_seed_for_tile(tile_coord, details)
 		if dwarfhold_seed.is_empty():
 			print("Unable to resolve dwarfhold scene seed for %s" % tile_coord)
@@ -1363,6 +1376,31 @@ func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 	var wild_seed := _wild_scene_seed_for_tile(tile_coord, details)
 	_store_selected_wild_scene_context(wild_seed, tile_coord, details)
 	SceneCacheService.request_change(self, TOWN_GENERATION_SCENE_PATH)
+
+## The wild tile a hold journey embarks on: dry open ground beside the
+## mountain, south first since the mouth faces south. Mountain-biome
+## neighbours are a last resort - they are solid stone now, so an
+## embark there would spawn the walker in a pocket of the range. The
+## invalid sentinel means no side qualified at all.
+func _hold_approach_tile(tile_coord: Vector2i) -> Vector2i:
+	var offsets: Array[Vector2i] = [Vector2i(0, 1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, -1)]
+	for allow_mountain: bool in [false, true]:
+		for offset: Vector2i in offsets:
+			var neighbor := tile_coord + offset
+			var neighbor_details := _tile_data.get(neighbor, {}) as Dictionary
+			if neighbor_details.is_empty():
+				continue
+			var neighbor_biome := _tile_base_biome_from_data(neighbor_details)
+			if neighbor_biome == BIOME_WATER:
+				continue
+			if not allow_mountain and neighbor_biome == BIOME_MOUNTAIN:
+				continue
+			if neighbor_details.has("settlement_type"):
+				continue
+			if not String(neighbor_details.get("structure", "")).strip_edges().is_empty():
+				continue
+			return neighbor
+	return Vector2i(2147483647, 2147483647)
 
 func _is_town_settlement(details: Dictionary) -> bool:
 	var settlement_type := String(details.get("settlement_type", "")).strip_edges().to_lower()

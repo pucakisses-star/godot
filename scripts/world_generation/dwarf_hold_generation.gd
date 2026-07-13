@@ -458,6 +458,11 @@ const DWARFHOLD_SCENE_NAME_KEY := "dwarfhold_scene_name"
 const DWARFHOLD_SCENE_FALL_KEY := "dwarfhold_scene_fall_text"
 const DWARFHOLD_SCENE_GEOLOGY_KEY := "dwarfhold_scene_geology"
 const DWARFHOLD_SCENE_OVERLAND_KEY := "dwarfhold_scene_overland_arrival"
+## Stage 4 of the hold merge: the main floor lives on the SURFACE, so a
+## stair descent lands in the first underhall and ascending from it
+## returns to the surface city - the old level-0 city never shows.
+const DWARFHOLD_SCENE_FROM_SURFACE_KEY := "dwarfhold_scene_from_surface_stair"
+const TOWN_SCENE_PATH := "res://scenes/town_generation.tscn"
 
 ## Identity carried in from the overworld chronicle: the hold's name and,
 ## for abandoned ruins, the fall summary ("Fell to <beast>, year <y>").
@@ -1562,6 +1567,11 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 	if settings.has(DWARFHOLD_SCENE_OVERLAND_KEY):
 		settings.erase(DWARFHOLD_SCENE_OVERLAND_KEY)
 		_store_world_settings(settings)
+	# Sticky, unlike the overland flag: every stair descent (the only
+	# real way in since stage 4) lands in the first underhall and
+	# ascends back OUT to the surface city - and a save reloaded in the
+	# underhalls must keep that shape, so the key is never consumed.
+	_from_surface_stair = bool(settings.get(DWARFHOLD_SCENE_FROM_SURFACE_KEY, false))
 	var chronology := settings.get("chronology", {}) as Dictionary
 	_calendar_start_year = maxi(1, int(chronology.get("year", 250)))
 	_underdeep_sites = []
@@ -1599,6 +1609,11 @@ func _on_generate_pressed() -> void:
 	_generate_city()
 
 func _on_depth_down_pressed() -> void:
+	# Stage 4: on a surface-stair visit, level 0's duplicate city is
+	# retired - stepping above the first underhall exits to the surface.
+	if _from_surface_stair and _hold_state.current_level_index - 1 <= 0:
+		_exit_to_surface_city()
+		return
 	_show_level(_hold_state.current_level_index - 1)
 
 func _on_depth_up_pressed() -> void:
@@ -1639,7 +1654,14 @@ func _generate_city() -> void:
 		var level_seed := "%s::depth_%d" % [seed_text, level_index]
 		_hold_state.generated_levels.append(_generate_single_level(level_seed, level_index, level_count))
 
-	_show_level(0)
+	if _from_surface_stair and _hold_state.generated_levels.size() > 1:
+		# Stage 4: the main floor lives on the SURFACE. Descending the
+		# great hall's stair lands in the first underhall, arriving at
+		# its up-stair - the same shaft the walker just climbed down.
+		_pending_player_spawn_cell = _resolve_stair_spawn_cell(1, "up", _pending_player_spawn_cell)
+		_show_level(1)
+	else:
+		_show_level(0)
 
 func _generate_single_level(level_seed: String, level_index: int, level_count: int) -> Dictionary:
 	_rng.seed = hash(level_seed)
@@ -1950,6 +1972,13 @@ func _repair_level_connectivity(grid: Dictionary, door_cells: Dictionary, stair_
 	SettlementArchitectureService.repair_level_connectivity(grid, door_cells, stair_cells, level_index, is_passable, "DwarfHold")
 
 
+## Each level's wild rock gets its own noise seed; level 0 keeps the
+## bare world hash so pre-stage-4 saves' streamed chunks stay identical.
+func _level_world_seed(level_index: int) -> int:
+	if level_index <= 0:
+		return _world_seed_hash
+	return _world_seed_hash ^ (level_index * 2654435761)
+
 func _show_level(target_level_index: int) -> void:
 	if _hold_state.generated_levels.is_empty():
 		depth_down_button.disabled = true
@@ -1976,20 +2005,17 @@ func _show_level(target_level_index: int) -> void:
 	_latest_district_labels = level_data.get("district_labels", []) as Array
 	_latest_district_cell_map = level_data.get("district_cell_map", {}) as Dictionary
 	_latest_floor_decor = level_data.get("floor_decor", {}) as Dictionary
-	if _hold_state.current_level_index == 0:
-		# The surface level is an open, diggable underground: rock beyond
-		# the city streams in as deterministic noise-carved chunks.
-		if not level_data.has("generated_chunks"):
-			level_data["generated_chunks"] = {}
-		if not level_data.has("dug_cells"):
-			level_data["dug_cells"] = {}
-		_generated_chunks = level_data.get("generated_chunks", {}) as Dictionary
-		_dug_cells = level_data.get("dug_cells", {}) as Dictionary
-		_world_noise = UndergroundWorldService.make_noise_set(_world_seed_hash)
-	else:
-		_world_noise = {}
-		_generated_chunks = {}
-		_dug_cells = {}
+	# EVERY level is an open, diggable underground: rock beyond the halls
+	# streams in as deterministic noise-carved chunks, each level with
+	# its own cavern layout. (Level 0 keeps its original seed so old
+	# saves' galleries still line up.)
+	if not level_data.has("generated_chunks"):
+		level_data["generated_chunks"] = {}
+	if not level_data.has("dug_cells"):
+		level_data["dug_cells"] = {}
+	_generated_chunks = level_data.get("generated_chunks", {}) as Dictionary
+	_dug_cells = level_data.get("dug_cells", {}) as Dictionary
+	_world_noise = UndergroundWorldService.make_noise_set(_level_world_seed(_hold_state.current_level_index))
 	_last_player_chunk = Vector2i(2147483647, 2147483647)
 	_streamed_chunks = {}
 	var stored_bounds: Variant = level_data.get("city_bounds")
@@ -3184,12 +3210,15 @@ func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 				continue
 			_generated_chunks[key] = true
 			var stamped_site := false
-			for site_variant: Variant in (_sites_by_chunk.get(key, []) as Array):
-				var site := site_variant as Dictionary
-				UndergroundWorldService.stamp_settlement_site(_latest_grid, _latest_floor_decor, site)
-				_append_district_label_once({"name": String(site.get("name", "")), "center": site.get("cell", Vector2i.ZERO), "wild": true})
-				stamped_site = true
-			var discovery: Dictionary = UndergroundWorldService.stamp_chunk_discovery(_latest_grid, _latest_floor_decor, chunk, _world_seed_hash)
+			# Underdeep settlements live at the BOTTOM of the world: they
+			# stamp only on the deepest level, not once per stratum.
+			if _hold_state.current_level_index == _hold_state.generated_levels.size() - 1:
+				for site_variant: Variant in (_sites_by_chunk.get(key, []) as Array):
+					var site := site_variant as Dictionary
+					UndergroundWorldService.stamp_settlement_site(_latest_grid, _latest_floor_decor, site)
+					_append_district_label_once({"name": String(site.get("name", "")), "center": site.get("cell", Vector2i.ZERO), "wild": true})
+					stamped_site = true
+			var discovery: Dictionary = UndergroundWorldService.stamp_chunk_discovery(_latest_grid, _latest_floor_decor, chunk, _level_world_seed(_hold_state.current_level_index))
 			if not discovery.is_empty():
 				discovery["wild"] = true
 				_discovery_chunks[chunk] = true
@@ -6286,6 +6315,9 @@ var _journey_geology: Dictionary = {}
 ## True when the player walked in overland through the mountain mouth
 ## (vs a map journey or stairs): they spawn at the hold's south gate.
 var _overland_arrival := false
+## The visit came down the surface city's great-hall stair (stage 4):
+## the walker lives in the underhalls and ascends OUT, not to level 0.
+var _from_surface_stair := false
 
 ## An ore appropriate to the current stratum, drawn from this world's
 ## metal list - the same list the overworld geology readout advertises.
@@ -6633,10 +6665,24 @@ func _try_use_stairs_at_player_cell() -> bool:
 		return true
 	if stair_direction == "up" and _hold_state.current_level_index > 0:
 		var destination_index := _hold_state.current_level_index - 1
+		# Stage 4: from the first underhall the way up IS the surface -
+		# the great hall above belongs to the town scene, and the old
+		# level-0 city never shows on a surface-stair visit.
+		if _from_surface_stair and destination_index == 0:
+			_exit_to_surface_city()
+			return true
 		_pending_player_spawn_cell = _resolve_stair_spawn_cell(destination_index, "down", _player_cell)
 		_show_level(destination_index)
 		return true
 	return false
+
+## Hands the walker back to the surface city. The town scene is almost
+## always parked in the scene cache from the descent, so this revives it
+## exactly as it was left - standing on the great hall's stair, arrival
+## lock armed until they step off.
+func _exit_to_surface_city() -> void:
+	_set_save_status("You climb back up to the great hall.", Color(0.85, 0.9, 0.7, 1.0))
+	SceneCacheService.request_change(self, TOWN_SCENE_PATH)
 
 func _stair_direction_at_cell(cell: Vector2i) -> String:
 	for layer: TileMapLayer in [decor_layer, city_layer]:
