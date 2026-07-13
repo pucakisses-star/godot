@@ -298,7 +298,11 @@ const TOWN_MULTI_CELL_TILES := {
 	Vector2i(0, 49): {"size": Vector2i(3, 3), "origin": Vector2i(0, -32)},
 	# The desert palm: trunk on its anchor cell, crown rising one tile
 	# above (painted at atlas build, town_generation._paint_desert_flora_tiles).
-	Vector2i(12, 52): {"size": Vector2i(1, 2), "origin": Vector2i(0, -32)}
+	Vector2i(12, 52): {"size": Vector2i(1, 2), "origin": Vector2i(0, -32)},
+	# The stone coffin lies head-north from its foot anchor; the street
+	# lamp's lantern head rises one tile above its post.
+	Vector2i(2, 54): {"size": Vector2i(1, 2), "origin": Vector2i(0, -32)},
+	Vector2i(9, 54): {"size": Vector2i(1, 2), "origin": Vector2i(0, -32)}
 }
 
 const TOWN_TILE_ATLAS := {
@@ -722,6 +726,28 @@ const TOWN_TILE_ATLAS := {
 	"sandstone_brick_worn": Vector2i(10, 52),
 	"ruin_tower_sand": Vector2i(11, 52),
 	"palm": Vector2i(12, 52),
+	# The hold massif's own mountain stone (painted at atlas build,
+	# town_generation._paint_massif_rock_tiles): unmistakably GREY crag,
+	# not sandy scree - the first massif build reused sand_pebbles and
+	# vanished into dirt-toned biomes. "dark" rims the foot of the
+	# mountain, "top" catches light on the high cells.
+	"massif_rock": Vector2i(13, 52),
+	"massif_rock_dark": Vector2i(14, 52),
+	"massif_rock_top": Vector2i(15, 52),
+	# The churchyard-and-park kit on appended row 54 (painted at atlas
+	# build, town_generation._paint_graveyard_tiles): headstones, a
+	# cross marker, a lidded stone coffin (1x2, anchored at its foot), a
+	# moss-eaten statue, the four quarters of a tiered fountain, and a
+	# wrought street lamp (1x2, lantern head above its anchor).
+	"gravestone": Vector2i(0, 54),
+	"gravestone_cross": Vector2i(1, 54),
+	"stone_coffin": Vector2i(2, 54),
+	"statue_mossy": Vector2i(4, 54),
+	"fountain_nw": Vector2i(5, 54),
+	"fountain_ne": Vector2i(6, 54),
+	"fountain_sw": Vector2i(7, 54),
+	"fountain_se": Vector2i(8, 54),
+	"street_lamp": Vector2i(9, 54),
 	# Lakeshore water plants, painted into appended row 46 at atlas build time
 	# (town_generation._paint_water_plant_tiles; the shipped sheet has no
 	# aquatic plant art at all — verified by full-sheet inventory). Transparent
