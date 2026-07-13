@@ -285,6 +285,12 @@ const ZOOM_STEP := 0.1
 const DARK_COLOR := Color(0.03, 0.035, 0.055, 0.955)
 const PLAYER_LIGHT_TILES := 7.0
 const TORCH_LIGHT_TILES := 9.0
+## Glow SPRITES are flame coronas only - small additive halos hugging
+## the fire itself. Area illumination belongs to the darkness shader
+## alone, whose pools respect walls; big additive blobs do not, and
+## running both painted two mismatched lighting systems over the city.
+const FLAME_HALO_TILES := 2.2
+const CANDLE_HALO_TILES := 1.5
 ## Fires and candles in the settlement light their own pools, so the city
 ## glows only around its hearths instead of being blanket-lit.
 const HEARTH_LIGHT_TILES := 6.5
@@ -1100,7 +1106,8 @@ func _ready() -> void:
 	_escape_menu.show_return_to_map = true
 	add_child(_escape_menu)
 	_glow_texture = _create_glow_texture()
-	_player_glow = _create_glow_sprite(7.0)
+	# The walker's lantern halo; the shader carves the real 7-tile pool.
+	_player_glow = _create_glow_sprite(FLAME_HALO_TILES)
 	lighting_layer.add_child(_player_glow)
 	_player_glow.visible = false
 	_generate_city()
@@ -3722,7 +3729,12 @@ func _spawn_torch_at(cell: Vector2i) -> void:
 	# Stagger phases so a corridor of torches never dances in unison.
 	flame.frame = absi(cell.x * 7 + cell.y * 13) % 3
 	torch.add_child(flame)
-	var glow := _create_glow_sprite(TORCH_LIGHT_TILES)
+	# The glow sprite is the flame's own corona, nothing more: the
+	# darkness shader is the ONE system that lights the ground (and it
+	# respects walls, which an additive blob never can). Full-radius
+	# glows painted a second, wall-ignoring light over the shader's
+	# pools and the two reads fought each other.
+	var glow := _create_glow_sprite(FLAME_HALO_TILES)
 	glow.position = Vector2.ZERO
 	glow.visible = _lighting_enabled
 	torch.add_child(glow)
@@ -3857,8 +3869,10 @@ func _spawn_sconce_at(cell: Vector2i, is_candle: bool) -> void:
 		flame.play()
 		flame.frame = absi(cell.x * 7 + cell.y * 13) % 3
 		sconce.add_child(flame)
+	# The shader still lights the sconce's full pool (via
+	# _auto_sconce_cells below); the sprite is only the flame's corona.
 	var radius_tiles := CANDLE_SCONCE_LIGHT_TILES if is_candle else SCONCE_LIGHT_TILES
-	var glow := _create_glow_sprite(radius_tiles)
+	var glow := _create_glow_sprite(CANDLE_HALO_TILES if is_candle else FLAME_HALO_TILES)
 	glow.position = Vector2.ZERO
 	glow.visible = _lighting_enabled
 	sconce.add_child(glow)
@@ -6889,9 +6903,10 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 				_actor_passable_cache.erase(cell)
 		if RoomFurnishingService.piece_emits_light(piece_name):
 			_light_furnishing_cells.append(base_cell)
+			# Corona only - the shader lights the hearth's actual pool.
 			var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(
 				_cell_center_position(base_cell),
-				2.4 * float(tile_size.x),
+				0.9 * float(tile_size.x),
 				Color(1.0, 0.72, 0.35, 1.0)
 			)
 			actor_layer.add_child(glow)
