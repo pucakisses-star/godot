@@ -110,6 +110,8 @@ var _trade_shop_type := ""
 ## needs the trader's actual spot (sentinel = fall back to the shop anchor).
 var _trade_leash_cell := Vector2i(2147483647, 2147483647)
 var _shop_stocks: Dictionary = {}
+## Game day each shop anchor last rerolled its shelves.
+var _shop_restock_day: Dictionary = {}
 var _active_speech_bubble: PanelContainer
 var _escape_menu: EscapeMenu
 var _game_over: GameOverScreen
@@ -5176,6 +5178,29 @@ func _shop_type_at_cell(cell: Vector2i) -> String:
 		return building_type
 	return ""
 
+## The ward city's workshops trade for real: a click inside a hold
+## plot resolves to its building's shop counter. Returns {} off-plot
+## and for buildings that keep no counter (palace, barracks, homes).
+func _ward_shop_at_cell(cell: Vector2i) -> Dictionary:
+	for landmark: Dictionary in _surface_landmarks:
+		if String(landmark.get("structure", "")) != "dwarfhold_city":
+			continue
+		var plan := landmark.get("plan", {}) as Dictionary
+		if plan.is_empty() or not (plan.get("bounds", Rect2i()) as Rect2i).has_point(cell):
+			continue
+		for plot_variant: Variant in plan.get("plots", []) as Array:
+			var plot := plot_variant as Dictionary
+			var plot_rect := plot.get("rect", Rect2i()) as Rect2i
+			if not plot_rect.has_point(cell):
+				continue
+			var plot_type := String(plot.get("type", ""))
+			if not SettlementEconomyService.is_shop_building_type(plot_type):
+				return {}
+			# One counter per building: the stock anchors on the plot,
+			# not the clicked tile, so every wall shares the shelves.
+			return {"type": plot_type, "anchor": plot_rect.position}
+	return {}
+
 func _shop_anchor_for_cell(cell: Vector2i) -> Vector2i:
 	var shop_type := String(_latest_civic_building_type_map.get(cell, ""))
 	var anchor := cell
@@ -5207,12 +5232,17 @@ func _with_market_hint(section_text: String) -> String:
 func _is_trade_mode() -> bool:
 	return _trade_shop_cell.x != 2147483647
 
-func _open_trade_popup(cell: Vector2i, shop_type: String) -> void:
-	var anchor := _shop_anchor_for_cell(cell)
-	if not _shop_stocks.has(anchor):
+func _open_trade_popup(cell: Vector2i, shop_type: String, anchor_override: Vector2i = Vector2i(2147483647, 2147483647)) -> void:
+	var anchor := anchor_override if anchor_override.x != 2147483647 else _shop_anchor_for_cell(cell)
+	# Shelves restock with the calendar: a new game day rerolls the
+	# shop's wares, so the forge cycles fresh tools and blades over time
+	# instead of selling the same three items forever.
+	var last_restock := int(_shop_restock_day.get(anchor, _game_day if _shop_stocks.has(anchor) else -1))
+	if not _shop_stocks.has(anchor) or last_restock < _game_day:
 		var stock_rng := RandomNumberGenerator.new()
-		stock_rng.seed = hash(seed_input.text.strip_edges()) ^ hash(anchor)
+		stock_rng.seed = hash(seed_input.text.strip_edges()) ^ hash(anchor) ^ (_game_day * 7919)
 		_shop_stocks[anchor] = SettlementEconomyService.generate_shop_stock(shop_type, stock_rng)
+		_shop_restock_day[anchor] = _game_day
 	_selected_chest_cell = Vector2i(2147483647, 2147483647)
 	_trade_shop_cell = anchor
 	# The leash measures from the clicked counter tile, not the stock anchor.
@@ -5242,6 +5272,13 @@ func _refresh_trade_panel() -> void:
 	if stock.is_empty():
 		chest_popup_status_label.text = "🪙 %d coins — the shelves are bare; come back later" % _player_coins
 
+## Tavern fare is eaten at the bar the moment it is bought: hearts and
+## a full belly instead of a backpack item.
+const TAVERN_MEAL_HEARTS := {
+	"Hearty Stew": 6, "Roast Meat": 5, "Smoked Ribs": 5, "Grilled Fish": 4,
+	"Loaf of Bread": 3, "Wheel of Cheese": 3, "Ale Keg": 2
+}
+
 func _buy_trade_item(slot_index: int) -> void:
 	var stock := _shop_stocks.get(_trade_shop_cell, []) as Array
 	if slot_index < 0 or slot_index >= stock.size():
@@ -5256,6 +5293,17 @@ func _buy_trade_item(slot_index: int) -> void:
 	entry["quantity"] = int(entry.get("quantity", 1)) - 1
 	if int(entry.get("quantity", 0)) <= 0:
 		stock.remove_at(slot_index)
+	if _trade_shop_type == "tavern" and TAVERN_MEAL_HEARTS.has(item_name):
+		var hearts := int(TAVERN_MEAL_HEARTS[item_name])
+		_player_hp = minf(_player_hp + float(hearts), _player_max_hp)
+		_player_satiety = minf(_player_satiety + float(hearts) * PlayerStatsService.SATIETY_MAX / 12.0, PlayerStatsService.SATIETY_MAX)
+		_update_hp_label()
+		_save_player_hp()
+		if _player_sprite != null:
+			_spawn_floating_text("+%d ❤" % hearts, _player_sprite.position + Vector2(0, -14), Color(0.95, 0.5, 0.5, 1.0))
+		_refresh_trade_panel()
+		chest_popup_status_label.text = "You eat the %s at the bar — +%d ❤ (🪙 %d left)" % [item_name, hearts, _player_coins]
+		return
 	_player_inventory[item_name] = int(_player_inventory.get(item_name, 0)) + 1
 	_save_player_inventory()
 	_refresh_trade_panel()
@@ -5834,6 +5882,12 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	var shop_type := _shop_type_at_cell(clicked_cell)
 	if not shop_type.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
 		_open_trade_popup(clicked_cell, shop_type)
+		return
+	# The hold city's workshops trade too: the forge sells tools and
+	# blades, the store buys ore and stone, the tavern serves meals.
+	var ward_shop := _ward_shop_at_cell(clicked_cell)
+	if not ward_shop.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
+		_open_trade_popup(clicked_cell, String(ward_shop.get("type", "")), ward_shop.get("anchor", clicked_cell) as Vector2i)
 		return
 	if _try_boat_action(clicked_cell):
 		return
@@ -7446,7 +7500,10 @@ func _plan_dwarfhold_main_floor(landmark: Dictionary, rng: RandomNumberGenerator
 		"ground": ground, "decor": decor, "blocked": blocked,
 		"sprites": sprites, "bounds": rect.grow(1),
 		"sconces": sconce_cells, "light_cells": light_cells,
-		"spawn_cells": spawn_cells, "stair": center
+		"spawn_cells": spawn_cells, "stair": center,
+		# The buildings keep their trades: clicks inside a plot open the
+		# matching shop counter (forge, tavern, general store).
+		"plots": plots
 	}
 
 ## A camp: roundish dirt clearing, campfire (or burning pyre) with a warm
@@ -8956,8 +9013,11 @@ func _update_ward_darkness() -> void:
 ## advertised ore), and dug cells persist per site in world settings so
 ## carved galleries survive streaming and reloads.
 const WARD_DIG_TOOL_DAMAGE := {
-	"Dwarven Pickaxe": 12, "Steel Pickaxe": 8, "Miner's Pick": 6,
-	"Copper Pick": 5, "Worn Pickaxe": 4, "Rusty Pick": 4
+	# Names match the real items the shops sell and drops grant - the
+	# old "Miner's Pick"/"Rusty Pick" spellings existed nowhere, so a
+	# bought pickaxe never actually dug any better.
+	"Dwarven Pickaxe": 12, "Steel Pickaxe": 8, "Miner's Pickaxe": 6,
+	"Copper Pick": 5, "Worn Pickaxe": 4, "Rusty Pickaxe": 4
 }
 const WARD_HAND_DIG_DAMAGE := 3
 const WARD_DIG_ORE_CHANCE_PERCENT := 9

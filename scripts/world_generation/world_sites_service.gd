@@ -56,11 +56,13 @@ static func store_journey_context(settings: Dictionary, site: Dictionary) -> voi
 			# in the gazetteer at world generation.
 			var site_geology: Dictionary = site.get("geology", {}) if site.get("geology") is Dictionary else {}
 			settings["dwarfhold_scene_geology"] = site_geology
-			# The surface ward now lives INSIDE the town scene (stage 1 of
-			# the merge): this journey fires from its descend-stair, so
-			# the hold's Great Hall arrival is the right landing. The
-			# overland flag stays a hold-side capability for old saves
-			# but is no longer written here.
+			# The hold's WHOLE main floor lives in the town scene now:
+			# this journey fires from the great hall's descend-stair, so
+			# the hold scene must land the walker in the first underhall
+			# below - never in its own (retired) duplicate city level.
+			settings["dwarfhold_scene_from_surface_stair"] = true
+			# The overland flag stays a hold-side capability for old
+			# saves but is no longer written here.
 			# Underdeep projections belong to the overworld's richer view;
 			# stale ones from another hold would project the wrong towns.
 			settings.erase("underdeep_sites")

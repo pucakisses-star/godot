@@ -119,7 +119,7 @@ const SHOP_STOCK_POOLS := {
 	"trade_supply_store": ["Stone", "Leather Strap", "Miner's Lantern", "Rusty Pickaxe", "Spade", "Casting Net", "Fish Trap", "Silk Line Spool"],
 	"market_stall": ["Loaf of Bread", "Wheel of Cheese", "Skein of Wool", "Bolt of Cloth", "Wax Candles", "Dried Fish", "Jar of Honey", "Cured Ham", "Jerky Strip", "Aged Sausage", "Rowanberries"],
 	"smithy": ["Iron Ingot", "Steel Ingot", "Copper Ingot", "Iron Nails", "Iron Horseshoes", "Miner's Pickaxe", "Stone Hammer", "Mason's Chisel", "Whetstone", "Chain Links"],
-	"forge": ["Iron Ingot", "Steel Ingot", "Steel Billet", "Miner's Pickaxe", "Steel Pickaxe", "Forged Blade", "Whetstone", "Smith's Tongs", "Mason's Chisel"],
+	"forge": ["Iron Ingot", "Steel Ingot", "Steel Billet", "Miner's Pickaxe", "Steel Pickaxe", "Dwarven Pickaxe", "Forged Blade", "Whetstone", "Smith's Tongs", "Mason's Chisel"],
 	"weapon_shop": ["Iron Ingot", "Steel Pickaxe", "Geologist's Hammer", "Fishing Spear", "Sledgehammer"],
 	"armor_shop": ["Iron Ingot", "Leather Strap", "Stone Hammer", "Miner's Lantern"],
 	"apothecary": ["Mushrooms", "Glowcap", "Spore Dust", "Frostcap", "Violet Veil", "Jar of Honey", "Mandrake Root", "Foxglove Sprig", "Frostleaf", "Firebloom", "Nightcap Bells", "Rowanberries", "Garlic Sprout", "Healing Potion", "Ironhide Draught", "Hunter's Tonic", "Fleetfoot Philter"],
