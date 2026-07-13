@@ -2525,6 +2525,9 @@ func _persist_world_sites() -> void:
 			# geology so entering via a caravan journey digs the same strata
 			# the overworld tooltip advertises.
 			site_record["geology"] = GeologyService.profile_for_tile(coord, details, map_seed)
+			# The lore's gate status becomes real in the surface scene: a
+			# "Closed" hold bars its mouth against outsiders.
+			site_record["access"] = String(details.get("dwarfhold_access", "Open"))
 		sites.append(site_record)
 	if ambient_candidate_count > ambient_sites.size():
 		print("[OverworldMap] ambient landmark sites truncated: kept %d of %d" % [ambient_sites.size(), ambient_candidate_count])

@@ -1923,6 +1923,8 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 	# The churchyard-and-park kit: headstones, coffin, statue, fountain
 	# quarters and the street lamp.
 	_paint_graveyard_tiles(augmented)
+	# A closed hold's iron-banded gate slab.
+	_paint_sealed_gate_tile(augmented)
 	# Lakeshore water plants (transparent decor over the animated water) and
 	# the snow-dusted copies of the two full-height trees.
 	_paint_water_plant_tiles(augmented)
@@ -2895,6 +2897,39 @@ func _paint_massif_rock_tiles(image: Image) -> void:
 ## cross headstones, a lidded 1x2 stone coffin, a moss-eaten statue, the
 ## four quarters of a two-tier stone fountain with pooling water, and a
 ## wrought-iron street lamp whose lantern glows above its post.
+## The barred mouth of a closed hold: a dressed-stone slab filling the
+## whole passage, crossed by two riveted iron bands. It reads as a gate
+## someone shut on purpose, not a wall that happens to be there.
+func _paint_sealed_gate_tile(image: Image) -> void:
+	var origin := (TILE_ATLAS.get("sealed_gate", Vector2i(10, 54)) as Vector2i) * 32
+	var slab := Color(0.30, 0.29, 0.32, 1.0)
+	var slab_light := Color(0.38, 0.37, 0.40, 1.0)
+	var seam := Color(0.22, 0.21, 0.24, 1.0)
+	var iron := Color(0.16, 0.16, 0.19, 1.0)
+	var rivet := Color(0.52, 0.51, 0.56, 1.0)
+	for y in range(32):
+		for x in range(32):
+			var pick := slab
+			# Dressed-block courses with staggered vertical seams.
+			if y % 8 == 0 or (x + (8 if (y / 8) % 2 == 0 else 0)) % 16 == 0:
+				pick = seam
+			elif (x * 13 + y * 7) % 11 == 0:
+				pick = slab_light
+			image.set_pixel(origin.x + x, origin.y + y, pick)
+	# Two iron bands with rivets, and a heavy jamb down both edges.
+	for band_y: int in [7, 21]:
+		for y in range(band_y, band_y + 4):
+			for x in range(32):
+				image.set_pixel(origin.x + x, origin.y + y, iron)
+		for rivet_x: int in [3, 11, 19, 27]:
+			image.set_pixel(origin.x + rivet_x, origin.y + band_y + 1, rivet)
+			image.set_pixel(origin.x + rivet_x + 1, origin.y + band_y + 1, rivet)
+	for y in range(32):
+		image.set_pixel(origin.x, origin.y + y, iron)
+		image.set_pixel(origin.x + 1, origin.y + y, iron)
+		image.set_pixel(origin.x + 30, origin.y + y, iron)
+		image.set_pixel(origin.x + 31, origin.y + y, iron)
+
 func _paint_graveyard_tiles(image: Image) -> void:
 	var stone := Color(0.62, 0.63, 0.66, 1.0)
 	var stone_dark := Color(0.45, 0.46, 0.5, 1.0)
@@ -5178,6 +5213,20 @@ func _shop_type_at_cell(cell: Vector2i) -> String:
 		return building_type
 	return ""
 
+## Why a sealed hold is sealed: chronicler's flavor, stable per site.
+const SEALED_GATE_REASONS: Array[String] = [
+	"\"The hold mourns. No strangers.\"",
+	"\"Plague walks the deep halls. Turn back.\"",
+	"\"War has come to the mountain. The gate stays shut.\"",
+	"\"The deep levels have gone silent. None enter.\"",
+	"\"Goblin banners in the pass. We open for no one.\"",
+	"\"By order of the Thane: sealed until the omen passes.\""
+]
+
+func _sealed_gate_reason(cell: Vector2i) -> String:
+	var site_key := _ward_site_key_for_cell(cell)
+	return SEALED_GATE_REASONS[absi(hash("seal_reason|%s" % site_key)) % SEALED_GATE_REASONS.size()]
+
 ## The ward city's workshops trade for real: a click inside a hold
 ## plot resolves to its building's shop counter. Returns {} off-plot
 ## and for buildings that keep no counter (palace, barracks, homes).
@@ -5889,6 +5938,11 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	if not ward_shop.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
 		_open_trade_popup(clicked_cell, String(ward_shop.get("type", "")), ward_shop.get("anchor", clicked_cell) as Vector2i)
 		return
+	# Knocking on a sealed hold gate earns only the reason it is shut.
+	if city_layer.get_cell_source_id(clicked_cell) == 0 \
+			and city_layer.get_cell_atlas_coords(clicked_cell) == (TILE_ATLAS.get("sealed_gate", Vector2i(-9, -9)) as Vector2i):
+		_spawn_floating_text(_sealed_gate_reason(clicked_cell), _cell_center_position(clicked_cell) + Vector2(0, -14), Color(0.85, 0.82, 0.9, 1.0))
+		return
 	if _try_boat_action(clicked_cell):
 		return
 	if _try_farm_action(clicked_cell):
@@ -6402,6 +6456,9 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 					"tile_atlas": Vector2i(-1, -1),
 					"structure": "dwarfhold_city",
 					"name": String(site.get("name", "")),
+					# The gazetteer's gate status: a Closed hold bars its
+					# mouth against outsiders in the stamped city.
+					"closed": String(site.get("access", "Open")) == "Closed",
 					"plan": {},
 					"rect": Rect2i(
 						anchor - Vector2i(HOLD_CITY_HALF_W + 1, HOLD_CITY_HALF_H * 2 + 1),
@@ -7406,6 +7463,26 @@ func _plan_dwarfhold_main_floor(landmark: Dictionary, rng: RandomNumberGenerator
 					break
 				ground[cell] = "hold:wall" if plot_edge else "hold:floor"
 	ground[center] = "hold:stairway_down"
+	# A closed hold bars its mouth: iron-banded slabs seal the FULL
+	# width of the south artery (three columns, two rows deep) so no
+	# gap remains beside the gate. The stone around it still yields to
+	# a pick, so the determined tunnel their own way in.
+	var gates_closed := bool(landmark.get("closed", false))
+	if gates_closed:
+		for seal_x in range(anchor.x - 1, anchor.x + 2):
+			ground[Vector2i(seal_x, anchor.y)] = "sealed_gate"
+			ground[Vector2i(seal_x, anchor.y - 1)] = "sealed_gate"
+	# The hold sheet has NO "wall" tile - the old key was silently
+	# skipped, leaving every building wall as unpainted (and walkable!)
+	# biome ground. Walls are hold stone, showing a carved face where
+	# open ground lies to their south, the same look the hold scene uses.
+	for wall_variant: Variant in ground.keys():
+		if String(ground[wall_variant]) != "hold:wall":
+			continue
+		var below := String(ground.get((wall_variant as Vector2i) + Vector2i(0, 1), ""))
+		var open_below := below.begins_with("hold:") and below != "hold:wall" \
+			and below != "hold:stone" and below != "hold:stone_face"
+		ground[wall_variant] = "hold:stone_face" if open_below else "hold:stone"
 	# Themed interiors: every BSP room is its own component, dressed by
 	# the same planners the villages use; light-throwing pieces double as
 	# lights for the ward's darkness shader.
@@ -7503,7 +7580,8 @@ func _plan_dwarfhold_main_floor(landmark: Dictionary, rng: RandomNumberGenerator
 		"spawn_cells": spawn_cells, "stair": center,
 		# The buildings keep their trades: clicks inside a plot open the
 		# matching shop counter (forge, tavern, general store).
-		"plots": plots
+		"plots": plots,
+		"closed": gates_closed
 	}
 
 ## A camp: roundish dirt clearing, campfire (or burning pyre) with a warm
@@ -8616,6 +8694,9 @@ func _stamp_gates_in_rect(rect: Rect2i) -> void:
 				_stamp_settlement_clearing(gate_rect, anchor)
 		var gate_label := Label.new()
 		gate_label.text = String(site.get("name", "Somewhere"))
+		# A closed hold announces itself: the name wears its status.
+		if String(site.get("class", "")) == "dwarfhold" and String(site.get("access", "Open")) == "Closed":
+			gate_label.text += "\n⛓ Gates sealed"
 		gate_label.add_theme_font_size_override("font_size", 18)
 		gate_label.add_theme_color_override("font_color", Color(0.98, 0.94, 0.82, 1.0))
 		gate_label.add_theme_color_override("font_outline_color", Color(0.1, 0.08, 0.06, 1.0))
@@ -8697,7 +8778,7 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 	var light_cells: Array[Vector2i] = []
 	for light_variant: Variant in plan.get("light_cells", []) as Array:
 		light_cells.append(light_variant as Vector2i)
-	_spawn_ward_overlay(gate_key, anchor, sconce_cells, light_cells)
+	_spawn_ward_overlay(gate_key, anchor, sconce_cells, light_cells, not bool(plan.get("closed", false)))
 	var spawn_cells: Dictionary = {}
 	for spawn_variant: Variant in plan.get("spawn_cells", []) as Array:
 		spawn_cells[spawn_variant as Vector2i] = true
@@ -8827,7 +8908,7 @@ var _ward_overlays: Dictionary = {}
 var _ward_torch_frames: SpriteFrames = null
 var _ward_torch_texture: Texture2D = null
 
-func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array[Vector2i], light_cells: Array[Vector2i] = []) -> void:
+func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array[Vector2i], light_cells: Array[Vector2i] = [], mouth_open: bool = true) -> void:
 	if gate_key.is_empty() or _ward_overlays.has(gate_key):
 		return
 	var tile_px := Vector2(float(tile_size.x), float(tile_size.y))
@@ -8874,11 +8955,13 @@ func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array
 			"phase": float(absi(light_cell.x * 11 + light_cell.y * 5))
 		})
 	# Daylight through the mouth, lamplight up the stairwell: two fixed
-	# pools that keep the way in and the way down readable.
+	# pools that keep the way in and the way down readable. A sealed
+	# gate lets no daylight past its iron.
 	var static_lights: Array = [
-		{"pos": _cell_center_position(Vector2i(anchor.x, anchor.y + 1)), "radius": WARD_MOUTH_LIGHT_TILES * tile_px.x},
 		{"pos": _cell_center_position(_hold_ward_stair_cell(anchor)), "radius": WARD_STAIR_LIGHT_TILES * tile_px.x}
 	]
+	if mouth_open:
+		static_lights.append({"pos": _cell_center_position(Vector2i(anchor.x, anchor.y + 1)), "radius": WARD_MOUTH_LIGHT_TILES * tile_px.x})
 	_ward_overlays[gate_key] = {
 		"material": overlay_material,
 		"nodes": nodes,

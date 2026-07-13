@@ -73,6 +73,7 @@ const TILE_COLOR_RULES: Array = [
 	["palm", Color(0.28, 0.48, 0.24, 1.0)],
 	["desert_bones", Color(0.80, 0.78, 0.68, 1.0)],
 	["desert_rock", Color(0.60, 0.44, 0.32, 1.0)],
+	["sealed_gate", Color(0.20, 0.20, 0.26, 1.0)],
 	["gravestone", Color(0.58, 0.58, 0.62, 1.0)],
 	["stone_coffin", Color(0.58, 0.58, 0.62, 1.0)],
 	["statue", Color(0.62, 0.62, 0.66, 1.0)],
@@ -108,7 +109,8 @@ const TILE_COLOR_RULES: Array = [
 ## The hold's own kit (the embedded dwarfhold city, tile source 1) gets
 ## explicit colors so its streets, walls and stairways read on the map.
 const HOLD_TILE_COLORS := {
-	"wall": Color(0.33, 0.30, 0.29, 1.0),
+	"stone": Color(0.33, 0.30, 0.29, 1.0),
+	"stone_face": Color(0.38, 0.35, 0.33, 1.0),
 	"floor": Color(0.58, 0.48, 0.34, 1.0),
 	"dirt": Color(0.46, 0.36, 0.25, 1.0),
 	"dirt_alt": Color(0.42, 0.33, 0.23, 1.0),
