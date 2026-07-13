@@ -462,6 +462,7 @@ const DWARFHOLD_SCENE_OVERLAND_KEY := "dwarfhold_scene_overland_arrival"
 ## stair descent lands in the first underhall and ascending from it
 ## returns to the surface city - the old level-0 city never shows.
 const DWARFHOLD_SCENE_FROM_SURFACE_KEY := "dwarfhold_scene_from_surface_stair"
+const DWARFHOLD_SCENE_GUILDS_KEY := "dwarfhold_scene_guilds"
 const TOWN_SCENE_PATH := "res://scenes/town_generation.tscn"
 
 ## Identity carried in from the overworld chronicle: the hold's name and,
@@ -1561,6 +1562,13 @@ func _apply_cached_dwarfhold_scene_seed() -> void:
 		_lair_beast = WorldChronicleService.lair_beast_for_tile(settings, _hold_tile)
 	var geology_variant: Variant = settings.get(DWARFHOLD_SCENE_GEOLOGY_KEY, null)
 	_journey_geology = (geology_variant as Dictionary).duplicate(true) if geology_variant is Dictionary else {}
+	# The guilds the overworld tooltip advertises: the scene's open
+	# factions adopt these names so the map's promise walks the halls.
+	_journey_guilds = []
+	for guild_variant: Variant in (settings.get(DWARFHOLD_SCENE_GUILDS_KEY, []) as Array if settings.get(DWARFHOLD_SCENE_GUILDS_KEY) is Array else []):
+		var guild_name := String(guild_variant).strip_edges()
+		if not guild_name.is_empty():
+			_journey_guilds.append(guild_name)
 	# One-shot: an overland walk-in spawns at the south gate; consumed so
 	# later level moves and reloads keep their own spawn logic.
 	_overland_arrival = bool(settings.get(DWARFHOLD_SCENE_OVERLAND_KEY, false))
@@ -4976,7 +4984,7 @@ func _assign_settlement_factions() -> void:
 			building_cells_by_type[building_type] = []
 		(building_cells_by_type[building_type] as Array).append(building_cell_variant)
 	_settlement_factions = SettlementFactionService.generate_factions(
-		"dwarf", _hold_state.selected_hold_population, building_cells_by_type, _rng
+		"dwarf", _hold_state.selected_hold_population, building_cells_by_type, _rng, _journey_guilds
 	)
 	## Chronicle grudges (a neighbor hold that fell, a beast still below)
 	## redirect one lodge's agenda toward the hold's real history.
@@ -6312,6 +6320,9 @@ var _geology: Dictionary = {}
 ## present it overrides the seed-derived profile so the pick finds what
 ## that mountain's tooltip advertised.
 var _journey_geology: Dictionary = {}
+## The guild names the overworld tooltip advertises for this hold; the
+## scene's open factions adopt them so map and halls agree.
+var _journey_guilds: Array[String] = []
 ## True when the player walked in overland through the mountain mouth
 ## (vs a map journey or stairs): they spawn at the hold's south gate.
 var _overland_arrival := false

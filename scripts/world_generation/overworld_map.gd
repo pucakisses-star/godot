@@ -1449,6 +1449,8 @@ func _store_selected_dwarfhold_scene_context(seed_text: String, tile_coord: Vect
 	settings[DWARFHOLD_SCENE_FALL_KEY] = String(details.get("fall_summary", ""))
 	# The hold digs the geology this exact tile advertises in the tooltip.
 	settings[DWARFHOLD_SCENE_GEOLOGY_KEY] = GeologyService.profile_for_tile(tile_coord, details, map_seed)
+	# ...and its factions carry the guild names the tooltip advertises.
+	settings["dwarfhold_scene_guilds"] = details.get("major_guilds", [])
 	settings["underdeep_sites"] = _build_underdeep_sites(tile_coord)
 	game_session.call("set_world_settings", settings)
 
@@ -2543,6 +2545,8 @@ func _persist_world_sites() -> void:
 			# The lore's gate status becomes real in the surface scene: a
 			# "Closed" hold bars its mouth against outsiders.
 			site_record["access"] = String(details.get("dwarfhold_access", "Open"))
+			# The advertised guilds become the hold's real open factions.
+			site_record["guilds"] = details.get("major_guilds", [])
 		sites.append(site_record)
 	if ambient_candidate_count > ambient_sites.size():
 		print("[OverworldMap] ambient landmark sites truncated: kept %d of %d" % [ambient_sites.size(), ambient_candidate_count])

@@ -56,6 +56,8 @@ static func store_journey_context(settings: Dictionary, site: Dictionary) -> voi
 			# in the gazetteer at world generation.
 			var site_geology: Dictionary = site.get("geology", {}) if site.get("geology") is Dictionary else {}
 			settings["dwarfhold_scene_geology"] = site_geology
+			# The map's advertised guilds become the hold's own factions.
+			settings["dwarfhold_scene_guilds"] = site.get("guilds", []) if site.get("guilds") is Array else []
 			# The hold's WHOLE main floor lives in the town scene now:
 			# this journey fires from the great hall's descend-stair, so
 			# the hold scene must land the walker in the first underhall
