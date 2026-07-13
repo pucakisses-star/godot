@@ -1988,13 +1988,13 @@ func _level_world_seed(level_index: int) -> int:
 	return _world_seed_hash ^ (level_index * 2654435761)
 
 func _show_level(target_level_index: int) -> void:
-	if _hold_state.generated_levels.is_empty():
+	if not _hold_state.has_levels():
 		depth_down_button.disabled = true
 		depth_up_button.disabled = true
 		depth_label.text = "Level 0 / 0"
 		return
 
-	_hold_state.current_level_index = clampi(target_level_index, 0, _hold_state.generated_levels.size() - 1)
+	_hold_state.current_level_index = _hold_state.clamp_index(target_level_index)
 	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	var grid := level_data.get("grid", {}) as Dictionary
 	_door_cells = level_data.get("door_cells", {}) as Dictionary
@@ -3132,7 +3132,7 @@ const EVICT_CHUNK_RADIUS := 4
 ## earn their protection - guarding them everywhere left unstamped
 ## chunks on shallow levels unevictable.
 func _chunk_neighborhood_has_stamp(chunk: Vector2i) -> bool:
-	var sites_stamp_here := _hold_state.current_level_index == _hold_state.generated_levels.size() - 1
+	var sites_stamp_here := _hold_state.is_deepest()
 	for dy in range(-1, 2):
 		for dx in range(-1, 2):
 			var neighbor := chunk + Vector2i(dx, dy)
@@ -3202,7 +3202,7 @@ func _evict_far_chunks(player_chunk: Vector2i) -> void:
 ## Walked back into an evicted area: the recorded torches, rails and
 ## carts get their sprites back.
 func _respawn_torches_in_rect(rect: Rect2i) -> void:
-	if _hold_state.generated_levels.is_empty():
+	if not _hold_state.has_levels():
 		return
 	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	for torch_cell_variant: Variant in (level_data.get("torches", []) as Array):
@@ -3230,7 +3230,7 @@ func _ensure_chunks_around(player_chunk: Vector2i) -> void:
 			var stamped_site := false
 			# Underdeep settlements live at the BOTTOM of the world: they
 			# stamp only on the deepest level, not once per stratum.
-			if _hold_state.current_level_index == _hold_state.generated_levels.size() - 1:
+			if _hold_state.is_deepest():
 				for site_variant: Variant in (_sites_by_chunk.get(key, []) as Array):
 					var site := site_variant as Dictionary
 					UndergroundWorldService.stamp_settlement_site(_latest_grid, _latest_floor_decor, site)
@@ -5536,7 +5536,7 @@ func _update_creature_spawning(delta: float) -> void:
 	_spawn_creature_at(cell, UndergroundCreatureService.pick_definition_index(Vector2(cell).length(), _rng))
 
 func _current_level_starmetal_cells() -> Array:
-	if _hold_state.generated_levels.is_empty():
+	if not _hold_state.has_levels():
 		return []
 	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	return level_data.get("starmetal_cells", []) as Array
@@ -5610,9 +5610,9 @@ func _populate_stratum_creatures(stratum: Dictionary) -> void:
 ## into the named beast, run by the same AI pipeline with boss stats.
 
 func _maybe_spawn_lair_boss() -> void:
-	if _lair_beast.is_empty() or _hold_state.generated_levels.is_empty():
+	if _lair_beast.is_empty() or not _hold_state.has_levels():
 		return
-	if _hold_state.current_level_index != _hold_state.generated_levels.size() - 1:
+	if not _hold_state.is_deepest():
 		return
 	## Re-check the register: the beast may have died this very visit.
 	if WorldChronicleService.is_beast_slain(_world_settings_snapshot(), String(_lair_beast.get("name", ""))):
@@ -6675,7 +6675,7 @@ func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 		_update_player_turn_movement(0.0)
 
 func _try_use_stairs_at_player_cell() -> bool:
-	if _hold_state.generated_levels.is_empty() or _hold_state.current_level_index < 0 or _hold_state.current_level_index >= _hold_state.generated_levels.size():
+	if not _hold_state.has_current():
 		return false
 
 	var stair_direction := _stair_direction_at_cell(_player_cell)

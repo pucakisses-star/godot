@@ -4141,13 +4141,13 @@ func _target_npcs_for_level(level_index: int, _level_count: int) -> int:
 	return _hold_state.target_resident_npcs
 
 func _show_level(target_level_index: int) -> void:
-	if _hold_state.generated_levels.is_empty():
+	if not _hold_state.has_levels():
 		depth_down_button.disabled = true
 		depth_up_button.disabled = true
 		depth_label.text = "Level 0 / 0"
 		return
 
-	_hold_state.current_level_index = clampi(target_level_index, 0, _hold_state.generated_levels.size() - 1)
+	_hold_state.current_level_index = _hold_state.clamp_index(target_level_index)
 	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	var grid := level_data.get("grid", {}) as Dictionary
 	_door_cells = level_data.get("door_cells", {}) as Dictionary
@@ -6016,7 +6016,7 @@ func _request_player_move_to_cell(target_cell: Vector2i) -> void:
 		_update_player_turn_movement(0.0)
 
 func _try_use_stairs_at_player_cell() -> bool:
-	if _hold_state.generated_levels.is_empty() or _hold_state.current_level_index < 0 or _hold_state.current_level_index >= _hold_state.generated_levels.size():
+	if not _hold_state.has_current():
 		return false
 
 	var stair_direction := _stair_direction_at_cell(_player_cell)
