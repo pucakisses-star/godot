@@ -761,6 +761,10 @@ const TOWN_TILE_ATLAS := {
 	"fountain_sw": Vector2i(7, 54),
 	"fountain_se": Vector2i(8, 54),
 	"street_lamp": Vector2i(9, 54),
+	# A closed hold's barred mouth: an iron-banded stone slab sealing the
+	# passage (painted at atlas build; impassable, so a sealed hold only
+	# opens to a pick through the mountain around it).
+	"sealed_gate": Vector2i(10, 54),
 	# Lakeshore water plants, painted into appended row 46 at atlas build time
 	# (town_generation._paint_water_plant_tiles; the shipped sheet has no
 	# aquatic plant art at all — verified by full-sheet inventory). Transparent
