@@ -732,6 +732,7 @@ var _is_first_age := false
 var _world_name := ""
 var _world_name_label: Label
 var _roads_layer: TileMapLayer
+var _roads_diagonal_layer: TileMapLayer
 var _ships_layer: Node2D
 var _ship_states: Array[Dictionary] = []
 var _overlay_dirty := {
@@ -10036,6 +10037,8 @@ func _update_caravans_visibility() -> void:
 		# The detailed view redraws roads as dirt tracks inside its own
 		# images; the world-scale brushwork would smear over them.
 		_roads_layer.visible = overlays_visible and not _region_mode
+	if _roads_diagonal_layer != null:
+		_roads_diagonal_layer.visible = overlays_visible and not _region_mode
 
 func _create_caravan_texture() -> Texture2D:
 	var image := Image.create(14, 11, false, Image.FORMAT_RGBA8)
@@ -10074,7 +10077,17 @@ func _build_road_tiles() -> void:
 		parent.add_child(_roads_layer)
 		var highland_index := highland_layer.get_index() if highland_layer != null else map_layer.get_index()
 		parent.move_child(_roads_layer, highland_index + 1)
+	if _roads_diagonal_layer == null:
+		# Diagonal connectors overlay the orthogonal pieces: a cell can
+		# carry both an end cap and a stroke out through its corner.
+		_roads_diagonal_layer = TileMapLayer.new()
+		_roads_diagonal_layer.name = "RoadsDiagonalLayer"
+		_roads_diagonal_layer.tile_set = map_layer.tile_set
+		var diagonal_parent := _roads_layer.get_parent()
+		diagonal_parent.add_child(_roads_diagonal_layer)
+		diagonal_parent.move_child(_roads_diagonal_layer, _roads_layer.get_index() + 1)
 	_roads_layer.clear()
+	_roads_diagonal_layer.clear()
 	if _route_segments.is_empty():
 		return
 	# Collect road cells from the route paths, skipping unroadable ground.
@@ -10106,6 +10119,21 @@ func _build_road_tiles() -> void:
 			mask |= 8
 		var segment := TILE_ATLAS_DEFS.road_segment_for_mask(mask, cell.x * 73856093 ^ cell.y * 19349663)
 		_roads_layer.set_cell(cell, _atlas_source_id, segment["atlas"] as Vector2i, int(segment["alt"]))
+		# Routes that STEP diagonally get a corner stroke on the overlay -
+		# but only when no orthogonal road cell already bridges the pair
+		# (both ends test the same two shared neighbours, so the stroke
+		# always draws from both sides or from neither).
+		var diagonal_mask := 0
+		if road_cells.has(cell + Vector2i(1, -1)) and (mask & 3) == 0:
+			diagonal_mask |= 1
+		if road_cells.has(cell + Vector2i(1, 1)) and (mask & 6) == 0:
+			diagonal_mask |= 2
+		if road_cells.has(cell + Vector2i(-1, 1)) and (mask & 12) == 0:
+			diagonal_mask |= 4
+		if road_cells.has(cell + Vector2i(-1, -1)) and (mask & 9) == 0:
+			diagonal_mask |= 8
+		if diagonal_mask > 0:
+			_roads_diagonal_layer.set_cell(cell, _atlas_source_id, TILE_ATLAS_DEFS.road_diagonal_for_mask(diagonal_mask))
 		# Roads clear the woods they cut through, like the browser overlay.
 		if tree_layer != null and tree_layer.get_cell_source_id(cell) >= 0:
 			tree_layer.erase_cell(cell)
