@@ -196,6 +196,12 @@ var _surface_site_road_traced: Dictionary = {}
 var _surface_landmark_blocked_cells: Dictionary = {}
 var _surface_world_seed_text := ""
 var _surface_arrival_lock := false
+## Phase 1 seamless surface<->deep column: when on, a hold's mouth stair
+## descends into its deep halls as a z-change in THIS scene instead of a
+## journey swap to the hold scene. Off by default (and until the descent
+## branch is wired) so production behaviour is unchanged; a harness or a
+## future debug toggle flips it via the "seamless_hold_descent" setting.
+var _seamless_hold_descent := false
 var _surface_road_paths: Array[Array] = []
 ## Grass cells beside lane junctions that host a wooden direction post,
 ## planned by the lane tracer and rendered through _pick_decor_tile.
@@ -3358,6 +3364,7 @@ func _apply_cached_town_scene_seed() -> void:
 	_town_is_village = bool(settings.get(TOWN_SCENE_VILLAGE_KEY, false))
 	_wild_mode = bool(settings.get(TOWN_SCENE_WILD_KEY, false))
 	_wild_water = _wild_mode and bool(settings.get(TOWN_SCENE_WILD_WATER_KEY, false))
+	_seamless_hold_descent = bool(settings.get("seamless_hold_descent", false))
 	if _wild_mode:
 		# Name the header for the wilderness, not "Unnamed Town".
 		var wild_title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
@@ -9298,15 +9305,45 @@ func _check_surface_arrival() -> void:
 		if scene_path.is_empty():
 			continue
 		_surface_arrival_lock = true
-		var game_session := get_node_or_null("/root/GameSession")
-		if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		# Phase 1: a hold's mouth stair descends into its deep halls. Once
+		# the seamless path is on, that descent becomes a z-change WITHIN
+		# this scene (no load screen) instead of a swap to the hold scene.
+		# Until then - and always with the flag off - it is the journey
+		# swap exactly as before, so this is the single hook the seamless
+		# branch flips against.
+		if _hold_descent_is_seamless(site):
+			_begin_seamless_hold_descent(gate, site)
 			return
-		var settings: Dictionary = game_session.call("get_world_settings")
-		WorldSitesService.store_journey_context(settings, site)
-		game_session.call("set_world_settings", settings)
-		_set_save_status("You arrive at %s." % String(site.get("name", "your destination")), Color(0.85, 0.9, 0.7, 1.0))
-		SceneCacheService.request_change(self, scene_path)
+		_begin_site_journey(site, scene_path)
 		return
+
+## True only for a hold's mouth when the seamless-descent capability is
+## enabled. Every other arrival - towns, dungeons, and holds with the
+## capability off (the default) - keeps the journey swap.
+func _hold_descent_is_seamless(site: Dictionary) -> bool:
+	return _seamless_hold_descent and String(site.get("class", "")) == "dwarfhold"
+
+## The classic arrival: store the destination's journey context and hand
+## over to its scene behind the fade. Extracted so the descent decision
+## lives in one place.
+func _begin_site_journey(site: Dictionary, scene_path: String) -> void:
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings") or not game_session.has_method("set_world_settings"):
+		return
+	var settings: Dictionary = game_session.call("get_world_settings")
+	WorldSitesService.store_journey_context(settings, site)
+	game_session.call("set_world_settings", settings)
+	_set_save_status("You arrive at %s." % String(site.get("name", "your destination")), Color(0.85, 0.9, 0.7, 1.0))
+	SceneCacheService.request_change(self, scene_path)
+
+## Descend a hold's mouth stair into its deep halls without leaving the
+## scene. Wired in the next commit against the town's own underground
+## renderer; the capability flag stays off until it lands, so this is
+## never reached in production yet.
+func _begin_seamless_hold_descent(_gate: Dictionary, site: Dictionary) -> void:
+	# Not yet implemented: fall back to the journey swap so enabling the
+	# flag early can never strand the walker on the stair.
+	_begin_site_journey(site, WorldSitesService.scene_path_for(site))
 
 func _player_on_any_gate_cell() -> bool:
 	for gate: Dictionary in _surface_gates:
