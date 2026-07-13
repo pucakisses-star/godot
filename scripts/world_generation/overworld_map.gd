@@ -572,6 +572,9 @@ var _loading_progress_target := 0.0
 @onready var structure_details_economy_label: RichTextLabel = get_node_or_null(
 	"MapUi/StructureDetailsDialog/DetailsMargin/DetailsTabs/Economy/EconomyText"
 )
+@onready var structure_details_policies_label: RichTextLabel = get_node_or_null(
+	"MapUi/StructureDetailsDialog/DetailsMargin/DetailsTabs/Policies/PoliciesText"
+)
 @onready var tooltip_panel: PanelContainer = get_node_or_null("MapUi/MapTooltip")
 
 ## The Dwarf Fortress region zoom: double-clicking swaps the whole map for
@@ -1659,6 +1662,18 @@ func _show_structure_details_modal(tile_coord: Vector2i, details: Dictionary) ->
 	structure_details_dialog.title = "Structure Details — %s" % settlement_name
 	if structure_details_tabs != null:
 		structure_details_tabs.current_tab = 0
+	# Holds govern themselves: the Policies tab carries their gate law,
+	# taxes, trade bans and the Thane's edicts. Other structures keep no
+	# code of law, so the tab hides for them.
+	if structure_details_policies_label != null and structure_details_tabs != null:
+		var policies_container := structure_details_policies_label.get_parent() as Control
+		var policies_tab_index := structure_details_tabs.get_tab_idx_from_control(policies_container)
+		if policies_tab_index >= 0:
+			if _is_dwarfhold_structure(details):
+				structure_details_tabs.set_tab_hidden(policies_tab_index, false)
+				_set_details_tab_text(structure_details_policies_label, _dwarfhold_policies_bbcode(tile_coord, details))
+			else:
+				structure_details_tabs.set_tab_hidden(policies_tab_index, true)
 
 	# No writer ever sets a "biome" key on the details dict; derive the
 	# display label from the tile itself.
@@ -8624,6 +8639,82 @@ func _dwarfhold_classification_for_tile(tile: Vector2i) -> Dictionary:
 		"label": "Dwarfhold",
 		"population_range": Vector2i(900, 4800)
 	}
+
+## --- Hold policies -----------------------------------------------------------
+## Every hold governs itself: gate law, taxes, trade bans, arms rules,
+## justice and the Thane's standing edicts, all seeded from the tile so
+## the same world always keeps the same code. Shown in the Policies tab
+## of the hold's details panel.
+const HOLD_TAX_TITHES: Array[String] = [
+	"One part in twenty of all ore sold within the walls",
+	"One part in ten of all ore sold within the walls",
+	"One part in eight of all ore sold, doubled for gold",
+	"A flat toll of two coins on every market-day stall"
+]
+const HOLD_TRADE_LAWS: Array[String] = [
+	"Export of raw gems is forbidden; cut stones trade freely",
+	"No timber leaves the hold while the deep braces want for it",
+	"Outsider caravans trade in the surface ward only",
+	"Salt and grain are bought at fixed price, by old compact",
+	"All ingots bear the hold's stamp before sale"
+]
+const HOLD_ARMS_LAWS: Array[String] = [
+	"Outsiders peace-bond their blades at the gate",
+	"No axe drawn under the mountain save in the practice yard",
+	"Only sworn dwarves may bear arms past the great hall",
+	"Hammers and picks are tools, not weapons - the guard decides which"
+]
+const HOLD_JUSTICE_LAWS: Array[String] = [
+	"Theft is repaid tenfold or worked off in the deep shafts",
+	"Blood spilt under the mountain is judged by the Thane alone",
+	"Oathbreakers are exiled through the mouth at dawn",
+	"Disputes are settled by the Code of the Deep, as carved",
+	"False weights cost a merchant their stall and their beard-rings"
+]
+const HOLD_EDICTS: Array[String] = [
+	"Ale is rationed until the next harvest caravan",
+	"No open flame within ten paces of the grain cellars",
+	"All strangers are escorted beyond the second stair",
+	"The forges burn day and night until the levy is met",
+	"Beards braided in mourning until the season turns",
+	"The deep galleries are shut past the third bell",
+	"Every household owes one basket of mushrooms to the stores",
+	"Singing in the ale hall is a right; brawling costs a tooth"
+]
+
+func _dwarfhold_policies_bbcode(tile_coord: Vector2i, details: Dictionary) -> String:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("hold_policies|%d|%d|%d" % [tile_coord.x, tile_coord.y, map_seed])
+	var access := String(details.get("dwarfhold_access", "Open")).strip_edges()
+	var classification_key := String(details.get("settlement_classification_key", ""))
+	if classification_key == "abandoned":
+		return "[b]The halls keep no law now.[/b]\n\nThe old code is still carved beside the gate:\n• %s\n• %s\n\nNo one remains to enforce it." % [
+			HOLD_JUSTICE_LAWS[rng.randi_range(0, HOLD_JUSTICE_LAWS.size() - 1)],
+			HOLD_ARMS_LAWS[rng.randi_range(0, HOLD_ARMS_LAWS.size() - 1)]
+		]
+	var gate_line := "Open — outsiders may pass the mouth freely" if access != "Closed" \
+		else "Sealed — no outsiders enter or leave; the gate slabs are barred"
+	var ruler_title := String(details.get("ruler_title", "")).strip_edges()
+	var ruler_name := String(details.get("ruler_name", "")).strip_edges()
+	var ruler_display := ("%s %s" % [ruler_title, ruler_name]).strip_edges()
+	if ruler_display.is_empty():
+		ruler_display = "the Thane"
+	var edict_pool := HOLD_EDICTS.duplicate()
+	var edicts: Array[String] = []
+	for _edict in range(rng.randi_range(2, 3)):
+		edicts.append(String(edict_pool.pop_at(rng.randi_range(0, edict_pool.size() - 1))))
+	var edict_lines := ""
+	for edict: String in edicts:
+		edict_lines += "• %s\n" % edict
+	return "[b]Gates:[/b] %s\n\n[b]Taxes:[/b] %s\n\n[b]Trade law:[/b] %s\n\n[b]Arms law:[/b] %s\n\n[b]Justice:[/b] %s\n\n[b]Standing edicts of %s[/b]\n%s" % [
+		gate_line,
+		HOLD_TAX_TITHES[rng.randi_range(0, HOLD_TAX_TITHES.size() - 1)],
+		HOLD_TRADE_LAWS[rng.randi_range(0, HOLD_TRADE_LAWS.size() - 1)],
+		HOLD_ARMS_LAWS[rng.randi_range(0, HOLD_ARMS_LAWS.size() - 1)],
+		HOLD_JUSTICE_LAWS[rng.randi_range(0, HOLD_JUSTICE_LAWS.size() - 1)],
+		ruler_display,
+		edict_lines
+	]
 
 func _dwarfhold_access_status_for_classification(classification_key: String, rng: RandomNumberGenerator) -> String:
 	if classification_key == "abandoned":
