@@ -1890,6 +1890,11 @@ func _build_town_atlas_texture(base_texture: Texture2D) -> ImageTexture:
 	_paint_sand_pattern_tiles(augmented)
 	_paint_desert_flora_tiles(augmented)
 	_paint_sandstone_ruin_tiles(augmented)
+	# The hold massif's grey mountain stone.
+	_paint_massif_rock_tiles(augmented)
+	# The churchyard-and-park kit: headstones, coffin, statue, fountain
+	# quarters and the street lamp.
+	_paint_graveyard_tiles(augmented)
 	# Lakeshore water plants (transparent decor over the animated water) and
 	# the snow-dusted copies of the two full-height trees.
 	_paint_water_plant_tiles(augmented)
@@ -2822,6 +2827,174 @@ func _paint_sandstone_ruin_tiles(image: Image) -> void:
 				elif tx >= right - 3:
 					tone = brick_shade
 				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+
+## The massif's mountain stone: cold grey crag with strong faceting so a
+## hold's mountain reads as ROCK on any ground - the first massif reused
+## sandy scree tiles and disappeared into dirt-toned biomes. Three
+## shades: the body, a darker foot rim, and a light-catching top.
+func _paint_massif_rock_tiles(image: Image) -> void:
+	var shades := {
+		"massif_rock": [Color(0.47, 0.48, 0.52, 1.0), Color(0.36, 0.37, 0.41, 1.0), Color(0.58, 0.59, 0.63, 1.0)],
+		"massif_rock_dark": [Color(0.33, 0.34, 0.38, 1.0), Color(0.24, 0.25, 0.29, 1.0), Color(0.42, 0.43, 0.47, 1.0)],
+		"massif_rock_top": [Color(0.58, 0.6, 0.65, 1.0), Color(0.46, 0.48, 0.53, 1.0), Color(0.72, 0.74, 0.79, 1.0)]
+	}
+	for key: String in shades.keys():
+		var coords := TILE_ATLAS.get(key, Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var palette := shades[key] as Array
+		var body := palette[0] as Color
+		var crack := palette[1] as Color
+		var facet := palette[2] as Color
+		var origin := coords * tile_size
+		for ty in range(tile_size.y):
+			for tx in range(tile_size.x):
+				var tone := body
+				var grain := (tx * 73856093 ^ ty * 19349663) & 0x7fffffff
+				# Angular facet plates split by crack seams.
+				var plate := ((tx * 5 + ty * 3) / 16 + (tx * 2 - ty) / 13) % 3
+				if plate == 1:
+					tone = facet if grain % 7 < 3 else body
+				elif plate == 2 and grain % 5 < 2:
+					tone = crack
+				if grain % 43 == 0:
+					tone = crack
+				elif grain % 53 == 1:
+					tone = facet
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+
+## The churchyard-and-park kit, all on transparent surrounds: rounded and
+## cross headstones, a lidded 1x2 stone coffin, a moss-eaten statue, the
+## four quarters of a two-tier stone fountain with pooling water, and a
+## wrought-iron street lamp whose lantern glows above its post.
+func _paint_graveyard_tiles(image: Image) -> void:
+	var stone := Color(0.62, 0.63, 0.66, 1.0)
+	var stone_dark := Color(0.45, 0.46, 0.5, 1.0)
+	var stone_light := Color(0.76, 0.77, 0.8, 1.0)
+	var moss := Color(0.4, 0.55, 0.34, 1.0)
+	var water := Color(0.4, 0.62, 0.82, 1.0)
+	var water_light := Color(0.62, 0.8, 0.94, 1.0)
+	var iron := Color(0.18, 0.18, 0.21, 1.0)
+	var lamp_glow := Color(1.0, 0.85, 0.45, 1.0)
+	# Headstone: rounded slab with an inscription line and grass shadow.
+	var grave_coords := TILE_ATLAS.get("gravestone", Vector2i(-1, -1)) as Vector2i
+	if grave_coords.x >= 0:
+		var origin := grave_coords * tile_size
+		for ty in range(8, 28):
+			for tx in range(10, 22):
+				var tone := stone
+				if ty < 12 and (tx < 12 or tx > 19):
+					continue
+				if tx >= 20 or ty >= 26:
+					tone = stone_dark
+				elif tx <= 11 and ty < 20:
+					tone = stone_light
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+		for tx in range(13, 19):
+			image.set_pixel(origin.x + tx, origin.y + 16, stone_dark)
+			if tx < 17:
+				image.set_pixel(origin.x + tx, origin.y + 19, stone_dark)
+		image.set_pixel(origin.x + 11, origin.y + 26, moss)
+		image.set_pixel(origin.x + 12, origin.y + 27, moss)
+	# Cross marker.
+	var cross_coords := TILE_ATLAS.get("gravestone_cross", Vector2i(-1, -1)) as Vector2i
+	if cross_coords.x >= 0:
+		var origin := cross_coords * tile_size
+		for ty in range(6, 28):
+			for tx in range(14, 18):
+				image.set_pixel(origin.x + tx, origin.y + ty, stone if tx < 16 else stone_dark)
+		for tx in range(9, 23):
+			for ty in range(11, 15):
+				image.set_pixel(origin.x + tx, origin.y + ty, stone if ty < 13 else stone_dark)
+		image.set_pixel(origin.x + 15, origin.y + 27, moss)
+	# The coffin: a lidded sarcophagus lying head-north (art spans two
+	# rows; the atlas anchor is the FOOT row, head drawn above).
+	var coffin_coords := TILE_ATLAS.get("stone_coffin", Vector2i(-1, -1)) as Vector2i
+	if coffin_coords.x >= 0:
+		var origin := coffin_coords * tile_size
+		for ty in range(4, 62):
+			var half_width := 9 if ty < 14 else (11 if ty < 40 else 9)
+			for tx in range(16 - half_width, 16 + half_width):
+				var tone := stone
+				if tx >= 16 + half_width - 3 or ty >= 58:
+					tone = stone_dark
+				elif tx <= 16 - half_width + 2:
+					tone = stone_light
+				image.set_pixel(origin.x + tx, origin.y + ty, tone)
+		# Lid seam and a moss bloom on the shoulder.
+		for ty in range(6, 60):
+			if ty % 2 == 0:
+				image.set_pixel(origin.x + 16, origin.y + ty, stone_dark)
+		for moss_spot: Vector2i in [Vector2i(9, 18), Vector2i(10, 19), Vector2i(22, 44), Vector2i(21, 45)]:
+			image.set_pixel(origin.x + moss_spot.x, origin.y + moss_spot.y, moss)
+	# The mossy statue: a robed figure gone green at the edges.
+	var statue_coords := TILE_ATLAS.get("statue_mossy", Vector2i(-1, -1)) as Vector2i
+	if statue_coords.x >= 0:
+		var origin := statue_coords * tile_size
+		for ty in range(22, 30):
+			for tx in range(8, 24):
+				image.set_pixel(origin.x + tx, origin.y + ty, stone_dark if ty > 27 else stone)
+		for ty in range(8, 22):
+			var half_width := 3 if ty < 12 else 5
+			for tx in range(16 - half_width, 16 + half_width):
+				image.set_pixel(origin.x + tx, origin.y + ty, stone if tx < 18 else stone_dark)
+		for tx in range(14, 18):
+			image.set_pixel(origin.x + tx, origin.y + 5, stone_light)
+			image.set_pixel(origin.x + tx, origin.y + 6, stone)
+		image.set_pixel(origin.x + 13, origin.y + 6, stone)
+		image.set_pixel(origin.x + 18, origin.y + 6, stone)
+		for moss_spot: Vector2i in [Vector2i(12, 15), Vector2i(11, 16), Vector2i(20, 12), Vector2i(9, 24), Vector2i(22, 25), Vector2i(10, 23)]:
+			image.set_pixel(origin.x + moss_spot.x, origin.y + moss_spot.y, moss)
+	# The fountain quarters: assembled 2x2, a raised stone rim around a
+	# pool with a lit inner basin; NW carries the spout tier.
+	for quarter: String in ["fountain_nw", "fountain_ne", "fountain_sw", "fountain_se"]:
+		var coords := TILE_ATLAS.get(quarter, Vector2i(-1, -1)) as Vector2i
+		if coords.x < 0:
+			continue
+		var origin := coords * tile_size
+		var flip_x := quarter == "fountain_ne" or quarter == "fountain_se"
+		var flip_y := quarter == "fountain_sw" or quarter == "fountain_se"
+		for ty in range(tile_size.y):
+			for tx in range(tile_size.x):
+				# Work in the NW quarter's frame; mirror for the others.
+				var ux := (tile_size.x - 1 - tx) if flip_x else tx
+				var uy := (tile_size.y - 1 - ty) if flip_y else ty
+				var fx := float(ux) / 32.0
+				var fy := float(uy) / 32.0
+				var ring := sqrt((1.0 - fx) * (1.0 - fx) + (1.0 - fy) * (1.0 - fy))
+				var tone := Color(0, 0, 0, 0)
+				if ring < 0.55:
+					tone = water_light if (ux + uy) % 9 < 2 else water
+				elif ring < 0.75:
+					tone = stone_light if ring < 0.62 else stone
+				elif ring < 0.95:
+					tone = stone_dark if (ux * 7 + uy * 3) % 11 == 0 else stone
+				if tone.a > 0.0:
+					image.set_pixel(origin.x + tx, origin.y + ty, tone)
+		if quarter == "fountain_nw":
+			# The upper basin and spout live on the NW quarter, near the join.
+			for ty in range(20, 32):
+				for tx in range(20, 32):
+					var d := Vector2(float(tx) - 32.0, float(ty) - 32.0).length()
+					if d < 10.0:
+						image.set_pixel(origin.x + tx, origin.y + ty, stone_light if d > 7.0 else water_light)
+	# The street lamp: iron post on the anchor row, glowing lantern above.
+	var lamp_coords := TILE_ATLAS.get("street_lamp", Vector2i(-1, -1)) as Vector2i
+	if lamp_coords.x >= 0:
+		var origin := lamp_coords * tile_size
+		for ty in range(10, 62):
+			image.set_pixel(origin.x + 15, origin.y + ty, iron)
+			image.set_pixel(origin.x + 16, origin.y + ty, iron)
+		for tx in range(12, 20):
+			image.set_pixel(origin.x + tx, origin.y + 60, iron)
+			image.set_pixel(origin.x + tx, origin.y + 61, iron)
+		# The lantern: iron cage around a warm pane.
+		for ty in range(2, 12):
+			for tx in range(11, 21):
+				var edge := tx <= 12 or tx >= 19 or ty <= 3 or ty >= 10
+				image.set_pixel(origin.x + tx, origin.y + ty, iron if edge else lamp_glow)
+		image.set_pixel(origin.x + 15, origin.y + 1, iron)
+		image.set_pixel(origin.x + 16, origin.y + 1, iron)
 
 ## --- painted water plants and snow trees --------------------------------------
 
@@ -7316,6 +7489,8 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 	_stamp_gates_in_rect(rect)
 	_stamp_landmarks_in_chunk(chunk, rect)
 	_stamp_snow_ruins_in_chunk(rect)
+	_stamp_graveyards_in_chunk(rect)
+	_stamp_road_lamps_in_chunk(rect)
 	_clear_understory_under_trees(rect)
 
 ## --- Randomly generated ice ruins ------------------------------------------
@@ -7502,6 +7677,162 @@ func _snow_ruin_layout(anchor: Vector2i) -> Dictionary:
 			break
 	_snow_ruin_layouts[anchor] = layout
 	return layout
+
+## --- Churchyards and street lamps -------------------------------------------
+## Old burial grounds scattered through temperate wilds, one candidate
+## per lattice block of WORLD space like the ruined forts: rows of
+## headstones and cross markers, lidded stone coffins, a moss-eaten
+## statue or a working two-tier fountain at the heart, and wrought
+## street lamps at the gate corners. Everything is decor over untouched
+## ground, so the yard sits naturally in whatever grass or autumn forest
+## it was dug in.
+const GRAVEYARD_LATTICE := 64
+const GRAVEYARD_CHANCE := 0.22
+const GRAVEYARD_HALF := Vector2i(5, 4)
+
+var _graveyard_layouts: Dictionary = {}
+var _lamp_glow_sprites: Dictionary = {}
+
+func _stamp_graveyards_in_chunk(rect: Rect2i) -> void:
+	if _surface_biome_ctx.is_empty():
+		return
+	var world_rect := Rect2i(rect.position + _surface_world_origin, rect.size)
+	var pad := GRAVEYARD_HALF + Vector2i(1, 2)
+	var min_block_x := int(floor(float(world_rect.position.x - pad.x) / float(GRAVEYARD_LATTICE)))
+	var min_block_y := int(floor(float(world_rect.position.y - pad.y) / float(GRAVEYARD_LATTICE)))
+	var max_block_x := int(floor(float(world_rect.end.x + pad.x) / float(GRAVEYARD_LATTICE)))
+	var max_block_y := int(floor(float(world_rect.end.y + pad.y) / float(GRAVEYARD_LATTICE)))
+	for block_y in range(min_block_y, max_block_y + 1):
+		for block_x in range(min_block_x, max_block_x + 1):
+			var anchor := _graveyard_anchor(Vector2i(block_x, block_y))
+			if anchor.x == 2147483647:
+				continue
+			var layout := _graveyard_layout(anchor)
+			for cell_variant: Variant in layout.keys():
+				var cell := cell_variant as Vector2i
+				if not rect.has_point(cell):
+					continue
+				if _latest_grid.has(cell) or _surface_road_cells.has(cell) or _surface_landmark_blocked_cells.has(cell):
+					continue
+				# Only stand stones on open painted ground - never in water
+				# or on crag.
+				if city_layer.get_cell_source_id(cell) < 0:
+					continue
+				if not _is_passable_atlas_tile(city_layer.get_cell_atlas_coords(cell)):
+					continue
+				if decor_layer.get_cell_source_id(cell) >= 0:
+					decor_layer.erase_cell(cell)
+				_place_tile(decor_layer, cell, String(layout[cell]))
+
+func _graveyard_anchor(block: Vector2i) -> Vector2i:
+	var sentinel := Vector2i(2147483647, 2147483647)
+	var roll := hash("graveyard|%s|%d|%d" % [_surface_world_seed_text, block.x, block.y])
+	if float(roll & 0xffff) / 65535.0 > GRAVEYARD_CHANCE:
+		return sentinel
+	var span := GRAVEYARD_LATTICE - maxi(GRAVEYARD_HALF.x, GRAVEYARD_HALF.y) * 2 - 4
+	var world_anchor := block * GRAVEYARD_LATTICE + Vector2i(
+		GRAVEYARD_HALF.x + 2 + (roll >> 16) % span,
+		GRAVEYARD_HALF.y + 2 + (roll >> 32) % span
+	)
+	var biome := SurfaceWorldService.biome_for_world_cell(_surface_biome_ctx, world_anchor)
+	if biome != (TILE_ATLAS_DEFS.BIOME_GRASSLAND as String) and biome != (TILE_ATLAS_DEFS.BIOME_FOREST as String):
+		return sentinel
+	var anchor := world_anchor - _surface_world_origin
+	for gate: Dictionary in _surface_gates:
+		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		if maxi(absi(gate_anchor.x - anchor.x), absi(gate_anchor.y - anchor.y)) < SNOW_RUIN_GATE_CLEARANCE:
+			return sentinel
+	return anchor
+
+## {local cell: decor key}. Rows of markers around a centerpiece, a few
+## coffins among them, lamps on the south corners.
+func _graveyard_layout(anchor: Vector2i) -> Dictionary:
+	var cached_variant: Variant = _graveyard_layouts.get(anchor)
+	if cached_variant is Dictionary:
+		return cached_variant as Dictionary
+	if _graveyard_layouts.size() > 24:
+		_graveyard_layouts.clear()
+	var world_anchor := anchor + _surface_world_origin
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("graveyard_layout|%s|%d|%d" % [_surface_world_seed_text, world_anchor.x, world_anchor.y])
+	var layout: Dictionary = {}
+	# The centerpiece: a fountain in park-like yards, a statue in the rest.
+	if rng.randf() < 0.45:
+		layout[anchor + Vector2i(0, -1)] = "fountain_nw"
+		layout[anchor + Vector2i(1, -1)] = "fountain_ne"
+		layout[anchor + Vector2i(0, 0)] = "fountain_sw"
+		layout[anchor + Vector2i(1, 0)] = "fountain_se"
+	else:
+		layout[anchor] = "statue_mossy"
+	# Marker rows, spaced like the reference yard; coffins take a slot in
+	# roughly one row per yard.
+	for row_y in range(-GRAVEYARD_HALF.y, GRAVEYARD_HALF.y + 1, 2):
+		for col_x in range(-GRAVEYARD_HALF.x, GRAVEYARD_HALF.x + 1, 2):
+			var cell := anchor + Vector2i(col_x, row_y)
+			if layout.has(cell) or absi(col_x) <= 1 and absi(row_y) <= 1:
+				continue
+			var marker_roll := rng.randf()
+			if marker_roll < 0.3:
+				continue
+			if marker_roll < 0.42 and row_y > -GRAVEYARD_HALF.y:
+				# Coffins anchor at their FOOT; the head row above must
+				# stay inside the yard.
+				layout[cell] = "stone_coffin"
+			elif marker_roll < 0.75:
+				layout[cell] = "gravestone"
+			else:
+				layout[cell] = "gravestone_cross"
+	# Lamps light the yard's south corners.
+	layout[anchor + Vector2i(-GRAVEYARD_HALF.x, GRAVEYARD_HALF.y)] = "street_lamp"
+	layout[anchor + Vector2i(GRAVEYARD_HALF.x, GRAVEYARD_HALF.y)] = "street_lamp"
+	_graveyard_layouts[anchor] = layout
+	return layout
+
+## Wrought lamps pace the wild roads: roughly one per eleven road cells,
+## set on the verge beside the trail, each with a warm breathing glow.
+func _stamp_road_lamps_in_chunk(rect: Rect2i) -> void:
+	if _surface_road_cells.is_empty():
+		return
+	for y in range(rect.position.y, rect.end.y):
+		for x in range(rect.position.x, rect.end.x):
+			var road_cell := Vector2i(x, y)
+			if not _surface_road_cells.has(road_cell):
+				continue
+			var world_cell := road_cell + _surface_world_origin
+			if (hash("road_lamp|%d|%d" % [world_cell.x, world_cell.y]) & 0xffff) % 11 != 0:
+				continue
+			for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+				var verge := road_cell + offset
+				if not rect.has_point(verge):
+					continue
+				if _surface_road_cells.has(verge) or _latest_grid.has(verge) or _lamp_glow_sprites.has(verge):
+					continue
+				if city_layer.get_cell_source_id(verge) < 0:
+					continue
+				if not _is_passable_atlas_tile(city_layer.get_cell_atlas_coords(verge)):
+					continue
+				if decor_layer.get_cell_source_id(verge) >= 0:
+					continue
+				_place_tile(decor_layer, verge, "street_lamp")
+				_spawn_lamp_glow(verge)
+				break
+
+func _spawn_lamp_glow(cell: Vector2i) -> void:
+	if _lamp_glow_sprites.has(cell):
+		return
+	var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(
+		_cell_center_position(cell) + Vector2(0.0, -float(tile_size.y)),
+		2.2 * float(tile_size.x),
+		Color(1.0, 0.8, 0.42, 1.0)
+	)
+	glow.visible = _lighting_enabled
+	actor_layer.add_child(glow)
+	var base_scale := glow.scale
+	var period := 0.5 + float(absi(cell.x * 31 + cell.y * 17) % 40) * 0.01
+	var pulse := glow.create_tween().set_loops()
+	pulse.tween_property(glow, "scale", base_scale * 1.1, period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	pulse.tween_property(glow, "scale", base_scale, period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_lamp_glow_sprites[cell] = glow
 
 ## Ground-truth guarantee that no cut-stump or bush is left drawn on top of
 ## a tree: after a chunk (and its landmarks) are painted, scan it — grown by
@@ -7946,13 +8277,21 @@ func _stamp_dwarfhold_facade(anchor: Vector2i) -> void:
 			var dx := (float(x) - massif_center.x) / float(HOLD_MASSIF_HALF_WIDTH)
 			var dy := (float(y) - massif_center.y) / float(HOLD_MASSIF_HALF_HEIGHT)
 			var edge_noise := float(hash("hold_massif|%d|%d" % [cell.x, cell.y]) & 0xffff) / 65535.0
-			if dx * dx + dy * dy > 0.72 + edge_noise * 0.42:
+			var reach := dx * dx + dy * dy
+			if reach > 0.72 + edge_noise * 0.42:
 				continue
-			# Mostly bare crag with occasional sandy folds, like the wild
-			# ranges; the blocked set is what stops walkers (the crag tile
-			# itself is atlas-passable).
+			# Unmistakably a mountain: grey crag body, a darker rim where
+			# the rock meets the ground, light catching the high middle.
+			# The blocked set still stops walkers either way.
 			var fold := hash("hold_fold|%d|%d" % [cell.x, cell.y]) & 0xffff
-			_place_tile(city_layer, cell, "sand_pebbles" if fold % 5 != 0 else "sand")
+			var rock_key := "massif_rock"
+			if reach > 0.52:
+				rock_key = "massif_rock_dark"
+			elif reach < 0.2 and fold % 3 != 0:
+				rock_key = "massif_rock_top"
+			elif fold % 7 == 0:
+				rock_key = "massif_rock_dark"
+			_place_tile(city_layer, cell, rock_key)
 			decor_layer.erase_cell(cell)
 			_surface_blocked_cells[cell] = true
 	# The carved front set into the south face: dressed stone with the
@@ -8056,6 +8395,12 @@ func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 			city_layer.erase_cell(cell)
 			decor_layer.erase_cell(cell)
 			_actor_passable_cache.erase(cell)
+			# Street-lamp glows die with their chunk; the deterministic
+			# lamp pass re-lights them when the road streams back in.
+			var lamp_glow := _lamp_glow_sprites.get(cell) as Sprite2D
+			if lamp_glow != null:
+				lamp_glow.queue_free()
+				_lamp_glow_sprites.erase(cell)
 		_surface_chunks.erase(chunk)
 		# A gate whose ground just evaporated must stamp itself anew on
 		# return, or the wilds would swallow its clearing for good.
