@@ -3403,7 +3403,11 @@ func _generate_city() -> void:
 	if _wild_mode:
 		_town_details = {}
 		_town_market = {}
-		_hold_state.generated_levels.append(_generate_wild_clearing_level())
+		var clearing := _generate_wild_clearing_level()
+		# A wild embark (incl. the surface a hold's carved city sits on) is
+		# above ground; its kind marks the top of any column dug beneath it.
+		clearing["kind"] = "surface_wild"
+		_hold_state.generated_levels.append(clearing)
 		_show_level(0)
 		return
 
@@ -3420,7 +3424,10 @@ func _generate_city() -> void:
 		level_count = maxi(1, _rng.randi_range(minimum_levels, maximum_levels))
 	for level_index in range(level_count):
 		var level_seed := "%s::depth_%d" % [seed_text, level_index]
-		_hold_state.generated_levels.append(_generate_single_level(level_seed, level_index, level_count))
+		var level_data := _generate_single_level(level_seed, level_index, level_count)
+		# The surface village sits atop its storage cellars in one column.
+		level_data["kind"] = "surface" if level_index == 0 else "cellar"
+		_hold_state.generated_levels.append(level_data)
 
 	_show_level(0)
 
@@ -4129,7 +4136,7 @@ func _pick_village_well_cell(grid: Dictionary) -> Vector2i:
 ## system (wilds streaming, gates, weather, farms, animals, caravans) keys
 ## off this so cellars render as sealed underground interiors.
 func _is_underground_level() -> bool:
-	return _hold_state.current_level_index > 0
+	return _hold_state.is_underground()
 
 ## Towns sleep everyone above ground: the 10:1 resident target applies to
 ## the surface level IN FULL, and the storage cellar draws no share. The
