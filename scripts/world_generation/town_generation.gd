@@ -89,6 +89,12 @@ var _map_origin_offset := Vector2.ZERO
 var _door_cells: Dictionary = {}
 var _latest_civic_buildings_by_id: Dictionary = {}
 var _latest_bed_count := 0
+## The resident target the current level was generated for. Storage cellars
+## carry 0 (they draw no share); a seamless hold's underhalls carry the hold's
+## per-level population, so the same level repopulates on every revisit. Read
+## at spawn time - the live _hold_state target is the surface embark's (0 for
+## a wild descent) by then, so the per-level count must be persisted here.
+var _latest_resident_target := 0
 var _lighting_enabled := true
 var _chest_inventories: Dictionary = {}
 var _selected_chest_cell := Vector2i(2147483647, 2147483647)
@@ -211,6 +217,9 @@ var _seamless_surface_level: Dictionary = {}
 ## Where to place the walker when they climb back out of a hold's halls -
 ## the mouth stair on the surface they descended through.
 var _seamless_return_cell := Vector2i(2147483647, 2147483647)
+## Set only while generating a hold's deep column, so the per-level
+## population target gives the halls their folk (a town cellar stays empty).
+var _generating_hold_column := false
 var _surface_road_paths: Array[Array] = []
 ## Grass cells beside lane junctions that host a wooden direction post,
 ## planned by the lane tracer and rendered through _pick_decor_tile.
@@ -3720,7 +3729,10 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 		"residence_type_map": _latest_residence_type_map,
 		"stair_cells": stair_cells,
 		"village_yards": village_yards,
-		"well_cell": well_cell
+		"well_cell": well_cell,
+		# 0 for a storage cellar; the hold's per-level share for a seamless
+		# underhall (computed above while _generating_hold_column was set).
+		"resident_target": target_npcs_for_level
 	}
 
 ## --- Village architecture ---------------------------------------------------
@@ -4158,7 +4170,12 @@ func _is_underground_level() -> bool:
 ## the surface level IN FULL, and the storage cellar draws no share. The
 ## base class's even split across levels quartered the street population
 ## when the old clamp bug forced towns to four levels.
-func _target_npcs_for_level(level_index: int, _level_count: int) -> int:
+## A hold's deep halls (seamless descent) are the exception - they house
+## the hold's own folk, split across the halls, so they generate as real
+## populated underhalls instead of an empty cellar.
+func _target_npcs_for_level(level_index: int, level_count: int) -> int:
+	if _generating_hold_column:
+		return _hold_state.target_npcs_for_level(level_index, level_count)
 	if level_index > 0:
 		return 0
 	return _hold_state.target_resident_npcs
@@ -4185,6 +4202,7 @@ func _show_level(target_level_index: int) -> void:
 	_latest_civic_building_type_map = level_data.get("civic_building_type_map", {}) as Dictionary
 	_latest_civic_building_name_map = _build_civic_building_name_lookup(_latest_civic_buildings_by_id, seed_input.text.strip_edges(), "townsfolk")
 	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
+	_latest_resident_target = int(level_data.get("resident_target", 0))
 	_plan_village_signboards(grid)
 	_village_yards = level_data.get("village_yards", []) as Array
 	var well_variant: Variant = level_data.get("well_cell")
@@ -4279,12 +4297,23 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		if decor_key == "bed" or decor_key == "bed_alt":
 			_latest_bed_count += 1
 			_bed_cells.append(decor_cell_variant as Vector2i)
+	# Seamless deep halls wear the hold's own carved-stone kit (tileset
+	# source 1) instead of the town's cellar tiles. The grid was dug by the
+	# shared hall/plaza pipeline, so it is already hold-shaped - only the
+	# paint of the base terrain changes, and the walkability of each hold
+	# tile matches the grid cell it stands on. Interior furniture still comes
+	# from the shared decor pass below (town-sheet furniture on hold stone).
+	var underhall := _hold_state.current_depth_kind() == "underhall"
 	for y in range(bounds.position.y, bounds.end.y):
 		for x in range(bounds.position.x, bounds.end.x):
 			var cell := _cell_at(grid, x, y)
 			var base_tile := _pick_base_tile(grid, x, y, cell)
 			var render_cell := Vector2i(x, y)
-			if base_tile in WALL_FRAME_TILE_KEYS:
+			if underhall:
+				# The base terrain comes from the hold atlas; walls are solid
+				# stone (no timber-frame cut-outs down a carved hall).
+				_place_hold_tile(city_layer, render_cell, _pick_underhall_base_tile(grid, x, y, cell))
+			elif base_tile in WALL_FRAME_TILE_KEYS:
 				# Framed-room pieces are opaque toward the interior and cut out
 				# toward the exterior, so they sit over a ground tile: lay the
 				# surrounding ground on the terrain layer and stamp the timber
@@ -4315,7 +4344,11 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		var stair_cell := stair_cells[stair_key] as Vector2i
 		if city_layer.get_cell_source_id(stair_cell) < 0:
 			continue
-		_place_tile(city_layer, stair_cell, "stairway_up" if stair_key == "up" else "stairway_down")
+		var stair_tile := "stairway_up" if stair_key == "up" else "stairway_down"
+		if underhall:
+			_place_hold_tile(city_layer, stair_cell, stair_tile)
+		else:
+			_place_tile(city_layer, stair_cell, stair_tile)
 		decor_layer.erase_cell(stair_cell)
 		_actor_passable_cache.erase(stair_cell)
 		# The hatch may have displaced two-tile-tall furniture (indoor stair
@@ -4726,8 +4759,13 @@ func _furnish_interiors(grid: Dictionary) -> void:
 	_glow_sprites.clear()
 	_pending_glows.clear()
 	_actor_passable_cache.clear()
-	# The wilds have no interiors to dress; the clearing stays open ground.
-	if actor_layer == null or _wild_mode:
+	# The open wilds have no interiors to dress; the clearing stays open
+	# ground. But a seamless hold descent from a wild embark keeps _wild_mode
+	# set while the walker stands in the hold's underhalls, and those DO need
+	# dressing - the same rich multi-room furnishing (RoomFurnishingService,
+	# shared with the hold scene) the hold lays for its own halls - so
+	# underground levels are furnished even while wild mode is on.
+	if actor_layer == null or (_wild_mode and not _is_underground_level()):
 		return
 	## Stairways live on the CITY layer (no decor), so the decor probe alone
 	## reads them as free floor — a prop dropped there would hide the cellar
@@ -5738,9 +5776,18 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 		_hold_state.current_level_index,
 		maxi(_hold_state.generated_levels.size(), 1)
 	)
-	# The wilds hold no residents, and neither does a storage cellar: the
-	# tavern_npc_count floor only pads the SURFACE of population-less towns.
-	var npc_spawn_count := 0 if _wild_mode or _is_underground_level() else maxi(tavern_npc_count, mini(level_npc_target, 250))
+	# The open wilds hold no residents, and neither does a storage cellar
+	# (its resident_target is 0). A seamless hold's underhalls DO: they carry
+	# the hold's per-level share, persisted on the level when it was dug, so
+	# the dwarves walk the halls the descent lands in. The tavern_npc_count
+	# floor only pads the SURFACE of population-less towns.
+	var npc_spawn_count: int
+	if _is_underground_level():
+		npc_spawn_count = mini(_latest_resident_target, 250)
+	elif _wild_mode:
+		npc_spawn_count = 0
+	else:
+		npc_spawn_count = maxi(tavern_npc_count, mini(level_npc_target, 250))
 	var result := DwarfHoldTavernService.spawn_tavern_characters(
 		actor_layer, city_layer, _npc_states, _rng, _walkable_cells,
 		_tavern_character_texture, _pending_player_spawn_cell,
@@ -9409,6 +9456,16 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 	var hold_seed := String(site.get("seed", "")).strip_edges()
 	if hold_seed.is_empty():
 		hold_seed = String(site.get("name", "hold"))
+	# The halls scale to the HOLD's own population (the surface embark has
+	# none), so they generate as large, populated underhalls - the same
+	# 10:1 resident rule the hold scene digs by. The surface's state is
+	# preserved and restored so the wilds return unchanged on the way out.
+	var population := maxi(0, int(site.get("population", 0)))
+	var saved_selected := _hold_state.selected_hold_population
+	var saved_target := _hold_state.target_resident_npcs
+	_hold_state.selected_hold_population = population
+	_hold_state.target_resident_npcs = int(ceil(float(population) / 10.0))
+	_generating_hold_column = true
 	var column: Array[Dictionary] = []
 	# _generate_single_level reseeds _rng from the level seed, so generating
 	# the halls never disturbs the already-built surface embark.
@@ -9417,6 +9474,9 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		var level_data := _generate_single_level(level_seed, depth, HOLD_DEEP_LEVELS + 1)
 		level_data["kind"] = "underhall"
 		column.append(level_data)
+	_generating_hold_column = false
+	_hold_state.selected_hold_population = saved_selected
+	_hold_state.target_resident_npcs = saved_target
 	return column
 
 func _player_on_any_gate_cell() -> bool:
@@ -11246,6 +11306,20 @@ func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 		if SNOW_BASE_SWAP.has(tile_key):
 			return String(SNOW_BASE_SWAP[tile_key])
 	return tile_key
+
+## The hold's own base-tile vocabulary (tileset source 1) for a seamless deep
+## hall cell. The grid is already hold-shaped - dug by the shared hall/plaza
+## pipeline - so this reuses the hold's tile service to read it. The one place
+## it diverges from the hold scene is undug rock: the hold leaves deep rock
+## black and lets its darkness quad read it as a cave wall, but the town scene
+## has no underground darkness overlay, so undug rock is filled solid stone
+## here (a lit, solid-stone hold rather than a field of black gaps). Passing
+## the hold atlas turns on the depth pass (carved wall faces, dirt shadows).
+func _pick_underhall_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
+	var key := DwarfHoldTileService.pick_base_tile(grid, x, y, cell, _door_cells, TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS)
+	if key.is_empty():
+		return "stone"
+	return key
 
 ## The opaque ground stamped under a framed-room wall cell so the frame's
 ## cut-out exterior edges blend into the surroundings instead of the dark
