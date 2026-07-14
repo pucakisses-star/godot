@@ -4287,12 +4287,23 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		if decor_key == "bed" or decor_key == "bed_alt":
 			_latest_bed_count += 1
 			_bed_cells.append(decor_cell_variant as Vector2i)
+	# Seamless deep halls wear the hold's own carved-stone kit (tileset
+	# source 1) instead of the town's cellar tiles. The grid was dug by the
+	# shared hall/plaza pipeline, so it is already hold-shaped - only the
+	# paint of the base terrain changes, and the walkability of each hold
+	# tile matches the grid cell it stands on. Interior furniture still comes
+	# from the shared decor pass below (town-sheet furniture on hold stone).
+	var underhall := _hold_state.current_depth_kind() == "underhall"
 	for y in range(bounds.position.y, bounds.end.y):
 		for x in range(bounds.position.x, bounds.end.x):
 			var cell := _cell_at(grid, x, y)
 			var base_tile := _pick_base_tile(grid, x, y, cell)
 			var render_cell := Vector2i(x, y)
-			if base_tile in WALL_FRAME_TILE_KEYS:
+			if underhall:
+				# The base terrain comes from the hold atlas; walls are solid
+				# stone (no timber-frame cut-outs down a carved hall).
+				_place_hold_tile(city_layer, render_cell, _pick_underhall_base_tile(grid, x, y, cell))
+			elif base_tile in WALL_FRAME_TILE_KEYS:
 				# Framed-room pieces are opaque toward the interior and cut out
 				# toward the exterior, so they sit over a ground tile: lay the
 				# surrounding ground on the terrain layer and stamp the timber
@@ -4323,7 +4334,11 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 		var stair_cell := stair_cells[stair_key] as Vector2i
 		if city_layer.get_cell_source_id(stair_cell) < 0:
 			continue
-		_place_tile(city_layer, stair_cell, "stairway_up" if stair_key == "up" else "stairway_down")
+		var stair_tile := "stairway_up" if stair_key == "up" else "stairway_down"
+		if underhall:
+			_place_hold_tile(city_layer, stair_cell, stair_tile)
+		else:
+			_place_tile(city_layer, stair_cell, stair_tile)
 		decor_layer.erase_cell(stair_cell)
 		_actor_passable_cache.erase(stair_cell)
 		# The hatch may have displaced two-tile-tall furniture (indoor stair
@@ -11267,6 +11282,20 @@ func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 		if SNOW_BASE_SWAP.has(tile_key):
 			return String(SNOW_BASE_SWAP[tile_key])
 	return tile_key
+
+## The hold's own base-tile vocabulary (tileset source 1) for a seamless deep
+## hall cell. The grid is already hold-shaped - dug by the shared hall/plaza
+## pipeline - so this reuses the hold's tile service to read it. The one place
+## it diverges from the hold scene is undug rock: the hold leaves deep rock
+## black and lets its darkness quad read it as a cave wall, but the town scene
+## has no underground darkness overlay, so undug rock is filled solid stone
+## here (a lit, solid-stone hold rather than a field of black gaps). Passing
+## the hold atlas turns on the depth pass (carved wall faces, dirt shadows).
+func _pick_underhall_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
+	var key := DwarfHoldTileService.pick_base_tile(grid, x, y, cell, _door_cells, TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS)
+	if key.is_empty():
+		return "stone"
+	return key
 
 ## The opaque ground stamped under a framed-room wall cell so the frame's
 ## cut-out exterior edges blend into the surroundings instead of the dark
