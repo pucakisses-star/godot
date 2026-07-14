@@ -95,6 +95,15 @@ var _latest_bed_count := 0
 ## at spawn time - the live _hold_state target is the surface embark's (0 for
 ## a wild descent) by then, so the per-level count must be persisted here.
 var _latest_resident_target := 0
+## The current underhall level's ore veins and fungus (cell -> hold tile key),
+## stamped by the depth strata at generation. This IS the reference stored on
+## the level, so mining a vein (erasing its entry) persists to the level stack
+## and the vein stays gone on revisit. The stratum drives the ore a vein yields.
+var _latest_floor_decor: Dictionary = {}
+var _latest_stratum: Dictionary = DepthStrataService.SURFACE
+## Accumulated pick damage on the vein being mined, cleared on level change so
+## a half-mined vein's progress never bleeds across a descent.
+var _vein_damage: Dictionary = {}
 var _lighting_enabled := true
 var _chest_inventories: Dictionary = {}
 var _selected_chest_cell := Vector2i(2147483647, 2147483647)
@@ -337,6 +346,12 @@ var _furnishing_blocked_cells: Dictionary = {}
 var _glow_sprites: Array[Node2D] = []
 var _pending_glows: Array[Dictionary] = []
 var _light_overlay_sprite: Sprite2D
+## The seamless underhalls are true underground: a level-wide darkness quad
+## (the same shader the surface ward's massif uses) covers the level and is
+## carved open by warm pools - the player's own light and every furnishing
+## fire. {sprite, material, static_lights}; rebuilt per level, empty above
+## ground and on storage cellars.
+var _underhall_overlay: Dictionary = {}
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
@@ -847,6 +862,12 @@ func _process(delta: float) -> void:
 	_update_player_turn_movement(delta)
 	_update_ground_items(delta)
 	_update_npc_movement(delta)
+	# The pick's swing cooldown and the deep dark both tick every frame,
+	# above ground and below: _update_surface_life (where the ward's copies
+	# live) early-outs underground, so the seamless underhalls drive theirs
+	# from here or a vein could be struck only once and the halls never dim.
+	_ward_swing_timer = maxf(0.0, _ward_swing_timer - delta)
+	_update_underhall_darkness()
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
@@ -4203,6 +4224,10 @@ func _show_level(target_level_index: int) -> void:
 	_latest_civic_building_name_map = _build_civic_building_name_lookup(_latest_civic_buildings_by_id, seed_input.text.strip_edges(), "townsfolk")
 	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
 	_latest_resident_target = int(level_data.get("resident_target", 0))
+	# The strata veins ride the level by reference, so mining one persists.
+	_latest_floor_decor = level_data.get("floor_decor", {}) as Dictionary
+	_latest_stratum = level_data.get("stratum", DepthStrataService.SURFACE) as Dictionary
+	_vein_damage.clear()
 	_plan_village_signboards(grid)
 	_village_yards = level_data.get("village_yards", []) as Array
 	var well_variant: Variant = level_data.get("well_cell")
@@ -4225,6 +4250,9 @@ func _show_level(target_level_index: int) -> void:
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
 	_furnish_interiors(grid)
+	# Now the furnishing fires are known, drape the deep dark over an underhall
+	# (a no-op that clears any prior quad above ground or on a storage cellar).
+	_build_underhall_darkness(_find_bounds(grid).grow(1))
 	_build_farmsteads()
 	_scatter_desert_decor()
 	_spawn_farm_animals()
@@ -4277,6 +4305,10 @@ func _apply_lighting_state() -> void:
 			var ward_node := node_variant as Node2D
 			if ward_node != null and is_instance_valid(ward_node):
 				ward_node.visible = _lighting_enabled
+	# The deep underhall dark rides it too, so the toggle floods the halls.
+	var underhall_sprite := _underhall_overlay.get("sprite") as Node2D
+	if underhall_sprite != null and is_instance_valid(underhall_sprite):
+		underhall_sprite.visible = _lighting_enabled
 
 func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	if city_layer.tile_set == null:
@@ -4338,6 +4370,15 @@ func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 					var top_cell := render_cell + Vector2i.UP
 					if decor_layer.get_cell_source_id(top_cell) < 0:
 						_place_tile(decor_layer, top_cell, String(TALL_DECOR_TOPS[decor_tile]))
+	# The strata's ore veins and fungus, laid over the hold's floor from the
+	# same atlas. A "stone" vein is a solid outcrop (it blocks like rock until
+	# it is mined); fungus is scenery. This runs before the stair pass so a
+	# vein never buries a hatch.
+	if underhall:
+		for vein_cell_variant: Variant in _latest_floor_decor.keys():
+			var vein_cell := vein_cell_variant as Vector2i
+			_place_hold_tile(decor_layer, vein_cell, String(_latest_floor_decor[vein_cell_variant]))
+			_actor_passable_cache.erase(vein_cell)
 	for stair_key: String in ["up", "down"]:
 		if not stair_cells.has(stair_key):
 			continue
@@ -5977,6 +6018,11 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	# chips it away by the hold's own geology.
 	if _is_ward_rock_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
 		_swing_at_ward_rock(clicked_cell)
+		return
+	# Deep in the hold, an adjacent swing at an ore vein works it for the
+	# level's stratum ore.
+	if _is_underhall_vein_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
+		_swing_at_underhall_vein(clicked_cell)
 		return
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
@@ -9151,6 +9197,93 @@ func _free_ward_overlay_for_key(gate_key: String) -> void:
 ## Feeds each ward shader its lights every frame: the player first, then
 ## the mouth and stairwell pools, then every sconce riding a slow sine
 ## flicker phase-keyed per cell so no two throb in unison.
+## Frees the level-wide underhall darkness quad (its own actor-layer child).
+func _free_underhall_darkness() -> void:
+	if _underhall_overlay.is_empty():
+		return
+	var sprite := _underhall_overlay.get("sprite") as Node2D
+	if sprite != null and is_instance_valid(sprite):
+		sprite.queue_free()
+	_underhall_overlay = {}
+
+## Builds the darkness for a seamless underhall: one quad covering the level,
+## dark everywhere (the ellipse is sized so the whole level sits deep inside
+## it), lit only by the player and the furnishing fires already collected for
+## the warm-glow overlay. A light at the up-stair keeps the way out visible.
+## No-op (and frees any prior quad) above ground and on storage cellars.
+func _build_underhall_darkness(bounds: Rect2i) -> void:
+	_free_underhall_darkness()
+	if _hold_state.current_depth_kind() != "underhall" or actor_layer == null:
+		return
+	var tile_px := Vector2(float(tile_size.x), float(tile_size.y))
+	var origin_px := Vector2(bounds.position * tile_size)
+	var size_px := Vector2(bounds.size * tile_size)
+	if size_px.x <= 0.0 or size_px.y <= 0.0:
+		return
+	var quad_image := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+	quad_image.fill(Color.WHITE)
+	var overlay_sprite := Sprite2D.new()
+	overlay_sprite.texture = ImageTexture.create_from_image(quad_image)
+	overlay_sprite.centered = false
+	overlay_sprite.position = origin_px
+	overlay_sprite.scale = size_px / 4.0
+	overlay_sprite.z_index = 12
+	var shader := Shader.new()
+	shader.code = WARD_DARKNESS_SHADER
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("overlay_origin", origin_px)
+	mat.set_shader_parameter("overlay_size", size_px)
+	# A whole-level ellipse: half-axes as wide as the level, so even the far
+	# corners land at reach ~0.5 (mask = 1) - solid dark, no daylight edge.
+	mat.set_shader_parameter("ward_center_px", origin_px + size_px * 0.5)
+	mat.set_shader_parameter("ward_half_px", size_px)
+	overlay_sprite.material = mat
+	overlay_sprite.visible = _lighting_enabled
+	actor_layer.add_child(overlay_sprite)
+	# Static lights: every furnishing fire (forge, oven, hearth, candle) that
+	# was queued for the warm-glow overlay, plus a pool up the entry stair.
+	var static_lights: Array = []
+	for glow_variant: Variant in _pending_glows:
+		var glow := glow_variant as Dictionary
+		static_lights.append({
+			"pos": _cell_center_position(glow.get("cell", Vector2i.ZERO) as Vector2i),
+			"radius": maxf(1.0, float(glow.get("radius", 2.4))) * tile_px.x
+		})
+	var up_stair_variant: Variant = _hold_state.active_level_stairs.get("up")
+	if up_stair_variant is Vector2i:
+		static_lights.append({"pos": _cell_center_position(up_stair_variant as Vector2i), "radius": WARD_STAIR_LIGHT_TILES * tile_px.x})
+	_underhall_overlay = {"sprite": overlay_sprite, "material": mat, "static_lights": static_lights}
+
+## Per-frame: push the player's light and the nearest fires into the underhall
+## darkness shader (nearest win the slots when a big level over-fills them).
+func _update_underhall_darkness() -> void:
+	if _underhall_overlay.is_empty() or not _lighting_enabled:
+		return
+	var mat := _underhall_overlay.get("material") as ShaderMaterial
+	if mat == null:
+		return
+	var player_position := _player_sprite.position if _player_sprite != null else Vector2.ZERO
+	var lights := (_underhall_overlay.get("static_lights", []) as Array)
+	if lights.size() > WARD_LIGHT_MAX - 1:
+		lights = lights.duplicate()
+		lights.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
+	var positions := PackedVector2Array()
+	var radii := PackedFloat32Array()
+	if _player_sprite != null:
+		positions.append(player_position)
+		radii.append(WARD_PLAYER_LIGHT_TILES * float(tile_size.x))
+	for light_variant: Variant in lights:
+		if positions.size() >= WARD_LIGHT_MAX:
+			break
+		var light := light_variant as Dictionary
+		positions.append(light.get("pos", Vector2.ZERO) as Vector2)
+		radii.append(float(light.get("radius", 0.0)))
+	mat.set_shader_parameter("light_count", positions.size())
+	mat.set_shader_parameter("light_pos", positions)
+	mat.set_shader_parameter("light_radius", radii)
+
 func _update_ward_darkness() -> void:
 	if _ward_overlays.is_empty() or not _lighting_enabled:
 		return
@@ -9243,6 +9376,66 @@ func _ward_site_key_for_cell(cell: Vector2i) -> String:
 		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_CITY_HALF_H * 2 + 6:
 			return String(gate.get("key", ""))
 	return ""
+
+## An ore vein on the current underhall floor: a "stone" outcrop the depth
+## strata stamped, mineable for the level's stratum ore. Other floor decor
+## (fungus) is not a vein.
+func _is_underhall_vein_cell(cell: Vector2i) -> bool:
+	if _hold_state.current_depth_kind() != "underhall":
+		return false
+	return String(_latest_floor_decor.get(cell, "")) == "stone"
+
+## One pickaxe swing at an ore vein, gated by the same swing cooldown and
+## tool-damage ladder as the surface massif so the best carried pick works
+## fastest. The vein breaks when its hit points run out.
+func _swing_at_underhall_vein(cell: Vector2i) -> void:
+	if _ward_swing_timer > 0.0:
+		return
+	_ward_swing_timer = WARD_SWING_COOLDOWN
+	var damage := WARD_HAND_DIG_DAMAGE
+	for tool_name: String in WARD_DIG_TOOL_DAMAGE.keys():
+		if int(_player_inventory.get(tool_name, 0)) > 0:
+			damage = maxi(damage, int(WARD_DIG_TOOL_DAMAGE[tool_name]))
+	var vein_hp := 14
+	var total_damage := int(_vein_damage.get(cell, 0)) + damage
+	if total_damage >= vein_hp:
+		_mine_underhall_vein(cell)
+		return
+	_vein_damage[cell] = total_damage
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.6, 0.58, 0.55, 1.0), 5)
+
+## Breaks an ore vein: drops Stone plus a roll from the level stratum's ore
+## table, then erases the vein. _latest_floor_decor is the level's own dict
+## (by reference), so the vein stays mined on revisit.
+func _mine_underhall_vein(cell: Vector2i) -> void:
+	_vein_damage.erase(cell)
+	_latest_floor_decor.erase(cell)
+	decor_layer.erase_cell(cell)
+	_actor_passable_cache.erase(cell)
+	_add_to_inventory("Stone", 1)
+	var ore := _roll_stratum_ore(_latest_stratum)
+	if not ore.is_empty():
+		_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
+		_spawn_floating_text("Struck %s!" % String(ore.get("name", "")), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.6, 0.58, 0.55, 1.0), 12)
+
+## Weighted roll from a stratum's ore_drops table -> {name, amount}, or {} for
+## a barren strike. Uses the live RNG (a per-swing surprise, not generation).
+func _roll_stratum_ore(stratum: Dictionary) -> Dictionary:
+	var drops := stratum.get("ore_drops", []) as Array
+	var total := 0
+	for drop_variant: Variant in drops:
+		total += int((drop_variant as Dictionary).get("weight", 0))
+	if total <= 0:
+		return {}
+	var roll := randi_range(1, total)
+	var running := 0
+	for drop_variant: Variant in drops:
+		var drop := drop_variant as Dictionary
+		running += int(drop.get("weight", 0))
+		if roll <= running:
+			return {"name": String(drop.get("name", "")), "amount": randi_range(int(drop.get("min", 1)), int(drop.get("max", 1)))}
+	return {}
 
 func _swing_at_ward_rock(cell: Vector2i) -> void:
 	if _ward_swing_timer > 0.0:
@@ -9448,9 +9641,10 @@ func _hold_deep_column_for(gate_key: String, site: Dictionary) -> Array[Dictiona
 
 ## A hold's deep halls as a stack of underground levels, built by the town
 ## scene's own plaza/hall generator (shared with the hold scene through
-## SettlementSceneBase). Deterministic per hold seed. Fidelity - real
-## strata, ores, streamed rock, the full population - is the next commit;
-## this proves the seamless z-change descent end to end.
+## SettlementSceneBase). Deterministic per hold seed, scaled to the hold's
+## population, skinned in the hold's stone, and seeded with depth strata
+## (ore veins and fungus). Remaining fidelity: streamed minable rock walls
+## and the hold's darkness.
 const HOLD_DEEP_LEVELS := 3
 func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 	var hold_seed := String(site.get("seed", "")).strip_edges()
@@ -9473,6 +9667,19 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		var level_seed := "%s::underhall_%d" % [hold_seed, depth]
 		var level_data := _generate_single_level(level_seed, depth, HOLD_DEEP_LEVELS + 1)
 		level_data["kind"] = "underhall"
+		# The earth changes with depth: each level belongs to a stratum (soil,
+		# then the fungal cavern, then the starmetal deep) that seeds its own
+		# ore veins and fungus onto the hall floor. Veins are "stone" outcrops
+		# the walker mines for the stratum's ore. Stamped on its own seeded rng
+		# so a revisit re-deals nothing; the stratum rides the level so digging
+		# rolls the right ore table.
+		var stratum := DepthStrataService.stratum_for_level(depth, HOLD_DEEP_LEVELS + 1)
+		var strata_floor_decor: Dictionary = {}
+		var strata_rng := RandomNumberGenerator.new()
+		strata_rng.seed = hash("%s::strata" % level_seed)
+		DepthStrataService.stamp_stratum_features(level_data.get("grid", {}) as Dictionary, strata_floor_decor, stratum, strata_rng)
+		level_data["floor_decor"] = strata_floor_decor
+		level_data["stratum"] = stratum
 		column.append(level_data)
 	_generating_hold_column = false
 	_hold_state.selected_hold_population = saved_selected
@@ -9544,7 +9751,6 @@ func _update_surface_life(delta: float) -> void:
 		return
 	_update_ward_dwarves(delta)
 	_update_ward_darkness()
-	_ward_swing_timer = maxf(0.0, _ward_swing_timer - delta)
 	var danger: float = SurfaceLifeService.danger_for_cell(_player_cell, _surface_anchor_cells)
 	_surface_spawn_timer -= delta
 	if _surface_spawn_timer <= 0.0:
