@@ -213,10 +213,12 @@ var _surface_world_seed_text := ""
 var _surface_arrival_lock := false
 ## Phase 1 seamless surface<->deep column: when on, a hold's mouth stair
 ## descends into its deep halls as a z-change in THIS scene instead of a
-## journey swap to the hold scene. Off by default (and until the descent
-## branch is wired) so production behaviour is unchanged; a harness or a
-## future debug toggle flips it via the "seamless_hold_descent" setting.
-var _seamless_hold_descent := false
+## journey swap to the hold scene. Now ON by default: the deep halls carry
+## the hold's population, stone, furniture, dwarves, ore veins and cave
+## dark. The scene-swap path is kept as a fallback (a failed generation
+## never strands the walker), so this stays a reversible flip - the
+## "seamless_hold_descent" setting still overrides it.
+var _seamless_hold_descent := true
 ## A hold's deep halls, generated on first descent and cached per gate so
 ## re-entering is instant and stable. The surface embark (the wild
 ## clearing the hold's carved city sits on) is level 0; a descended hold's
@@ -3403,7 +3405,7 @@ func _apply_cached_town_scene_seed() -> void:
 	_town_is_village = bool(settings.get(TOWN_SCENE_VILLAGE_KEY, false))
 	_wild_mode = bool(settings.get(TOWN_SCENE_WILD_KEY, false))
 	_wild_water = _wild_mode and bool(settings.get(TOWN_SCENE_WILD_WATER_KEY, false))
-	_seamless_hold_descent = bool(settings.get("seamless_hold_descent", false))
+	_seamless_hold_descent = bool(settings.get("seamless_hold_descent", true))
 	if _wild_mode:
 		# Name the header for the wilderness, not "Unnamed Town".
 		var wild_title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
