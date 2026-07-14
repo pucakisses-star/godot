@@ -89,6 +89,12 @@ var _map_origin_offset := Vector2.ZERO
 var _door_cells: Dictionary = {}
 var _latest_civic_buildings_by_id: Dictionary = {}
 var _latest_bed_count := 0
+## The resident target the current level was generated for. Storage cellars
+## carry 0 (they draw no share); a seamless hold's underhalls carry the hold's
+## per-level population, so the same level repopulates on every revisit. Read
+## at spawn time - the live _hold_state target is the surface embark's (0 for
+## a wild descent) by then, so the per-level count must be persisted here.
+var _latest_resident_target := 0
 var _lighting_enabled := true
 var _chest_inventories: Dictionary = {}
 var _selected_chest_cell := Vector2i(2147483647, 2147483647)
@@ -3723,7 +3729,10 @@ func _generate_single_level(level_seed: String, level_index: int, level_count: i
 		"residence_type_map": _latest_residence_type_map,
 		"stair_cells": stair_cells,
 		"village_yards": village_yards,
-		"well_cell": well_cell
+		"well_cell": well_cell,
+		# 0 for a storage cellar; the hold's per-level share for a seamless
+		# underhall (computed above while _generating_hold_column was set).
+		"resident_target": target_npcs_for_level
 	}
 
 ## --- Village architecture ---------------------------------------------------
@@ -4193,6 +4202,7 @@ func _show_level(target_level_index: int) -> void:
 	_latest_civic_building_type_map = level_data.get("civic_building_type_map", {}) as Dictionary
 	_latest_civic_building_name_map = _build_civic_building_name_lookup(_latest_civic_buildings_by_id, seed_input.text.strip_edges(), "townsfolk")
 	_latest_residence_type_map = level_data.get("residence_type_map", {}) as Dictionary
+	_latest_resident_target = int(level_data.get("resident_target", 0))
 	_plan_village_signboards(grid)
 	_village_yards = level_data.get("village_yards", []) as Array
 	var well_variant: Variant = level_data.get("well_cell")
@@ -5766,9 +5776,18 @@ func _spawn_tavern_characters(grid: Dictionary) -> void:
 		_hold_state.current_level_index,
 		maxi(_hold_state.generated_levels.size(), 1)
 	)
-	# The wilds hold no residents, and neither does a storage cellar: the
-	# tavern_npc_count floor only pads the SURFACE of population-less towns.
-	var npc_spawn_count := 0 if _wild_mode or _is_underground_level() else maxi(tavern_npc_count, mini(level_npc_target, 250))
+	# The open wilds hold no residents, and neither does a storage cellar
+	# (its resident_target is 0). A seamless hold's underhalls DO: they carry
+	# the hold's per-level share, persisted on the level when it was dug, so
+	# the dwarves walk the halls the descent lands in. The tavern_npc_count
+	# floor only pads the SURFACE of population-less towns.
+	var npc_spawn_count: int
+	if _is_underground_level():
+		npc_spawn_count = mini(_latest_resident_target, 250)
+	elif _wild_mode:
+		npc_spawn_count = 0
+	else:
+		npc_spawn_count = maxi(tavern_npc_count, mini(level_npc_target, 250))
 	var result := DwarfHoldTavernService.spawn_tavern_characters(
 		actor_layer, city_layer, _npc_states, _rng, _walkable_cells,
 		_tavern_character_texture, _pending_player_spawn_cell,
