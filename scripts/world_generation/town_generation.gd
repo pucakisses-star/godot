@@ -4749,8 +4749,13 @@ func _furnish_interiors(grid: Dictionary) -> void:
 	_glow_sprites.clear()
 	_pending_glows.clear()
 	_actor_passable_cache.clear()
-	# The wilds have no interiors to dress; the clearing stays open ground.
-	if actor_layer == null or _wild_mode:
+	# The open wilds have no interiors to dress; the clearing stays open
+	# ground. But a seamless hold descent from a wild embark keeps _wild_mode
+	# set while the walker stands in the hold's underhalls, and those DO need
+	# dressing - the same rich multi-room furnishing (RoomFurnishingService,
+	# shared with the hold scene) the hold lays for its own halls - so
+	# underground levels are furnished even while wild mode is on.
+	if actor_layer == null or (_wild_mode and not _is_underground_level()):
 		return
 	## Stairways live on the CITY layer (no decor), so the decor probe alone
 	## reads them as free floor — a prop dropped there would hide the cellar
