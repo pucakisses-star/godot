@@ -211,6 +211,9 @@ var _seamless_surface_level: Dictionary = {}
 ## Where to place the walker when they climb back out of a hold's halls -
 ## the mouth stair on the surface they descended through.
 var _seamless_return_cell := Vector2i(2147483647, 2147483647)
+## Set only while generating a hold's deep column, so the per-level
+## population target gives the halls their folk (a town cellar stays empty).
+var _generating_hold_column := false
 var _surface_road_paths: Array[Array] = []
 ## Grass cells beside lane junctions that host a wooden direction post,
 ## planned by the lane tracer and rendered through _pick_decor_tile.
@@ -4158,7 +4161,12 @@ func _is_underground_level() -> bool:
 ## the surface level IN FULL, and the storage cellar draws no share. The
 ## base class's even split across levels quartered the street population
 ## when the old clamp bug forced towns to four levels.
-func _target_npcs_for_level(level_index: int, _level_count: int) -> int:
+## A hold's deep halls (seamless descent) are the exception - they house
+## the hold's own folk, split across the halls, so they generate as real
+## populated underhalls instead of an empty cellar.
+func _target_npcs_for_level(level_index: int, level_count: int) -> int:
+	if _generating_hold_column:
+		return _hold_state.target_npcs_for_level(level_index, level_count)
 	if level_index > 0:
 		return 0
 	return _hold_state.target_resident_npcs
@@ -9409,6 +9417,16 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 	var hold_seed := String(site.get("seed", "")).strip_edges()
 	if hold_seed.is_empty():
 		hold_seed = String(site.get("name", "hold"))
+	# The halls scale to the HOLD's own population (the surface embark has
+	# none), so they generate as large, populated underhalls - the same
+	# 10:1 resident rule the hold scene digs by. The surface's state is
+	# preserved and restored so the wilds return unchanged on the way out.
+	var population := maxi(0, int(site.get("population", 0)))
+	var saved_selected := _hold_state.selected_hold_population
+	var saved_target := _hold_state.target_resident_npcs
+	_hold_state.selected_hold_population = population
+	_hold_state.target_resident_npcs = int(ceil(float(population) / 10.0))
+	_generating_hold_column = true
 	var column: Array[Dictionary] = []
 	# _generate_single_level reseeds _rng from the level seed, so generating
 	# the halls never disturbs the already-built surface embark.
@@ -9417,6 +9435,9 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		var level_data := _generate_single_level(level_seed, depth, HOLD_DEEP_LEVELS + 1)
 		level_data["kind"] = "underhall"
 		column.append(level_data)
+	_generating_hold_column = false
+	_hold_state.selected_hold_population = saved_selected
+	_hold_state.target_resident_npcs = saved_target
 	return column
 
 func _player_on_any_gate_cell() -> bool:
