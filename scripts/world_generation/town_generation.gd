@@ -346,6 +346,12 @@ var _furnishing_blocked_cells: Dictionary = {}
 var _glow_sprites: Array[Node2D] = []
 var _pending_glows: Array[Dictionary] = []
 var _light_overlay_sprite: Sprite2D
+## The seamless underhalls are true underground: a level-wide darkness quad
+## (the same shader the surface ward's massif uses) covers the level and is
+## carved open by warm pools - the player's own light and every furnishing
+## fire. {sprite, material, static_lights}; rebuilt per level, empty above
+## ground and on storage cellars.
+var _underhall_overlay: Dictionary = {}
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
@@ -856,6 +862,12 @@ func _process(delta: float) -> void:
 	_update_player_turn_movement(delta)
 	_update_ground_items(delta)
 	_update_npc_movement(delta)
+	# The pick's swing cooldown and the deep dark both tick every frame,
+	# above ground and below: _update_surface_life (where the ward's copies
+	# live) early-outs underground, so the seamless underhalls drive theirs
+	# from here or a vein could be struck only once and the halls never dim.
+	_ward_swing_timer = maxf(0.0, _ward_swing_timer - delta)
+	_update_underhall_darkness()
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
@@ -4238,6 +4250,9 @@ func _show_level(target_level_index: int) -> void:
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
 	_furnish_interiors(grid)
+	# Now the furnishing fires are known, drape the deep dark over an underhall
+	# (a no-op that clears any prior quad above ground or on a storage cellar).
+	_build_underhall_darkness(_find_bounds(grid).grow(1))
 	_build_farmsteads()
 	_scatter_desert_decor()
 	_spawn_farm_animals()
@@ -4290,6 +4305,10 @@ func _apply_lighting_state() -> void:
 			var ward_node := node_variant as Node2D
 			if ward_node != null and is_instance_valid(ward_node):
 				ward_node.visible = _lighting_enabled
+	# The deep underhall dark rides it too, so the toggle floods the halls.
+	var underhall_sprite := _underhall_overlay.get("sprite") as Node2D
+	if underhall_sprite != null and is_instance_valid(underhall_sprite):
+		underhall_sprite.visible = _lighting_enabled
 
 func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	if city_layer.tile_set == null:
@@ -9178,6 +9197,93 @@ func _free_ward_overlay_for_key(gate_key: String) -> void:
 ## Feeds each ward shader its lights every frame: the player first, then
 ## the mouth and stairwell pools, then every sconce riding a slow sine
 ## flicker phase-keyed per cell so no two throb in unison.
+## Frees the level-wide underhall darkness quad (its own actor-layer child).
+func _free_underhall_darkness() -> void:
+	if _underhall_overlay.is_empty():
+		return
+	var sprite := _underhall_overlay.get("sprite") as Node2D
+	if sprite != null and is_instance_valid(sprite):
+		sprite.queue_free()
+	_underhall_overlay = {}
+
+## Builds the darkness for a seamless underhall: one quad covering the level,
+## dark everywhere (the ellipse is sized so the whole level sits deep inside
+## it), lit only by the player and the furnishing fires already collected for
+## the warm-glow overlay. A light at the up-stair keeps the way out visible.
+## No-op (and frees any prior quad) above ground and on storage cellars.
+func _build_underhall_darkness(bounds: Rect2i) -> void:
+	_free_underhall_darkness()
+	if _hold_state.current_depth_kind() != "underhall" or actor_layer == null:
+		return
+	var tile_px := Vector2(float(tile_size.x), float(tile_size.y))
+	var origin_px := Vector2(bounds.position * tile_size)
+	var size_px := Vector2(bounds.size * tile_size)
+	if size_px.x <= 0.0 or size_px.y <= 0.0:
+		return
+	var quad_image := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+	quad_image.fill(Color.WHITE)
+	var overlay_sprite := Sprite2D.new()
+	overlay_sprite.texture = ImageTexture.create_from_image(quad_image)
+	overlay_sprite.centered = false
+	overlay_sprite.position = origin_px
+	overlay_sprite.scale = size_px / 4.0
+	overlay_sprite.z_index = 12
+	var shader := Shader.new()
+	shader.code = WARD_DARKNESS_SHADER
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("overlay_origin", origin_px)
+	mat.set_shader_parameter("overlay_size", size_px)
+	# A whole-level ellipse: half-axes as wide as the level, so even the far
+	# corners land at reach ~0.5 (mask = 1) - solid dark, no daylight edge.
+	mat.set_shader_parameter("ward_center_px", origin_px + size_px * 0.5)
+	mat.set_shader_parameter("ward_half_px", size_px)
+	overlay_sprite.material = mat
+	overlay_sprite.visible = _lighting_enabled
+	actor_layer.add_child(overlay_sprite)
+	# Static lights: every furnishing fire (forge, oven, hearth, candle) that
+	# was queued for the warm-glow overlay, plus a pool up the entry stair.
+	var static_lights: Array = []
+	for glow_variant: Variant in _pending_glows:
+		var glow := glow_variant as Dictionary
+		static_lights.append({
+			"pos": _cell_center_position(glow.get("cell", Vector2i.ZERO) as Vector2i),
+			"radius": maxf(1.0, float(glow.get("radius", 2.4))) * tile_px.x
+		})
+	var up_stair_variant: Variant = _hold_state.active_level_stairs.get("up")
+	if up_stair_variant is Vector2i:
+		static_lights.append({"pos": _cell_center_position(up_stair_variant as Vector2i), "radius": WARD_STAIR_LIGHT_TILES * tile_px.x})
+	_underhall_overlay = {"sprite": overlay_sprite, "material": mat, "static_lights": static_lights}
+
+## Per-frame: push the player's light and the nearest fires into the underhall
+## darkness shader (nearest win the slots when a big level over-fills them).
+func _update_underhall_darkness() -> void:
+	if _underhall_overlay.is_empty() or not _lighting_enabled:
+		return
+	var mat := _underhall_overlay.get("material") as ShaderMaterial
+	if mat == null:
+		return
+	var player_position := _player_sprite.position if _player_sprite != null else Vector2.ZERO
+	var lights := (_underhall_overlay.get("static_lights", []) as Array)
+	if lights.size() > WARD_LIGHT_MAX - 1:
+		lights = lights.duplicate()
+		lights.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
+	var positions := PackedVector2Array()
+	var radii := PackedFloat32Array()
+	if _player_sprite != null:
+		positions.append(player_position)
+		radii.append(WARD_PLAYER_LIGHT_TILES * float(tile_size.x))
+	for light_variant: Variant in lights:
+		if positions.size() >= WARD_LIGHT_MAX:
+			break
+		var light := light_variant as Dictionary
+		positions.append(light.get("pos", Vector2.ZERO) as Vector2)
+		radii.append(float(light.get("radius", 0.0)))
+	mat.set_shader_parameter("light_count", positions.size())
+	mat.set_shader_parameter("light_pos", positions)
+	mat.set_shader_parameter("light_radius", radii)
+
 func _update_ward_darkness() -> void:
 	if _ward_overlays.is_empty() or not _lighting_enabled:
 		return
@@ -9645,7 +9751,6 @@ func _update_surface_life(delta: float) -> void:
 		return
 	_update_ward_dwarves(delta)
 	_update_ward_darkness()
-	_ward_swing_timer = maxf(0.0, _ward_swing_timer - delta)
 	var danger: float = SurfaceLifeService.danger_for_cell(_player_cell, _surface_anchor_cells)
 	_surface_spawn_timer -= delta
 	if _surface_spawn_timer <= 0.0:
