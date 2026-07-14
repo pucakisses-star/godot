@@ -73,13 +73,15 @@ const YEAR_EPITHETS: Array[String] = [
 	"Roots", "Leaves", "Thunder", "Floods", "Drought", "Mist",
 	"Flowers", "Nettles", "Briars", "Ravens", "Serpents", "Foxes",
 	"Black Pines",
-	"Kings", "the Moon", "the Yellow Fire", "Bloodstone"
+	"Kings", "the Moon", "the Yellow Fire", "Bloodstone",
+	"the Ashen Heart", "the Creek", "Plenty", "Rum", "Ale", "Wine"
 ]
 
 ## The epithet's tail: "Ash", "the Long Winter"...
 static func year_epithet(year: int) -> String:
-	# 45 is coprime to the pool size (133 = 7 x 19), so consecutive
-	# years walk the whole pool before any name comes around again.
+	# 45 (= 3^2 x 5) is coprime to the pool size (139, prime), so
+	# consecutive years walk the whole pool before any name comes around
+	# again.
 	return YEAR_EPITHETS[posmod(year * 45 + 17, YEAR_EPITHETS.size())]
 
 ## "the Year of Ash" (or "The Year of Ash" when it opens a sentence).
