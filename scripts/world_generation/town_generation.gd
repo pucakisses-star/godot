@@ -202,6 +202,15 @@ var _surface_arrival_lock := false
 ## branch is wired) so production behaviour is unchanged; a harness or a
 ## future debug toggle flips it via the "seamless_hold_descent" setting.
 var _seamless_hold_descent := false
+## A hold's deep halls, generated on first descent and cached per gate so
+## re-entering is instant and stable. The surface embark (the wild
+## clearing the hold's carved city sits on) is level 0; a descended hold's
+## halls become levels 1.. in the same column.
+var _hold_deep_columns: Dictionary = {}
+var _seamless_surface_level: Dictionary = {}
+## Where to place the walker when they climb back out of a hold's halls -
+## the mouth stair on the surface they descended through.
+var _seamless_return_cell := Vector2i(2147483647, 2147483647)
 var _surface_road_paths: Array[Array] = []
 ## Grass cells beside lane junctions that host a wooden direction post,
 ## planned by the lane tracer and rendered through _pick_decor_tile.
@@ -6041,6 +6050,24 @@ func _try_use_stairs_at_player_cell() -> bool:
 		return true
 	if stair_direction == "up" and _hold_state.current_level_index > 0:
 		var destination_index := _hold_state.current_level_index - 1
+		# Climbing out of a hold's halls to the surface (level 0) lands on
+		# the mouth stair we descended through - the wild surface has no
+		# "down" stair in its grid, so the generic resolve would fall back
+		# to the current cell.
+		if destination_index == 0 and _seamless_return_cell.x != 2147483647:
+			_show_level(0)
+			# The mouth is a STREAMED landmark cell, not part of the little
+			# surface clearing grid, so the grid-validated spawn can't land
+			# there - place the walker on it directly and let the wilds
+			# stream back in around them.
+			_player_cell = _seamless_return_cell
+			if _player_sprite != null:
+				_actor_sprite_to_cell(_player_sprite, _seamless_return_cell)
+			_player_is_moving = false
+			_player_move_path.clear()
+			_wild_needs_recenter = true
+			_surface_arrival_lock = true
+			return true
 		_pending_player_spawn_cell = _resolve_stair_spawn_cell(destination_index, "down", _player_cell)
 		_show_level(destination_index)
 		return true
@@ -9337,13 +9364,60 @@ func _begin_site_journey(site: Dictionary, scene_path: String) -> void:
 	SceneCacheService.request_change(self, scene_path)
 
 ## Descend a hold's mouth stair into its deep halls without leaving the
-## scene. Wired in the next commit against the town's own underground
-## renderer; the capability flag stays off until it lands, so this is
-## never reached in production yet.
-func _begin_seamless_hold_descent(_gate: Dictionary, site: Dictionary) -> void:
-	# Not yet implemented: fall back to the journey swap so enabling the
-	# flag early can never strand the walker on the stair.
-	_begin_site_journey(site, WorldSitesService.scene_path_for(site))
+## scene: the halls become levels 1.. of THIS scene's column and the town's
+## own underground renderer draws them (the same path its village cellars
+## use), so there is no load screen. Reuses the level-switch and player-
+## placement machinery the depth stairs already run on.
+func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
+	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+	var gate_key := String(gate.get("key", ""))
+	var column := _hold_deep_column_for(gate_key, site)
+	# The wild surface is level 0; preserve it once so climbing back out
+	# restores the exact embark. The descended hold's halls sit beneath it.
+	if _seamless_surface_level.is_empty() and _hold_state.has_levels():
+		_seamless_surface_level = _hold_state.generated_levels[0] as Dictionary
+	if column.is_empty() or _seamless_surface_level.is_empty():
+		# Generation failed - never strand the walker; take the old swap.
+		_begin_site_journey(site, WorldSitesService.scene_path_for(site))
+		return
+	var rebuilt: Array[Dictionary] = [_seamless_surface_level]
+	rebuilt.append_array(column)
+	_hold_state.generated_levels = rebuilt
+	# Climb back out to the mouth stair we descended through.
+	_seamless_return_cell = _hold_ward_stair_cell(anchor)
+	_set_save_status("You descend into %s." % String(site.get("name", "the hold")), Color(0.85, 0.9, 0.7, 1.0))
+	_pending_player_spawn_cell = _resolve_stair_spawn_cell(1, "up", _seamless_return_cell)
+	_show_level(1)
+
+## The cached deep column for a hold gate, generated on first descent.
+func _hold_deep_column_for(gate_key: String, site: Dictionary) -> Array[Dictionary]:
+	if gate_key.is_empty():
+		gate_key = String(site.get("seed", "hold"))
+	if _hold_deep_columns.has(gate_key):
+		return _hold_deep_columns[gate_key] as Array[Dictionary]
+	var column := _generate_hold_deep_column(site)
+	_hold_deep_columns[gate_key] = column
+	return column
+
+## A hold's deep halls as a stack of underground levels, built by the town
+## scene's own plaza/hall generator (shared with the hold scene through
+## SettlementSceneBase). Deterministic per hold seed. Fidelity - real
+## strata, ores, streamed rock, the full population - is the next commit;
+## this proves the seamless z-change descent end to end.
+const HOLD_DEEP_LEVELS := 3
+func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
+	var hold_seed := String(site.get("seed", "")).strip_edges()
+	if hold_seed.is_empty():
+		hold_seed = String(site.get("name", "hold"))
+	var column: Array[Dictionary] = []
+	# _generate_single_level reseeds _rng from the level seed, so generating
+	# the halls never disturbs the already-built surface embark.
+	for depth in range(1, HOLD_DEEP_LEVELS + 1):
+		var level_seed := "%s::underhall_%d" % [hold_seed, depth]
+		var level_data := _generate_single_level(level_seed, depth, HOLD_DEEP_LEVELS + 1)
+		level_data["kind"] = "underhall"
+		column.append(level_data)
+	return column
 
 func _player_on_any_gate_cell() -> bool:
 	for gate: Dictionary in _surface_gates:
