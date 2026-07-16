@@ -6026,6 +6026,11 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	if _is_underhall_vein_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
 		_swing_at_underhall_vein(clicked_cell)
 		return
+	# And the undug rock itself digs: tunnel through the deep to expand the
+	# hold, one carved cell at a time.
+	if _is_underhall_rock_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
+		_swing_at_underhall_rock(clicked_cell)
+		return
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
 		# You don't chat with the risen dead - you put them down.
@@ -9378,6 +9383,65 @@ func _ward_site_key_for_cell(cell: Vector2i) -> String:
 		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_CITY_HALF_H * 2 + 6:
 			return String(gate.get("key", ""))
 	return ""
+
+## Undug rock in a seamless underhall: solid earth the walker can tunnel
+## through to expand the hold. Only true rock digs - building walls
+## (CELL_WALL) and everything already carved stay untouched, mirroring the
+## hold scene's own _is_diggable_cell rule.
+func _is_underhall_rock_cell(cell: Vector2i) -> bool:
+	if _hold_state.current_depth_kind() != "underhall":
+		return false
+	return _cell_at(_latest_grid, cell.x, cell.y) == CELL_ROCK
+
+## Deep rock is harder than a surface outcrop; a bare hand takes six swings.
+const UNDERHALL_ROCK_HP := 18
+
+## One pickaxe swing at the tunnel face, on the same cooldown and tool
+## ladder as every other dig in the scene.
+func _swing_at_underhall_rock(cell: Vector2i) -> void:
+	if _ward_swing_timer > 0.0:
+		return
+	_ward_swing_timer = WARD_SWING_COOLDOWN
+	var damage := WARD_HAND_DIG_DAMAGE
+	for tool_name: String in WARD_DIG_TOOL_DAMAGE.keys():
+		if int(_player_inventory.get(tool_name, 0)) > 0:
+			damage = maxi(damage, int(WARD_DIG_TOOL_DAMAGE[tool_name]))
+	var total_damage := int(_vein_damage.get(cell, 0)) + damage
+	if total_damage >= UNDERHALL_ROCK_HP:
+		_dig_underhall_rock(cell)
+		return
+	_vein_damage[cell] = total_damage
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.5, 0.48, 0.46, 1.0), 5)
+
+## Breaks through the rock: the cell becomes dug hall in the level's own grid
+## (held by reference, so the tunnel survives revisits), the tile and its
+## neighbors repaint from the hold kit (a wall above a fresh tunnel shows its
+## carved face), and the spoil pays Stone with a small chance of the level
+## stratum's ore.
+func _dig_underhall_rock(cell: Vector2i) -> void:
+	_vein_damage.erase(cell)
+	_latest_grid[cell] = CELL_HALL
+	decor_layer.erase_cell(cell)
+	for offset: Vector2i in [Vector2i.ZERO, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var repaint := cell + offset
+		var repaint_zone := _cell_at(_latest_grid, repaint.x, repaint.y)
+		_place_hold_tile(city_layer, repaint, _pick_underhall_base_tile(_latest_grid, repaint.x, repaint.y, repaint_zone))
+		_actor_passable_cache.erase(repaint)
+	_add_to_inventory("Stone", 1)
+	if randi_range(1, 100) <= WARD_DIG_ORE_CHANCE_PERCENT:
+		var ore := _roll_stratum_ore(_latest_stratum)
+		if not ore.is_empty():
+			_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
+			_spawn_floating_text("Struck %s!" % String(ore.get("name", "")), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.5, 0.48, 0.46, 1.0), 12)
+	# A long tunnel can outrun the darkness quad; when the new cell nears its
+	# edge, rebuild the quad over the grown grid so the deep never runs out
+	# of dark.
+	var overlay_sprite := _underhall_overlay.get("sprite") as Sprite2D
+	if overlay_sprite != null and is_instance_valid(overlay_sprite):
+		var quad_rect := Rect2(overlay_sprite.position, overlay_sprite.scale * 4.0)
+		if not quad_rect.grow(-3.0 * float(tile_size.x)).has_point(_cell_center_position(cell)):
+			_build_underhall_darkness(_find_bounds(_latest_grid).grow(1))
 
 ## An ore vein on the current underhall floor: a "stone" outcrop the depth
 ## strata stamped, mineable for the level's stratum ore. Other floor decor
