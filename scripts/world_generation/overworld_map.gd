@@ -784,6 +784,9 @@ const TOWN_SCENE_WILD_KEY := "town_scene_is_wild"
 ## Set true when that wild tile is open water: the clearing is drawn as sea
 ## and the player is dropped afloat on the ocean rather than on dry ground.
 const TOWN_SCENE_WILD_WATER_KEY := "town_scene_wild_water"
+## Set true when the wild embark is a hold journey's approach: the scene
+## places the walker at the hold's mouth stair instead of the clearing.
+const TOWN_SCENE_SPAWN_AT_HOLD_MOUTH_KEY := "town_scene_spawn_at_hold_mouth"
 const DUNGEON_INTERIOR_SCENE_PATH := "res://scenes/dungeon_interior.tscn"
 const DUNGEON_SCENE_SEED_KEY := "dungeon_scene_seed"
 const DUNGEON_SCENE_NAME_KEY := "dungeon_scene_name"
@@ -1346,7 +1349,9 @@ func _begin_journey_from_tile(tile_coord: Vector2i) -> void:
 		if approach.x != 2147483647:
 			var approach_details := _tile_data.get(approach, {}) as Dictionary
 			var approach_seed := _wild_scene_seed_for_tile(approach, approach_details)
-			_store_selected_wild_scene_context(approach_seed, approach, approach_details)
+			# The journey's destination is the HOLD, not the wild tile it
+			# embarks through: spawn the walker at the hold's mouth stair.
+			_store_selected_wild_scene_context(approach_seed, approach, approach_details, true)
 			SceneCacheService.request_change(self, TOWN_GENERATION_SCENE_PATH)
 			return
 		# No open ground on any side (a hold ringed by sea or cities):
@@ -1505,7 +1510,7 @@ func _store_selected_town_scene_context(seed_text: String, tile_coord: Vector2i,
 ## and river buffers so the streamed wilds match the overworld, but flags the
 ## scene wild (TOWN_SCENE_WILD_KEY) and zeroes every settlement field so it
 ## raises a bare biome clearing with no city, population, or theme.
-func _store_selected_wild_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary) -> void:
+func _store_selected_wild_scene_context(seed_text: String, tile_coord: Vector2i, details: Dictionary, spawn_at_hold_mouth: bool = false) -> void:
 	var game_session := get_node_or_null("/root/GameSession")
 	if game_session == null:
 		return
@@ -1514,6 +1519,12 @@ func _store_selected_wild_scene_context(seed_text: String, tile_coord: Vector2i,
 	var settings: Dictionary = game_session.call("get_world_settings")
 	settings[TOWN_SCENE_WILD_KEY] = true
 	settings[TOWN_SCENE_WILD_WATER_KEY] = _patch_biome_label_for_tile(tile_coord) == BIOME_WATER
+	# A hold journey embarks on the wild tile NEXT to the mountain (the tile
+	# itself is solid stone), but the walker must arrive AT the hold, not in
+	# the middle of a 768-cell wild tile with the city a hike away: this flag
+	# tells the scene to place them at the hold's mouth stair. Written every
+	# embark (true or false) so a later plain wild journey never inherits it.
+	settings[TOWN_SCENE_SPAWN_AT_HOLD_MOUTH_KEY] = spawn_at_hold_mouth
 	settings[TOWN_SCENE_SEED_KEY] = seed_text
 	settings[TOWN_SCENE_TILE_KEY] = {"x": tile_coord.x, "y": tile_coord.y}
 	settings[TOWN_SCENE_NAME_KEY] = _wild_place_name_for_tile(tile_coord, details)

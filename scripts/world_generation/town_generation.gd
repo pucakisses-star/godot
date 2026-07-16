@@ -219,6 +219,11 @@ var _surface_arrival_lock := false
 ## never strands the walker), so this stays a reversible flip - the
 ## "seamless_hold_descent" setting still overrides it.
 var _seamless_hold_descent := true
+## A hold journey embarks on the wild tile beside the mountain (the hold's
+## own tile is solid stone), but its destination is the HOLD: this one-shot
+## flag places the walker at the hold's mouth stair instead of the middle
+## of a 768-cell wild clearing with the city a hike away.
+var _wild_spawn_at_hold_mouth := false
 ## A hold's deep halls, generated on first descent and cached per gate so
 ## re-entering is instant and stable. The surface embark (the wild
 ## clearing the hold's carved city sits on) is level 0; a descended hold's
@@ -3406,6 +3411,7 @@ func _apply_cached_town_scene_seed() -> void:
 	_wild_mode = bool(settings.get(TOWN_SCENE_WILD_KEY, false))
 	_wild_water = _wild_mode and bool(settings.get(TOWN_SCENE_WILD_WATER_KEY, false))
 	_seamless_hold_descent = bool(settings.get("seamless_hold_descent", true))
+	_wild_spawn_at_hold_mouth = _wild_mode and bool(settings.get("town_scene_spawn_at_hold_mouth", false))
 	if _wild_mode:
 		# Name the header for the wilderness, not "Unnamed Town".
 		var wild_title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
@@ -4251,6 +4257,7 @@ func _show_level(target_level_index: int) -> void:
 	_restamp_player_builds()
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
+	_apply_hold_doorstep_spawn()
 	_furnish_interiors(grid)
 	# Now the furnishing fires are known, drape the deep dark over an underhall
 	# (a no-op that clears any prior quad above ground or on a storage cellar).
@@ -4307,10 +4314,12 @@ func _apply_lighting_state() -> void:
 			var ward_node := node_variant as Node2D
 			if ward_node != null and is_instance_valid(ward_node):
 				ward_node.visible = _lighting_enabled
-	# The deep underhall dark rides it too, so the toggle floods the halls.
-	var underhall_sprite := _underhall_overlay.get("sprite") as Node2D
-	if underhall_sprite != null and is_instance_valid(underhall_sprite):
-		underhall_sprite.visible = _lighting_enabled
+	# The deep underhall dark and its wall sconces ride it too, so the
+	# toggle floods the halls.
+	for underhall_node_variant: Variant in _underhall_overlay.get("nodes", []) as Array:
+		var underhall_node := underhall_node_variant as Node2D
+		if underhall_node != null and is_instance_valid(underhall_node):
+			underhall_node.visible = _lighting_enabled
 
 func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	if city_layer.tile_set == null:
@@ -6025,6 +6034,11 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	# level's stratum ore.
 	if _is_underhall_vein_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
 		_swing_at_underhall_vein(clicked_cell)
+		return
+	# And the undug rock itself digs: tunnel through the deep to expand the
+	# hold, one carved cell at a time.
+	if _is_underhall_rock_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
+		_swing_at_underhall_rock(clicked_cell)
 		return
 	var npc_state := _npc_state_at_cell(clicked_cell)
 	if not npc_state.is_empty() and _is_player_adjacent_to_cell(clicked_cell):
@@ -9199,13 +9213,15 @@ func _free_ward_overlay_for_key(gate_key: String) -> void:
 ## Feeds each ward shader its lights every frame: the player first, then
 ## the mouth and stairwell pools, then every sconce riding a slow sine
 ## flicker phase-keyed per cell so no two throb in unison.
-## Frees the level-wide underhall darkness quad (its own actor-layer child).
+## Frees the level-wide underhall darkness quad and its wall sconces (all
+## actor-layer children of this overlay).
 func _free_underhall_darkness() -> void:
 	if _underhall_overlay.is_empty():
 		return
-	var sprite := _underhall_overlay.get("sprite") as Node2D
-	if sprite != null and is_instance_valid(sprite):
-		sprite.queue_free()
+	for node_variant: Variant in _underhall_overlay.get("nodes", []) as Array:
+		var node := node_variant as Node2D
+		if node != null and is_instance_valid(node):
+			node.queue_free()
 	_underhall_overlay = {}
 
 ## Builds the darkness for a seamless underhall: one quad covering the level,
@@ -9255,7 +9271,38 @@ func _build_underhall_darkness(bounds: Rect2i) -> void:
 	var up_stair_variant: Variant = _hold_state.active_level_stairs.get("up")
 	if up_stair_variant is Vector2i:
 		static_lights.append({"pos": _cell_center_position(up_stair_variant as Vector2i), "radius": WARD_STAIR_LIGHT_TILES * tile_px.x})
-	_underhall_overlay = {"sprite": overlay_sprite, "material": mat, "static_lights": static_lights}
+	# Wall sconces: the hold strings its halls with torches, so the seamless
+	# underhalls do too. Mounted on rock walls that border dug ground, at a
+	# deterministic modular spacing (revisits relight identical walls), capped
+	# so a sprawling level doesn't drown the scene in flames - the darkness
+	# shader already gives its light slots to the pools nearest the player.
+	var nodes: Array = [overlay_sprite]
+	var sconces: Array = []
+	var sconce_seen: Dictionary = {}
+	for cell_variant: Variant in _latest_grid.keys():
+		if sconces.size() >= 140:
+			break
+		var hall_cell := cell_variant as Vector2i
+		var zone := int(_latest_grid[cell_variant])
+		if zone != CELL_HALL and zone != CELL_PLAZA:
+			continue
+		for offset: Vector2i in [Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.DOWN]:
+			var wall_cell := hall_cell + offset
+			if sconce_seen.has(wall_cell):
+				continue
+			if _cell_at(_latest_grid, wall_cell.x, wall_cell.y) != CELL_ROCK:
+				continue
+			# The ward strings its shell at every 4th cell; match its density.
+			if posmod(wall_cell.x * 3 + wall_cell.y * 5, WARD_SCONCE_SPACING) != 0:
+				continue
+			sconce_seen[wall_cell] = true
+			nodes.append(_spawn_ward_sconce(wall_cell))
+			sconces.append({
+				"pos": _cell_center_position(wall_cell),
+				"radius": WARD_SCONCE_LIGHT_TILES * tile_px.x,
+				"phase": float(absi(wall_cell.x * 7 + wall_cell.y * 13))
+			})
+	_underhall_overlay = {"sprite": overlay_sprite, "material": mat, "static_lights": static_lights, "sconces": sconces, "nodes": nodes}
 
 ## Per-frame: push the player's light and the nearest fires into the underhall
 ## darkness shader (nearest win the slots when a big level over-fills them).
@@ -9266,11 +9313,14 @@ func _update_underhall_darkness() -> void:
 	if mat == null:
 		return
 	var player_position := _player_sprite.position if _player_sprite != null else Vector2.ZERO
-	var lights := (_underhall_overlay.get("static_lights", []) as Array)
+	# Fires and sconces compete for the shader's slots together; when a big
+	# level over-fills them, the pools nearest the player win, exactly as the
+	# ward and the hold scene pick their own lights.
+	var lights := (_underhall_overlay.get("static_lights", []) as Array) + (_underhall_overlay.get("sconces", []) as Array)
 	if lights.size() > WARD_LIGHT_MAX - 1:
-		lights = lights.duplicate()
 		lights.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 			return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
+	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
 	var positions := PackedVector2Array()
 	var radii := PackedFloat32Array()
 	if _player_sprite != null:
@@ -9281,7 +9331,11 @@ func _update_underhall_darkness() -> void:
 			break
 		var light := light_variant as Dictionary
 		positions.append(light.get("pos", Vector2.ZERO) as Vector2)
-		radii.append(float(light.get("radius", 0.0)))
+		var radius := float(light.get("radius", 0.0))
+		# Sconce flames breathe; steady fires (they carry no phase) hold still.
+		if light.has("phase"):
+			radius *= 1.0 + 0.07 * sin(flicker_phase * 8.0 + float(light.get("phase", 0.0)))
+		radii.append(radius)
 	mat.set_shader_parameter("light_count", positions.size())
 	mat.set_shader_parameter("light_pos", positions)
 	mat.set_shader_parameter("light_radius", radii)
@@ -9378,6 +9432,65 @@ func _ward_site_key_for_cell(cell: Vector2i) -> String:
 		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_CITY_HALF_H * 2 + 6:
 			return String(gate.get("key", ""))
 	return ""
+
+## Undug rock in a seamless underhall: solid earth the walker can tunnel
+## through to expand the hold. Only true rock digs - building walls
+## (CELL_WALL) and everything already carved stay untouched, mirroring the
+## hold scene's own _is_diggable_cell rule.
+func _is_underhall_rock_cell(cell: Vector2i) -> bool:
+	if _hold_state.current_depth_kind() != "underhall":
+		return false
+	return _cell_at(_latest_grid, cell.x, cell.y) == CELL_ROCK
+
+## Deep rock is harder than a surface outcrop; a bare hand takes six swings.
+const UNDERHALL_ROCK_HP := 18
+
+## One pickaxe swing at the tunnel face, on the same cooldown and tool
+## ladder as every other dig in the scene.
+func _swing_at_underhall_rock(cell: Vector2i) -> void:
+	if _ward_swing_timer > 0.0:
+		return
+	_ward_swing_timer = WARD_SWING_COOLDOWN
+	var damage := WARD_HAND_DIG_DAMAGE
+	for tool_name: String in WARD_DIG_TOOL_DAMAGE.keys():
+		if int(_player_inventory.get(tool_name, 0)) > 0:
+			damage = maxi(damage, int(WARD_DIG_TOOL_DAMAGE[tool_name]))
+	var total_damage := int(_vein_damage.get(cell, 0)) + damage
+	if total_damage >= UNDERHALL_ROCK_HP:
+		_dig_underhall_rock(cell)
+		return
+	_vein_damage[cell] = total_damage
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.5, 0.48, 0.46, 1.0), 5)
+
+## Breaks through the rock: the cell becomes dug hall in the level's own grid
+## (held by reference, so the tunnel survives revisits), the tile and its
+## neighbors repaint from the hold kit (a wall above a fresh tunnel shows its
+## carved face), and the spoil pays Stone with a small chance of the level
+## stratum's ore.
+func _dig_underhall_rock(cell: Vector2i) -> void:
+	_vein_damage.erase(cell)
+	_latest_grid[cell] = CELL_HALL
+	decor_layer.erase_cell(cell)
+	for offset: Vector2i in [Vector2i.ZERO, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var repaint := cell + offset
+		var repaint_zone := _cell_at(_latest_grid, repaint.x, repaint.y)
+		_place_hold_tile(city_layer, repaint, _pick_underhall_base_tile(_latest_grid, repaint.x, repaint.y, repaint_zone))
+		_actor_passable_cache.erase(repaint)
+	_add_to_inventory("Stone", 1)
+	if randi_range(1, 100) <= WARD_DIG_ORE_CHANCE_PERCENT:
+		var ore := _roll_stratum_ore(_latest_stratum)
+		if not ore.is_empty():
+			_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
+			_spawn_floating_text("Struck %s!" % String(ore.get("name", "")), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
+	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.5, 0.48, 0.46, 1.0), 12)
+	# A long tunnel can outrun the darkness quad; when the new cell nears its
+	# edge, rebuild the quad over the grown grid so the deep never runs out
+	# of dark.
+	var overlay_sprite := _underhall_overlay.get("sprite") as Sprite2D
+	if overlay_sprite != null and is_instance_valid(overlay_sprite):
+		var quad_rect := Rect2(overlay_sprite.position, overlay_sprite.scale * 4.0)
+		if not quad_rect.grow(-3.0 * float(tile_size.x)).has_point(_cell_center_position(cell)):
+			_build_underhall_darkness(_find_bounds(_latest_grid).grow(1))
 
 ## An ore vein on the current underhall floor: a "stone" outcrop the depth
 ## strata stamped, mineable for the level's stratum ore. Other floor decor
@@ -9610,6 +9723,45 @@ func _begin_site_journey(site: Dictionary, scene_path: String) -> void:
 ## own underground renderer draws them (the same path its village cellars
 ## use), so there is no load screen. Reuses the level-switch and player-
 ## placement machinery the depth stairs already run on.
+## A hold journey's arrival: place the walker at the destination hold's
+## mouth stair - the same streamed-landmark cell the seamless ascent
+## returns to - so "Begin your journey here" on a dwarfhold lands IN the
+## hold, not in the middle of the approach tile's wilds. One-shot: the
+## flag is consumed so a later ascent's own placement is never fought.
+## The gate list is built during surface setup (the hold sits one tile
+## away, well inside the site window), so the nearest dwarfhold gate is
+## the journey's destination.
+func _apply_hold_doorstep_spawn() -> void:
+	if not _wild_spawn_at_hold_mouth:
+		return
+	if not _wild_mode or _is_underground_level() or _player_sprite == null:
+		return
+	_wild_spawn_at_hold_mouth = false
+	var nearest_anchor := Vector2i(2147483647, 2147483647)
+	var nearest_distance := 2147483647
+	for gate: Dictionary in _surface_gates:
+		if String((gate.get("site", {}) as Dictionary).get("class", "")) != "dwarfhold":
+			continue
+		var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		var gate_distance := maxi(absi(anchor.x - _player_cell.x), absi(anchor.y - _player_cell.y))
+		if gate_distance < nearest_distance:
+			nearest_distance = gate_distance
+			nearest_anchor = anchor
+	if nearest_anchor.x == 2147483647:
+		return
+	# The mouth is a streamed landmark cell outside the clearing grid, so
+	# place directly (grid-validated spawns would reject it); the chunk
+	# streamer raises the carved city around the walker from here.
+	var mouth := _hold_ward_stair_cell(nearest_anchor)
+	_player_cell = mouth
+	_actor_sprite_to_cell(_player_sprite, mouth)
+	# The mouth doubles as the gate's own trigger: without the arrival lock
+	# the very first frame would treat the arrival spawn as a NEW arrival
+	# and auto-descend into the underhalls. Locked, exactly as a stair exit
+	# locks it, until the walker steps off the gate.
+	_surface_arrival_lock = true
+	_wild_needs_recenter = true
+
 func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
 	var gate_key := String(gate.get("key", ""))
