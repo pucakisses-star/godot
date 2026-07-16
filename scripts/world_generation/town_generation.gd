@@ -219,6 +219,11 @@ var _surface_arrival_lock := false
 ## never strands the walker), so this stays a reversible flip - the
 ## "seamless_hold_descent" setting still overrides it.
 var _seamless_hold_descent := true
+## A hold journey embarks on the wild tile beside the mountain (the hold's
+## own tile is solid stone), but its destination is the HOLD: this one-shot
+## flag places the walker at the hold's mouth stair instead of the middle
+## of a 768-cell wild clearing with the city a hike away.
+var _wild_spawn_at_hold_mouth := false
 ## A hold's deep halls, generated on first descent and cached per gate so
 ## re-entering is instant and stable. The surface embark (the wild
 ## clearing the hold's carved city sits on) is level 0; a descended hold's
@@ -3406,6 +3411,7 @@ func _apply_cached_town_scene_seed() -> void:
 	_wild_mode = bool(settings.get(TOWN_SCENE_WILD_KEY, false))
 	_wild_water = _wild_mode and bool(settings.get(TOWN_SCENE_WILD_WATER_KEY, false))
 	_seamless_hold_descent = bool(settings.get("seamless_hold_descent", true))
+	_wild_spawn_at_hold_mouth = _wild_mode and bool(settings.get("town_scene_spawn_at_hold_mouth", false))
 	if _wild_mode:
 		# Name the header for the wilderness, not "Unnamed Town".
 		var wild_title_label := get_node_or_null("Margin/Layout/Controls/Title") as Label
@@ -4251,6 +4257,7 @@ func _show_level(target_level_index: int) -> void:
 	_restamp_player_builds()
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
+	_apply_hold_doorstep_spawn()
 	_furnish_interiors(grid)
 	# Now the furnishing fires are known, drape the deep dark over an underhall
 	# (a no-op that clears any prior quad above ground or on a storage cellar).
@@ -9716,6 +9723,45 @@ func _begin_site_journey(site: Dictionary, scene_path: String) -> void:
 ## own underground renderer draws them (the same path its village cellars
 ## use), so there is no load screen. Reuses the level-switch and player-
 ## placement machinery the depth stairs already run on.
+## A hold journey's arrival: place the walker at the destination hold's
+## mouth stair - the same streamed-landmark cell the seamless ascent
+## returns to - so "Begin your journey here" on a dwarfhold lands IN the
+## hold, not in the middle of the approach tile's wilds. One-shot: the
+## flag is consumed so a later ascent's own placement is never fought.
+## The gate list is built during surface setup (the hold sits one tile
+## away, well inside the site window), so the nearest dwarfhold gate is
+## the journey's destination.
+func _apply_hold_doorstep_spawn() -> void:
+	if not _wild_spawn_at_hold_mouth:
+		return
+	if not _wild_mode or _is_underground_level() or _player_sprite == null:
+		return
+	_wild_spawn_at_hold_mouth = false
+	var nearest_anchor := Vector2i(2147483647, 2147483647)
+	var nearest_distance := 2147483647
+	for gate: Dictionary in _surface_gates:
+		if String((gate.get("site", {}) as Dictionary).get("class", "")) != "dwarfhold":
+			continue
+		var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		var gate_distance := maxi(absi(anchor.x - _player_cell.x), absi(anchor.y - _player_cell.y))
+		if gate_distance < nearest_distance:
+			nearest_distance = gate_distance
+			nearest_anchor = anchor
+	if nearest_anchor.x == 2147483647:
+		return
+	# The mouth is a streamed landmark cell outside the clearing grid, so
+	# place directly (grid-validated spawns would reject it); the chunk
+	# streamer raises the carved city around the walker from here.
+	var mouth := _hold_ward_stair_cell(nearest_anchor)
+	_player_cell = mouth
+	_actor_sprite_to_cell(_player_sprite, mouth)
+	# The mouth doubles as the gate's own trigger: without the arrival lock
+	# the very first frame would treat the arrival spawn as a NEW arrival
+	# and auto-descend into the underhalls. Locked, exactly as a stair exit
+	# locks it, until the walker steps off the gate.
+	_surface_arrival_lock = true
+	_wild_needs_recenter = true
+
 func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
 	var gate_key := String(gate.get("key", ""))
