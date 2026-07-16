@@ -4307,10 +4307,12 @@ func _apply_lighting_state() -> void:
 			var ward_node := node_variant as Node2D
 			if ward_node != null and is_instance_valid(ward_node):
 				ward_node.visible = _lighting_enabled
-	# The deep underhall dark rides it too, so the toggle floods the halls.
-	var underhall_sprite := _underhall_overlay.get("sprite") as Node2D
-	if underhall_sprite != null and is_instance_valid(underhall_sprite):
-		underhall_sprite.visible = _lighting_enabled
+	# The deep underhall dark and its wall sconces ride it too, so the
+	# toggle floods the halls.
+	for underhall_node_variant: Variant in _underhall_overlay.get("nodes", []) as Array:
+		var underhall_node := underhall_node_variant as Node2D
+		if underhall_node != null and is_instance_valid(underhall_node):
+			underhall_node.visible = _lighting_enabled
 
 func _render_city(grid: Dictionary, stair_cells: Dictionary = {}) -> void:
 	if city_layer.tile_set == null:
@@ -9204,13 +9206,15 @@ func _free_ward_overlay_for_key(gate_key: String) -> void:
 ## Feeds each ward shader its lights every frame: the player first, then
 ## the mouth and stairwell pools, then every sconce riding a slow sine
 ## flicker phase-keyed per cell so no two throb in unison.
-## Frees the level-wide underhall darkness quad (its own actor-layer child).
+## Frees the level-wide underhall darkness quad and its wall sconces (all
+## actor-layer children of this overlay).
 func _free_underhall_darkness() -> void:
 	if _underhall_overlay.is_empty():
 		return
-	var sprite := _underhall_overlay.get("sprite") as Node2D
-	if sprite != null and is_instance_valid(sprite):
-		sprite.queue_free()
+	for node_variant: Variant in _underhall_overlay.get("nodes", []) as Array:
+		var node := node_variant as Node2D
+		if node != null and is_instance_valid(node):
+			node.queue_free()
 	_underhall_overlay = {}
 
 ## Builds the darkness for a seamless underhall: one quad covering the level,
@@ -9260,7 +9264,38 @@ func _build_underhall_darkness(bounds: Rect2i) -> void:
 	var up_stair_variant: Variant = _hold_state.active_level_stairs.get("up")
 	if up_stair_variant is Vector2i:
 		static_lights.append({"pos": _cell_center_position(up_stair_variant as Vector2i), "radius": WARD_STAIR_LIGHT_TILES * tile_px.x})
-	_underhall_overlay = {"sprite": overlay_sprite, "material": mat, "static_lights": static_lights}
+	# Wall sconces: the hold strings its halls with torches, so the seamless
+	# underhalls do too. Mounted on rock walls that border dug ground, at a
+	# deterministic modular spacing (revisits relight identical walls), capped
+	# so a sprawling level doesn't drown the scene in flames - the darkness
+	# shader already gives its light slots to the pools nearest the player.
+	var nodes: Array = [overlay_sprite]
+	var sconces: Array = []
+	var sconce_seen: Dictionary = {}
+	for cell_variant: Variant in _latest_grid.keys():
+		if sconces.size() >= 140:
+			break
+		var hall_cell := cell_variant as Vector2i
+		var zone := int(_latest_grid[cell_variant])
+		if zone != CELL_HALL and zone != CELL_PLAZA:
+			continue
+		for offset: Vector2i in [Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.DOWN]:
+			var wall_cell := hall_cell + offset
+			if sconce_seen.has(wall_cell):
+				continue
+			if _cell_at(_latest_grid, wall_cell.x, wall_cell.y) != CELL_ROCK:
+				continue
+			# The ward strings its shell at every 4th cell; match its density.
+			if posmod(wall_cell.x * 3 + wall_cell.y * 5, WARD_SCONCE_SPACING) != 0:
+				continue
+			sconce_seen[wall_cell] = true
+			nodes.append(_spawn_ward_sconce(wall_cell))
+			sconces.append({
+				"pos": _cell_center_position(wall_cell),
+				"radius": WARD_SCONCE_LIGHT_TILES * tile_px.x,
+				"phase": float(absi(wall_cell.x * 7 + wall_cell.y * 13))
+			})
+	_underhall_overlay = {"sprite": overlay_sprite, "material": mat, "static_lights": static_lights, "sconces": sconces, "nodes": nodes}
 
 ## Per-frame: push the player's light and the nearest fires into the underhall
 ## darkness shader (nearest win the slots when a big level over-fills them).
@@ -9271,11 +9306,14 @@ func _update_underhall_darkness() -> void:
 	if mat == null:
 		return
 	var player_position := _player_sprite.position if _player_sprite != null else Vector2.ZERO
-	var lights := (_underhall_overlay.get("static_lights", []) as Array)
+	# Fires and sconces compete for the shader's slots together; when a big
+	# level over-fills them, the pools nearest the player win, exactly as the
+	# ward and the hold scene pick their own lights.
+	var lights := (_underhall_overlay.get("static_lights", []) as Array) + (_underhall_overlay.get("sconces", []) as Array)
 	if lights.size() > WARD_LIGHT_MAX - 1:
-		lights = lights.duplicate()
 		lights.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 			return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
+	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
 	var positions := PackedVector2Array()
 	var radii := PackedFloat32Array()
 	if _player_sprite != null:
@@ -9286,7 +9324,11 @@ func _update_underhall_darkness() -> void:
 			break
 		var light := light_variant as Dictionary
 		positions.append(light.get("pos", Vector2.ZERO) as Vector2)
-		radii.append(float(light.get("radius", 0.0)))
+		var radius := float(light.get("radius", 0.0))
+		# Sconce flames breathe; steady fires (they carry no phase) hold still.
+		if light.has("phase"):
+			radius *= 1.0 + 0.07 * sin(flicker_phase * 8.0 + float(light.get("phase", 0.0)))
+		radii.append(radius)
 	mat.set_shader_parameter("light_count", positions.size())
 	mat.set_shader_parameter("light_pos", positions)
 	mat.set_shader_parameter("light_radius", radii)
