@@ -963,12 +963,18 @@ func _day_night_tint(hour: float) -> Color:
 func _update_day_night_tint() -> void:
 	# Tint only the map layers so the side panel stays readable at night.
 	# Sealed cellars see no sky: underground levels stay untinted, the
-	# same way the precipitation overlay already gates on the level.
-	var tint := (
-		Color.WHITE
-		if _is_underground_level()
-		else _day_night_tint(_game_hour) * WeatherService.tint_multiplier(_current_weather)
-	)
+	# same way the precipitation overlay already gates on the level -
+	# except a seamless underhall, which wears its STRATUM's cast (the
+	# fungal caverns glow faintly green, the starmetal deep runs pale
+	# blue), exactly as the hold scene colors its own ground. Actors stay
+	# untinted underground so walkers keep their readability in the dark.
+	var tint := Color.WHITE
+	var actor_tint := Color.WHITE
+	if not _is_underground_level():
+		tint = _day_night_tint(_game_hour) * WeatherService.tint_multiplier(_current_weather)
+		actor_tint = tint
+	elif _hold_state.current_depth_kind() == "underhall":
+		tint = _latest_stratum.get("tint", Color.WHITE) as Color
 	if tint.is_equal_approx(_applied_day_night_tint):
 		return
 	_applied_day_night_tint = tint
@@ -977,7 +983,7 @@ func _update_day_night_tint() -> void:
 	if decor_layer != null:
 		decor_layer.modulate = tint
 	if actor_layer != null:
-		actor_layer.modulate = tint
+		actor_layer.modulate = actor_tint
 	# Landmark icons (tents, pyres, great trees) live on a sibling layer
 	# that must darken with everything else or they glow at midnight.
 	if _surface_landmark_layer != null and is_instance_valid(_surface_landmark_layer):
@@ -4290,6 +4296,11 @@ func _update_depth_controls() -> void:
 	depth_down_button.disabled = _hold_state.current_level_index <= 0
 	depth_up_button.disabled = _hold_state.current_level_index >= level_count - 1
 	depth_label.text = "Level %d / %d" % [_hold_state.current_level_index + 1, level_count]
+	# A seamless underhall names its stratum, as the hold's own gauge does.
+	if _hold_state.current_depth_kind() == "underhall":
+		var stratum_name := String(_latest_stratum.get("name", ""))
+		if not stratum_name.is_empty():
+			depth_label.text += " — %s" % stratum_name
 
 
 func _on_lighting_toggle_toggled(toggled_on: bool) -> void:
@@ -9832,6 +9843,7 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		var strata_rng := RandomNumberGenerator.new()
 		strata_rng.seed = hash("%s::strata" % level_seed)
 		DepthStrataService.stamp_stratum_features(level_data.get("grid", {}) as Dictionary, strata_floor_decor, stratum, strata_rng)
+		_carve_underhall_pools(level_data.get("grid", {}) as Dictionary, stratum, strata_rng)
 		level_data["floor_decor"] = strata_floor_decor
 		level_data["stratum"] = stratum
 		column.append(level_data)
@@ -9839,6 +9851,34 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 	_hold_state.selected_hold_population = saved_selected
 	_hold_state.target_resident_npcs = saved_target
 	return column
+
+## Still water in the deep: wobble-edged pools carved into the undug rock
+## beside the halls - the fungal caverns hold real lakes, the other strata
+## a stray pool or two. Only solid rock converts, so a pool can never eat
+## dug floor, a room, or a stair: walkability is untouched and the pools
+## read as cave lakes glinting at the edge of the torchlight.
+func _carve_underhall_pools(grid: Dictionary, stratum: Dictionary, rng: RandomNumberGenerator) -> void:
+	var pool_count := rng.randi_range(3, 5) if bool(stratum.get("cavern", false)) else rng.randi_range(0, 2)
+	if pool_count <= 0:
+		return
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in grid.keys():
+		if int(grid[cell_variant]) == CELL_HALL:
+			hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	for _pool in range(pool_count):
+		var anchor := hall_cells[rng.randi_range(0, hall_cells.size() - 1)]
+		var center := anchor + Vector2i(rng.randi_range(-9, 9), rng.randi_range(-7, 7))
+		var radius := rng.randi_range(2, 4)
+		for dy in range(-radius, radius + 1):
+			for dx in range(-radius, radius + 1):
+				var wobble := 1.0 + 0.3 * sin(float(dx) * 1.1 + float(dy) * 0.7)
+				if Vector2(dx, dy).length() > float(radius) * 0.85 * wobble:
+					continue
+				var pool_cell := center + Vector2i(dx, dy)
+				if int(grid.get(pool_cell, CELL_ROCK)) == CELL_ROCK:
+					grid[pool_cell] = DwarfHoldTileService.CELL_WATER
 
 func _player_on_any_gate_cell() -> bool:
 	for gate: Dictionary in _surface_gates:
@@ -11676,6 +11716,10 @@ func _pick_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
 ## here (a lit, solid-stone hold rather than a field of black gaps). Passing
 ## the hold atlas turns on the depth pass (carved wall faces, dirt shadows).
 func _pick_underhall_base_tile(grid: Dictionary, x: int, y: int, cell: int) -> String:
+	# Cavern pools: still water in the deep, painted before the service
+	# (whose flat fallback would read the water zone as generic stone).
+	if cell == DwarfHoldTileService.CELL_WATER:
+		return "water"
 	var key := DwarfHoldTileService.pick_base_tile(grid, x, y, cell, _door_cells, TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS)
 	if key.is_empty():
 		return "stone"
