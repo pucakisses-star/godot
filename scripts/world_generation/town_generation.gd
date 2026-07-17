@@ -359,6 +359,23 @@ var _light_overlay_sprite: Sprite2D
 ## fire. {sprite, material, static_lights}; rebuilt per level, empty above
 ## ground and on storage cellars.
 var _underhall_overlay: Dictionary = {}
+## Minecart rails and the carts that ride them, in the seamless underhalls.
+## Every hold generates a working mine line from its entry stair to its
+## descent stair; R lays more track, C builds/boards a cart. Rails and cart
+## positions live on the level data BY REFERENCE, so the network persists
+## across level swaps exactly like the veins and tunnels. Mirrors the hold
+## scene's own system.
+var _rail_cells: Dictionary = {}
+var _rail_sprites: Dictionary = {}
+var _rail_textures: Dictionary = {}
+var _minecart_sprites: Dictionary = {}
+var _minecart_texture: Texture2D
+var _cart_riding := false
+var _cart_cell := Vector2i.ZERO
+var _cart_origin_cell := Vector2i.ZERO
+var _cart_dir := Vector2i.ZERO
+var _cart_desired_dir := Vector2i.ZERO
+var _cart_progress := 0.0
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
@@ -875,6 +892,7 @@ func _process(delta: float) -> void:
 	# from here or a vein could be struck only once and the halls never dim.
 	_ward_swing_timer = maxf(0.0, _ward_swing_timer - delta)
 	_update_underhall_darkness()
+	_update_minecart(delta)
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
@@ -1203,6 +1221,16 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 			KEY_M:
 				_toggle_mount()
+				get_viewport().set_input_as_handled()
+				return
+			KEY_R:
+				# Deep in the hold: lay minecart rails at the walker's feet.
+				_place_rail()
+				get_viewport().set_input_as_handled()
+				return
+			KEY_C:
+				# Deep in the hold: build, board, or step off a minecart.
+				_handle_cart_key()
 				get_viewport().set_input_as_handled()
 				return
 			KEY_I:
@@ -4255,6 +4283,9 @@ func _show_level(target_level_index: int) -> void:
 	_shop_stocks.clear()
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
+	# The level's rail network and parked carts come back with it (and the
+	# clear is the teardown on the surface and in storage cellars).
+	_rebuild_underhall_rails(level_data)
 	# _restore_homestead (via _setup_surface_world above) stamps saved builds
 	# before _render_city clears both layers and repaints the town rect plus
 	# its one-cell border ring; a build hugging the town edge sits on that
@@ -6288,6 +6319,16 @@ func _screen_position_from_cell(cell: Vector2i) -> Vector2:
 func _try_move_player(direction: Vector2i) -> bool:
 	if direction == Vector2i.ZERO:
 		return false
+	# Aboard a minecart the keys steer the CART: launch along a rail, or
+	# queue the turn taken at the next junction. Walking is suspended.
+	if _cart_riding:
+		if absi(direction.x) + absi(direction.y) != 1:
+			return false
+		_cart_desired_dir = direction
+		if _cart_dir == Vector2i.ZERO and _rail_cells.has(_cart_cell + direction):
+			_cart_dir = direction
+			_cart_progress = 0.0
+		return true
 	# One tile per step, always - a longer vector would glide the sprite
 	# across intermediate cells nothing ever walkability-checked.
 	if absi(direction.x) > 1 or absi(direction.y) > 1:
@@ -9563,6 +9604,382 @@ func _roll_stratum_ore(stratum: Dictionary) -> Dictionary:
 			return {"name": String(drop.get("name", "")), "amount": randi_range(int(drop.get("min", 1)), int(drop.get("max", 1)))}
 	return {}
 
+## --- Minecart rails in the deep -------------------------------------------
+## The hold scene's own rail-and-cart system, mirrored for the seamless
+## underhalls: R lays track at the walker's feet, C builds a cart on rails
+## (or boards one beside them), the keys steer the ride. On top of that the
+## deep column GENERATES a working mine line per level - the hold's dwarves
+## did not wait for the walker to bring timber.
+const RAIL_TIMBER_COST := 1
+const RAIL_STONE_COST := 1
+const CART_INGOT_COST := 2
+const CART_SPEED_TILES := 7.0
+
+## The generated line: a track from the level's entry stair to its descent
+## stair through the dug corridors, with one cart parked mid-line. The stair
+## mouths themselves stay clear so the hatch art never hides under iron.
+func _lay_underhall_railway(level_data: Dictionary) -> void:
+	var grid := level_data.get("grid", {}) as Dictionary
+	var stairs := level_data.get("stair_cells", {}) as Dictionary
+	var up_variant: Variant = stairs.get("up")
+	var down_variant: Variant = stairs.get("down")
+	if not (up_variant is Vector2i) or not (down_variant is Vector2i):
+		return
+	var path := _underhall_rail_path(grid, up_variant as Vector2i, down_variant as Vector2i)
+	if path.size() < 4:
+		return
+	path = path.slice(1, path.size() - 1)
+	level_data["rails"] = path.duplicate()
+	level_data["carts"] = [path[path.size() / 2]]
+
+## Breadth-first line through the dug ground, corridors and plazas first so
+## the track hugs the streets; only if no corridor route exists does it cut
+## through rooms. Empty when the stairs simply don't connect.
+func _underhall_rail_path(grid: Dictionary, from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2i]:
+	for corridors_only: bool in [true, false]:
+		var frontier: Array[Vector2i] = [from_cell]
+		var came_from: Dictionary = {from_cell: from_cell}
+		var head := 0
+		while head < frontier.size():
+			var current := frontier[head]
+			head += 1
+			if current == to_cell:
+				var path: Array[Vector2i] = []
+				var walk := to_cell
+				while walk != from_cell:
+					path.push_front(walk)
+					walk = came_from[walk] as Vector2i
+				path.push_front(from_cell)
+				return path
+			for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var next_cell := current + offset
+				if came_from.has(next_cell):
+					continue
+				var zone := int(grid.get(next_cell, CELL_ROCK))
+				var open := zone == CELL_HALL or zone == CELL_PLAZA
+				if not corridors_only:
+					open = open or zone == CELL_HOUSE or zone == CELL_BUILDING
+				if not open and next_cell != to_cell:
+					continue
+				came_from[next_cell] = current
+				frontier.append(next_cell)
+	return []
+
+## Rebuilds the shown level's rail network and parked carts from its own
+## data (empty on the surface and in storage cellars - the clear is the
+## teardown for every level kind).
+func _rebuild_underhall_rails(level_data: Dictionary) -> void:
+	_clear_rail_sprites()
+	_clear_minecart_sprites()
+	_rail_cells = {}
+	for rail_variant: Variant in (level_data.get("rails", []) as Array):
+		_rail_cells[rail_variant as Vector2i] = true
+	for rail_variant: Variant in _rail_cells.keys():
+		_spawn_rail_at(rail_variant as Vector2i)
+	for cart_variant: Variant in (level_data.get("carts", []) as Array):
+		_spawn_minecart_at(cart_variant as Vector2i)
+
+func _place_rail() -> void:
+	if _player_sprite == null or _hold_state.current_depth_kind() != "underhall":
+		return
+	var cell := _player_cell
+	if _rail_cells.has(cell):
+		_set_save_status("Rails already run here", Color(0.85, 0.8, 0.7, 1.0))
+		return
+	if int(_player_inventory.get("Timber", 0)) < RAIL_TIMBER_COST or int(_player_inventory.get("Stone", 0)) < RAIL_STONE_COST:
+		_set_save_status("Need %d Timber and %d Stone to lay rails" % [RAIL_TIMBER_COST, RAIL_STONE_COST], Color(0.95, 0.75, 0.45, 1.0))
+		return
+	_add_to_inventory("Timber", -RAIL_TIMBER_COST)
+	_add_to_inventory("Stone", -RAIL_STONE_COST)
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	if not level_data.has("rails"):
+		level_data["rails"] = []
+	(level_data["rails"] as Array).append(cell)
+	_rail_cells[cell] = true
+	_spawn_rail_at(cell)
+	_refresh_rail_art_around(cell)
+	_set_save_status("Rails laid", Color(0.85, 0.82, 0.7, 1.0))
+
+func _spawn_rail_at(cell: Vector2i) -> void:
+	_rail_cells[cell] = true
+	if _rail_sprites.has(cell):
+		return
+	var rail := Sprite2D.new()
+	rail.texture = _rail_texture_for(_rail_signature(cell))
+	rail.centered = true
+	rail.position = _cell_center_position(cell)
+	# Above the floor, below every actor.
+	rail.z_index = 4
+	lighting_layer.add_child(rail)
+	_rail_sprites[cell] = rail
+
+## Re-derives the connection art of a cell and its four neighbors after
+## the network changes.
+func _refresh_rail_art_around(cell: Vector2i) -> void:
+	for offset: Vector2i in [Vector2i.ZERO, Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		var neighbor := cell + offset
+		var sprite := _rail_sprites.get(neighbor) as Sprite2D
+		if sprite != null:
+			sprite.texture = _rail_texture_for(_rail_signature(neighbor))
+
+func _clear_rail_sprites() -> void:
+	for rail_variant: Variant in _rail_sprites.values():
+		var rail := rail_variant as Sprite2D
+		if rail != null:
+			rail.queue_free()
+	_rail_sprites = {}
+
+## Which arms this rail cell extends toward its rail neighbors: "ns",
+## "ew", corners, or the full cross; a stub follows its one neighbor's
+## axis, an orphan lies east-west.
+func _rail_signature(cell: Vector2i) -> String:
+	var north := _rail_cells.has(cell + Vector2i(0, -1))
+	var east := _rail_cells.has(cell + Vector2i(1, 0))
+	var south := _rail_cells.has(cell + Vector2i(0, 1))
+	var west := _rail_cells.has(cell + Vector2i(-1, 0))
+	var count := (1 if north else 0) + (1 if east else 0) + (1 if south else 0) + (1 if west else 0)
+	if count >= 3:
+		return "cross"
+	if north and south:
+		return "ns"
+	if east and west:
+		return "ew"
+	if north and east:
+		return "ne"
+	if north and west:
+		return "nw"
+	if south and east:
+		return "se"
+	if south and west:
+		return "sw"
+	if north or south:
+		return "ns"
+	return "ew"
+
+## Track art painted on demand per signature: iron rails riding wooden
+## sleepers, arms reaching the tile edges they connect toward.
+func _rail_texture_for(signature: String) -> Texture2D:
+	var cached_variant: Variant = _rail_textures.get(signature)
+	if cached_variant is Texture2D:
+		return cached_variant as Texture2D
+	var arms := {
+		"ns": [true, false, true, false], "ew": [false, true, false, true],
+		"ne": [true, true, false, false], "nw": [true, false, false, true],
+		"se": [false, true, true, false], "sw": [false, false, true, true],
+		"cross": [true, true, true, true]
+	}.get(signature, [false, true, false, true]) as Array
+	var image := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var sleeper := Color(0.42, 0.29, 0.17, 1.0)
+	var iron := Color(0.55, 0.53, 0.5, 1.0)
+	var iron_dark := Color(0.34, 0.33, 0.32, 1.0)
+	if bool(arms[0]) or bool(arms[2]):
+		var y_start := 0 if bool(arms[0]) else 7
+		var y_end := 16 if bool(arms[2]) else 9
+		for ty in range(y_start, y_end):
+			if ty % 3 == 1:
+				for tx in range(4, 12):
+					image.set_pixel(tx, ty, sleeper)
+		for ty in range(y_start, y_end):
+			image.set_pixel(5, ty, iron)
+			image.set_pixel(6, ty, iron_dark)
+			image.set_pixel(10, ty, iron)
+			image.set_pixel(11, ty, iron_dark)
+	if bool(arms[1]) or bool(arms[3]):
+		var x_start := 7 if not bool(arms[3]) else 0
+		var x_end := 9 if not bool(arms[1]) else 16
+		for tx in range(x_start, x_end):
+			if tx % 3 == 1:
+				for ty in range(4, 12):
+					image.set_pixel(tx, ty, sleeper)
+		for tx in range(x_start, x_end):
+			image.set_pixel(tx, 5, iron)
+			image.set_pixel(tx, 6, iron_dark)
+			image.set_pixel(tx, 10, iron)
+			image.set_pixel(tx, 11, iron_dark)
+	image.resize(int(tile_size.x), int(tile_size.y), Image.INTERPOLATE_NEAREST)
+	var texture := ImageTexture.create_from_image(image)
+	_rail_textures[signature] = texture
+	return texture
+
+func _create_minecart_texture() -> Texture2D:
+	var image := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var body := Color(0.36, 0.3, 0.26, 1.0)
+	var rim := Color(0.55, 0.48, 0.4, 1.0)
+	var hollow := Color(0.16, 0.13, 0.11, 1.0)
+	var wheel := Color(0.12, 0.12, 0.13, 1.0)
+	for ty in range(4, 13):
+		for tx in range(3, 13):
+			var tone := body
+			if ty == 4 or ty == 12 or tx == 3 or tx == 12:
+				tone = rim
+			elif ty >= 6 and ty <= 10 and tx >= 5 and tx <= 10:
+				tone = hollow
+			image.set_pixel(tx, ty, tone)
+	for wheel_x: int in [4, 11]:
+		image.set_pixel(wheel_x, 13, wheel)
+		image.set_pixel(wheel_x + 1, 13, wheel)
+	image.resize(int(tile_size.x), int(tile_size.y), Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(image)
+
+func _spawn_minecart_at(cell: Vector2i) -> void:
+	if _minecart_sprites.has(cell):
+		return
+	if _minecart_texture == null:
+		_minecart_texture = _create_minecart_texture()
+	var cart := Sprite2D.new()
+	cart.texture = _minecart_texture
+	cart.centered = true
+	cart.position = _cell_center_position(cell)
+	cart.z_index = 10
+	lighting_layer.add_child(cart)
+	_minecart_sprites[cell] = cart
+
+func _clear_minecart_sprites() -> void:
+	for cart_variant: Variant in _minecart_sprites.values():
+		var cart := cart_variant as Sprite2D
+		if cart != null:
+			cart.queue_free()
+	_minecart_sprites = {}
+	_cart_riding = false
+	_cart_dir = Vector2i.ZERO
+
+## C beside (or atop) a cart mounts it; C on your own rail with ingots
+## to spare builds one; C aboard a stopped cart steps off.
+func _handle_cart_key() -> void:
+	if _player_sprite == null or _hold_state.current_depth_kind() != "underhall":
+		return
+	if _cart_riding:
+		if _cart_dir == Vector2i.ZERO:
+			_dismount_cart()
+		else:
+			_set_save_status("Hold on!", Color(0.9, 0.8, 0.6, 1.0))
+		return
+	var mount_cell := Vector2i(2147483647, 2147483647)
+	if _minecart_sprites.has(_player_cell):
+		mount_cell = _player_cell
+	else:
+		for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			if _minecart_sprites.has(_player_cell + offset):
+				mount_cell = _player_cell + offset
+				break
+	if mount_cell.x != 2147483647:
+		_mount_cart(mount_cell)
+		return
+	_place_minecart()
+
+func _place_minecart() -> void:
+	var cell := _player_cell
+	if not _rail_cells.has(cell):
+		_set_save_status("A minecart needs rails beneath it (R to lay track)", Color(0.95, 0.75, 0.45, 1.0))
+		return
+	if _minecart_sprites.has(cell):
+		_set_save_status("A cart already waits here", Color(0.85, 0.8, 0.7, 1.0))
+		return
+	if int(_player_inventory.get("Iron Ingot", 0)) < CART_INGOT_COST:
+		_set_save_status("Need %d Iron Ingots to build a minecart" % CART_INGOT_COST, Color(0.95, 0.75, 0.45, 1.0))
+		return
+	_add_to_inventory("Iron Ingot", -CART_INGOT_COST)
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	if not level_data.has("carts"):
+		level_data["carts"] = []
+	(level_data["carts"] as Array).append(cell)
+	_spawn_minecart_at(cell)
+	_set_save_status("Minecart built - press C beside it to ride", Color(0.85, 0.82, 0.7, 1.0))
+
+func _mount_cart(cell: Vector2i) -> void:
+	_cart_riding = true
+	_cart_cell = cell
+	_cart_origin_cell = cell
+	_cart_dir = Vector2i.ZERO
+	_cart_desired_dir = Vector2i.ZERO
+	_cart_progress = 0.0
+	_player_move_path.clear()
+	_player_is_moving = false
+	_player_cell = cell
+	_player_sprite.position = _cell_center_position(cell)
+	_center_view_on_world_position(_player_sprite.position)
+	_set_save_status("Aboard - hold a direction to ride, C to step off", Color(0.85, 0.82, 0.7, 1.0))
+
+func _dismount_cart() -> void:
+	_cart_riding = false
+	_cart_dir = Vector2i.ZERO
+	# Step off onto the first open non-rail neighbor; failing that, any
+	# open neighbor; failing THAT, stay put on the cart cell.
+	for prefer_off_rail: bool in [true, false]:
+		for offset: Vector2i in [Vector2i(0, 1), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, -1)]:
+			var step_cell := _cart_cell + offset
+			if not _is_walkable_cell(step_cell) or _is_cell_occupied_by_npc(step_cell):
+				continue
+			if bool(prefer_off_rail) and _rail_cells.has(step_cell):
+				continue
+			_player_cell = step_cell
+			_player_sprite.position = _cell_center_position(step_cell)
+			_center_view_on_world_position(_player_sprite.position)
+			return
+
+## The ride itself: the cart barrels toward the next rail cell, follows
+## lone corners, honors the held direction at junctions, and brakes at
+## the end of the line (its new resting place persists on the level).
+func _update_minecart(delta: float) -> void:
+	if not _cart_riding or _cart_dir == Vector2i.ZERO or _player_sprite == null:
+		return
+	_cart_progress += delta * CART_SPEED_TILES
+	while _cart_progress >= 1.0 and _cart_dir != Vector2i.ZERO:
+		_cart_progress -= 1.0
+		_move_cart_to(_cart_cell + _cart_dir)
+		_cart_dir = _next_cart_direction()
+		if _cart_dir == Vector2i.ZERO:
+			_settle_cart()
+	var cart := _minecart_sprites.get(_cart_cell) as Sprite2D
+	var glide := _cell_center_position(_cart_cell)
+	if _cart_dir != Vector2i.ZERO:
+		glide += Vector2(_cart_dir) * Vector2(tile_size) * clampf(_cart_progress, 0.0, 1.0)
+	if cart != null:
+		cart.position = glide
+	_player_sprite.position = glide
+	_center_view_on_world_position(glide)
+
+func _move_cart_to(next_cell: Vector2i) -> void:
+	var cart := _minecart_sprites.get(_cart_cell) as Sprite2D
+	_minecart_sprites.erase(_cart_cell)
+	_cart_cell = next_cell
+	_player_cell = next_cell
+	if cart != null:
+		_minecart_sprites[next_cell] = cart
+
+## Straight ahead first, then the held direction, then a lone corner;
+## never straight back the way it came.
+func _next_cart_direction() -> Vector2i:
+	var candidates: Array[Vector2i] = []
+	if _cart_desired_dir != Vector2i.ZERO and _cart_desired_dir != -_cart_dir and _rail_cells.has(_cart_cell + _cart_desired_dir):
+		return _cart_desired_dir
+	if _rail_cells.has(_cart_cell + _cart_dir):
+		return _cart_dir
+	for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		if offset == -_cart_dir:
+			continue
+		if _rail_cells.has(_cart_cell + offset):
+			candidates.append(offset)
+	if candidates.size() == 1:
+		return candidates[0]
+	return Vector2i.ZERO
+
+## The cart came to rest: move its level entry from where it started to
+## where it stopped so the level rebuilds it here.
+func _settle_cart() -> void:
+	_cart_progress = 0.0
+	if _cart_origin_cell == _cart_cell:
+		return
+	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
+	var carts := level_data.get("carts", []) as Array
+	carts.erase(_cart_origin_cell)
+	if not carts.has(_cart_cell):
+		carts.append(_cart_cell)
+	level_data["carts"] = carts
+	_cart_origin_cell = _cart_cell
+
 func _swing_at_ward_rock(cell: Vector2i) -> void:
 	if _ward_swing_timer > 0.0:
 		return
@@ -9846,6 +10263,9 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		_carve_underhall_pools(level_data.get("grid", {}) as Dictionary, stratum, strata_rng)
 		level_data["floor_decor"] = strata_floor_decor
 		level_data["stratum"] = stratum
+		# The hold's mine line: rails from the entry stair to the descent
+		# stair, a cart parked mid-track, ready the day the walker arrives.
+		_lay_underhall_railway(level_data)
 		column.append(level_data)
 	_generating_hold_column = false
 	_hold_state.selected_hold_population = saved_selected
