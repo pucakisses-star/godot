@@ -893,6 +893,17 @@ func _process(delta: float) -> void:
 	_ward_swing_timer = maxf(0.0, _ward_swing_timer - delta)
 	_update_underhall_darkness()
 	_update_minecart(delta)
+	# The stratum's beasts hunt below ground too: _update_surface_life owns
+	# this tick on the surface but early-outs underground, so the underhalls
+	# drive the same shared AI from here.
+	if _is_underground_level() and not _surface_creatures.is_empty():
+		SurfaceLifeService.update_creatures(
+			delta, _surface_creatures, _player_cell,
+			Callable(self, "_is_walkable_cell"),
+			Callable(self, "_cell_center_position"),
+			_rng,
+			Callable(self, "_damage_player")
+		)
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
@@ -4295,6 +4306,10 @@ func _show_level(target_level_index: int) -> void:
 	_spawn_tavern_characters(grid)
 	# After the NPC spawn (which rebuilds the actor layer's children).
 	_apply_hold_doorstep_spawn()
+	# The stratum's beasts prowl in AFTER the actor-layer rebuild above (a
+	# creature spawned before it would ride a freed sprite) and after the
+	# doorstep spawn, so "not in the walker's lap" measures the real spot.
+	_populate_underhall_creatures(level_data)
 	_furnish_interiors(grid)
 	# Now the furnishing fires are known, drape the deep dark over an underhall
 	# (a no-op that clears any prior quad above ground or on a storage cellar).
@@ -10259,10 +10274,13 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		var strata_floor_decor: Dictionary = {}
 		var strata_rng := RandomNumberGenerator.new()
 		strata_rng.seed = hash("%s::strata" % level_seed)
-		DepthStrataService.stamp_stratum_features(level_data.get("grid", {}) as Dictionary, strata_floor_decor, stratum, strata_rng)
+		var starmetal_cells := DepthStrataService.stamp_stratum_features(level_data.get("grid", {}) as Dictionary, strata_floor_decor, stratum, strata_rng)
 		_carve_underhall_pools(level_data.get("grid", {}) as Dictionary, stratum, strata_rng)
 		level_data["floor_decor"] = strata_floor_decor
 		level_data["stratum"] = stratum
+		# The deepest level's starmetal deposit, remembered so its guardian
+		# beasts muster around it on every visit.
+		level_data["starmetal_cells"] = starmetal_cells
 		# The hold's mine line: rails from the entry stair to the descent
 		# stair, a cart parked mid-track, ready the day the walker arrives.
 		_lay_underhall_railway(level_data)
@@ -10271,6 +10289,58 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 	_hold_state.selected_hold_population = saved_selected
 	_hold_state.target_resident_npcs = saved_target
 	return column
+
+## The stratum's beasts: cave wildlife prowling the underhalls, drawn from
+## the same creature pipeline the surface wilds use (same defs, same sheet,
+## same AI, combat and loot already wired to the click handler). Each
+## stratum fields its own cast - soil vermin up top, cavern crawlers in
+## the middle, the starmetal deep's horrors at the bottom, with extra
+## guardians mustered around the starmetal deposit itself. Spawns are
+## transient prowlers rolled per visit; the level teardown frees them.
+func _populate_underhall_creatures(level_data: Dictionary) -> void:
+	if _hold_state.current_depth_kind() != "underhall":
+		return
+	var slots := _latest_stratum.get("creature_slots", []) as Array
+	if slots.is_empty():
+		return
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in _latest_grid.keys():
+		if int(_latest_grid[cell_variant]) == CELL_HALL:
+			hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	var spawn_count := clampi(3 + _hold_state.current_level_index, 3, 8)
+	for _spawn in range(spawn_count):
+		var cell := hall_cells[_rng.randi_range(0, hall_cells.size() - 1)]
+		# Never in the walker's lap: beasts prowl in from the dark.
+		if maxi(absi(cell.x - _player_cell.x), absi(cell.y - _player_cell.y)) < 12:
+			continue
+		SurfaceLifeService.spawn_creature(
+			_surface_creatures, SURFACE_CREATURE_TEXTURE,
+			int(slots[_rng.randi_range(0, slots.size() - 1)]),
+			cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
+		)
+	# The starmetal's guardians: the stratum's meanest slot, mustered
+	# around the deposit. The deposit cell itself is a solid outcrop (and
+	# its flanks may hold veins), so each guard takes the first open cell
+	# in its deposit's neighborhood rather than gambling on one roll.
+	for starmetal_variant: Variant in (level_data.get("starmetal_cells", []) as Array):
+		var deposit := starmetal_variant as Vector2i
+		var guard_posted := false
+		for dy in range(-2, 3):
+			if guard_posted:
+				break
+			for dx in range(-2, 3):
+				var guard_cell := deposit + Vector2i(dx, dy)
+				if not _is_walkable_cell(guard_cell):
+					continue
+				SurfaceLifeService.spawn_creature(
+					_surface_creatures, SURFACE_CREATURE_TEXTURE,
+					int(slots[slots.size() - 1]),
+					guard_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
+				)
+				guard_posted = true
+				break
 
 ## Still water in the deep: wobble-edged pools carved into the undug rock
 ## beside the halls - the fungal caverns hold real lakes, the other strata
