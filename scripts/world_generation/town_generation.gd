@@ -120,6 +120,22 @@ var _coins_label: Label
 var _trade_shop_cell := Vector2i(2147483647, 2147483647)
 var _crate_armed := ""
 var _trade_shop_type := ""
+## The open trade panel's craft entries: slot index -> recipe. Rebuilt on
+## every refresh; only the ward forge fills it.
+var _chest_slot_recipes: Dictionary = {}
+## The ward forge's craft ladder: smelt mined ore into ingots, then work
+## ingots into picks. Ore is mined for free, so every rung undercuts the
+## shop's coin price without being free - the smith's fee on the upper
+## rungs keeps coins in the loop. Smelt ratios match GearService.SMELT_DEFS
+## so the ward forge and the old hold's deep furnace agree.
+const WARD_FORGE_RECIPES: Array[Dictionary] = [
+	{"output": "Copper Ingot", "materials": {"Copper Ore": 2}, "coins": 0},
+	{"output": "Iron Ingot", "materials": {"Iron Ore": 2}, "coins": 0},
+	{"output": "Gold Ingot", "materials": {"Gold Nugget": 2}, "coins": 0},
+	{"output": "Copper Pick", "materials": {"Copper Ingot": 2}, "coins": 0},
+	{"output": "Steel Pickaxe", "materials": {"Iron Ingot": 3}, "coins": 6},
+	{"output": "Dwarven Pickaxe", "materials": {"Iron Ingot": 5, "Gold Nugget": 2}, "coins": 8},
+]
 ## The real-world cell the walk-away leash measures while a trade popup is
 ## open; traveler stocks anchor at a synthetic far-away cell, so the leash
 ## needs the trader's actual spot (sentinel = fall back to the shop anchor).
@@ -5505,9 +5521,29 @@ func _refresh_trade_panel() -> void:
 		var quantity := int(entry.get("quantity", 1))
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, item_name, quantity)
 		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
+	# The forge's anvil side: craft entries rendered AFTER the coin wares,
+	# never stored in the stock (the daily reroll and the buy path's
+	# quantity decrement must never touch them).
+	_chest_slot_recipes.clear()
+	if _trade_shop_type == "forge":
+		var next_slot := mini(stock.size(), _chest_slot_labels.size())
+		for recipe: Dictionary in WARD_FORGE_RECIPES:
+			if next_slot >= _chest_slot_labels.size():
+				break
+			var output := String(recipe.get("output", ""))
+			_fill_inventory_slot(next_slot, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, output, 1)
+			var craft_tooltip := "\nCraft: %s" % GearService.craft_costs_text({"craft": recipe.get("materials", {})})
+			var fee := int(recipe.get("coins", 0))
+			if fee > 0:
+				craft_tooltip += " + %d coins" % fee
+			_chest_slot_panels[next_slot].tooltip_text += craft_tooltip
+			_chest_slot_recipes[next_slot] = recipe
+			next_slot += 1
 	_populate_backpack_slots()
 	chest_popup_status_label.text = "🪙 %d coins — click wares to buy, click your pack to sell" % _player_coins
-	if stock.is_empty():
+	if _trade_shop_type == "forge":
+		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or craft at the anvil" % _player_coins
+	elif stock.is_empty():
 		chest_popup_status_label.text = "🪙 %d coins — the shelves are bare; come back later" % _player_coins
 
 ## Tavern fare is eaten at the bar the moment it is bought: hearts and
@@ -5518,6 +5554,11 @@ const TAVERN_MEAL_HEARTS := {
 }
 
 func _buy_trade_item(slot_index: int) -> void:
+	# Craft slots resolve first: they cost materials, not shelf stock, and
+	# must never fall through to the coin-buy quantity decrement.
+	if _chest_slot_recipes.has(slot_index):
+		_craft_forge_entry(_chest_slot_recipes[slot_index] as Dictionary)
+		return
 	var stock := _shop_stocks.get(_trade_shop_cell, []) as Array
 	if slot_index < 0 or slot_index >= stock.size():
 		return
@@ -5546,6 +5587,29 @@ func _buy_trade_item(slot_index: int) -> void:
 	_save_player_inventory()
 	_refresh_trade_panel()
 	chest_popup_status_label.text = "Bought %s for %d coins (🪙 %d left)" % [item_name, price, _player_coins]
+
+## One craft at the forge's anvil: check the full cost (materials AND the
+## smith's fee) before deducting anything - never a partial spend.
+func _craft_forge_entry(recipe: Dictionary) -> void:
+	var output := String(recipe.get("output", ""))
+	var materials := recipe.get("materials", {}) as Dictionary
+	var fee := int(recipe.get("coins", 0))
+	if not GearService.can_afford_craft({"craft": materials}, _player_inventory) or _player_coins < fee:
+		var needed := GearService.craft_costs_text({"craft": materials})
+		if fee > 0:
+			needed += " + %d coins" % fee
+		chest_popup_status_label.text = "The smith needs %s for a %s" % [needed, output]
+		return
+	for material_variant: Variant in materials.keys():
+		_add_to_inventory(String(material_variant), -int(materials[material_variant]))
+	if fee > 0:
+		_adjust_coins(-fee)
+	_add_to_inventory(output, 1)
+	GameAudioService.play_sfx(self, "coin")
+	if _player_sprite != null:
+		_spawn_floating_text("+%s" % output, _player_sprite.position + Vector2(0, -14), Color(0.85, 0.9, 1.0, 1.0))
+	_refresh_trade_panel()
+	chest_popup_status_label.text = "Forged a %s (🪙 %d)" % [output, _player_coins]
 
 func _sell_item(item_name: String) -> void:
 	if int(_player_inventory.get(item_name, 0)) < 1:
