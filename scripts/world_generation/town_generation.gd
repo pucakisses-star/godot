@@ -1860,6 +1860,11 @@ func _update_player_turn_movement(delta: float) -> void:
 ## Walking away slams the lid: the chest/trade popup only works within
 ## reach of its tile, so held keys can't shop from across the map.
 func _close_out_of_range_popups() -> void:
+	# The notice board leashes like a shop counter: walk off, it closes.
+	if _contracts_panel != null and _contracts_panel.visible and _contracts_leash_cell.x != 2147483647:
+		var contracts_span := _player_cell - _contracts_leash_cell
+		if maxi(absi(contracts_span.x), absi(contracts_span.y)) > 6:
+			_close_contracts_board()
 	if chest_popup == null or not chest_popup.visible:
 		return
 	var anchor := _trade_shop_cell if _is_trade_mode() else _selected_chest_cell
@@ -6165,6 +6170,10 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 			return
 		_spawn_floating_text("Rock and stone!", _cell_center_position(clicked_cell) + Vector2(0, -12), Color(0.9, 0.85, 0.7, 1.0))
 		return
+	# The hold's notice board: contracts posted on the great-hall plaza.
+	if _ward_notice_board_at_cell(clicked_cell).x != 2147483647 and _is_player_adjacent_to_cell(clicked_cell):
+		_open_contracts_board(clicked_cell)
+		return
 	# The mountain digs from inside: an adjacent swing at massif rock
 	# chips it away by the hold's own geology.
 	if _is_ward_rock_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
@@ -7878,12 +7887,19 @@ func _plan_dwarfhold_main_floor(landmark: Dictionary, rng: RandomNumberGenerator
 			continue
 		if (hash("ward_spawn|%d|%d" % [(cell_variant as Vector2i).x, (cell_variant as Vector2i).y]) & 0xffff) % 9 == 0:
 			spawn_cells.append(cell_variant)
+	# The notice board: a carved signboard on the great-hall plaza's rim
+	# where the hold posts its contracts. Blocked like furniture, so the
+	# walker stands beside it to read.
+	var notice_board_cell := center + Vector2i(-4, -3)
+	decor[notice_board_cell] = "signboard"
+	blocked[notice_board_cell] = true
 	return {
 		"ok": true, "kind": "dwarfhold_city", "anchor": anchor,
 		"ground": ground, "decor": decor, "blocked": blocked,
 		"sprites": sprites, "bounds": rect.grow(1),
 		"sconces": sconce_cells, "light_cells": light_cells,
 		"spawn_cells": spawn_cells, "stair": center,
+		"notice_board": notice_board_cell,
 		# The buildings keep their trades: clicks inside a plot open the
 		# matching shop counter (forge, tavern, general store).
 		"plots": plots,
@@ -9794,6 +9810,225 @@ func _apply_underhall_diffs(level_data: Dictionary, depth: int) -> void:
 	level_data["carts"] = carts
 	_restoring_underhall_diffs = false
 
+## --- Hold contracts ----------------------------------------------------------
+## The notice board on the great-hall plaza posts two contracts per hold per
+## day, deterministic from the hold's seed and the calendar: a slay bounty
+## on the beasts prowling THIS hold's underhalls, and an ore delivery. Only
+## ACCEPTED contracts persist (per site seed, in world settings, riding
+## every save); unaccepted offers are recomputed on each open, so the board
+## is stateless until the walker signs.
+const HOLD_CONTRACTS_SETTINGS_KEY := "hold_contracts"
+
+var _contracts_panel: PanelContainer
+var _contracts_rows: VBoxContainer
+var _contracts_title: Label
+var _contracts_board_seed_key := ""
+var _contracts_leash_cell := Vector2i(2147483647, 2147483647)
+
+func _roll_hold_contract_offers(seed_key: String) -> Dictionary:
+	var offer_rng := RandomNumberGenerator.new()
+	offer_rng.seed = hash("hold_contract|%s|%d" % [seed_key, _game_day])
+	var slay_target := offer_rng.randi_range(4, 8)
+	var deliver_ore := "Iron Ore" if offer_rng.randi_range(0, 1) == 0 else "Copper Ore"
+	var deliver_target := offer_rng.randi_range(6, 12)
+	var ore_worth := int(SettlementEconomyService.ITEM_VALUES.get(deliver_ore, 4))
+	return {
+		"slay": {"target": slay_target, "pay": slay_target * offer_rng.randi_range(9, 13)},
+		"deliver": {"ore": deliver_ore, "target": deliver_target, "pay": deliver_target * (ore_worth + offer_rng.randi_range(2, 4))}
+	}
+
+func _hold_contract_state(seed_key: String) -> Dictionary:
+	var settings: Dictionary = _world_settings_snapshot()
+	var contracts: Dictionary = settings.get(HOLD_CONTRACTS_SETTINGS_KEY, {}) as Dictionary if settings.get(HOLD_CONTRACTS_SETTINGS_KEY) is Dictionary else {}
+	return contracts.get(seed_key, {}) as Dictionary if contracts.get(seed_key) is Dictionary else {}
+
+func _store_hold_contract_state(seed_key: String, state: Dictionary) -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var contracts: Dictionary = settings.get(HOLD_CONTRACTS_SETTINGS_KEY, {}) as Dictionary if settings.get(HOLD_CONTRACTS_SETTINGS_KEY) is Dictionary else {}
+	contracts[seed_key] = state
+	settings[HOLD_CONTRACTS_SETTINGS_KEY] = contracts
+	_store_world_settings(settings)
+
+## The kill hook: a beast the PLAYER fells in this hold's underhalls counts
+## toward its accepted slay bounty. Guard kills run the quiet strike and
+## never reach here.
+func _record_underhall_beast_slain() -> void:
+	if _seamless_hold_ledger_key.is_empty():
+		return
+	if _hold_state.current_depth_kind() != "underhall":
+		return
+	var state := _hold_contract_state(_seamless_hold_ledger_key)
+	if not (state.get("slay") is Dictionary):
+		return
+	var slay := state.get("slay") as Dictionary
+	slay["slain"] = int(slay.get("slain", 0)) + 1
+	state["slay"] = slay
+	_store_hold_contract_state(_seamless_hold_ledger_key, state)
+	var remaining := maxi(int(slay.get("target", 0)) - int(slay.get("slain", 0)), 0)
+	if remaining > 0:
+		_set_save_status("Bounty: %d more beast%s to fell." % [remaining, "" if remaining == 1 else "s"], Color(0.8, 0.85, 0.95, 1.0))
+	else:
+		_set_save_status("Bounty filled — the notice board owes you coin.", Color(0.7, 0.95, 0.7, 1.0))
+
+## The board's site seed: the gazetteer identity of the gate nearest this
+## ward cell, matching the underhall ledger's key so bounty kills below
+## and the board above agree on which hold they mean.
+func _ward_site_seed_for_cell(cell: Vector2i) -> String:
+	for gate: Dictionary in _surface_gates:
+		var site := gate.get("site", {}) as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_CITY_HALF_H * 2 + 6:
+			var site_seed := String(site.get("seed", "")).strip_edges()
+			if site_seed.is_empty():
+				site_seed = String(gate.get("key", ""))
+			return site_seed
+	return ""
+
+## The ward's notice board at this cell, or the invalid sentinel.
+func _ward_notice_board_at_cell(cell: Vector2i) -> Vector2i:
+	for landmark: Dictionary in _surface_landmarks:
+		if String(landmark.get("structure", "")) != "dwarfhold_city":
+			continue
+		var plan := landmark.get("plan", {}) as Dictionary
+		var board_variant: Variant = plan.get("notice_board")
+		if board_variant is Vector2i and (board_variant as Vector2i) == cell:
+			return cell
+	return Vector2i(2147483647, 2147483647)
+
+func _open_contracts_board(board_cell: Vector2i) -> void:
+	var seed_key := _ward_site_seed_for_cell(board_cell)
+	if seed_key.is_empty():
+		return
+	_contracts_board_seed_key = seed_key
+	_contracts_leash_cell = board_cell
+	if _contracts_panel == null:
+		_contracts_panel = PanelContainer.new()
+		_contracts_panel.z_index = 50
+		_contracts_panel.custom_minimum_size = Vector2(380, 0)
+		var column := VBoxContainer.new()
+		column.add_theme_constant_override("separation", 8)
+		_contracts_panel.add_child(column)
+		_contracts_title = Label.new()
+		_contracts_title.add_theme_font_size_override("font_size", 17)
+		_contracts_title.add_theme_color_override("font_color", Color(0.93, 0.88, 0.78, 1.0))
+		column.add_child(_contracts_title)
+		_contracts_rows = VBoxContainer.new()
+		_contracts_rows.add_theme_constant_override("separation", 6)
+		column.add_child(_contracts_rows)
+		var close_button := Button.new()
+		close_button.text = "Close"
+		close_button.focus_mode = Control.FOCUS_NONE
+		close_button.pressed.connect(_close_contracts_board)
+		column.add_child(close_button)
+		chest_popup.get_parent().add_child(_contracts_panel)
+		_contracts_panel.position = Vector2(220, 120)
+	if _contracts_title != null:
+		_contracts_title.text = "Notice Board — contracts"
+	_refresh_contracts_board()
+	_contracts_panel.visible = true
+
+func _close_contracts_board() -> void:
+	if _contracts_panel != null:
+		_contracts_panel.visible = false
+	_contracts_board_seed_key = ""
+	_contracts_leash_cell = Vector2i(2147483647, 2147483647)
+
+## Rebuilds the two offer rows from the ledger and today's deterministic
+## roll: Accept when unsigned, live progress while signed, Turn In when
+## filled, and "paid today" after a turn-in until tomorrow's offers.
+func _refresh_contracts_board() -> void:
+	if _contracts_rows == null or _contracts_board_seed_key.is_empty():
+		return
+	for child: Node in _contracts_rows.get_children():
+		child.queue_free()
+	var offers := _roll_hold_contract_offers(_contracts_board_seed_key)
+	var state := _hold_contract_state(_contracts_board_seed_key)
+	for kind: String in ["slay", "deliver"]:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		var text := Label.new()
+		text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		text.custom_minimum_size = Vector2(260, 0)
+		var action: Button = null
+		if state.get(kind) is Dictionary:
+			var active := state.get(kind) as Dictionary
+			var pay := int(active.get("pay", 0))
+			var target := int(active.get("target", 0))
+			var have := 0
+			if kind == "slay":
+				have = int(active.get("slain", 0))
+				text.text = "Bounty: fell %d beasts in the deep — %d/%d slain (%d coins)" % [target, mini(have, target), target, pay]
+			else:
+				var ore := String(active.get("ore", "Iron Ore"))
+				have = int(_player_inventory.get(ore, 0))
+				text.text = "Supply: deliver %d %s — %d/%d in your pack (%d coins)" % [target, ore, mini(have, target), target, pay]
+			if have >= target:
+				action = Button.new()
+				action.text = "Turn in"
+				action.pressed.connect(_turn_in_hold_contract.bind(kind))
+		elif int(state.get(kind + "_done_day", -1)) == _game_day:
+			text.text = "The %s contract is filled and paid — new work tomorrow." % kind
+		else:
+			var offer := offers.get(kind, {}) as Dictionary
+			var pay := int(offer.get("pay", 0))
+			var target := int(offer.get("target", 0))
+			if kind == "slay":
+				text.text = "Bounty: fell %d beasts in the deep (%d coins)" % [target, pay]
+			else:
+				text.text = "Supply: deliver %d %s (%d coins)" % [target, String(offer.get("ore", "Iron Ore")), pay]
+			action = Button.new()
+			action.text = "Accept"
+			action.pressed.connect(_accept_hold_contract.bind(kind))
+		row.add_child(text)
+		if action != null:
+			action.focus_mode = Control.FOCUS_NONE
+			row.add_child(action)
+		_contracts_rows.add_child(row)
+
+func _accept_hold_contract(kind: String) -> void:
+	if _contracts_board_seed_key.is_empty():
+		return
+	var state := _hold_contract_state(_contracts_board_seed_key)
+	if state.get(kind) is Dictionary:
+		return
+	var offers := _roll_hold_contract_offers(_contracts_board_seed_key)
+	var offer := (offers.get(kind, {}) as Dictionary).duplicate(true)
+	if kind == "slay":
+		offer["slain"] = 0
+	state[kind] = offer
+	_store_hold_contract_state(_contracts_board_seed_key, state)
+	_set_save_status("Contract signed — the hold expects results.", Color(0.85, 0.9, 0.7, 1.0))
+	_refresh_contracts_board()
+
+func _turn_in_hold_contract(kind: String) -> void:
+	if _contracts_board_seed_key.is_empty():
+		return
+	var state := _hold_contract_state(_contracts_board_seed_key)
+	if not (state.get(kind) is Dictionary):
+		return
+	var active := state.get(kind) as Dictionary
+	var target := int(active.get("target", 0))
+	var pay := int(active.get("pay", 0))
+	if kind == "slay":
+		if int(active.get("slain", 0)) < target:
+			return
+	else:
+		var ore := String(active.get("ore", "Iron Ore"))
+		if int(_player_inventory.get(ore, 0)) < target:
+			return
+		_add_to_inventory(ore, -target)
+	state.erase(kind)
+	state[kind + "_done_day"] = _game_day
+	_store_hold_contract_state(_contracts_board_seed_key, state)
+	_adjust_coins(pay)
+	GameAudioService.play_sfx(self, "coin")
+	if _player_sprite != null:
+		_spawn_floating_text("+%d coins" % pay, _player_sprite.position + Vector2(0, -14), Color(0.95, 0.8, 0.4, 1.0))
+	_set_save_status("Contract fulfilled — %d coins from the hold." % pay, Color(0.7, 0.95, 0.7, 1.0))
+	_refresh_contracts_board()
+
 ## --- Minecart rails in the deep -------------------------------------------
 ## The hold scene's own rail-and-cart system, mirrored for the seamless
 ## underhalls: R lays track at the walker's feet, C builds a cart on rails
@@ -10836,6 +11071,9 @@ func _strike_surface_creature(creature_index: int, damage: int, announce: bool =
 		return
 	var creature_name := String(def.get("name", "creature"))
 	if announce:
+		# A beast the player fells in the underhalls counts toward this
+		# hold's accepted slay bounty (the quiet guard path never does).
+		_record_underhall_beast_slain()
 		var coins := _rng.randi_range(2, 6) + int(def.get("damage", 1)) * 2
 		_adjust_coins(coins)
 		GameAudioService.play_sfx(self, "coin")
