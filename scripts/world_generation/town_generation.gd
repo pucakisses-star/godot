@@ -389,6 +389,11 @@ var _seamless_hold_ledger_key := ""
 ## True while a replay is writing edits back onto a level, so the
 ## recorders never re-record what the ledger itself just applied.
 var _restoring_underhall_diffs := false
+## The chronicle beast laired in the descended hold, captured at descent
+## (the deepest underhall has no site dict in scope). Empty when the hold
+## harbors no living beast; re-checked against the slain register on every
+## deepest-level show so a kill never respawns.
+var _underhall_lair_beast: Dictionary = {}
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
@@ -10339,6 +10344,10 @@ func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	var rebuilt: Array[Dictionary] = [_seamless_surface_level]
 	rebuilt.append_array(column)
 	_hold_state.generated_levels = rebuilt
+	# The chronicle's laired beast, if one still lives here: looked up by
+	# the hold's overworld tile exactly as the old hold scene and the
+	# surface-lair landmarks do.
+	_underhall_lair_beast = WorldChronicleService.lair_beast_for_tile(_world_settings_snapshot(), WorldSitesService.site_tile(site))
 	# Climb back out to the mouth stair we descended through.
 	_seamless_return_cell = _hold_ward_stair_cell(anchor)
 	_set_save_status("You descend into %s." % String(site.get("name", "the hold")), Color(0.85, 0.9, 0.7, 1.0))
@@ -10464,6 +10473,66 @@ func _populate_underhall_creatures(level_data: Dictionary) -> void:
 				)
 				guard_posted = true
 				break
+	_maybe_spawn_underhall_lair_boss()
+
+## The chronicle's beast holds the bottom of the hold: on the DEEPEST
+## underhall it nests at the hall cell farthest from wherever the walker
+## came in, grown and tinted into the named beast by the same boss specs
+## the hold scene and the surface lairs use. The kill already routes:
+## _strike_surface_creature's death branch fires _award_surface_lair_kill
+## for any boss:true state - trophy, hoard, and the world remembering.
+## The slain register is re-checked every show, so it never respawns.
+func _maybe_spawn_underhall_lair_boss() -> void:
+	if _underhall_lair_beast.is_empty() or not _hold_state.is_deepest():
+		return
+	if _hold_state.current_depth_kind() != "underhall":
+		return
+	if WorldChronicleService.is_beast_slain(_world_settings_snapshot(), String(_underhall_lair_beast.get("name", ""))):
+		_underhall_lair_beast = {}
+		return
+	for existing: Dictionary in _surface_creatures:
+		if bool(existing.get("boss", false)):
+			return
+	var lair_hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in _latest_grid.keys():
+		if int(_latest_grid[cell_variant]) == CELL_HALL:
+			lair_hall_cells.append(cell_variant as Vector2i)
+	if lair_hall_cells.is_empty():
+		return
+	var boss_cell := lair_hall_cells[0]
+	var best_distance := -1.0
+	for hall_cell: Vector2i in lair_hall_cells:
+		var lair_distance := Vector2(hall_cell - _player_cell).length()
+		if lair_distance > best_distance:
+			best_distance = lair_distance
+			boss_cell = hall_cell
+	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(_underhall_lair_beast.get("kind", "dragon")))
+	var size_before := _surface_creatures.size()
+	SurfaceLifeService.spawn_creature(
+		_surface_creatures, SURFACE_CREATURE_TEXTURE, int(spec.get("def_index", 7)),
+		boss_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
+	)
+	if _surface_creatures.size() <= size_before:
+		return
+	var boss := _surface_creatures[_surface_creatures.size() - 1]
+	var display := String(_underhall_lair_beast.get("display", "a nameless beast"))
+	boss["site_key"] = _seamless_hold_ledger_key
+	boss["home_cell"] = boss_cell
+	boss["boss"] = true
+	boss["beast_name"] = String(_underhall_lair_beast.get("name", ""))
+	boss["beast_display"] = display
+	boss["beast_kind"] = String(_underhall_lair_beast.get("kind", "dragon"))
+	boss["lair_name"] = String(_underhall_lair_beast.get("lair_name", ""))
+	boss["hp"] = int(spec.get("max_hp", 200))
+	boss["damage_override"] = int(spec.get("damage", 8))
+	boss["aggro_override"] = int(spec.get("aggro_range", 12))
+	boss["cooldown_override"] = float(spec.get("attack_cooldown", 1.5))
+	boss["speed_override"] = float(spec.get("speed", 80.0))
+	boss["leash_override"] = 6
+	var boss_sprite := boss.get("sprite") as Sprite2D
+	if boss_sprite != null:
+		UndergroundCreatureService.apply_boss_visuals(boss_sprite, spec, WorldChronicleService._capitalize_first(display))
+	_set_save_status("The deep stirs — %s nests here." % display, Color(1.0, 0.55, 0.45, 1.0))
 
 ## Still water in the deep: wobble-edged pools carved into the undug rock
 ## beside the halls - the fungal caverns hold real lakes, the other strata
