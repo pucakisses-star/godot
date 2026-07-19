@@ -376,6 +376,19 @@ var _cart_origin_cell := Vector2i.ZERO
 var _cart_dir := Vector2i.ZERO
 var _cart_desired_dir := Vector2i.ZERO
 var _cart_progress := 0.0
+## The underhall ledger: player edits to the seamless deep column (tunnels
+## dug, veins mined out, rails laid, cart resting places) recorded as a
+## DIFF in world settings so they ride save slots and replay onto the
+## deterministically regenerated column. A separate key from the old hold
+## scene's "hold_diffs" - the two scenes generate different geometry for
+## the same hold, so sharing a ledger would corrupt both.
+const UNDERHALL_DIFFS_KEY := "underhall_diffs"
+## The current column's ledger identity: the hold's site seed (the same
+## string that drives regeneration), set at descent.
+var _seamless_hold_ledger_key := ""
+## True while a replay is writing edits back onto a level, so the
+## recorders never re-record what the ledger itself just applied.
+var _restoring_underhall_diffs := false
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
@@ -9538,6 +9551,7 @@ func _swing_at_underhall_rock(cell: Vector2i) -> void:
 func _dig_underhall_rock(cell: Vector2i) -> void:
 	_vein_damage.erase(cell)
 	_latest_grid[cell] = CELL_HALL
+	_record_underhall_edit("dug", cell)
 	decor_layer.erase_cell(cell)
 	for offset: Vector2i in [Vector2i.ZERO, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
 		var repaint := cell + offset
@@ -9593,6 +9607,7 @@ func _swing_at_underhall_vein(cell: Vector2i) -> void:
 func _mine_underhall_vein(cell: Vector2i) -> void:
 	_vein_damage.erase(cell)
 	_latest_floor_decor.erase(cell)
+	_record_underhall_edit("decor_erased", cell)
 	decor_layer.erase_cell(cell)
 	_actor_passable_cache.erase(cell)
 	_add_to_inventory("Stone", 1)
@@ -9619,6 +9634,96 @@ func _roll_stratum_ore(stratum: Dictionary) -> Dictionary:
 		if roll <= running:
 			return {"name": String(drop.get("name", "")), "amount": randi_range(int(drop.get("min", 1)), int(drop.get("max", 1)))}
 	return {}
+
+## --- The underhall ledger ---------------------------------------------------
+## The seamless column regenerates deterministically from the hold seed, so
+## everything the PLAYER changed - tunnels dug, veins mined out, rails laid,
+## where a cart came to rest - is recorded as a diff in world settings (it
+## rides every save slot) and replayed onto each freshly generated level.
+## Mirrors the old hold scene's hold-diffs ledger under its own key: the two
+## scenes generate different geometry for the same hold, so a shared ledger
+## would corrupt both.
+
+func _underhall_cell_key(cell: Vector2i) -> String:
+	return "%d,%d" % [cell.x, cell.y]
+
+func _parse_underhall_cell_key(cell_key: String) -> Vector2i:
+	var parts := cell_key.split(",")
+	if parts.size() != 2:
+		return Vector2i(2147483647, 2147483647)
+	return Vector2i(int(parts[0]), int(parts[1]))
+
+## Records one player edit against the current hold + level. List fields
+## ("dug", "decor_erased", "rails") pass value=null and accumulate cells;
+## keyed fields ("cart_at") store cell -> value. Inert while a replay is
+## running so the ledger never re-records itself.
+func _record_underhall_edit(field: String, cell: Vector2i, value: Variant = null) -> void:
+	if _restoring_underhall_diffs or _seamless_hold_ledger_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var diffs: Dictionary = settings.get(UNDERHALL_DIFFS_KEY, {}) as Dictionary if settings.get(UNDERHALL_DIFFS_KEY) is Dictionary else {}
+	var hold_diff: Dictionary = diffs.get(_seamless_hold_ledger_key, {}) as Dictionary if diffs.get(_seamless_hold_ledger_key) is Dictionary else {}
+	var level_key := str(_hold_state.current_level_index)
+	var level_diff: Dictionary = hold_diff.get(level_key, {}) as Dictionary if hold_diff.get(level_key) is Dictionary else {}
+	var cell_key := _underhall_cell_key(cell)
+	if value == null:
+		var cells: Array = level_diff.get(field, []) as Array if level_diff.get(field) is Array else []
+		if not cells.has(cell_key):
+			cells.append(cell_key)
+		level_diff[field] = cells
+	else:
+		var edits: Dictionary = level_diff.get(field, {}) as Dictionary if level_diff.get(field) is Dictionary else {}
+		edits[cell_key] = value
+		level_diff[field] = edits
+	hold_diff[level_key] = level_diff
+	diffs[_seamless_hold_ledger_key] = hold_diff
+	settings[UNDERHALL_DIFFS_KEY] = diffs
+	_store_world_settings(settings)
+
+## Replays the saved diff for one depth onto its freshly generated level:
+## dug cells become hall, mined veins vanish, player rails and cart moves
+## land on top of the generated line. A diff, not a snapshot - untouched
+## ground is untouched, which is exactly why regeneration must stay
+## deterministic.
+func _apply_underhall_diffs(level_data: Dictionary, depth: int) -> void:
+	if _seamless_hold_ledger_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var diffs_variant: Variant = settings.get(UNDERHALL_DIFFS_KEY)
+	if not (diffs_variant is Dictionary):
+		return
+	var hold_variant: Variant = (diffs_variant as Dictionary).get(_seamless_hold_ledger_key)
+	if not (hold_variant is Dictionary):
+		return
+	var level_variant: Variant = (hold_variant as Dictionary).get(str(depth))
+	if not (level_variant is Dictionary):
+		return
+	var level_diff := level_variant as Dictionary
+	_restoring_underhall_diffs = true
+	var grid := level_data.get("grid", {}) as Dictionary
+	for dug_variant: Variant in (level_diff.get("dug", []) as Array):
+		grid[_parse_underhall_cell_key(String(dug_variant))] = CELL_HALL
+	var floor_decor := level_data.get("floor_decor", {}) as Dictionary
+	for mined_variant: Variant in (level_diff.get("decor_erased", []) as Array):
+		floor_decor.erase(_parse_underhall_cell_key(String(mined_variant)))
+	var rails := level_data.get("rails", []) as Array
+	for rail_variant: Variant in (level_diff.get("rails", []) as Array):
+		var rail_cell := _parse_underhall_cell_key(String(rail_variant))
+		if not rails.has(rail_cell):
+			rails.append(rail_cell)
+	level_data["rails"] = rails
+	var carts := level_data.get("carts", []) as Array
+	var cart_edits_variant: Variant = level_diff.get("cart_at")
+	if cart_edits_variant is Dictionary:
+		for cart_key_variant: Variant in (cart_edits_variant as Dictionary).keys():
+			var cart_cell := _parse_underhall_cell_key(String(cart_key_variant))
+			if bool((cart_edits_variant as Dictionary)[cart_key_variant]):
+				if not carts.has(cart_cell):
+					carts.append(cart_cell)
+			else:
+				carts.erase(cart_cell)
+	level_data["carts"] = carts
+	_restoring_underhall_diffs = false
 
 ## --- Minecart rails in the deep -------------------------------------------
 ## The hold scene's own rail-and-cart system, mirrored for the seamless
@@ -9711,6 +9816,7 @@ func _place_rail() -> void:
 	if not level_data.has("rails"):
 		level_data["rails"] = []
 	(level_data["rails"] as Array).append(cell)
+	_record_underhall_edit("rails", cell)
 	_rail_cells[cell] = true
 	_spawn_rail_at(cell)
 	_refresh_rail_art_around(cell)
@@ -9901,6 +10007,7 @@ func _place_minecart() -> void:
 	if not level_data.has("carts"):
 		level_data["carts"] = []
 	(level_data["carts"] as Array).append(cell)
+	_record_underhall_edit("cart_at", cell, true)
 	_spawn_minecart_at(cell)
 	_set_save_status("Minecart built - press C beside it to ride", Color(0.85, 0.82, 0.7, 1.0))
 
@@ -9994,6 +10101,8 @@ func _settle_cart() -> void:
 	if not carts.has(_cart_cell):
 		carts.append(_cart_cell)
 	level_data["carts"] = carts
+	_record_underhall_edit("cart_at", _cart_origin_cell, false)
+	_record_underhall_edit("cart_at", _cart_cell, true)
 	_cart_origin_cell = _cart_cell
 
 func _swing_at_ward_rock(cell: Vector2i) -> void:
@@ -10209,6 +10318,15 @@ func _apply_hold_doorstep_spawn() -> void:
 func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
 	var gate_key := String(gate.get("key", ""))
+	# The ledger key is the site seed - the same string that drives the
+	# column's deterministic regeneration, so recorded edits always replay
+	# onto the geometry they were made on. Set BEFORE generation so the
+	# apply pass inside it can read the saved diff.
+	_seamless_hold_ledger_key = String(site.get("seed", "")).strip_edges()
+	if _seamless_hold_ledger_key.is_empty():
+		_seamless_hold_ledger_key = gate_key
+	if _seamless_hold_ledger_key.is_empty():
+		_seamless_hold_ledger_key = String(site.get("name", "hold"))
 	var column := _hold_deep_column_for(gate_key, site)
 	# The wild surface is level 0; preserve it once so climbing back out
 	# restores the exact embark. The descended hold's halls sit beneath it.
@@ -10285,6 +10403,10 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		# The hold's mine line: rails from the entry stair to the descent
 		# stair, a cart parked mid-track, ready the day the walker arrives.
 		_lay_underhall_railway(level_data)
+		# Last, the ledger: the player's saved edits replay onto the fresh
+		# level - dug tunnels reopen, worked-out veins stay gone, laid rails
+		# and moved carts land on top of the generated line.
+		_apply_underhall_diffs(level_data, depth)
 		column.append(level_data)
 	_generating_hold_column = false
 	_hold_state.selected_hold_population = saved_selected
