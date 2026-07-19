@@ -904,6 +904,7 @@ func _process(delta: float) -> void:
 			_rng,
 			Callable(self, "_damage_player")
 		)
+		_update_underhall_defense(delta)
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
@@ -6413,7 +6414,7 @@ func _update_npc_movement(delta: float) -> void:
 func _scheduled_states() -> Array[Dictionary]:
 	var living: Array[Dictionary] = []
 	for state: Dictionary in _npc_states:
-		if SettlementAfflictionService.is_active_zombie(state) or bool(state.get("traveler", false)) or bool(state.get("raid_duty", false)) or bool(state.get("wilds_keeper", false)):
+		if SettlementAfflictionService.is_active_zombie(state) or bool(state.get("traveler", false)) or bool(state.get("raid_duty", false)) or bool(state.get("combat_duty", false)) or bool(state.get("wilds_keeper", false)):
 			continue
 		living.append(state)
 	return living
@@ -10562,7 +10563,10 @@ func _attack_surface_creature(creature_index: int) -> void:
 	_strike_surface_creature(creature_index, int(PlayerStatsService.for_session(self).get("attack", 2)))
 
 ## Shared edge for melee, bow, staff, guards and the loyal sporeling.
-func _strike_surface_creature(creature_index: int, damage: int) -> void:
+## announce=false is the guards' edge: a dwarf felling a prowler pays the
+## PLAYER nothing and posts no ticker line (several guards mobbing one
+## beast would spam both), but boss and camp routing stay intact.
+func _strike_surface_creature(creature_index: int, damage: int, announce: bool = true) -> void:
 	if creature_index < 0 or creature_index >= _surface_creatures.size():
 		return
 	var state := _surface_creatures[creature_index]
@@ -10576,24 +10580,38 @@ func _strike_surface_creature(creature_index: int, damage: int) -> void:
 	if int(state.get("hp", 0)) > 0:
 		return
 	var creature_name := String(def.get("name", "creature"))
-	var coins := _rng.randi_range(2, 6) + int(def.get("damage", 1)) * 2
-	_adjust_coins(coins)
-	GameAudioService.play_sfx(self, "coin")
+	if announce:
+		var coins := _rng.randi_range(2, 6) + int(def.get("damage", 1)) * 2
+		_adjust_coins(coins)
+		GameAudioService.play_sfx(self, "coin")
+		if sprite != null:
+			_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
+		if sprite != null:
+			sprite.queue_free()
+		var fallen_site_key := String(state.get("site_key", ""))
+		var is_boss := bool(state.get("boss", false))
+		_surface_creatures.remove_at(creature_index)
+		if is_boss:
+			# A named beast, not a camp band: trophy, hoard, and recorded
+			# history instead of tent plunder.
+			_award_surface_lair_kill(state)
+			return
+		_set_save_status("The %s falls — %d coins scavenged." % [creature_name, coins], Color(0.85, 0.95, 0.7, 1.0))
+		# The last of a camp's garrison marks the site cleared (with plunder).
+		if not fallen_site_key.is_empty():
+			_note_camp_creature_down(fallen_site_key)
+		return
+	# The quiet path: the beast falls to a dwarf's axe.
 	if sprite != null:
-		_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
 		sprite.queue_free()
-	var fallen_site_key := String(state.get("site_key", ""))
-	var is_boss := bool(state.get("boss", false))
+	var quiet_site_key := String(state.get("site_key", ""))
+	var quiet_boss := bool(state.get("boss", false))
 	_surface_creatures.remove_at(creature_index)
-	if is_boss:
-		# A named beast, not a camp band: trophy, hoard, and recorded
-		# history instead of tent plunder.
+	if quiet_boss:
 		_award_surface_lair_kill(state)
 		return
-	_set_save_status("The %s falls — %d coins scavenged." % [creature_name, coins], Color(0.85, 0.95, 0.7, 1.0))
-	# The last of a camp's garrison marks the site cleared (with plunder).
-	if not fallen_site_key.is_empty():
-		_note_camp_creature_down(fallen_site_key)
+	if not quiet_site_key.is_empty():
+		_note_camp_creature_down(quiet_site_key)
 
 ## --- The homestead layer ---------------------------------------------------
 ## Everything the player owns above ground: built walls and floors, tilled
@@ -12049,6 +12067,56 @@ func _update_raider_bashing(raider: Dictionary, delta: float) -> void:
 		return
 
 ## Town guards drop their rounds and close on raiders within their ward.
+## The hold defends itself: underhall guards near a prowling beast break
+## from their rounds, close on it, and cut it down - the same one-way
+## combat the surface raid guards run (dwarves carry no HP; creatures
+## keep hunting the PLAYER, so a guard standing in the beast's path is
+## the wall between it and you, and the guards win over time). The
+## combat_duty flag pulls a fighting guard out of the scheduler so the
+## two systems never tug the same sprite.
+const UNDERHALL_GUARD_ENGAGE_RANGE := 8
+
+func _update_underhall_defense(delta: float) -> void:
+	if _surface_creatures.is_empty():
+		return
+	for state: Dictionary in _npc_states:
+		if int(state.get("role", -1)) != ROLE_GUARD:
+			continue
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var guard_cell := state.get("cell", Vector2i.ZERO) as Vector2i
+		var best := -1
+		var best_distance := UNDERHALL_GUARD_ENGAGE_RANGE + 1
+		for index in _surface_creatures.size():
+			if bool(_surface_creatures[index].get("dying", false)):
+				continue
+			if _surface_creatures[index].get("sprite") as Sprite2D == null:
+				continue
+			var beast_cell := _surface_creatures[index].get("cell", Vector2i(9999, 9999)) as Vector2i
+			var distance := maxi(absi(beast_cell.x - guard_cell.x), absi(beast_cell.y - guard_cell.y))
+			if distance < best_distance:
+				best_distance = distance
+				best = index
+		if best < 0:
+			state.erase("combat_duty")
+			continue
+		state["combat_duty"] = true
+		state["guard_step_timer"] = float(state.get("guard_step_timer", 0.0)) - delta
+		state["guard_attack_timer"] = maxf(float(state.get("guard_attack_timer", 0.0)) - delta, 0.0)
+		if best_distance <= 1:
+			if float(state.get("guard_attack_timer", 0.0)) <= 0.0:
+				state["guard_attack_timer"] = 1.2
+				# Resolve fresh: the strike mutates the list, so a cached
+				# index from an earlier guard this frame could be stale.
+				_strike_surface_creature(best, 2, false)
+		elif float(state.get("guard_step_timer", 0.0)) <= 0.0:
+			state["guard_step_timer"] = 0.4
+			var step: Vector2i = CreatureCombatService.step_toward(guard_cell, _surface_creatures[best].get("cell", guard_cell) as Vector2i, Callable(self, "_is_npc_walkable_cell"))
+			if step != Vector2i.ZERO:
+				state["cell"] = guard_cell + step
+				sprite.position = _cell_center_position(guard_cell + step)
+
 func _update_guard_response(delta: float, raiders: Array[Dictionary]) -> void:
 	for state: Dictionary in _npc_states:
 		if int(state.get("role", -1)) != ROLE_GUARD:
