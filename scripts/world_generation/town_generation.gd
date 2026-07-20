@@ -6003,6 +6003,62 @@ func _add_live_thought(state: Dictionary, text: String, valence: int) -> void:
 		thoughts.pop_front()
 	state["live_thoughts"] = thoughts
 
+## --- Bonds: friendships and grudges -----------------------------------------
+## Residents remember who they pass their evenings with. Each finished
+## social call nudges the pair's regard both ways: most visits warm it a
+## step, a soured one cools it hard and leaves a quarrel in both logs.
+## Cross the warm threshold and the pair are friends for the session —
+## the graph lives and dies with the scene, like the thought log it feeds.
+const NPC_BOND_MIN := -9
+const NPC_BOND_MAX := 9
+const NPC_BOND_FRIEND := 5
+const NPC_SOCIAL_SOUR_CHANCE := 0.12
+
+func _record_social_bond(state_a: Dictionary, state_b: Dictionary, soured: bool) -> void:
+	_ensure_npc_identity(state_a)
+	_ensure_npc_identity(state_b)
+	_shift_npc_bond(state_a, state_b, soured)
+	_shift_npc_bond(state_b, state_a, soured)
+
+## One side of the ledger: adjust this resident's regard for the other
+## and let them feel it — a quarrel, a friendship sealed, or (between
+## friends already) the odd shared laugh worth remembering.
+func _shift_npc_bond(state: Dictionary, other: Dictionary, soured: bool) -> void:
+	var other_name := String(other.get("npc_name", ""))
+	if other_name.is_empty():
+		return
+	var bonds: Dictionary = state.get("bonds", {}) if state.get("bonds") is Dictionary else {}
+	var before := int(bonds.get(other_name, 0))
+	var after := clampi(before + (-2 if soured else 1), NPC_BOND_MIN, NPC_BOND_MAX)
+	bonds[other_name] = after
+	state["bonds"] = bonds
+	var first_name := other_name.get_slice(" ", 0)
+	if soured:
+		_add_live_thought(state, "quarreled with %s" % first_name, -2)
+	elif after >= NPC_BOND_FRIEND and before < NPC_BOND_FRIEND:
+		# A friendship seals once; a bond that cools and warms again
+		# doesn't read as a fresh revelation.
+		var sealed: Dictionary = state.get("bond_sealed", {}) if state.get("bond_sealed") is Dictionary else {}
+		if not sealed.has(other_name):
+			sealed[other_name] = true
+			state["bond_sealed"] = sealed
+			_add_live_thought(state, "grew close to %s" % first_name, 2)
+	elif before >= NPC_BOND_FRIEND and _rng.randf() < 0.4:
+		_add_live_thought(state, "shared a laugh with %s" % first_name, 1)
+
+## The scheduler leaves the partner's name on a state whose social call
+## ran its course; settle those into the bond graph, the odd visit
+## souring into a quarrel instead of warming toward friendship.
+func _settle_completed_socials() -> void:
+	for state: Dictionary in _npc_states:
+		var done_partner := String(state.get("social_call_done", ""))
+		if done_partner.is_empty():
+			continue
+		state.erase("social_call_done")
+		var partner_index := _find_npc_state_by_name(done_partner)
+		if partner_index >= 0:
+			_record_social_bond(state, _npc_states[partner_index], _rng.randf() < NPC_SOCIAL_SOUR_CHANCE)
+
 ## The speaker notices their situation: an engaged activity or foul
 ## weather marks the thought log (once per activity instance, once per
 ## day for weather), so the mood follows the life actually lived.
@@ -6807,6 +6863,7 @@ func _update_npc_movement(delta: float) -> void:
 		WeatherService.is_storm(_current_weather),
 		_npc_pois
 	)
+	_settle_completed_socials()
 
 ## The dead answer to their hunger, not the clock.
 func _scheduled_states() -> Array[Dictionary]:
