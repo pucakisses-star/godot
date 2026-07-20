@@ -3527,6 +3527,11 @@ func _on_generate_pressed() -> void:
 	_generate_city()
 
 func _on_depth_down_pressed() -> void:
+	# The panel's climb out of a seamless hold takes the same road as the
+	# walked up-stair: the mouth cell, not a random clearing cell.
+	if _hold_state.current_level_index == 1 and _seamless_return_cell.x != 2147483647:
+		_return_to_seamless_surface()
+		return
 	_show_level(_hold_state.current_level_index - 1)
 
 func _on_depth_up_pressed() -> void:
@@ -4883,6 +4888,9 @@ func _clear_inventory_slots(panels: Array[PanelContainer], labels: Array[Label],
 
 func _populate_chest_slots(loot_entries: Array) -> void:
 	_clear_inventory_slots(_chest_slot_panels, _chest_slot_labels, _chest_slot_icons)
+	# A chest never crafts: drop any recipe slots a forge visit left in the
+	# map, so no stale mapping outlives the panel it belonged to.
+	_chest_slot_recipes.clear()
 	for i in range(mini(loot_entries.size(), _chest_slot_labels.size())):
 		var entry := loot_entries[i] as Dictionary
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, String(entry.get("name", "Supplies")), int(entry.get("quantity", 1)))
@@ -4927,8 +4935,14 @@ func _furnish_interiors(grid: Dictionary) -> void:
 	var stair_lookup: Dictionary = {}
 	for stair_variant: Variant in _hold_state.active_level_stairs.values():
 		stair_lookup[stair_variant as Vector2i] = true
+	# The residents are already standing (the spawn pass runs before this
+	# one): a blocking piece stamped onto a dwarf would leave them planted
+	# inside the furniture until they happened to wander off.
+	var npc_lookup: Dictionary = {}
+	for npc_state: Dictionary in _npc_states:
+		npc_lookup[npc_state.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i] = true
 	var is_occupied := func(cell: Vector2i) -> bool:
-		return stair_lookup.has(cell) or decor_layer.get_cell_source_id(cell) >= 0
+		return stair_lookup.has(cell) or npc_lookup.has(cell) or decor_layer.get_cell_source_id(cell) >= 0
 	# Houses get home comforts.
 	for component_variant: Variant in RoomFurnishingService.collect_zone_components(grid, CELL_HOUSE):
 		var component: Array[Vector2i] = []
@@ -6318,32 +6332,52 @@ func _try_use_stairs_at_player_cell() -> bool:
 		# "down" stair in its grid, so the generic resolve would fall back
 		# to the current cell.
 		if destination_index == 0 and _seamless_return_cell.x != 2147483647:
-			_show_level(0)
-			# The mouth is a STREAMED landmark cell, not part of the little
-			# surface clearing grid, so the grid-validated spawn can't land
-			# there - place the walker on it directly and let the wilds
-			# stream back in around them.
-			_player_cell = _seamless_return_cell
-			if _player_sprite != null:
-				_actor_sprite_to_cell(_player_sprite, _seamless_return_cell)
-			_player_is_moving = false
-			_player_move_path.clear()
-			_wild_needs_recenter = true
-			_surface_arrival_lock = true
+			_return_to_seamless_surface()
 			return true
 		_pending_player_spawn_cell = _resolve_stair_spawn_cell(destination_index, "down", _player_cell)
 		_show_level(destination_index)
 		return true
 	return false
 
+## Climbing out of a hold's halls to the surface (level 0) lands on the
+## mouth stair we descended through. The mouth is a STREAMED landmark
+## cell, not part of the little surface clearing grid, so the
+## grid-validated stair spawn can never place this - the walker goes
+## on it directly and the wilds stream back in around them.
+func _return_to_seamless_surface() -> void:
+	_show_level(0)
+	_player_cell = _seamless_return_cell
+	if _player_sprite != null:
+		_actor_sprite_to_cell(_player_sprite, _seamless_return_cell)
+	_player_is_moving = false
+	_player_move_path.clear()
+	_wild_needs_recenter = true
+	_surface_arrival_lock = true
+	# The climb closes out the visit: consume the return cell and trim
+	# the column to the lone surface level, or the depth panel stays
+	# live on the open wilds and warps the walker back into these halls
+	# from anywhere (and a later climb elsewhere would reuse a stale
+	# mouth cell). Re-descent rebuilds the column from the cached grids.
+	_seamless_return_cell = Vector2i(2147483647, 2147483647)
+	_hold_state.generated_levels.resize(1)
+	_update_depth_controls()
+
 func _stair_direction_at_cell(cell: Vector2i) -> String:
 	for layer: TileMapLayer in [decor_layer, city_layer]:
 		if layer == null or layer.get_cell_source_id(cell) < 0:
 			continue
 		var atlas := layer.get_cell_atlas_coords(cell)
-		if atlas == TILE_ATLAS.get("stairway_up", Vector2i(-1000, -1000)):
+		# Underhall stairs are stamped from the hold's carved-stone kit,
+		# whose sheet reuses the town sheet's coordinate space - the
+		# lookup table must follow the SOURCE the cell was set from, or
+		# hold stairs read as plain floor (walking onto them did nothing
+		# and the depth panel was the only way out) while a town wall
+		# sharing the coords would read as a stair.
+		var stair_atlas: Dictionary = TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS \
+			if layer.get_cell_source_id(cell) == HOLD_TILE_SOURCE_ID else TILE_ATLAS
+		if atlas == (stair_atlas.get("stairway_up", Vector2i(-1000, -1000)) as Vector2i):
 			return "up"
-		if atlas == TILE_ATLAS.get("stairway_down", Vector2i(-1000, -1000)):
+		if atlas == (stair_atlas.get("stairway_down", Vector2i(-1000, -1000)) as Vector2i):
 			return "down"
 	return ""
 
@@ -6437,7 +6471,8 @@ func _try_move_player(direction: Vector2i) -> bool:
 		if absi(direction.x) + absi(direction.y) != 1:
 			return false
 		_cart_desired_dir = direction
-		if _cart_dir == Vector2i.ZERO and _rail_cells.has(_cart_cell + direction):
+		if _cart_dir == Vector2i.ZERO and _rail_cells.has(_cart_cell + direction) \
+				and not _minecart_sprites.has(_cart_cell + direction):
 			_cart_dir = direction
 			_cart_progress = 0.0
 		return true
@@ -6628,6 +6663,18 @@ func _setup_surface_world(grid: Dictionary) -> void:
 			_npc_states.remove_at(state_index)
 	# A rebuilt scene garrisons its camps afresh.
 	_camp_cleared_sites.clear()
+	# The rebuild wipes the actor layer (the tavern spawn frees every
+	# child), taking ward darkness quads, sconces, and ward dwarves with
+	# it. Prune their registries too: the ward spawners guard on these,
+	# and a stale entry makes the facade re-stamp on ascent rebuild
+	# nothing - a lit hold city with no traders in it.
+	for overlay_key_variant: Variant in _ward_overlays.keys():
+		_free_ward_overlay_for_key(String(overlay_key_variant))
+	for ward_dwarf_index in range(_ward_dwarves.size() - 1, -1, -1):
+		var ward_sprite := _ward_dwarves[ward_dwarf_index].get("sprite") as Sprite2D
+		if ward_sprite != null and is_instance_valid(ward_sprite):
+			ward_sprite.queue_free()
+		_ward_dwarves.remove_at(ward_dwarf_index)
 	## Cellars are sealed underground interiors. The teardown above still
 	## ran (gates, creatures, caravans and travelers never survive the
 	## descent), but no wilds belong down here: clearing the noise set is
@@ -9655,14 +9702,25 @@ func _dig_underhall_rock(cell: Vector2i) -> void:
 			_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
 			_spawn_floating_text("Struck %s!" % String(ore.get("name", "")), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
 	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.5, 0.48, 0.46, 1.0), 12)
-	# A long tunnel can outrun the darkness quad; when the new cell nears its
-	# edge, rebuild the quad over the grown grid so the deep never runs out
-	# of dark.
+	# Rebuild the darkness when the dig demands it: a long tunnel can outrun
+	# the quad's edge, and a dug wall may have carried a mounted sconce -
+	# without a rebuild the torch would float over open floor with its
+	# phantom light still burning. The rebuild re-derives the sconce ring
+	# from the grid as it now is.
+	var needs_darkness_rebuild := false
 	var overlay_sprite := _underhall_overlay.get("sprite") as Sprite2D
 	if overlay_sprite != null and is_instance_valid(overlay_sprite):
 		var quad_rect := Rect2(overlay_sprite.position, overlay_sprite.scale * 4.0)
 		if not quad_rect.grow(-3.0 * float(tile_size.x)).has_point(_cell_center_position(cell)):
-			_build_underhall_darkness(_find_bounds(_latest_grid).grow(1))
+			needs_darkness_rebuild = true
+	if not needs_darkness_rebuild:
+		var dug_center := _cell_center_position(cell)
+		for sconce_variant: Variant in (_underhall_overlay.get("sconces", []) as Array):
+			if ((sconce_variant as Dictionary).get("pos", Vector2.INF) as Vector2).is_equal_approx(dug_center):
+				needs_darkness_rebuild = true
+				break
+	if needs_darkness_rebuild:
+		_build_underhall_darkness(_find_bounds(_latest_grid).grow(1))
 
 ## An ore vein on the current underhall floor: a "stone" outcrop the depth
 ## strata stamped, mineable for the level's stratum ore. Other floor decor
@@ -9828,6 +9886,7 @@ var _contracts_panel: PanelContainer
 var _contracts_rows: VBoxContainer
 var _contracts_title: Label
 var _contracts_board_seed_key := ""
+var _contracts_board_offers: Dictionary = {}
 var _contracts_leash_cell := Vector2i(2147483647, 2147483647)
 
 func _roll_hold_contract_offers(seed_key: String) -> Dictionary:
@@ -9938,6 +9997,7 @@ func _close_contracts_board() -> void:
 	if _contracts_panel != null:
 		_contracts_panel.visible = false
 	_contracts_board_seed_key = ""
+	_contracts_board_offers = {}
 	_contracts_leash_cell = Vector2i(2147483647, 2147483647)
 
 ## Rebuilds the two offer rows from the ledger and today's deterministic
@@ -9949,6 +10009,10 @@ func _refresh_contracts_board() -> void:
 	for child: Node in _contracts_rows.get_children():
 		child.queue_free()
 	var offers := _roll_hold_contract_offers(_contracts_board_seed_key)
+	# Accept must sign THESE terms: hold the roll the rows are about to
+	# show, or a day turning while the board stands open would let the
+	# click re-roll and bind work the walker never read.
+	_contracts_board_offers = offers
 	var state := _hold_contract_state(_contracts_board_seed_key)
 	for kind: String in ["slay", "deliver"]:
 		var row := HBoxContainer.new()
@@ -9998,7 +10062,13 @@ func _accept_hold_contract(kind: String) -> void:
 	var state := _hold_contract_state(_contracts_board_seed_key)
 	if state.get(kind) is Dictionary:
 		return
-	var offers := _roll_hold_contract_offers(_contracts_board_seed_key)
+	# The board's view refuses same-day re-signing after a payout; the
+	# model refuses it too so no other caller can slip one through.
+	if int(state.get(kind + "_done_day", -1)) == _game_day:
+		return
+	var offers := _contracts_board_offers
+	if not (offers.get(kind) is Dictionary):
+		offers = _roll_hold_contract_offers(_contracts_board_seed_key)
 	var offer := (offers.get(kind, {}) as Dictionary).duplicate(true)
 	if kind == "slay":
 		offer["slain"] = 0
@@ -10055,18 +10125,32 @@ func _lay_underhall_railway(level_data: Dictionary) -> void:
 	var down_variant: Variant = stairs.get("down")
 	if not (up_variant is Vector2i) or not (down_variant is Vector2i):
 		return
-	var path := _underhall_rail_path(grid, up_variant as Vector2i, down_variant as Vector2i)
+	# The strata stamp their veins and fungus BEFORE the line is laid, and
+	# every floor-decor outcrop blocks like rock: the track must route
+	# around them or the rails (and the parked cart) land on cells the
+	# walker can't stand on.
+	var blocked_decor := level_data.get("floor_decor", {}) as Dictionary
+	var path := _underhall_rail_path(grid, blocked_decor, up_variant as Vector2i, down_variant as Vector2i)
 	if path.size() < 4:
 		return
 	path = path.slice(1, path.size() - 1)
+	# When the outcrops choke every clean route, the fallback passes cut
+	# the line THROUGH them - so any decor still sitting on a rail cell
+	# comes off now: the builders mined the seam to lay their track.
+	for rail_cell: Vector2i in path:
+		blocked_decor.erase(rail_cell)
 	level_data["rails"] = path.duplicate()
 	level_data["carts"] = [path[path.size() / 2]]
 
-## Breadth-first line through the dug ground, corridors and plazas first so
-## the track hugs the streets; only if no corridor route exists does it cut
-## through rooms. Empty when the stairs simply don't connect.
-func _underhall_rail_path(grid: Dictionary, from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2i]:
-	for corridors_only: bool in [true, false]:
+## Breadth-first line through the dug ground, best route first: corridors
+## and plazas clear of vein/fungus outcrops, then any dug ground clear of
+## them, and only when the outcrops choke every clean route do the last
+## passes allow decor cells (the caller mines those off the line). Empty
+## when the stairs simply don't connect.
+func _underhall_rail_path(grid: Dictionary, blocked_decor: Dictionary, from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2i]:
+	for pass_rules: Array in [[true, true], [false, true], [true, false], [false, false]]:
+		var corridors_only := bool(pass_rules[0])
+		var avoid_decor := bool(pass_rules[1])
 		var frontier: Array[Vector2i] = [from_cell]
 		var came_from: Dictionary = {from_cell: from_cell}
 		var head := 0
@@ -10084,6 +10168,8 @@ func _underhall_rail_path(grid: Dictionary, from_cell: Vector2i, to_cell: Vector
 			for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 				var next_cell := current + offset
 				if came_from.has(next_cell):
+					continue
+				if avoid_decor and blocked_decor.has(next_cell) and next_cell != to_cell:
 					continue
 				var zone := int(grid.get(next_cell, CELL_ROCK))
 				var open := zone == CELL_HALL or zone == CELL_PLAZA
@@ -10382,17 +10468,20 @@ func _move_cart_to(next_cell: Vector2i) -> void:
 		_minecart_sprites[next_cell] = cart
 
 ## Straight ahead first, then the held direction, then a lone corner;
-## never straight back the way it came.
+## never straight back the way it came. A cell holding another cart is
+## a buffer stop, not track - the rider brakes behind it.
 func _next_cart_direction() -> Vector2i:
 	var candidates: Array[Vector2i] = []
-	if _cart_desired_dir != Vector2i.ZERO and _cart_desired_dir != -_cart_dir and _rail_cells.has(_cart_cell + _cart_desired_dir):
+	if _cart_desired_dir != Vector2i.ZERO and _cart_desired_dir != -_cart_dir \
+			and _rail_cells.has(_cart_cell + _cart_desired_dir) \
+			and not _minecart_sprites.has(_cart_cell + _cart_desired_dir):
 		return _cart_desired_dir
-	if _rail_cells.has(_cart_cell + _cart_dir):
+	if _rail_cells.has(_cart_cell + _cart_dir) and not _minecart_sprites.has(_cart_cell + _cart_dir):
 		return _cart_dir
 	for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 		if offset == -_cart_dir:
 			continue
-		if _rail_cells.has(_cart_cell + offset):
+		if _rail_cells.has(_cart_cell + offset) and not _minecart_sprites.has(_cart_cell + offset):
 			candidates.append(offset)
 	if candidates.size() == 1:
 		return candidates[0]
@@ -10741,7 +10830,9 @@ func _populate_underhall_creatures(level_data: Dictionary) -> void:
 		return
 	var hall_cells: Array[Vector2i] = []
 	for cell_variant: Variant in _latest_grid.keys():
-		if int(_latest_grid[cell_variant]) == CELL_HALL:
+		# Vein and fungus outcrops sit on hall cells but block walking - a
+		# beast spawned there would stand inside the rock.
+		if int(_latest_grid[cell_variant]) == CELL_HALL and not _latest_floor_decor.has(cell_variant):
 			hall_cells.append(cell_variant as Vector2i)
 	if hall_cells.is_empty():
 		return
@@ -10799,7 +10890,7 @@ func _maybe_spawn_underhall_lair_boss() -> void:
 			return
 	var lair_hall_cells: Array[Vector2i] = []
 	for cell_variant: Variant in _latest_grid.keys():
-		if int(_latest_grid[cell_variant]) == CELL_HALL:
+		if int(_latest_grid[cell_variant]) == CELL_HALL and not _latest_floor_decor.has(cell_variant):
 			lair_hall_cells.append(cell_variant as Vector2i)
 	if lair_hall_cells.is_empty():
 		return
@@ -12646,7 +12737,11 @@ func _update_guard_response(delta: float, raiders: Array[Dictionary]) -> void:
 				state["guard_attack_timer"] = 1.2
 				var raider_index := _surface_creatures.find(raiders[best])
 				if raider_index >= 0:
-					_strike_surface_creature(raider_index, 2)
+					# Quiet strike, same as the underhall guards: a raider
+					# felled by a town guard pays the player nothing and
+					# posts no ticker line - the raid bounty in _end_raid
+					# is the player's reward for a defended homestead.
+					_strike_surface_creature(raider_index, 2, false)
 		elif float(state.get("guard_step_timer", 0.0)) <= 0.0:
 			state["guard_step_timer"] = 0.4
 			var step: Vector2i = CreatureCombatService.step_toward(guard_cell, raiders[best].get("cell", guard_cell) as Vector2i, Callable(self, "_is_npc_walkable_cell"))
