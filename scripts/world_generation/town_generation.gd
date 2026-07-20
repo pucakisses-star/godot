@@ -430,6 +430,18 @@ var _restoring_underhall_diffs := false
 ## harbors no living beast; re-checked against the slain register on every
 ## deepest-level show so a kill never respawns.
 var _underhall_lair_beast: Dictionary = {}
+## A hold under siege: the living laired beast has left its nest and
+## stormed the level the walker stands on. While set, chatter shouts the
+## alarm and the whole watch converges; it clears when the beast falls,
+## or when a level swap frees the actors and the assault breaks off.
+var _siege_active := false
+## Absolute game-hours before another siege may erupt: the beast gathers
+## itself between assaults, so the halls are not stormed twice in a night.
+var _siege_cooldown_until := 0.0
+## Rolled once per game hour underground - rare by design, so most
+## descents pass in peace and the horn means something when it sounds.
+const SIEGE_CHANCE_PER_HOUR := 0.02
+const SIEGE_COOLDOWN_HOURS := 48.0
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
@@ -991,6 +1003,7 @@ func _advance_game_clock(delta: float) -> void:
 		_refresh_player_stats_town()
 		_advance_farm_growth()
 		_maybe_start_raid()
+		_maybe_start_siege()
 		if _game_day != day_before:
 			_advance_world_events()
 			_refresh_weather(true)
@@ -4332,6 +4345,10 @@ func _show_level(target_level_index: int) -> void:
 		depth_label.text = "Level 0 / 0"
 		return
 
+	# A level swap frees the actor layer, siege beast included: the assault
+	# breaks off (the beast withdraws into the dark) rather than leaving a
+	# stuck alarm shouting over halls with nothing left in them.
+	_siege_active = false
 	_hold_state.current_level_index = _hold_state.clamp_index(target_level_index)
 	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	var grid := level_data.get("grid", {}) as Dictionary
@@ -6099,7 +6116,8 @@ func _chatter_context(state: Dictionary) -> Dictionary:
 	if not _is_underground_level():
 		rumor = String(WorldChronicleService.latest_player_deed(_world_settings_snapshot()).get("display", ""))
 	return {
-		"raid": _raid_active,
+		# A beast storming the halls is a raid as far as the shouting goes.
+		"raid": _raid_active or _siege_active,
 		"guard": int(state.get("role", -1)) == ROLE_GUARD,
 		"combat": bool(state.get("combat_duty", false)) or bool(state.get("raid_duty", false)),
 		"weather": String(_current_weather.get("kind", "clear")),
@@ -7758,6 +7776,12 @@ func _award_surface_lair_kill(state: Dictionary) -> void:
 	var beast_display := String(state.get("beast_display", "the beast"))
 	for resident: Dictionary in _npc_states:
 		_add_live_thought(resident, "saw %s slain" % beast_display, 2)
+	# A siege beaten back is its own memory, worth more than watching:
+	# these dwarves HELD when the terror came to them.
+	if _siege_active:
+		_siege_active = false
+		for resident: Dictionary in _npc_states:
+			_add_live_thought(resident, "stood the siege", 2)
 	if not _seamless_gate_key.is_empty():
 		_hold_deep_columns.erase(_seamless_gate_key)
 	_store_world_settings(settings)
@@ -11524,6 +11548,16 @@ func _maybe_spawn_underhall_lair_boss() -> void:
 		if lair_distance > best_distance:
 			best_distance = lair_distance
 			boss_cell = hall_cell
+	if _spawn_underhall_boss_at(boss_cell).is_empty():
+		return
+	_set_save_status("The deep stirs — %s nests here." % String(_underhall_lair_beast.get("display", "a nameless beast")), Color(1.0, 0.55, 0.45, 1.0))
+
+## One beast, wherever it stands: the chronicle's terror grown and tinted
+## by its boss spec on the given cell. The deepest-level nest and a siege
+## both spawn through here, so _strike_surface_creature's death branch
+## routes the same kill - trophy, hoard, the world remembering - no
+## matter which door the beast came in by.
+func _spawn_underhall_boss_at(boss_cell: Vector2i) -> Dictionary:
 	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(_underhall_lair_beast.get("kind", "dragon")))
 	var size_before := _surface_creatures.size()
 	SurfaceLifeService.spawn_creature(
@@ -11531,7 +11565,7 @@ func _maybe_spawn_underhall_lair_boss() -> void:
 		boss_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
 	)
 	if _surface_creatures.size() <= size_before:
-		return
+		return {}
 	var boss := _surface_creatures[_surface_creatures.size() - 1]
 	var display := String(_underhall_lair_beast.get("display", "a nameless beast"))
 	boss["site_key"] = _seamless_hold_ledger_key
@@ -11550,7 +11584,77 @@ func _maybe_spawn_underhall_lair_boss() -> void:
 	var boss_sprite := boss.get("sprite") as Sprite2D
 	if boss_sprite != null:
 		UndergroundCreatureService.apply_boss_visuals(boss_sprite, spec, WorldChronicleService._capitalize_first(display))
-	_set_save_status("The deep stirs — %s nests here." % display, Color(1.0, 0.55, 0.45, 1.0))
+	return boss
+
+## --- hold sieges -------------------------------------------------------------
+## While the laired terror lives, the deep is never safe: once in a rare
+## while it leaves its nest and storms whatever level the walker stands
+## on. Rolled on the hourly clock hook, long-cooled between assaults.
+func _maybe_start_siege() -> void:
+	if _siege_active or not _is_underground_level():
+		return
+	if _hold_state.current_depth_kind() != "underhall" or _underhall_lair_beast.is_empty():
+		return
+	if float(_game_day) * 24.0 + _game_hour < _siege_cooldown_until:
+		return
+	if _rng.randf() >= SIEGE_CHANCE_PER_HOUR:
+		return
+	_begin_hold_siege()
+
+## The beast breaks in at the level's rim, far from the walker, and the
+## whole watch drops its rounds to meet it. Slaying it routes exactly like
+## the nest kill - it is the same beast - plus every soul in the halls
+## remembers having stood the siege.
+func _begin_hold_siege() -> void:
+	if _siege_active or _underhall_lair_beast.is_empty():
+		return
+	if _hold_state.current_depth_kind() != "underhall":
+		return
+	if WorldChronicleService.is_beast_slain(_world_settings_snapshot(), String(_underhall_lair_beast.get("name", ""))):
+		# A slain terror storms nothing; the register outlives the capture.
+		_underhall_lair_beast = {}
+		return
+	for existing: Dictionary in _surface_creatures:
+		if bool(existing.get("boss", false)):
+			return
+	var breach_cell := _siege_breach_cell()
+	if breach_cell == DwarfHoldStateModel.INVALID_CELL:
+		return
+	if _spawn_underhall_boss_at(breach_cell).is_empty():
+		return
+	_siege_active = true
+	_siege_cooldown_until = float(_game_day) * 24.0 + _game_hour + SIEGE_COOLDOWN_HOURS
+	# The watch musters: combat duty exactly as the defense pass grants it
+	# (out of the scheduler, into the fight); the widened siege engage
+	# range below keeps the duty held until the beast or the level is gone.
+	for state: Dictionary in _npc_states:
+		if int(state.get("role", -1)) == ROLE_GUARD:
+			state["combat_duty"] = true
+	GameAudioService.play_sfx(self, "raid_horn")
+	_set_save_status("%s storms the halls!" % WorldChronicleService._capitalize_first(String(_underhall_lair_beast.get("display", "a nameless beast"))), Color(1.0, 0.45, 0.35, 1.0))
+
+## Where the siege breaks in: a walkable hall cell hugging the level's
+## bounds, as far from the walker as the rim allows - the beast comes out
+## of the dark at the edge of the halls, never out of thin air underfoot.
+func _siege_breach_cell() -> Vector2i:
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in _latest_grid.keys():
+		if int(_latest_grid[cell_variant]) == CELL_HALL and not _latest_floor_decor.has(cell_variant):
+			hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return DwarfHoldStateModel.INVALID_CELL
+	var bounds := _find_bounds(_latest_grid)
+	var breach := DwarfHoldStateModel.INVALID_CELL
+	var best_score := -1.0e12
+	for hall_cell: Vector2i in hall_cells:
+		var rim_distance := mini(
+			mini(hall_cell.x - bounds.position.x, bounds.end.x - 1 - hall_cell.x),
+			mini(hall_cell.y - bounds.position.y, bounds.end.y - 1 - hall_cell.y))
+		var score := Vector2(hall_cell - _player_cell).length() - float(rim_distance) * 4.0
+		if score > best_score:
+			best_score = score
+			breach = hall_cell
+	return breach
 
 ## Still water in the deep: wobble-edged pools carved into the undug rock
 ## beside the halls - the fungal caverns hold real lakes, the other strata
@@ -13523,7 +13627,7 @@ func _maybe_start_raid() -> void:
 	if _game_day < _next_raid_day or int(_game_hour) < 19 or int(_game_hour) >= 23:
 		return
 	var center := _homestead_center()
-	var raider_count := 4 + mini(3, _game_day / 4)
+	var raider_count := 4 + mini(3, _game_day / 4) + _raid_bonus_for_wealth(_player_coins)
 	var spawned := 0
 	for attempt in raider_count * 6:
 		if spawned >= raider_count:
@@ -13554,6 +13658,11 @@ func _maybe_start_raid() -> void:
 	for resident: Dictionary in _npc_states:
 		_add_live_thought(resident, "heard the raid horn sound", -2)
 	_set_save_status("A war horn sounds — %d raiders march on your homestead!" % spawned, Color(0.95, 0.4, 0.35, 1.0))
+
+## Wealth is a beacon: every 500 coins in the walker's purse draws one
+## more blade to the horn, to a cap - even greed marches in small bands.
+func _raid_bonus_for_wealth(coins: int) -> int:
+	return clampi(coins / 500, 0, 4)
 
 func _persist_next_raid_day() -> void:
 	var settings: Dictionary = _world_settings_snapshot()
@@ -13613,6 +13722,9 @@ func _update_raider_bashing(raider: Dictionary, delta: float) -> void:
 ## combat_duty flag pulls a fighting guard out of the scheduler so the
 ## two systems never tug the same sprite.
 const UNDERHALL_GUARD_ENGAGE_RANGE := 8
+## A siege is everyone's fight: the whole level's watch converges on the
+## storming beast instead of only the guards already within a ward of it.
+const UNDERHALL_SIEGE_ENGAGE_RANGE := 999
 
 func _update_underhall_defense(delta: float) -> void:
 	if _surface_creatures.is_empty():
@@ -13621,6 +13733,7 @@ func _update_underhall_defense(delta: float) -> void:
 		for state: Dictionary in _npc_states:
 			state.erase("combat_duty")
 		return
+	var engage_range: int = UNDERHALL_SIEGE_ENGAGE_RANGE if _siege_active else UNDERHALL_GUARD_ENGAGE_RANGE
 	for state: Dictionary in _npc_states:
 		if int(state.get("role", -1)) != ROLE_GUARD:
 			continue
@@ -13629,7 +13742,7 @@ func _update_underhall_defense(delta: float) -> void:
 			continue
 		var guard_cell := state.get("cell", Vector2i.ZERO) as Vector2i
 		var best := -1
-		var best_distance := UNDERHALL_GUARD_ENGAGE_RANGE + 1
+		var best_distance := engage_range + 1
 		for index in _surface_creatures.size():
 			if bool(_surface_creatures[index].get("dying", false)):
 				continue
