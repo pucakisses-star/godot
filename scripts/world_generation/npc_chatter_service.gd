@@ -88,6 +88,15 @@ const DELIVERANCE_LINES: Array[String] = [
 	"The deep is ours again.", "New kin arrive every day now.",
 	"The gates stand open once more.", "They'll sing of that kill for a century."
 ]
+## Deeds travel: surface folk trade tavern gossip about the walker's
+## freshest kill, %s standing in for the beast's storied name.
+const RUMOR_LINES: Array[String] = [
+	"They say a walker felled %s.", "Heard the news? %s is slain.",
+	"Drinks were raised when word came: %s is dead.",
+	"No more watching the road for %s.",
+	"Somebody finally did for %s. Imagine that.",
+	"A pedlar swore it true: %s is no more."
+]
 const GENERIC_IDLE_LINES: Array[String] = [
 	"Hm? Just thinking.", "Stone and steel, another day.", "So it goes."
 ]
@@ -145,6 +154,11 @@ static func ambient_line(state: Dictionary, identity: Dictionary, context: Dicti
 		return _pick(WEATHER_LINES[weather] as Array, rng)
 	if bool(context.get("delivered", false)) and rng.randf() < 0.3:
 		return _pick(DELIVERANCE_LINES, rng)
+	# Above ground the same deed is hearsay, not homecoming: the news
+	# arrives by road and gets retold over mugs.
+	var rumor := String(context.get("rumor", ""))
+	if not rumor.is_empty() and not bool(context.get("underground", false)) and rng.randf() < 0.25:
+		return _pick_format(RUMOR_LINES, rumor, rng)
 	var mood := mood_value(state)
 	if (mood >= 5 or mood <= -4) and rng.randf() < 0.35:
 		return _pick(JOYFUL_LINES if mood > 0 else MISERABLE_LINES, rng)

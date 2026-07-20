@@ -5625,6 +5625,18 @@ func _refresh_trade_panel() -> void:
 		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or brew at the bench" % _player_coins
 	elif stock.is_empty():
 		chest_popup_status_label.text = "🪙 %d coins — the shelves are bare; come back later" % _player_coins
+	if _trade_shop_type == "tavern":
+		var greeting := _tavern_greeting_line()
+		if not greeting.is_empty():
+			chest_popup_status_label.text = "%s\n%s" % [greeting, chest_popup_status_label.text]
+
+## The taproom knows the walker's deeds before the walker sits down:
+## renown earns a nod from the keeper. Empty until the first deed.
+func _tavern_greeting_line() -> String:
+	var renown := WorldChronicleService.player_renown(_world_settings_snapshot())
+	if renown <= 0:
+		return ""
+	return "The keeper nods — a %s drinks here tonight." % WorldChronicleService.renown_title(renown)
 
 ## Tavern fare is eaten at the bar the moment it is bought: hearts and
 ## a full belly instead of a backpack item.
@@ -6025,6 +6037,11 @@ func _chatter_context(state: Dictionary) -> Dictionary:
 	# A hall whose laired terror the walker has slain celebrates it.
 	var delivered := _is_underground_level() and _seamless_site_tile.x != 2147483647 \
 		and not WorldChronicleService.deliverance_for_tile(_world_settings_snapshot(), _seamless_site_tile).is_empty()
+	# On the surface the same deed travels as hearsay instead: the
+	# walker's freshest kill, by its storied name, retold on the roads.
+	var rumor := ""
+	if not _is_underground_level():
+		rumor = String(WorldChronicleService.latest_player_deed(_world_settings_snapshot()).get("display", ""))
 	return {
 		"raid": _raid_active,
 		"guard": int(state.get("role", -1)) == ROLE_GUARD,
@@ -6032,7 +6049,8 @@ func _chatter_context(state: Dictionary) -> Dictionary:
 		"weather": String(_current_weather.get("kind", "clear")),
 		"underground": _is_underground_level(),
 		"stratum": String(_latest_stratum.get("name", "")),
-		"delivered": delivered
+		"delivered": delivered,
+		"rumor": rumor
 	}
 
 func _show_npc_dialogue(state: Dictionary) -> void:
@@ -10227,10 +10245,19 @@ func _roll_hold_contract_offers(seed_key: String) -> Dictionary:
 	var deliver_ore := "Iron Ore" if offer_rng.randi_range(0, 1) == 0 else "Copper Ore"
 	var deliver_target := offer_rng.randi_range(6, 12)
 	var ore_worth := int(SettlementEconomyService.ITEM_VALUES.get(deliver_ore, 4))
+	# A storied name commands better terms: the board sweetens its coin
+	# for the walker the taverns already sing about.
+	var pay_tier := WorldChronicleService.renown_tier(WorldChronicleService.player_renown(_world_settings_snapshot()))
 	return {
-		"slay": {"target": slay_target, "pay": slay_target * offer_rng.randi_range(9, 13)},
-		"deliver": {"ore": deliver_ore, "target": deliver_target, "pay": deliver_target * (ore_worth + offer_rng.randi_range(2, 4))}
+		"slay": {"target": slay_target,
+			"pay": _renown_scaled_pay(slay_target * offer_rng.randi_range(9, 13), pay_tier)},
+		"deliver": {"ore": deliver_ore, "target": deliver_target,
+			"pay": _renown_scaled_pay(deliver_target * (ore_worth + offer_rng.randi_range(2, 4)), pay_tier)}
 	}
+
+## Contract coin grows a tenth per renown tier over the base offer.
+static func _renown_scaled_pay(base_pay: int, tier: int) -> int:
+	return base_pay * (100 + 10 * tier) / 100
 
 func _hold_contract_state(seed_key: String) -> Dictionary:
 	var settings: Dictionary = _world_settings_snapshot()
