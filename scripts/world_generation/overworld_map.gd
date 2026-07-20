@@ -10127,9 +10127,16 @@ func _spawn_caravans() -> void:
 		var path := _route_segments[caravan_rng.randi_range(0, _route_segments.size() - 1)] as PackedVector2Array
 		if path.size() < 4:
 			continue
+		# Cumulative arc length per waypoint, computed once: the per-frame
+		# mover binary-searches this instead of re-summing every segment
+		# of the route every frame for every caravan.
+		var cumulative := PackedFloat32Array()
+		cumulative.resize(path.size())
 		var total_length := 0.0
+		cumulative[0] = 0.0
 		for i in range(path.size() - 1):
 			total_length += path[i].distance_to(path[i + 1])
+			cumulative[i + 1] = total_length
 		if total_length <= 1.0:
 			continue
 		var sprite := Sprite2D.new()
@@ -10138,6 +10145,7 @@ func _spawn_caravans() -> void:
 		_caravans_layer.add_child(sprite)
 		_caravan_states.append({
 			"path": path,
+			"cumulative": cumulative,
 			"length": total_length,
 			"t": caravan_rng.randf_range(0.0, total_length),
 			"dir": 1.0 if caravan_rng.randf() < 0.5 else -1.0,
@@ -10162,19 +10170,18 @@ func _update_caravans(delta: float) -> void:
 			state["dir"] = -1.0
 		state["t"] = t
 		var path := state.get("path") as PackedVector2Array
-		var remaining := t
+		var cumulative := state.get("cumulative") as PackedFloat32Array
 		var caravan_position := path[0]
 		var heading := Vector2.RIGHT
-		for i in range(path.size() - 1):
-			var segment_length := path[i].distance_to(path[i + 1])
-			if segment_length <= 0.001:
-				continue
-			if remaining <= segment_length:
-				caravan_position = path[i].lerp(path[i + 1], remaining / segment_length)
-				heading = path[i + 1] - path[i]
-				break
-			remaining -= segment_length
-			caravan_position = path[i + 1]
+		# The waypoint the wagon is between, found in the precomputed
+		# arc-length table; skip forward over zero-length segments.
+		var segment := clampi(cumulative.bsearch(t) - 1, 0, path.size() - 2)
+		while segment < path.size() - 2 and cumulative[segment + 1] - cumulative[segment] <= 0.001:
+			segment += 1
+		var segment_length := cumulative[segment + 1] - cumulative[segment]
+		if segment_length > 0.001:
+			caravan_position = path[segment].lerp(path[segment + 1], clampf((t - cumulative[segment]) / segment_length, 0.0, 1.0))
+			heading = path[segment + 1] - path[segment]
 		sprite.position = caravan_position
 		sprite.flip_h = heading.x * float(state.get("dir", 1.0)) < 0.0
 
