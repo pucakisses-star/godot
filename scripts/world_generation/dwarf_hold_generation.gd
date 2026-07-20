@@ -325,6 +325,9 @@ uniform float tile_px = 32.0;
 
 void fragment() {
 	vec2 world_pos = overlay_origin + UV * overlay_size;
+	// Hard pixel lighting: judge each tile once from its center so every
+	// tile wears one flat shade - no gradients inside a tile.
+	world_pos = (floor(world_pos / tile_px) + 0.5) * tile_px;
 	float reveal = 0.0;
 	for (int i = 0; i < MAX_LIGHTS; i++) {
 		if (i >= light_count) { break; }
@@ -350,10 +353,10 @@ void fragment() {
 			}
 		}
 		if (blocked) { continue; }
-		float s2 = 1.0 - smoothstep(r * 0.32, r, d);
-		reveal = max(reveal, s2);
+		reveal = max(reveal, clamp(1.0 - d / r, 0.0, 1.0));
 	}
-	reveal = clamp(reveal, 0.0, 1.0);
+	// Four hard bands: bright core, two falloff rings, then the dark.
+	reveal = clamp(floor(reveal * 4.0) / 3.0, 0.0, 1.0);
 	float a = darkness_color.a * darkness_strength * (1.0 - reveal);
 	// Torchlight penumbra: the thinning darkness near a light leans warm
 	// instead of cold void, so light pools read like firelight.
@@ -1144,16 +1147,24 @@ func _create_white_texture() -> Texture2D:
 	white_image.fill(Color(1.0, 1.0, 1.0, 1.0))
 	return ImageTexture.create_from_image(white_image)
 
+## Hard pixel light: the flame halo is three flat concentric rings drawn
+## at 16x16 and upscaled nearest - chunky stepped firelight, no gradient.
 func _create_glow_texture() -> Texture2D:
-	var glow_size := 128
-	var image := Image.create(glow_size, glow_size, false, Image.FORMAT_RGBA8)
-	var center := Vector2(glow_size / 2.0, glow_size / 2.0)
-	for y in range(glow_size):
-		for x in range(glow_size):
-			var distance := Vector2(x + 0.5, y + 0.5).distance_to(center) / (glow_size / 2.0)
-			var strength := clampf(1.0 - distance, 0.0, 1.0)
-			strength = strength * strength
-			image.set_pixel(x, y, Color(1.0, 0.82, 0.55, strength * 0.55))
+	var image := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	for py in range(16):
+		for px in range(16):
+			var ring_distance := Vector2(float(px) - 7.5, float(py) - 7.5).length()
+			var ring_alpha := 0.0
+			if ring_distance <= 3.5:
+				ring_alpha = 0.5
+			elif ring_distance <= 5.5:
+				ring_alpha = 0.3
+			elif ring_distance <= 7.5:
+				ring_alpha = 0.14
+			if ring_alpha > 0.0:
+				image.set_pixel(px, py, Color(1.0, 0.82, 0.55, ring_alpha))
+	image.resize(128, 128, Image.INTERPOLATE_NEAREST)
 	return ImageTexture.create_from_image(image)
 
 func _create_glow_sprite(tile_span: float) -> Sprite2D:
@@ -2391,18 +2402,20 @@ func _update_light_uniforms() -> void:
 	if city_panel != null and _zoom_level > 0.0:
 		cull_px = maxf(cull_px, (city_panel.size * 0.5).length() / _zoom_level + TORCH_LIGHT_TILES * float(tile_size.x))
 	var cull_sq := cull_px * cull_px
-	# Firelight breathes: torch and hearth radii ride a slow per-source
-	# sine so the pools flicker like flame, Core Keeper style. Phases are
-	# keyed by cell so neighboring fires never pulse in lockstep.
-	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
+	# Firelight gutters in HARD steps: time advances in coarse ticks and
+	# each fire hashes its tick to a whole jump - a half-tile shorter, a
+	# quarter-tile longer, or steady - pixel fire, not a breathing halo.
+	# Phases stay keyed by cell so neighboring fires never gutter in
+	# lockstep.
+	var flicker_tick := int(Time.get_ticks_msec()) / 140
+	var gutter_px := float(tile_size.x) * 0.5
 	var candidates: Array = []
 	for torch_cell_variant: Variant in _torch_sprites.keys():
 		var torch_cell := torch_cell_variant as Vector2i
 		var torch_position := _cell_center_position(torch_cell)
 		if torch_position.distance_squared_to(player_position) > cull_sq:
 			continue
-		var torch_flicker := 1.0 + 0.05 * sin(flicker_phase * 8.0 + float(torch_cell.x * 7 + torch_cell.y * 13))
-		candidates.append({"pos": torch_position, "radius": TORCH_LIGHT_TILES * float(tile_size.x) * torch_flicker})
+		candidates.append({"pos": torch_position, "radius": TORCH_LIGHT_TILES * float(tile_size.x) + _gutter_step(flicker_tick, torch_cell.x * 7 + torch_cell.y * 13, gutter_px)})
 	# The settlement's own fires and candles light their pools, so districts
 	# glow around their hearths instead of being uniformly bright.
 	for light_cell: Vector2i in _light_furnishing_cells:
@@ -2410,15 +2423,14 @@ func _update_light_uniforms() -> void:
 		if light_position.distance_squared_to(player_position) > cull_sq:
 			continue
 		var is_hearth := HEARTH_LIGHT_PIECES.has(String(_furnishing_by_cell.get(light_cell, "")))
-		var hearth_flicker := 1.0 + (0.04 if is_hearth else 0.0) * sin(flicker_phase * 6.0 + float(light_cell.x * 11 + light_cell.y * 5))
-		candidates.append({"pos": light_position, "radius": (HEARTH_LIGHT_TILES if is_hearth else CANDLE_LIGHT_TILES) * float(tile_size.x) * hearth_flicker})
+		var hearth_gutter := _gutter_step(flicker_tick, light_cell.x * 11 + light_cell.y * 5, gutter_px) if is_hearth else 0.0
+		candidates.append({"pos": light_position, "radius": (HEARTH_LIGHT_TILES if is_hearth else CANDLE_LIGHT_TILES) * float(tile_size.x) + hearth_gutter})
 	for sconce_variant: Variant in _auto_sconce_cells.keys():
 		var sconce_cell := sconce_variant as Vector2i
 		var sconce_position := _cell_center_position(sconce_cell)
 		if sconce_position.distance_squared_to(player_position) > cull_sq:
 			continue
-		var sconce_flicker := 1.0 + 0.05 * sin(flicker_phase * 8.0 + float(sconce_cell.x * 5 + sconce_cell.y * 11))
-		candidates.append({"pos": sconce_position, "radius": float(_auto_sconce_cells[sconce_variant]) * float(tile_size.x) * sconce_flicker})
+		candidates.append({"pos": sconce_position, "radius": float(_auto_sconce_cells[sconce_variant]) * float(tile_size.x) + _gutter_step(flicker_tick, sconce_cell.x * 5 + sconce_cell.y * 11, gutter_px)})
 	# Only sort when over budget; the far end of the list is what drops.
 	if candidates.size() > MAX_DYNAMIC_LIGHTS - 1:
 		candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
@@ -3790,19 +3802,20 @@ func _spawn_torch_at(cell: Vector2i) -> void:
 	glow.position = Vector2.ZERO
 	glow.visible = _lighting_enabled
 	torch.add_child(glow)
-	_attach_glow_pulse(glow, cell)
 	_torch_sprites[cell] = torch
 	# A fresh torch is a new light pool; hand it to the shader at once.
 	_update_light_uniforms()
 
-## A soft breathing pulse on a light's warm halo, phase-varied per cell
-## so neighboring fires never throb together.
-func _attach_glow_pulse(glow: Sprite2D, cell: Vector2i) -> void:
-	var base_scale := glow.scale
-	var period := 0.5 + float(absi(cell.x * 31 + cell.y * 17) % 40) * 0.01
-	var pulse := glow.create_tween().set_loops()
-	pulse.tween_property(glow, "scale", base_scale * 1.12, period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	pulse.tween_property(glow, "scale", base_scale, period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+## A fire's discrete gutter for one coarse tick: hashed to a whole jump
+## in radius - a half-tile shorter, a quarter-tile longer, or steady -
+## phase-varied per cell so neighboring fires never gutter together.
+func _gutter_step(flicker_tick: int, phase: int, gutter_px: float) -> float:
+	var gutter := ((flicker_tick + absi(phase)) * 2654435761) % 7
+	if gutter == 0:
+		return -gutter_px
+	if gutter == 3:
+		return gutter_px * 0.5
+	return 0.0
 
 var _torch_flame_frames_cache: SpriteFrames = null
 
@@ -3928,7 +3941,6 @@ func _spawn_sconce_at(cell: Vector2i, is_candle: bool) -> void:
 	glow.position = Vector2.ZERO
 	glow.visible = _lighting_enabled
 	sconce.add_child(glow)
-	_attach_glow_pulse(glow, cell)
 	_auto_sconce_sprites[cell] = sconce
 	_auto_sconce_cells[cell] = radius_tiles
 
@@ -6982,8 +6994,6 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 				Color(1.0, 0.72, 0.35, 1.0)
 			)
 			actor_layer.add_child(glow)
-			# Candles and hearths breathe like the torches do.
-			_attach_glow_pulse(glow, base_cell)
 			_furnishing_sprites.append(glow)
 
 func _actor_sprite_to_cell(sprite: Sprite2D, cell: Vector2i) -> void:

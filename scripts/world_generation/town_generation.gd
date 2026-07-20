@@ -7585,13 +7585,8 @@ func _apply_landmark_plan_slice(landmark: Dictionary, plan: Dictionary, chunk: V
 					sprite_def.get("color", AMBIENT_GLOW_WARM) as Color)
 				glow_sprite.visible = _lighting_enabled
 				actor_layer.add_child(glow_sprite)
-				# Firelight breathes: a slow scale pulse, phase-varied per
-				# cell so neighboring glows never throb in unison.
-				var glow_base_scale := glow_sprite.scale
-				var glow_period := 0.5 + float(absi(cell.x * 31 + cell.y * 17) % 40) * 0.01
-				var glow_pulse := glow_sprite.create_tween().set_loops()
-				glow_pulse.tween_property(glow_sprite, "scale", glow_base_scale * 1.12, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-				glow_pulse.tween_property(glow_sprite, "scale", glow_base_scale, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+				# Hard pixel light holds still: the flame sprites sway, the
+				# rings do not breathe.
 				_glow_sprites.append(glow_sprite)
 				nodes.append(glow_sprite)
 			"icon":
@@ -9115,11 +9110,6 @@ func _spawn_lamp_glow(cell: Vector2i) -> void:
 	)
 	glow.visible = _lighting_enabled
 	actor_layer.add_child(glow)
-	var base_scale := glow.scale
-	var period := 0.5 + float(absi(cell.x * 31 + cell.y * 17) % 40) * 0.01
-	var pulse := glow.create_tween().set_loops()
-	pulse.tween_property(glow, "scale", base_scale * 1.1, period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	pulse.tween_property(glow, "scale", base_scale, period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	_lamp_glow_sprites[cell] = glow
 
 ## Ground-truth guarantee that no cut-stump or bush is left drawn on top of
@@ -9713,6 +9703,7 @@ uniform vec2 overlay_origin;
 uniform vec2 overlay_size;
 uniform vec2 ward_center_px;
 uniform vec2 ward_half_px;
+uniform vec2 tile_px = vec2(32.0, 32.0);
 uniform int light_count = 0;
 uniform vec2 light_pos[96];
 uniform float light_radius[96];
@@ -9720,16 +9711,21 @@ uniform vec4 darkness_color : source_color = vec4(0.02, 0.03, 0.055, 0.93);
 
 void fragment() {
 	vec2 world = overlay_origin + UV * overlay_size;
-	vec2 e = (world - ward_center_px) / ward_half_px;
+	// Hard pixel lighting: every tile is judged once, from its center,
+	// and wears one flat shade - no gradients inside a tile, ever.
+	vec2 snapped = overlay_origin + (floor((world - overlay_origin) / tile_px) + 0.5) * tile_px;
+	vec2 e = (snapped - ward_center_px) / ward_half_px;
 	float reach = dot(e, e);
-	// Dark across the ward and its rock shell, feathered out just past
-	// the massif's ragged edge so the wilds keep their daylight.
-	float mask = 1.0 - smoothstep(0.72, 1.15, reach);
+	// The dark claims whole tiles: full night inside the shell, one dim
+	// fringe ring at the massif rim, daylight beyond.
+	float mask = reach < 0.82 ? 1.0 : (reach < 1.1 ? 0.5 : 0.0);
 	float reveal = 0.0;
 	for (int i = 0; i < light_count; i++) {
-		float d = distance(world, light_pos[i]);
-		reveal = max(reveal, 1.0 - smoothstep(light_radius[i] * 0.35, light_radius[i], d));
+		float d = distance(snapped, light_pos[i]);
+		reveal = max(reveal, clamp(1.0 - d / max(light_radius[i], 1.0), 0.0, 1.0));
 	}
+	// Four hard bands: bright core, two falloff rings, then the dark.
+	reveal = clamp(floor(reveal * 4.0) / 3.0, 0.0, 1.0);
 	// Lit ground warms before it clears - torchlight, not a cutout.
 	vec3 tinted = mix(darkness_color.rgb, vec3(0.42, 0.26, 0.11), reveal * 0.55);
 	COLOR = vec4(tinted, darkness_color.a * mask * (1.0 - reveal * 0.92));
@@ -9771,7 +9767,8 @@ func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array
 	overlay_material.shader = _darkness_shader()
 	overlay_material.set_shader_parameter("overlay_origin", origin_px)
 	overlay_material.set_shader_parameter("overlay_size", size_px)
-	# The mask ellipse inscribes the whole city rect with a feather past
+	overlay_material.set_shader_parameter("tile_px", tile_px)
+	# The mask ellipse inscribes the whole city rect stepped hard at
 	# its rim: the carved floor sits deep inside, the stone corners fall
 	# outside and keep their mountain daylight.
 	overlay_material.set_shader_parameter("ward_center_px", _cell_center_position(_hold_ward_stair_cell(anchor)))
@@ -9835,11 +9832,6 @@ func _spawn_ward_sconce(cell: Vector2i) -> Sprite2D:
 	sconce.add_child(glow)
 	actor_layer.add_child(sconce)
 	flame.play()
-	var glow_base_scale := glow.scale
-	var glow_period := 0.5 + float(absi(cell.x * 31 + cell.y * 17) % 40) * 0.01
-	var glow_pulse := glow.create_tween().set_loops()
-	glow_pulse.tween_property(glow, "scale", glow_base_scale * 1.12, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	glow_pulse.tween_property(glow, "scale", glow_base_scale, glow_period).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	return sconce
 
 ## The torch stick alone - the flame is a separate animated sprite so it
@@ -9931,6 +9923,7 @@ func _build_underhall_darkness(bounds: Rect2i) -> void:
 	mat.shader = _darkness_shader()
 	mat.set_shader_parameter("overlay_origin", origin_px)
 	mat.set_shader_parameter("overlay_size", size_px)
+	mat.set_shader_parameter("tile_px", tile_px)
 	# A whole-level ellipse: half-axes as wide as the level, so even the far
 	# corners land at reach ~0.5 (mask = 1) - solid dark, no daylight edge.
 	mat.set_shader_parameter("ward_center_px", origin_px + size_px * 0.5)
@@ -10035,18 +10028,30 @@ func _update_underhall_darkness() -> void:
 		return
 	_push_flicker_radii(mat, _underhall_overlay)
 
-## The per-frame remainder of a darkness push: the cached base radii
-## warped by each flame's breath. NAN phase marks a steady light.
+## The remainder of a darkness push: the cached base radii guttered by
+## each flame in HARD steps. Time advances in coarse ticks and every
+## flame hashes its tick to a whole jump - a ring shorter, a half-ring
+## longer, or steady - so torches gutter like pixel fire instead of
+## breathing like a halo. NAN phase marks a steady light. Between ticks
+## nothing is pushed at all.
 func _push_flicker_radii(mat: ShaderMaterial, cache: Dictionary) -> void:
-	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
+	var tick := int(Time.get_ticks_msec()) / 140
+	if int(cache.get("lit_flicker_tick", -1)) == tick:
+		return
+	cache["lit_flicker_tick"] = tick
 	var base_radii := cache.get("lit_base_radii") as PackedFloat32Array
 	var phases := cache.get("lit_phases") as PackedFloat32Array
 	var radii := PackedFloat32Array()
 	radii.resize(base_radii.size())
+	var gutter_px := float(tile_size.x) * 0.5
 	for i in base_radii.size():
 		var radius := base_radii[i]
 		if not is_nan(phases[i]):
-			radius *= 1.0 + 0.07 * sin(flicker_phase * 8.0 + phases[i])
+			var gutter := ((tick + int(phases[i])) * 2654435761) % 7
+			if gutter == 0:
+				radius -= gutter_px
+			elif gutter == 3:
+				radius += gutter_px * 0.5
 		radii[i] = radius
 	mat.set_shader_parameter("light_radius", radii)
 

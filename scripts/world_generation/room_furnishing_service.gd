@@ -866,27 +866,35 @@ static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_si
 static func piece_emits_light(piece_name: String) -> bool:
 	return bool(piece_def(piece_name).get("light", false))
 
-## Shared glow resources: the gradient pixels depend only on the RGB
+## Shared glow resources: the ring pixels depend only on the RGB
 ## (radius rides sprite.scale), so every hearth, sconce, and street lamp
 ## of a color shares ONE texture and ONE additive material - an underhall
-## with 140 sconces uploads one 96x96 gradient, not 140.
+## with 140 sconces uploads one 96x96 image, not 140.
+## Hard pixel light: the halo is three flat concentric rings drawn at
+## 12x12 and upscaled nearest - chunky stepped firelight, no gradient.
 static var _glow_textures: Dictionary = {}
 static var _glow_material: CanvasItemMaterial
 
-static func _glow_texture_for_color(color: Color) -> GradientTexture2D:
+static func _glow_texture_for_color(color: Color) -> Texture2D:
 	var key := color.to_html(false)
 	if _glow_textures.has(key):
-		return _glow_textures[key] as GradientTexture2D
-	var gradient := Gradient.new()
-	gradient.set_color(0, Color(color.r, color.g, color.b, 0.55))
-	gradient.set_color(1, Color(color.r, color.g, color.b, 0.0))
-	var texture := GradientTexture2D.new()
-	texture.gradient = gradient
-	texture.fill = GradientTexture2D.FILL_RADIAL
-	texture.fill_from = Vector2(0.5, 0.5)
-	texture.fill_to = Vector2(0.5, 0.0)
-	texture.width = 96
-	texture.height = 96
+		return _glow_textures[key] as Texture2D
+	var image := Image.create(12, 12, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	for py in range(12):
+		for px in range(12):
+			var ring_distance := Vector2(float(px) - 5.5, float(py) - 5.5).length()
+			var ring_alpha := 0.0
+			if ring_distance <= 2.5:
+				ring_alpha = 0.5
+			elif ring_distance <= 4.0:
+				ring_alpha = 0.3
+			elif ring_distance <= 5.5:
+				ring_alpha = 0.14
+			if ring_alpha > 0.0:
+				image.set_pixel(px, py, Color(color.r, color.g, color.b, ring_alpha))
+	image.resize(96, 96, Image.INTERPOLATE_NEAREST)
+	var texture := ImageTexture.create_from_image(image)
 	_glow_textures[key] = texture
 	return texture
 
