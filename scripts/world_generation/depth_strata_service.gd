@@ -93,6 +93,64 @@ const STARMETAL_DEPTH := {
 	"starmetal": true
 }
 
+## --- The Abyssal Deep --------------------------------------------------------
+## Below the starmetal the survey ends and the old maps go blank. Two more
+## strata wait past the Abyssal Stair: the Magma Sea, where the hold's
+## stone gives way to basalt shores around molten pools, and beneath even
+## that the Adamant Seam - solid rock threaded with the deep's hardest
+## metal, and the things that guard it. These live OUTSIDE the standard
+## ladder: stratum_for_level_with_geology never returns them, so every
+## hold's levels 1-3 keep the exact strata they always had.
+
+const MAGMA_SEA := {
+	"relic_pieces": ["df_tool_16_1", "df_tool_17_1", "df_tool_26_2", "df_tool_26_3", "df_box_0_1"],
+	"name": "The Magma Sea",
+	"stone": "Basalt",
+	"ore_drops": [
+		{"name": "Obsidian", "weight": 40, "min": 1, "max": 2},
+		{"name": "Basalt", "weight": 38, "min": 1, "max": 3},
+		{"name": "Gem Shard", "weight": 12, "min": 1, "max": 1},
+		{"name": "Fire Opal", "weight": 6, "min": 1, "max": 1},
+		{"name": "Runestone", "weight": 4, "min": 1, "max": 1}
+	],
+	"vein_count_range": Vector2i(8, 12),
+	"mushroom_count_range": Vector2i(0, 2),
+	"creature_slots": [5, 6, 7],
+	## Fire-kin: the sea's prowlers wear cinder-light and hit harder than
+	## their upland cousins of the same body.
+	"creature_tint": Color(1.35, 0.62, 0.5),
+	"tint": Color(1.12, 0.68, 0.58),
+	"cavern": false,
+	"starmetal": false
+}
+
+const ADAMANT_SEAM := {
+	"relic_pieces": ["df_tool_26_2", "df_tool_26_3", "df_tool_25_0", "df_box_0_1"],
+	"name": "The Adamant Seam",
+	"stone": "Obsidian",
+	"ore_drops": [
+		{"name": "Obsidian", "weight": 45, "min": 1, "max": 2},
+		{"name": "Basalt", "weight": 35, "min": 1, "max": 2},
+		{"name": "Gem Shard", "weight": 12, "min": 1, "max": 1},
+		{"name": "Adamantine Ore", "weight": 8, "min": 1, "max": 1}
+	],
+	"vein_count_range": Vector2i(0, 0),
+	"mushroom_count_range": Vector2i(0, 1),
+	"creature_slots": [6, 7],
+	"tint": Color(0.82, 0.86, 1.05),
+	"cavern": false,
+	"starmetal": false
+}
+
+## The stratum an abyss level wears, by ABSOLUTE depth below the surface
+## (4 = the Magma Sea, 5 and deeper = the Adamant Seam). A helper apart
+## from the ladder on purpose: the standard strata bands are load-bearing
+## for every already-dug hold and must never shift under them.
+static func abyss_stratum(depth: int) -> Dictionary:
+	if depth <= 4:
+		return MAGMA_SEA
+	return ADAMANT_SEAM
+
 const SURFACE := {
 	"relic_pieces": [],
 	"name": "Surface Halls",

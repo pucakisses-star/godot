@@ -101,6 +101,16 @@ var _latest_resident_target := 0
 ## and the vein stays gone on revisit. The stratum drives the ore a vein yields.
 var _latest_floor_decor: Dictionary = {}
 var _latest_stratum: Dictionary = DepthStrataService.SURFACE
+## The Magma Sea's molten pools (cell -> true) on the current level. Lava
+## takes a footfall - unlike still water it does not block - but the melt
+## scalds and throws the walker back where they stepped from. Empty
+## everywhere above the Abyssal Deep.
+var _latest_lava_cells: Dictionary = {}
+## The Adamant Seam's adamantine outcrops (cell -> true) on the current
+## level. The reference stored on the level itself, like the floor decor,
+## so a worked-out vein stays worked out for the visit; mining one wakes
+## the seam's wardens.
+var _latest_adamantine_cells: Dictionary = {}
 ## Accumulated pick damage on the vein being mined, cleared on level change so
 ## a half-mined vein's progress never bleeds across a descent.
 var _vein_damage: Dictionary = {}
@@ -1908,9 +1918,15 @@ func _update_player_turn_movement(delta: float) -> void:
 			break
 		budget -= remaining
 		_player_sprite.position = _player_move_target_position
+		var departed_cell := _player_cell
 		_player_cell = _player_move_target_cell
 		_player_is_moving = false
 		_close_out_of_range_popups()
+		# The melt punishes the footfall the moment it lands - before the
+		# stair check, so a scalded walker never also rides a hatch.
+		if _resolve_lava_step(_player_cell, departed_cell):
+			_center_view_on_world_position(_player_sprite.position)
+			return
 		if _try_use_stairs_at_player_cell():
 			_center_view_on_world_position(_player_sprite.position)
 			return
@@ -3529,6 +3545,11 @@ func _compute_passable_cell_for_actor(cell: Vector2i) -> bool:
 	# afloat), so sea cells are passable and let the walker roam the water.
 	if _wild_water and _is_water_cell(cell):
 		return true
+	# The Magma Sea's melt takes a step - it is the one water-painted ground
+	# an actor may enter, so the scald-and-bounce hazard can actually fire.
+	# Still water everywhere else keeps blocking.
+	if _latest_lava_cells.has(cell):
+		return true
 	# Mountain crags in the streamed wilds keep their rocky tile but block
 	# movement; roads never enter this set, so passes stay open.
 	if _surface_blocked_cells.has(cell):
@@ -4391,6 +4412,10 @@ func _show_level(target_level_index: int) -> void:
 	# The strata veins ride the level by reference, so mining one persists.
 	_latest_floor_decor = level_data.get("floor_decor", {}) as Dictionary
 	_latest_stratum = level_data.get("stratum", DepthStrataService.SURFACE) as Dictionary
+	# The Abyssal Deep's hazards ride their levels the same way; both come
+	# up empty on every level above the abyss.
+	_latest_lava_cells = level_data.get("lava_cells", {}) as Dictionary
+	_latest_adamantine_cells = level_data.get("adamantine_cells", {}) as Dictionary
 	_vein_damage.clear()
 	_plan_village_signboards(grid)
 	_village_yards = level_data.get("village_yards", []) as Array
@@ -4410,6 +4435,9 @@ func _show_level(target_level_index: int) -> void:
 	_faction_event_stamps.clear()
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
+	# The Abyssal Stair announces itself the way the surface gates do: a
+	# floating name over the hatch that leaves the survey's maps.
+	_spawn_abyss_stair_label(level_data)
 	# The level's rail network and parked carts come back with it (and the
 	# clear is the teardown on the surface and in storage cellars).
 	_rebuild_underhall_rails(level_data)
@@ -6715,6 +6743,14 @@ func _try_use_stairs_at_player_cell() -> bool:
 		var destination_index := _hold_state.current_level_index + 1
 		_pending_player_spawn_cell = _resolve_stair_spawn_cell(destination_index, "up", _player_cell)
 		_show_level(destination_index)
+		return true
+	# The Abyssal Stair: a down-hatch on the deepest STANDARD hall with no
+	# level yet beneath it. The step that takes it dares the deep - the
+	# column grows two levels past the starmetal and the descent rides the
+	# same machinery as every other stair. Once the abyss exists, the
+	# ordinary down-branch above handles this cell like any other hatch.
+	if stair_direction == "down" and _player_cell == _abyss_stair_cell_for_current_level():
+		_extend_column_to_abyss()
 		return true
 	if stair_direction == "up" and _hold_state.current_level_index > 0:
 		var destination_index := _hold_state.current_level_index - 1
@@ -10229,6 +10265,16 @@ func _mine_underhall_vein(cell: Vector2i) -> void:
 	_record_underhall_edit("decor_erased", cell)
 	decor_layer.erase_cell(cell)
 	_actor_passable_cache.erase(cell)
+	# The Adamant Seam's own metal: an adamantine outcrop pays the deep's
+	# prize instead of a table roll - and the strike is heard. The ledger
+	# entry above already keeps the worked-out vein gone on revisit.
+	if _latest_adamantine_cells.has(cell):
+		_latest_adamantine_cells.erase(cell)
+		_add_to_inventory("Adamantine Ore", 1)
+		_spawn_floating_text("Struck adamantine!", _cell_center_position(cell), Color(0.75, 0.85, 1.0, 1.0))
+		TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.55, 0.62, 0.8, 1.0), 12)
+		_wake_seam_wardens(cell)
+		return
 	_add_to_inventory("Stone", 1)
 	var ore := _roll_stratum_ore(_latest_stratum)
 	if not ore.is_empty():
@@ -12012,6 +12058,10 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		# level - dug tunnels reopen, worked-out veins stay gone, laid rails
 		# and moved carts land on top of the generated line.
 		_apply_underhall_diffs(level_data, depth)
+		# The deepest surveyed hall hides one more way down: the Abyssal
+		# Stair, dealt on the level's own seed, waiting past the starmetal.
+		if depth == HOLD_DEEP_LEVELS:
+			_stamp_abyss_stair(level_data, level_seed)
 		column.append(level_data)
 	_generating_hold_column = false
 	_hold_state.selected_hold_population = saved_selected
@@ -12057,6 +12107,9 @@ func _populate_underhall_creatures(level_data: Dictionary) -> void:
 			var prowler := _surface_creatures[_surface_creatures.size() - 1]
 			WildlifeService.apply_species(prowler,
 				WildlifeService.cave_species_for_slot(int(prowler.get("def_index", 0)), _rng))
+			# An abyss stratum re-casts its kin after the species dress: the
+			# Magma Sea's prowlers burn cinder-red and hit a tier harder.
+			_apply_abyss_creature_cast(prowler)
 	# The starmetal's guardians: the stratum's meanest slot, mustered
 	# around the deposit. The deposit cell itself is a solid outcrop (and
 	# its flanks may hold veins), so each guard takes the first open cell
@@ -12088,7 +12141,7 @@ func _populate_underhall_creatures(level_data: Dictionary) -> void:
 ## for any boss:true state - trophy, hoard, and the world remembering.
 ## The slain register is re-checked every show, so it never respawns.
 func _maybe_spawn_underhall_lair_boss() -> void:
-	if _underhall_lair_beast.is_empty() or not _hold_state.is_deepest():
+	if _underhall_lair_beast.is_empty() or _hold_state.current_level_index != _deepest_standard_level_index():
 		return
 	if _hold_state.current_depth_kind() != "underhall":
 		return
@@ -12246,6 +12299,337 @@ func _carve_underhall_pools(grid: Dictionary, stratum: Dictionary, rng: RandomNu
 				var pool_cell := center + Vector2i(dx, dy)
 				if int(grid.get(pool_cell, CELL_ROCK)) == CELL_ROCK:
 					grid[pool_cell] = DwarfHoldTileService.CELL_WATER
+
+## --- The Abyssal Deep ---------------------------------------------------------
+## Below the starmetal the survey ends. One special hatch - the Abyssal
+## Stair - hides on a hold's deepest surveyed hall; taking it appends two
+## more levels to the live column: the Magma Sea (depth 4), then the
+## Adamant Seam (depth 5). Hold columns only; a cave's dark bottom stays
+## its bottom. Everything below regenerates deterministically from the
+## hold seed and the underhall ledger replays the walker's edits, exactly
+## as the standard levels do - the abyss simply never joins the cached
+## three-level column, so the surveyed maps other systems trust (the lair
+## beast's nest above all) never shift.
+
+const ABYSS_DEEP_LEVELS := 2
+const LAVA_STEP_HEARTS := 2
+
+## The deepest SURVEYED level of the live column: the last level that is
+## not abyss. This is where the chronicle's lair beast nests - appending
+## the abyss must never lure it deeper than the starmetal.
+func _deepest_standard_level_index() -> int:
+	var deepest := _hold_state.generated_levels.size() - 1
+	while deepest > 0 and bool((_hold_state.generated_levels[deepest] as Dictionary).get("abyss", false)):
+		deepest -= 1
+	return deepest
+
+## The current level's Abyssal Stair cell, or the invalid sentinel when
+## the level carries none (only a hold column's deepest surveyed hall does).
+func _abyss_stair_cell_for_current_level() -> Vector2i:
+	var cell_variant: Variant = _hold_state.current_level().get("abyss_stair_cell")
+	return (cell_variant as Vector2i) if cell_variant is Vector2i else DwarfHoldStateModel.INVALID_CELL
+
+## Stamps the one Abyssal Stair onto a freshly dug deepest hall, dealt on
+## the level's own seed. It rides the floor decor as a hold stairway_down
+## piece: the decor painter renders it, the hold atlas walks it, and the
+## stair reader answers "down" on it - so the whole stair-arrival pipeline
+## works unmodified. Kept OUT of stair_cells: the rail line and the spawn
+## resolver only ever know the surveyed stairs.
+func _stamp_abyss_stair(level_data: Dictionary, level_seed: String) -> void:
+	var grid := level_data.get("grid", {}) as Dictionary
+	var floor_decor := level_data.get("floor_decor", {}) as Dictionary
+	var stair_cells := level_data.get("stair_cells", {}) as Dictionary
+	var rails := level_data.get("rails", []) as Array
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in grid.keys():
+		if int(grid[cell_variant]) != CELL_HALL:
+			continue
+		if floor_decor.has(cell_variant) or rails.has(cell_variant as Vector2i):
+			continue
+		hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	var stair_rng := RandomNumberGenerator.new()
+	stair_rng.seed = hash("%s::abyss_stair" % level_seed)
+	# Away from the entry stairs: of a fixed hand of candidates, keep the
+	# one with the most clearance from every surveyed stair (good enough
+	# past ~14 tiles), so the hatch is a find, not a doormat.
+	var best_cell := hall_cells[0]
+	var best_clearance := -1
+	for _deal in range(60):
+		var candidate := hall_cells[stair_rng.randi_range(0, hall_cells.size() - 1)]
+		var clearance := 2147483647
+		for stair_variant: Variant in stair_cells.values():
+			var stair_cell := stair_variant as Vector2i
+			clearance = mini(clearance, maxi(absi(candidate.x - stair_cell.x), absi(candidate.y - stair_cell.y)))
+		if clearance > best_clearance:
+			best_clearance = clearance
+			best_cell = candidate
+		if best_clearance >= 14:
+			break
+	floor_decor[best_cell] = "stairway_down"
+	level_data["abyss_stair_cell"] = best_cell
+
+## Names the Abyssal Stair over its hatch, the way the surface gates name
+## their holds. Rides the gate-label registry so the next level switch
+## frees it with the rest.
+func _spawn_abyss_stair_label(level_data: Dictionary) -> void:
+	var cell_variant: Variant = level_data.get("abyss_stair_cell")
+	if not (cell_variant is Vector2i):
+		return
+	var stair_label := Label.new()
+	stair_label.text = "The Abyssal Stair"
+	stair_label.add_theme_font_size_override("font_size", 18)
+	stair_label.add_theme_color_override("font_color", Color(0.98, 0.62, 0.5, 1.0))
+	stair_label.add_theme_color_override("font_outline_color", Color(0.1, 0.05, 0.05, 1.0))
+	stair_label.add_theme_constant_override("outline_size", 5)
+	stair_label.position = city_layer.map_to_local((cell_variant as Vector2i) + Vector2i(-2, -2))
+	stair_label.z_index = 30
+	city_layer.add_child(stair_label)
+	_surface_gate_labels.append(stair_label)
+
+## Dares the deep: appends the two abyss levels (depths 4 and 5) to the
+## live column if they are not already dug, then descends onto the Magma
+## Sea's entry stair. Re-dug deterministically from the hold seed on each
+## extension - the deep-column cache keeps only the surveyed three - and
+## the underhall ledger replays the walker's edits, so nothing mined or
+## dug below is ever lost.
+func _extend_column_to_abyss() -> void:
+	var first_abyss_index := HOLD_DEEP_LEVELS + 1
+	if _hold_state.generated_levels.size() <= first_abyss_index:
+		var hold_seed := _seamless_hold_ledger_key
+		if hold_seed.is_empty():
+			hold_seed = "hold"
+		for depth in range(first_abyss_index, first_abyss_index + ABYSS_DEEP_LEVELS):
+			_hold_state.generated_levels.append(_generate_abyss_level(hold_seed, depth))
+		_set_save_status("The Abyssal Stair opens — the earth below the starmetal takes you.", Color(1.0, 0.62, 0.5, 1.0))
+	_pending_player_spawn_cell = _resolve_stair_spawn_cell(first_abyss_index, "up", _player_cell)
+	_show_level(first_abyss_index)
+
+## One level of the Abyssal Deep, deterministic on the hold seed. Depth 4
+## is the Magma Sea: a broad basalt cavern whose floor breaks into molten
+## pools. Depth 5 is the Adamant Seam: near-solid rock, one carved pocket
+## and a few worm-tunnels, threaded with adamantine outcrops. Both ride
+## the same underhall machinery as the standard levels (mining, darkness,
+## creatures, the ledger).
+func _generate_abyss_level(hold_seed: String, depth: int) -> Dictionary:
+	var abyss_rng := RandomNumberGenerator.new()
+	abyss_rng.seed = hash("%s::abyss_%d" % [hold_seed, depth])
+	var stratum := DepthStrataService.abyss_stratum(depth)
+	var magma := depth == HOLD_DEEP_LEVELS + 1
+	var half := Vector2i(26, 19) if magma else Vector2i(19, 14)
+	var grid: Dictionary = {}
+	for y in range(-half.y, half.y + 1):
+		for x in range(-half.x, half.x + 1):
+			grid[Vector2i(x, y)] = CELL_ROCK
+	# Hollows chained across the rock - the sea's are wide shores, the
+	# seam's a tight pocket and whatever its worm-tunnels reach.
+	var centers: Array[Vector2i] = [Vector2i(-half.x + 7, 0)]
+	var hollow_count := abyss_rng.randi_range(5, 7) if magma else abyss_rng.randi_range(3, 4)
+	for _hollow in range(hollow_count - 1):
+		var previous := centers[centers.size() - 1]
+		var candidate := previous + Vector2i(abyss_rng.randi_range(5, 12), abyss_rng.randi_range(-8, 8))
+		candidate.x = clampi(candidate.x, -half.x + 4, half.x - 4)
+		candidate.y = clampi(candidate.y, -half.y + 4, half.y - 4)
+		centers.append(candidate)
+	for center_index in range(centers.size()):
+		var center := centers[center_index]
+		var radius := abyss_rng.randi_range(4, 6) if magma else abyss_rng.randi_range(2, 3)
+		for dy in range(-radius - 2, radius + 3):
+			for dx in range(-radius - 2, radius + 3):
+				var wobble := 1.0 + 0.35 * sin(float(dx) * 0.9 + float(dy) * 1.3 + float(abyss_rng.randi_range(0, 6)))
+				if Vector2(dx, dy).length() <= float(radius) * wobble:
+					var cell := center + Vector2i(dx, dy)
+					if grid.has(cell):
+						grid[cell] = CELL_HALL
+		if center_index > 0:
+			var walker := centers[center_index - 1]
+			var goal := center
+			for _step in range(200):
+				if walker == goal:
+					break
+				var toward := goal - walker
+				var step := Vector2i.ZERO
+				if absi(toward.x) > absi(toward.y) or (toward.y != 0 and abyss_rng.randi_range(0, 2) == 0):
+					step = Vector2i(signi(toward.x) if toward.x != 0 else 0, 0)
+				if step == Vector2i.ZERO:
+					step = Vector2i(0, signi(toward.y) if toward.y != 0 else 0)
+				walker += step
+				if grid.has(walker):
+					grid[walker] = CELL_HALL
+				# The sea's tunnels run two wide; the seam keeps single worm-holes.
+				if magma:
+					var widen := walker + (Vector2i(0, 1) if step.x != 0 else Vector2i(1, 0))
+					if grid.has(widen):
+						grid[widen] = CELL_HALL
+	# Stairs: the way up in the first hollow; a way further down only
+	# while the abyss goes deeper still.
+	var stair_cells: Dictionary = {"up": centers[0]}
+	grid[centers[0]] = CELL_HALL
+	if depth < HOLD_DEEP_LEVELS + ABYSS_DEEP_LEVELS:
+		var down_center := centers[centers.size() - 1]
+		stair_cells["down"] = down_center
+		grid[down_center] = CELL_HALL
+	var floor_decor: Dictionary = {}
+	for stair_variant: Variant in stair_cells.values():
+		floor_decor[stair_variant as Vector2i] = "protected"
+	DepthStrataService.stamp_stratum_features(grid, floor_decor, stratum, abyss_rng)
+	for stair_variant: Variant in stair_cells.values():
+		floor_decor.erase(stair_variant as Vector2i)
+	var lava_cells: Dictionary = {}
+	var adamantine_cells: Dictionary = {}
+	if magma:
+		_carve_lava_pools(grid, floor_decor, stair_cells, lava_cells, abyss_rng)
+	else:
+		_stamp_adamantine_veins(grid, floor_decor, stair_cells, adamantine_cells, abyss_rng)
+	var level_data := {
+		"kind": "underhall",
+		"abyss": true,
+		"grid": grid,
+		"door_cells": {},
+		"zone_counts": {},
+		"requested_zone_counts": {},
+		"civic_buildings_by_id": {},
+		"civic_building_type_map": {},
+		"residence_type_map": {},
+		"resident_target": 0,
+		"village_yards": [],
+		"floor_decor": floor_decor,
+		"stratum": stratum,
+		"stair_cells": stair_cells,
+		"starmetal_cells": [],
+		"lava_cells": lava_cells,
+		"adamantine_cells": adamantine_cells
+	}
+	_apply_underhall_diffs(level_data, depth)
+	return level_data
+
+## The Magma Sea's pools: wobble-rimmed melt blown into the cavern floor
+## and the rock beside it. Unlike the still pools of the upper strata the
+## melt EATS dug floor (never a stair's landing, never an outcrop) - the
+## sea is the hazard and the shores are the path.
+func _carve_lava_pools(grid: Dictionary, floor_decor: Dictionary, stair_cells: Dictionary, lava_cells: Dictionary, rng: RandomNumberGenerator) -> void:
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in grid.keys():
+		if int(grid[cell_variant]) == CELL_HALL:
+			hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	var landings: Dictionary = {}
+	for stair_variant: Variant in stair_cells.values():
+		var stair_cell := stair_variant as Vector2i
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				landings[stair_cell + Vector2i(dx, dy)] = true
+	for _pool in range(rng.randi_range(4, 6)):
+		var anchor := hall_cells[rng.randi_range(0, hall_cells.size() - 1)]
+		var center := anchor + Vector2i(rng.randi_range(-6, 6), rng.randi_range(-5, 5))
+		var radius := rng.randi_range(2, 4)
+		for dy in range(-radius, radius + 1):
+			for dx in range(-radius, radius + 1):
+				var wobble := 1.0 + 0.3 * sin(float(dx) * 1.1 + float(dy) * 0.7)
+				if Vector2(dx, dy).length() > float(radius) * 0.85 * wobble:
+					continue
+				var pool_cell := center + Vector2i(dx, dy)
+				if not grid.has(pool_cell) or landings.has(pool_cell) or floor_decor.has(pool_cell):
+					continue
+				grid[pool_cell] = DwarfHoldTileService.CELL_WATER
+				lava_cells[pool_cell] = true
+
+## The seam's prize: 4-6 adamantine outcrops dealt onto the pocket floor.
+## Each is a solid "stone" vein to the pick, but registered here so the
+## strike pays the true metal - and wakes what guards it.
+func _stamp_adamantine_veins(grid: Dictionary, floor_decor: Dictionary, stair_cells: Dictionary, adamantine_cells: Dictionary, rng: RandomNumberGenerator) -> void:
+	var landings: Array = stair_cells.values()
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in grid.keys():
+		if int(grid[cell_variant]) != CELL_HALL:
+			continue
+		if floor_decor.has(cell_variant) or landings.has(cell_variant):
+			continue
+		hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	var vein_target := rng.randi_range(4, 6)
+	for _deal in range(80):
+		if adamantine_cells.size() >= vein_target:
+			break
+		var cell := hall_cells[rng.randi_range(0, hall_cells.size() - 1)]
+		if floor_decor.has(cell):
+			continue
+		floor_decor[cell] = "stone"
+		adamantine_cells[cell] = true
+
+## The melt holds one footfall's weight and no more: stepping onto lava
+## scalds for two hearts and throws the walker back onto the ground they
+## left. True means the bounce fired and the step is over - no stair
+## check, no next glide.
+func _resolve_lava_step(arrived_cell: Vector2i, departed_cell: Vector2i) -> bool:
+	if not _latest_lava_cells.has(arrived_cell):
+		return false
+	_damage_player(LAVA_STEP_HEARTS, "the molten sea")
+	if arrived_cell != departed_cell and not _latest_lava_cells.has(departed_cell):
+		_player_cell = departed_cell
+	if _player_sprite != null:
+		_actor_sprite_to_cell(_player_sprite, _player_cell)
+		_spawn_floating_text("The melt scalds!", _player_sprite.position + Vector2(0, -14), Color(1.0, 0.5, 0.35, 1.0))
+	_player_is_moving = false
+	_player_move_path.clear()
+	return true
+
+## The abyss breeds meaner kin: a stratum carrying a creature tint (the
+## Magma Sea's fire-cast) paints its prowlers in it and stokes them a
+## tier past their upland cousins - same bodies, same AI, hotter blood.
+func _apply_abyss_creature_cast(prowler: Dictionary) -> void:
+	var cast_variant: Variant = _latest_stratum.get("creature_tint")
+	if not (cast_variant is Color):
+		return
+	prowler["hp"] = int(prowler.get("hp", 8)) + 6
+	prowler["damage_override"] = int(prowler.get("damage_override", 3)) + 1
+	var prowler_sprite := prowler.get("sprite") as Sprite2D
+	if prowler_sprite != null:
+		prowler_sprite.modulate = cast_variant as Color
+
+## "The seam's wardens wake": mining an adamantine vein musters two
+## high-tier guardians on open floor within a few tiles of the strike -
+## the deep does not give its metal away. Same shared creature pipeline,
+## dressed with warden overrides the way the cave kin wear species.
+func _wake_seam_wardens(vein_cell: Vector2i) -> void:
+	var posted := 0
+	for ring in range(1, 4):
+		if posted >= 2:
+			break
+		for dy in range(-ring, ring + 1):
+			if posted >= 2:
+				break
+			for dx in range(-ring, ring + 1):
+				if posted >= 2:
+					break
+				if maxi(absi(dx), absi(dy)) != ring:
+					continue
+				var guard_cell := vein_cell + Vector2i(dx, dy)
+				if guard_cell == _player_cell or not _is_walkable_cell(guard_cell):
+					continue
+				var wardens_before := _surface_creatures.size()
+				SurfaceLifeService.spawn_creature(
+					_surface_creatures, SURFACE_CREATURE_TEXTURE,
+					UndergroundCreatureService.CREATURE_DEFS.size() - 1,
+					guard_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
+				)
+				if _surface_creatures.size() <= wardens_before:
+					continue
+				var warden := _surface_creatures[_surface_creatures.size() - 1]
+				warden["species_name"] = "Seam Warden"
+				warden["hp"] = 32
+				warden["damage_override"] = 5
+				warden["aggro_override"] = 12
+				var warden_sprite := warden.get("sprite") as Sprite2D
+				if warden_sprite != null:
+					warden_sprite.modulate = Color(0.72, 0.82, 1.2, 1.0)
+					warden_sprite.scale *= 1.2
+				posted += 1
+	if posted > 0:
+		_set_save_status("The seam's wardens wake!", Color(0.75, 0.82, 1.0, 1.0))
 
 func _player_on_any_gate_cell() -> bool:
 	for gate: Dictionary in _surface_gates:

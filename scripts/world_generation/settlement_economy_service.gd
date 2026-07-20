@@ -12,6 +12,11 @@ const ITEM_VALUES := {
 	"Gold Ore": 12, "Tin Ore": 6, "Lead Ore": 4, "Zinc Ore": 5,
 	"Nickel Ore": 7, "Platinum Ore": 16, "Coal": 3, "Flux Stone": 3,
 	"Gold Nugget": 14, "Gem Shard": 16, "Starmetal Ore": 60, "Starmetal Bar": 150, "Old Tome": 12, "Carved Curio": 6, "Iron Ingot": 8, "Leather Strap": 2,
+	# Stones of the Abyssal Deep, brought up past the starmetal: glassy
+	# obsidian and sea-floor basalt from the Magma Sea's shores, fire opal
+	# glinting out of the melt, and the seam's adamantine - worth more than
+	# any ore the survey knows, short of the starmetal itself.
+	"Obsidian": 7, "Basalt": 4, "Fire Opal": 18, "Adamantine Ore": 40,
 
 	"Amber": 12, "Spider Amber": 18, "Fern Amber": 16, "Fossil Leaf": 10,
 	"Ancient Skull": 20, "Beast Skull": 18, "Fossil Claw": 12,
