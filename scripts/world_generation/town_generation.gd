@@ -5364,22 +5364,44 @@ func _update_farm_animals(delta: float) -> void:
 		state["anim_time"] = float(state.get("anim_time", 0.0)) + delta
 		if bool(state.get("moving", false)):
 			var target := state.get("move_target", sprite.position) as Vector2
-			sprite.position = sprite.position.move_toward(target, float(def.get("speed", 20.0)) * delta)
+			sprite.position = sprite.position.move_toward(target, float(def.get("speed", 20.0)) * float(state.get("speed_scale", 1.0)) * delta)
 			if sprite.position.distance_to(target) <= 0.5:
 				sprite.position = target
 				state["cell"] = state.get("move_cell", state.get("cell", Vector2i.ZERO)) as Vector2i
 				state["moving"] = false
 		else:
+			# A stalked wild grazer breaks its drift: short quick steps
+			# straight away from the hunter, the leash dragged along.
+			var fleeing: bool = bool(state.get("wild", false)) \
+				and Time.get_ticks_msec() < int(state.get("flee_until_ms", 0))
+			if not fleeing:
+				state["speed_scale"] = 1.0
 			state["wander_timer"] = float(state.get("wander_timer", 0.0)) - delta
 			if float(state.get("wander_timer", 0.0)) <= 0.0:
-				state["wander_timer"] = _rng.randf_range(1.5, 5.0)
+				state["wander_timer"] = 0.35 if fleeing else _rng.randf_range(1.5, 5.0)
 				var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
 				var step := directions[_rng.randi_range(0, 3)]
-				var next_cell := (state.get("cell", Vector2i.ZERO) as Vector2i) + step
+				var animal_cell := state.get("cell", Vector2i.ZERO) as Vector2i
+				if fleeing:
+					var flee_from := state.get("flee_from", sprite.position) as Vector2
+					var best_away := -1.0
+					for flee_dir: Vector2i in directions:
+						var flee_next := animal_cell + flee_dir
+						if not _is_passable_cell_for_actor(flee_next):
+							continue
+						var away := _cell_center_position(flee_next).distance_squared_to(flee_from)
+						if away > best_away:
+							best_away = away
+							step = flee_dir
+				var next_cell := animal_cell + step
 				# Animals keep to the greens; penned animals keep to their pen.
 				var pen_index := int(state.get("pen_index", -1))
 				var allowed: bool
-				if pen_index == -2:
+				if fleeing:
+					allowed = _is_passable_cell_for_actor(next_cell)
+					if allowed:
+						state["home"] = next_cell
+				elif pen_index == -2:
 					var home := state.get("home", state.get("cell", Vector2i.ZERO)) as Vector2i
 					allowed = maxi(absi(next_cell.x - home.x), absi(next_cell.y - home.y)) <= 3 and _is_passable_cell_for_actor(next_cell)
 				elif pen_index >= 0 and pen_index < _farm_pens.size():
@@ -11333,6 +11355,7 @@ func _update_surface_life(delta: float) -> void:
 		Callable(self, "_damage_player")
 	)
 	SurfaceLifeService.despawn_far_creatures(_surface_creatures, _player_cell)
+	_update_predation(delta)
 	_update_wilds_keepers(delta)
 	var finished: Array[int] = SurfaceLifeService.update_travelers(delta, _npc_states, Callable(self, "_cell_center_position"))
 	for finished_position in range(finished.size() - 1, -1, -1):
@@ -12639,6 +12662,85 @@ func _spawn_wild_animal_at(cell: Vector2i, species: Dictionary) -> void:
 		"wild": true, "species_name": String(species.get("name", "beast")),
 		"hp": int(species.get("max_hp", 5)), "loot": species.get("loot", [])
 	})
+
+## --- Predator and prey -------------------------------------------------------
+## The food chain runs without the walker: a hungry predator whose
+## quarrel isn't with the player stalks the nearest grazer, runs it
+## down, and feeds. The kill is the hunter's - no coins, no loot, just
+## a fed beast that leaves the herds alone for a while. Prey knows it:
+## a stalked grazer breaks its lazy drift and sprints.
+
+const PREDATOR_HUNT_RANGE := 10
+const PREDATOR_ATTACK_SECONDS := 1.1
+const PREDATOR_FED_SECONDS := 90.0
+const PREY_FLEE_MS := 2500
+
+func _update_predation(delta: float) -> void:
+	if not _wild_mode or _is_underground_level() or _surface_creatures.is_empty() or _farm_animals.is_empty():
+		return
+	var now_ms := Time.get_ticks_msec()
+	for state: Dictionary in _surface_creatures:
+		if not bool(state.get("predator", false)):
+			continue
+		if now_ms < int(state.get("fed_until_ms", 0)):
+			continue
+		var hunter_cell := state.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i
+		# The walker is the priority quarry: a predator with the player in
+		# (or near) aggro reach is the chase AI's business, not the hunt's.
+		var aggro := int(state.get("aggro_override", 8))
+		if maxi(absi(hunter_cell.x - _player_cell.x), absi(hunter_cell.y - _player_cell.y)) <= aggro + 2:
+			continue
+		var best := -1
+		var best_distance := PREDATOR_HUNT_RANGE + 1
+		for animal_index in _farm_animals.size():
+			var animal := _farm_animals[animal_index]
+			if not bool(animal.get("wild", false)):
+				continue
+			var animal_cell := animal.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i
+			var animal_distance := maxi(absi(animal_cell.x - hunter_cell.x), absi(animal_cell.y - hunter_cell.y))
+			if animal_distance < best_distance:
+				best_distance = animal_distance
+				best = animal_index
+		if best < 0:
+			continue
+		var prey := _farm_animals[best]
+		# The quarry smells the hunter and bolts.
+		prey["flee_from"] = _cell_center_position(hunter_cell)
+		prey["flee_until_ms"] = now_ms + PREY_FLEE_MS
+		prey["speed_scale"] = 1.7
+		state["hunt_step_timer"] = float(state.get("hunt_step_timer", 0.0)) - delta
+		state["hunt_attack_timer"] = maxf(float(state.get("hunt_attack_timer", 0.0)) - delta, 0.0)
+		if best_distance <= 1:
+			if float(state.get("hunt_attack_timer", 0.0)) > 0.0:
+				continue
+			state["hunt_attack_timer"] = PREDATOR_ATTACK_SECONDS
+			prey["hp"] = int(prey.get("hp", 5)) - 3
+			var prey_sprite := prey.get("sprite") as Sprite2D
+			if prey_sprite != null and is_instance_valid(prey_sprite):
+				_flash_sprite(prey_sprite, Color(1.0, 0.4, 0.35, 1.0))
+			if int(prey.get("hp", 0)) > 0:
+				continue
+			# The kill: the carcass is the hunter's, and a fed predator
+			# leaves the herds (and everything else) in peace a while.
+			if prey_sprite != null and is_instance_valid(prey_sprite):
+				prey_sprite.queue_free()
+			var prey_name := String(prey.get("species_name", "beast"))
+			_farm_animals.remove_at(best)
+			state["fed_until_ms"] = now_ms + int(PREDATOR_FED_SECONDS * 1000.0)
+			state["hp"] = int(state.get("hp", 1)) + 2
+			if maxi(absi(hunter_cell.x - _player_cell.x), absi(hunter_cell.y - _player_cell.y)) <= 20:
+				var hunter_def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
+				var hunter_name := String(state.get("species_name", String(hunter_def.get("name", "predator"))))
+				_set_save_status("A %s brings down a %s." % [hunter_name.to_lower(), prey_name.to_lower()], Color(0.88, 0.8, 0.62, 1.0))
+		elif float(state.get("hunt_step_timer", 0.0)) <= 0.0:
+			state["hunt_step_timer"] = 0.45
+			var step: Vector2i = CreatureCombatService.step_toward(hunter_cell,
+				prey.get("cell", hunter_cell) as Vector2i, Callable(self, "_is_walkable_cell"))
+			if step != Vector2i.ZERO:
+				state["cell"] = hunter_cell + step
+				var hunter_sprite := state.get("sprite") as Sprite2D
+				if hunter_sprite != null and is_instance_valid(hunter_sprite):
+					hunter_sprite.position = _cell_center_position(hunter_cell + step)
 
 ## Click a wild grazer: a hunt. Swings ride the player attack cooldown;
 ## the kill pays the species' meat and hide.
