@@ -10119,6 +10119,9 @@ func _dig_underhall_rock(cell: Vector2i) -> void:
 		var ore := _roll_stratum_ore(_latest_stratum)
 		if not ore.is_empty():
 			_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
+			# Ore raised from the hold's own strata may be the very haul
+			# a sworn chain asked for.
+			_advance_quest_progress("mine", String(ore.get("name", "")), int(ore.get("amount", 1)))
 			_spawn_floating_text(_ore_strike_text(ore), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
 	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.5, 0.48, 0.46, 1.0), 12)
 	# Rebuild the darkness when the dig demands it: a long tunnel can outrun
@@ -10181,6 +10184,8 @@ func _mine_underhall_vein(cell: Vector2i) -> void:
 	var ore := _roll_stratum_ore(_latest_stratum)
 	if not ore.is_empty():
 		_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
+		# A broken vein pays the stratum's ore - and a sworn chain's haul.
+		_advance_quest_progress("mine", String(ore.get("name", "")), int(ore.get("amount", 1)))
 		_spawn_floating_text(_ore_strike_text(ore), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
 	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.6, 0.58, 0.55, 1.0), 12)
 
@@ -10495,6 +10500,58 @@ func _refresh_contracts_board() -> void:
 			action.focus_mode = Control.FOCUS_NONE
 			row.add_child(action)
 		_contracts_rows.add_child(row)
+	# Beneath the day's postings hang the hold's chains: a held oath shows
+	# the step it stands on; a free hand sees the stories still untold.
+	var active_chain := _active_quest_chain()
+	if not active_chain.is_empty() and String(active_chain.get("site", "")) != _contracts_board_seed_key:
+		var pledged := Label.new()
+		pledged.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		pledged.custom_minimum_size = Vector2(260, 0)
+		pledged.text = "Chain: your oath is held by another hold — finish that story first."
+		_contracts_rows.add_child(pledged)
+		return
+	if not active_chain.is_empty():
+		var chain := _quest_chain_by_id(_contracts_board_seed_key, String(active_chain.get("id", "")))
+		if chain.is_empty():
+			return
+		var steps := chain.get("steps", []) as Array
+		var step_index := clampi(int(active_chain.get("step_index", 0)), 0, steps.size() - 1)
+		var step := steps[step_index] as Dictionary
+		var count := int(step.get("count", 0))
+		var have := int(active_chain.get("progress", 0))
+		if String(step.get("kind", "")) == "deliver":
+			have = int(_player_inventory.get(String(step.get("item", "")), 0))
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		var text := Label.new()
+		text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		text.custom_minimum_size = Vector2(260, 0)
+		text.text = "Chain: %s — %s — %d/%d (%d coins)" % [String(chain.get("name", "")),
+			String(step.get("label", "")), mini(have, count), count, int(chain.get("reward", 0))]
+		row.add_child(text)
+		if String(step.get("kind", "")) == "deliver" and have >= count:
+			var action := Button.new()
+			action.text = "Deliver"
+			action.focus_mode = Control.FOCUS_NONE
+			action.pressed.connect(_deliver_quest_items)
+			row.add_child(action)
+		_contracts_rows.add_child(row)
+		return
+	for chain: Dictionary in _offered_hold_quest_chains(_contracts_board_seed_key):
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		var text := Label.new()
+		text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		text.custom_minimum_size = Vector2(260, 0)
+		var steps := chain.get("steps", []) as Array
+		text.text = "Chain: %s — %d deeds (%d coins)" % [String(chain.get("name", "")), steps.size(), int(chain.get("reward", 0))]
+		row.add_child(text)
+		var action := Button.new()
+		action.text = "Accept"
+		action.focus_mode = Control.FOCUS_NONE
+		action.pressed.connect(_accept_quest_chain.bind(String(chain.get("id", ""))))
+		row.add_child(action)
+		_contracts_rows.add_child(row)
 
 func _accept_hold_contract(kind: String) -> void:
 	if _contracts_board_seed_key.is_empty():
@@ -10543,6 +10600,248 @@ func _turn_in_hold_contract(kind: String) -> void:
 		_spawn_floating_text("+%d coins" % pay, _player_sprite.position + Vector2(0, -14), Color(0.95, 0.8, 0.4, 1.0))
 	_set_save_status("Contract fulfilled — %d coins from the hold." % pay, Color(0.7, 0.95, 0.7, 1.0))
 	_refresh_contracts_board()
+
+## --- Quest chains ------------------------------------------------------------
+## Contracts that grow into stories: alongside the day's postings the board
+## carries the hold's CHAINS - multi-step works rolled once from the hold's
+## seed (a story does not reroll at dawn). Every deed a chain asks for is
+## one the hold already knows how to demand: culls in its own underhalls,
+## ore its own strata actually carry, a delivery signed at this board - and
+## the purse at the end pays well above any single day's contract. One
+## chain holds the walker's oath at a time; the oath rides world settings
+## so the story survives every scene swap.
+const QUEST_CHAIN_ACTIVE_SETTINGS_KEY := "active_quest_chain"
+const QUEST_CHAINS_DONE_SETTINGS_KEY := "quest_chains_done"
+
+## The geology the chains mine by: the recorded profile of this hold's own
+## overworld tile when a gate carries it, else the same seed-stable profile
+## the deep column digs through - so a chain never asks for ore the picks
+## below could not strike.
+func _quest_hold_geology(seed_key: String) -> Dictionary:
+	for gate: Dictionary in _surface_gates:
+		var site := gate.get("site", {}) as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		if String(site.get("seed", "")).strip_edges() != seed_key:
+			continue
+		var geology_variant: Variant = site.get("geology")
+		if geology_variant is Dictionary:
+			return geology_variant as Dictionary
+	return GeologyService.profile_for_seed(hash(seed_key))
+
+## Every ore this hold's strata yield, walked level by level down the same
+## ladder the deep column is carved through.
+func _hold_strata_ore_names(seed_key: String) -> Array[String]:
+	var geology := _quest_hold_geology(seed_key)
+	var names: Array[String] = []
+	for depth in range(1, HOLD_DEEP_LEVELS + 1):
+		var stratum := DepthStrataService.stratum_for_level_with_geology(geology, depth, HOLD_DEEP_LEVELS + 1)
+		for drop_variant: Variant in (stratum.get("ore_drops", []) as Array):
+			var drop_name := String((drop_variant as Dictionary).get("name", ""))
+			if not drop_name.is_empty() and not names.has(drop_name):
+				names.append(drop_name)
+	return names
+
+## The hold's three stories, deterministic from its seed alone. Each step
+## reuses a working the hold already runs - slay, mine, deliver - and each
+## purse outweighs a full day of single contracts.
+func _roll_hold_quest_chains(seed_key: String) -> Array[Dictionary]:
+	var chain_rng := RandomNumberGenerator.new()
+	chain_rng.seed = hash("hold_quest_chain|%s" % seed_key)
+	var ores: Array[String] = _hold_strata_ore_names(seed_key)
+	if ores.is_empty():
+		ores.append("Iron Ore")
+	var chains: Array[Dictionary] = []
+	# The Deep Roads: clear the way down, raise the ore, bring it home.
+	var road_cull := chain_rng.randi_range(3, 4)
+	var road_ore := ores[chain_rng.randi_range(0, ores.size() - 1)]
+	var road_haul := chain_rng.randi_range(4, 6)
+	chains.append({
+		"id": "deep_roads",
+		"name": "The Deep Roads",
+		"steps": [
+			{"kind": "slay", "count": road_cull, "label": "Cull %d deep beasts" % road_cull},
+			{"kind": "mine", "item": road_ore, "count": road_haul, "label": "Mine %d %s" % [road_haul, road_ore]},
+			{"kind": "deliver", "item": road_ore, "count": road_haul, "label": "Deliver %d %s" % [road_haul, road_ore]}
+		],
+		"reward": 120 + road_cull * 8 + road_haul * 6 + chain_rng.randi_range(0, 20)
+	})
+	# The Hungry Dark: feed the forges first, then answer what stirs below.
+	var dark_ore := ores[chain_rng.randi_range(0, ores.size() - 1)]
+	var dark_haul := chain_rng.randi_range(3, 5)
+	var dark_cull := chain_rng.randi_range(4, 6)
+	chains.append({
+		"id": "hungry_dark",
+		"name": "The Hungry Dark",
+		"steps": [
+			{"kind": "mine", "item": dark_ore, "count": dark_haul, "label": "Mine %d %s" % [dark_haul, dark_ore]},
+			{"kind": "deliver", "item": dark_ore, "count": dark_haul, "label": "Deliver %d %s" % [dark_haul, dark_ore]},
+			{"kind": "slay", "count": dark_cull, "label": "Cull %d deep beasts" % dark_cull}
+		],
+		"reward": 130 + dark_cull * 9 + dark_haul * 5 + chain_rng.randi_range(0, 25)
+	})
+	# The Old Vein: prove the seam still pays, then thin what guards it.
+	var vein_ore := ores[chain_rng.randi_range(0, ores.size() - 1)]
+	var vein_haul := chain_rng.randi_range(2, 4)
+	var vein_cull := chain_rng.randi_range(2, 3)
+	chains.append({
+		"id": "old_vein",
+		"name": "The Old Vein",
+		"steps": [
+			{"kind": "deliver", "item": vein_ore, "count": vein_haul, "label": "Deliver %d %s" % [vein_haul, vein_ore]},
+			{"kind": "slay", "count": vein_cull, "label": "Cull %d deep beasts" % vein_cull}
+		],
+		"reward": 115 + vein_cull * 10 + vein_haul * 7 + chain_rng.randi_range(0, 15)
+	})
+	return chains
+
+## What the board still posts: a finished story is told - the hold never
+## asks for it twice.
+func _offered_hold_quest_chains(seed_key: String) -> Array[Dictionary]:
+	var offered: Array[Dictionary] = []
+	for chain: Dictionary in _roll_hold_quest_chains(seed_key):
+		if not _quest_chain_done(seed_key, String(chain.get("id", ""))):
+			offered.append(chain)
+	return offered
+
+func _quest_chain_by_id(seed_key: String, chain_id: String) -> Dictionary:
+	for chain: Dictionary in _roll_hold_quest_chains(seed_key):
+		if String(chain.get("id", "")) == chain_id:
+			return chain
+	return {}
+
+func _active_quest_chain() -> Dictionary:
+	var settings: Dictionary = _world_settings_snapshot()
+	return settings.get(QUEST_CHAIN_ACTIVE_SETTINGS_KEY, {}) as Dictionary if settings.get(QUEST_CHAIN_ACTIVE_SETTINGS_KEY) is Dictionary else {}
+
+func _store_active_quest_chain(state: Dictionary) -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	if state.is_empty():
+		settings.erase(QUEST_CHAIN_ACTIVE_SETTINGS_KEY)
+	else:
+		settings[QUEST_CHAIN_ACTIVE_SETTINGS_KEY] = state
+	_store_world_settings(settings)
+
+func _quest_chain_done(seed_key: String, chain_id: String) -> bool:
+	var settings: Dictionary = _world_settings_snapshot()
+	var done: Dictionary = settings.get(QUEST_CHAINS_DONE_SETTINGS_KEY, {}) as Dictionary if settings.get(QUEST_CHAINS_DONE_SETTINGS_KEY) is Dictionary else {}
+	var site_done: Dictionary = done.get(seed_key, {}) as Dictionary if done.get(seed_key) is Dictionary else {}
+	return bool(site_done.get(chain_id, false))
+
+func _record_quest_chain_done(seed_key: String, chain_id: String) -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var done: Dictionary = settings.get(QUEST_CHAINS_DONE_SETTINGS_KEY, {}) as Dictionary if settings.get(QUEST_CHAINS_DONE_SETTINGS_KEY) is Dictionary else {}
+	var site_done: Dictionary = done.get(seed_key, {}) as Dictionary if done.get(seed_key) is Dictionary else {}
+	site_done[chain_id] = true
+	done[seed_key] = site_done
+	settings[QUEST_CHAINS_DONE_SETTINGS_KEY] = done
+	_store_world_settings(settings)
+
+## Signing a chain: one oath at a time, never a story already told here.
+## The oath binds to the hold whose board posted it, so its culls and
+## hauls are owed to THESE deeps and no other's.
+func _accept_quest_chain(chain_id: String) -> void:
+	if _contracts_board_seed_key.is_empty():
+		return
+	if not _active_quest_chain().is_empty():
+		return
+	if _quest_chain_done(_contracts_board_seed_key, chain_id):
+		return
+	var chain := _quest_chain_by_id(_contracts_board_seed_key, chain_id)
+	if chain.is_empty():
+		return
+	_store_active_quest_chain({"id": chain_id, "site": _contracts_board_seed_key, "step_index": 0, "progress": 0})
+	var steps := chain.get("steps", []) as Array
+	var first_label := String((steps[0] as Dictionary).get("label", "")) if steps.size() > 0 else String("")
+	_set_save_status("Chain signed: %s — %s." % [String(chain.get("name", "")), first_label], Color(0.85, 0.9, 0.7, 1.0))
+	_refresh_contracts_board()
+
+## The chain's walking edge: every hook feeds deeds through here, and only
+## the ACTIVE step of the ACTIVE chain drinks them. Slay counts any beast
+## felled where the hooks fire; mine counts only the step's own ore; the
+## delivery never trickles - it closes at the board with the goods in hand.
+func _advance_quest_progress(step_kind: String, item_name: String, amount: int) -> void:
+	if amount <= 0:
+		return
+	var active := _active_quest_chain()
+	if active.is_empty():
+		return
+	var chain_site := String(active.get("site", ""))
+	# A deed done in some other hold's deeps honors no one here.
+	if not _seamless_hold_ledger_key.is_empty() and _seamless_hold_ledger_key != chain_site:
+		return
+	var chain := _quest_chain_by_id(chain_site, String(active.get("id", "")))
+	if chain.is_empty():
+		return
+	var steps := chain.get("steps", []) as Array
+	var step_index := int(active.get("step_index", 0))
+	if step_index < 0 or step_index >= steps.size():
+		return
+	var step := steps[step_index] as Dictionary
+	if String(step.get("kind", "")) != step_kind:
+		return
+	if step_kind == "deliver":
+		return
+	if step_kind == "mine" and String(step.get("item", "")) != item_name:
+		return
+	var count := int(step.get("count", 0))
+	var progress := mini(int(active.get("progress", 0)) + amount, count)
+	active["progress"] = progress
+	_store_active_quest_chain(active)
+	if progress >= count:
+		_complete_active_quest_step(chain, active)
+
+## A step closes: the story turns its page, or - on the last page - the
+## purse opens, the ticker celebrates, and the hold marks the tale told.
+func _complete_active_quest_step(chain: Dictionary, active: Dictionary) -> void:
+	var steps := chain.get("steps", []) as Array
+	var next_index := int(active.get("step_index", 0)) + 1
+	if next_index < steps.size():
+		active["step_index"] = next_index
+		active["progress"] = 0
+		_store_active_quest_chain(active)
+		var next_label := String((steps[next_index] as Dictionary).get("label", ""))
+		_set_save_status("Quest advanced: %s" % next_label, Color(0.8, 0.85, 0.95, 1.0))
+		_refresh_contracts_board()
+		return
+	var reward := int(chain.get("reward", 0))
+	_record_quest_chain_done(String(active.get("site", "")), String(active.get("id", "")))
+	_store_active_quest_chain({})
+	_adjust_coins(reward)
+	GameAudioService.play_sfx(self, "coin")
+	if _player_sprite != null:
+		_spawn_floating_text("+%d coins" % reward, _player_sprite.position + Vector2(0, -14), Color(0.95, 0.8, 0.4, 1.0))
+	_set_save_status("The chain %s is done — %d coins from the hold." % [String(chain.get("name", "")), reward], Color(0.7, 0.95, 0.7, 1.0))
+	_refresh_contracts_board()
+
+## The board takes the chain's delivery: checks the pack, consumes the
+## goods, and turns the page. Refuses politely when the pack runs short or
+## the story is not standing at a delivery.
+func _deliver_quest_items() -> bool:
+	if _contracts_board_seed_key.is_empty():
+		return false
+	var active := _active_quest_chain()
+	if active.is_empty() or String(active.get("site", "")) != _contracts_board_seed_key:
+		return false
+	var chain := _quest_chain_by_id(_contracts_board_seed_key, String(active.get("id", "")))
+	if chain.is_empty():
+		return false
+	var steps := chain.get("steps", []) as Array
+	var step_index := int(active.get("step_index", 0))
+	if step_index < 0 or step_index >= steps.size():
+		return false
+	var step := steps[step_index] as Dictionary
+	if String(step.get("kind", "")) != "deliver":
+		return false
+	var item := String(step.get("item", ""))
+	var count := int(step.get("count", 0))
+	if int(_player_inventory.get(item, 0)) < count:
+		_set_save_status("The board wants %d %s — your pack runs short." % [count, item], Color(0.95, 0.7, 0.5, 1.0))
+		return false
+	_add_to_inventory(item, -count)
+	active["progress"] = count
+	_complete_active_quest_step(chain, active)
+	return true
 
 ## --- Minecart rails in the deep -------------------------------------------
 ## The hold scene's own rail-and-cart system, mirrored for the seamless
@@ -11908,6 +12207,10 @@ func _strike_surface_creature(creature_index: int, damage: int, announce: bool =
 		# A beast the player fells in the underhalls counts toward this
 		# hold's accepted slay bounty (the quiet guard path never does).
 		_record_underhall_beast_slain()
+		# The same fall speaks to a sworn chain: a cull in the right
+		# hold's deeps walks its story a step forward.
+		if _hold_state.current_depth_kind() == "underhall":
+			_advance_quest_progress("slay", "", 1)
 		var coins := _rng.randi_range(2, 6) + int(def.get("damage", 1)) * 2
 		_adjust_coins(coins)
 		GameAudioService.play_sfx(self, "coin")
