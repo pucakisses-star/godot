@@ -19,6 +19,24 @@ static func sites_from_settings(settings: Dictionary) -> Array:
 static func site_tile(site: Dictionary) -> Vector2i:
 	return Vector2i(int(site.get("x", 0)), int(site.get("y", 0)))
 
+## --- Dwarven caravans on the trails ------------------------------------------
+## Route indexes whose BOTH endpoint tiles are living dwarfholds: the
+## trails the hold caravans run.
+static func dwarven_route_indexes(segment_tiles: Array, hold_tiles: Dictionary) -> Array[int]:
+	var indexes: Array[int] = []
+	for segment_index in range(segment_tiles.size()):
+		var pair := segment_tiles[segment_index] as Dictionary
+		if hold_tiles.has(pair.get("from")) and hold_tiles.has(pair.get("to")):
+			indexes.append(segment_index)
+	return indexes
+
+## Wagons on the dwarven roads: one per trail, plus one for every hold
+## the walker has delivered - prosperity rolls on wheels.
+static func dwarven_caravan_count(dwarven_segment_count: int, delivered_holds: int) -> int:
+	if dwarven_segment_count <= 0:
+		return 0
+	return mini(dwarven_segment_count + delivered_holds, dwarven_segment_count * 2 + 2)
+
 static func scene_path_for(site: Dictionary) -> String:
 	match String(site.get("class", "")):
 		"town":

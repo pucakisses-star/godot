@@ -2188,6 +2188,52 @@ static func lair_beast_for_tile(settings: Dictionary, tile: Vector2i) -> Diction
 		return beast.duplicate(true)
 	return {}
 
+## --- Living-world deliverance ------------------------------------------------
+## A settlement whose laired terror the PLAYER slew is DELIVERED: gates
+## unbar, folk celebrate, the halls fill again, and extra caravans run
+## the trails. These read the same kill ledger the award path writes.
+
+## The deed that delivered this tile, or {} when none has: the beast's
+## name and display, the recorded year, and who did it.
+static func deliverance_for_tile(settings: Dictionary, tile: Vector2i) -> Dictionary:
+	var chronicle := chronicle_from_settings(settings)
+	var kills := player_kills(settings)
+	if chronicle.is_empty() or kills.is_empty():
+		return {}
+	for beast_variant: Variant in (chronicle.get("beasts", []) as Array):
+		var beast := beast_variant as Dictionary
+		var lair_site: Variant = beast.get("lair_site", {})
+		if not (lair_site is Dictionary):
+			continue
+		if int((lair_site as Dictionary).get("x", 2147483647)) != tile.x \
+				or int((lair_site as Dictionary).get("y", 2147483647)) != tile.y:
+			continue
+		var beast_name := String(beast.get("name", ""))
+		if not kills.has(beast_name):
+			continue
+		var kill := kills[beast_name] as Dictionary
+		return {"name": beast_name,
+			"display": String(beast.get("display", beast_name)),
+			"year": int(kill.get("year", 1)),
+			"by": String(kill.get("by", "a wanderer"))}
+	return {}
+
+## Sealed gates unbar when the terror that closed them is slain; a ruin
+## stays a ruin.
+static func effective_hold_access(settings: Dictionary, tile: Vector2i, rolled_access: String, classification_key: String) -> String:
+	if classification_key == "abandoned" or rolled_access != "Closed":
+		return rolled_access
+	if deliverance_for_tile(settings, tile).is_empty():
+		return rolled_access
+	return "Open"
+
+## A delivered hold's halls fill again: +15% souls over the rolled
+## census (at least a score of newcomers).
+static func boosted_hold_population(settings: Dictionary, tile: Vector2i, base_population: int) -> int:
+	if base_population <= 0 or deliverance_for_tile(settings, tile).is_empty():
+		return base_population
+	return base_population + maxi(base_population * 15 / 100, 20)
+
 ## "Skarthrax's Fang" — the beast's unique trophy item name.
 static func beast_trophy_name(beast: Dictionary) -> String:
 	var suffix := String(BEAST_TROPHY_SUFFIXES.get(String(beast.get("kind", "dragon")), "Fang"))
