@@ -62,8 +62,11 @@ static func default_settings() -> Dictionary:
 	return DEFAULT_WORLD_SETTINGS.duplicate(true)
 
 static func merge_with_defaults(raw_settings: Dictionary) -> Dictionary:
-	var merged := _deep_merge(default_settings(), raw_settings)
-	return normalize(merged)
+	# normalize() begins with its own _deep_merge over a fresh defaults
+	# copy, so a merge here would do the identical work twice. This runs
+	# on EVERY settings round-trip (per dig, per kill, per clock tick),
+	# so the single pass matters.
+	return normalize(raw_settings)
 
 static func normalize(raw_settings: Dictionary) -> Dictionary:
 	var normalized := _deep_merge(default_settings(), raw_settings)

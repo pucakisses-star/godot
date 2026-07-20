@@ -866,8 +866,17 @@ static func create_piece_sprite(piece_name: String, base_cell: Vector2i, tile_si
 static func piece_emits_light(piece_name: String) -> bool:
 	return bool(piece_def(piece_name).get("light", false))
 
-## A warm additive light pool for hearths and candle stands.
-static func create_glow_sprite(world_position: Vector2, radius: float, color: Color) -> Sprite2D:
+## Shared glow resources: the gradient pixels depend only on the RGB
+## (radius rides sprite.scale), so every hearth, sconce, and street lamp
+## of a color shares ONE texture and ONE additive material - an underhall
+## with 140 sconces uploads one 96x96 gradient, not 140.
+static var _glow_textures: Dictionary = {}
+static var _glow_material: CanvasItemMaterial
+
+static func _glow_texture_for_color(color: Color) -> GradientTexture2D:
+	var key := color.to_html(false)
+	if _glow_textures.has(key):
+		return _glow_textures[key] as GradientTexture2D
 	var gradient := Gradient.new()
 	gradient.set_color(0, Color(color.r, color.g, color.b, 0.55))
 	gradient.set_color(1, Color(color.r, color.g, color.b, 0.0))
@@ -878,13 +887,19 @@ static func create_glow_sprite(world_position: Vector2, radius: float, color: Co
 	texture.fill_to = Vector2(0.5, 0.0)
 	texture.width = 96
 	texture.height = 96
+	_glow_textures[key] = texture
+	return texture
+
+## A warm additive light pool for hearths and candle stands.
+static func create_glow_sprite(world_position: Vector2, radius: float, color: Color) -> Sprite2D:
 	var sprite := Sprite2D.new()
-	sprite.texture = texture
+	sprite.texture = _glow_texture_for_color(color)
 	sprite.centered = true
 	sprite.position = world_position
 	sprite.scale = Vector2.ONE * (radius / 48.0)
 	sprite.z_index = 14
-	var material := CanvasItemMaterial.new()
-	material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
-	sprite.material = material
+	if _glow_material == null:
+		_glow_material = CanvasItemMaterial.new()
+		_glow_material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	sprite.material = _glow_material
 	return sprite

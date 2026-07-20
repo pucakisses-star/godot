@@ -4340,8 +4340,13 @@ func _show_level(target_level_index: int) -> void:
 	_chest_inventories.clear()
 	# Shop stocks are keyed by anchor cell; a reseed must roll fresh shelves
 	# instead of serving the old town's (possibly depleted) stock on a
-	# colliding anchor.
+	# colliding anchor. The restock-day and partial-damage maps ride the
+	# same anchors/cells, so they reset with it or they'd bank entries for
+	# every shop and rock face ever touched this session.
 	_shop_stocks.clear()
+	_shop_restock_day.clear()
+	_ward_rock_damage.clear()
+	_faction_event_stamps.clear()
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
 	# The level's rail network and parked carts come back with it (and the
@@ -6645,6 +6650,11 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	# The rebuild frees the actor layer's children, bobber included; drop
 	# the fishing state so no frame ever touches the freed sprite again.
 	_fishing_state = {}
+	# Street-lamp glows are actor-layer children too: the wipe frees the
+	# nodes, so the registry must drop with them - stale freed refs made
+	# the has() guard refuse to ever relight a lamp after a descent.
+	_lamp_glow_sprites.clear()
+	_clear_sign_hover_label()
 	_clear_caravan_job()
 	for creature: Dictionary in _surface_creatures:
 		var creature_sprite := creature.get("sprite") as Sprite2D
@@ -9287,6 +9297,18 @@ var _ward_overlays: Dictionary = {}
 var _ward_torch_frames: SpriteFrames = null
 var _ward_torch_texture: Texture2D = null
 
+## One compiled Shader shared by every darkness overlay - ward quads and
+## the underhall quad differ only in their material uniforms, and
+## instantiating the source per build re-parsed the shader on every
+## level swap and dig rebuild.
+var _darkness_shader_instance: Shader
+
+func _darkness_shader() -> Shader:
+	if _darkness_shader_instance == null:
+		_darkness_shader_instance = Shader.new()
+		_darkness_shader_instance.code = WARD_DARKNESS_SHADER
+	return _darkness_shader_instance
+
 func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array[Vector2i], light_cells: Array[Vector2i] = [], mouth_open: bool = true) -> void:
 	if gate_key.is_empty() or _ward_overlays.has(gate_key):
 		return
@@ -9302,10 +9324,8 @@ func _spawn_ward_overlay(gate_key: String, anchor: Vector2i, sconce_cells: Array
 	overlay_sprite.position = origin_px
 	overlay_sprite.scale = size_px / 4.0
 	overlay_sprite.z_index = 12
-	var shader := Shader.new()
-	shader.code = WARD_DARKNESS_SHADER
 	var overlay_material := ShaderMaterial.new()
-	overlay_material.shader = shader
+	overlay_material.shader = _darkness_shader()
 	overlay_material.set_shader_parameter("overlay_origin", origin_px)
 	overlay_material.set_shader_parameter("overlay_size", size_px)
 	# The mask ellipse inscribes the whole city rect with a feather past
@@ -9464,10 +9484,8 @@ func _build_underhall_darkness(bounds: Rect2i) -> void:
 	overlay_sprite.position = origin_px
 	overlay_sprite.scale = size_px / 4.0
 	overlay_sprite.z_index = 12
-	var shader := Shader.new()
-	shader.code = WARD_DARKNESS_SHADER
 	var mat := ShaderMaterial.new()
-	mat.shader = shader
+	mat.shader = _darkness_shader()
 	mat.set_shader_parameter("overlay_origin", origin_px)
 	mat.set_shader_parameter("overlay_size", size_px)
 	# A whole-level ellipse: half-axes as wide as the level, so even the far
@@ -9524,6 +9542,11 @@ func _build_underhall_darkness(bounds: Rect2i) -> void:
 
 ## Per-frame: push the player's light and the nearest fires into the underhall
 ## darkness shader (nearest win the slots when a big level over-fills them).
+## The slot selection depends only on the player light's position, so the
+## positions array is rebuilt and re-uploaded ONLY when the player moves;
+## between moves each frame pushes just the flicker radii - or nothing at
+## all when no flame in the slots breathes. The caches live in the overlay
+## dict itself, so a rebuild (new dict) invalidates them automatically.
 func _update_underhall_darkness() -> void:
 	if _underhall_overlay.is_empty() or not _lighting_enabled:
 		return
@@ -9531,69 +9554,107 @@ func _update_underhall_darkness() -> void:
 	if mat == null:
 		return
 	var player_position := _player_sprite.position if _player_sprite != null else Vector2.ZERO
-	# Fires and sconces compete for the shader's slots together; when a big
-	# level over-fills them, the pools nearest the player win, exactly as the
-	# ward and the hold scene pick their own lights.
-	var lights := (_underhall_overlay.get("static_lights", []) as Array) + (_underhall_overlay.get("sconces", []) as Array)
-	if lights.size() > WARD_LIGHT_MAX - 1:
-		lights.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-			return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
+	if (_underhall_overlay.get("lit_player_pos", Vector2.INF) as Vector2) != player_position:
+		# Fires and sconces compete for the shader's slots together; when a
+		# big level over-fills them, the pools nearest the player win,
+		# exactly as the ward and the hold scene pick their own lights.
+		var lights := (_underhall_overlay.get("static_lights", []) as Array) + (_underhall_overlay.get("sconces", []) as Array)
+		if lights.size() > WARD_LIGHT_MAX - 1:
+			lights.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+				return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
+		var positions := PackedVector2Array()
+		var base_radii := PackedFloat32Array()
+		var phases := PackedFloat32Array()
+		var has_flicker := false
+		if _player_sprite != null:
+			positions.append(player_position)
+			base_radii.append(WARD_PLAYER_LIGHT_TILES * float(tile_size.x))
+			phases.append(NAN)
+		for light_variant: Variant in lights:
+			if positions.size() >= WARD_LIGHT_MAX:
+				break
+			var light := light_variant as Dictionary
+			positions.append(light.get("pos", Vector2.ZERO) as Vector2)
+			base_radii.append(float(light.get("radius", 0.0)))
+			# Sconce flames breathe; steady fires (no phase) hold still.
+			if light.has("phase"):
+				phases.append(float(light.get("phase", 0.0)))
+				has_flicker = true
+			else:
+				phases.append(NAN)
+		_underhall_overlay["lit_player_pos"] = player_position
+		_underhall_overlay["lit_base_radii"] = base_radii
+		_underhall_overlay["lit_phases"] = phases
+		_underhall_overlay["lit_has_flicker"] = has_flicker
+		mat.set_shader_parameter("light_count", positions.size())
+		mat.set_shader_parameter("light_pos", positions)
+	elif not bool(_underhall_overlay.get("lit_has_flicker", false)):
+		return
+	_push_flicker_radii(mat, _underhall_overlay)
+
+## The per-frame remainder of a darkness push: the cached base radii
+## warped by each flame's breath. NAN phase marks a steady light.
+func _push_flicker_radii(mat: ShaderMaterial, cache: Dictionary) -> void:
 	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
-	var positions := PackedVector2Array()
+	var base_radii := cache.get("lit_base_radii") as PackedFloat32Array
+	var phases := cache.get("lit_phases") as PackedFloat32Array
 	var radii := PackedFloat32Array()
-	if _player_sprite != null:
-		positions.append(player_position)
-		radii.append(WARD_PLAYER_LIGHT_TILES * float(tile_size.x))
-	for light_variant: Variant in lights:
-		if positions.size() >= WARD_LIGHT_MAX:
-			break
-		var light := light_variant as Dictionary
-		positions.append(light.get("pos", Vector2.ZERO) as Vector2)
-		var radius := float(light.get("radius", 0.0))
-		# Sconce flames breathe; steady fires (they carry no phase) hold still.
-		if light.has("phase"):
-			radius *= 1.0 + 0.07 * sin(flicker_phase * 8.0 + float(light.get("phase", 0.0)))
-		radii.append(radius)
-	mat.set_shader_parameter("light_count", positions.size())
-	mat.set_shader_parameter("light_pos", positions)
+	radii.resize(base_radii.size())
+	for i in base_radii.size():
+		var radius := base_radii[i]
+		if not is_nan(phases[i]):
+			radius *= 1.0 + 0.07 * sin(flicker_phase * 8.0 + phases[i])
+		radii[i] = radius
 	mat.set_shader_parameter("light_radius", radii)
 
 func _update_ward_darkness() -> void:
 	if _ward_overlays.is_empty() or not _lighting_enabled:
 		return
-	var flicker_phase := float(Time.get_ticks_msec()) * 0.001
 	var player_position := _player_sprite.position if _player_sprite != null else Vector2.ZERO
-	for overlay_variant: Variant in _ward_overlays.values():
-		var overlay := overlay_variant as Dictionary
+	for overlay_key: Variant in _ward_overlays:
+		var overlay := _ward_overlays[overlay_key] as Dictionary
 		var ward_material := overlay.get("material") as ShaderMaterial
 		if ward_material == null:
 			continue
-		# A full main floor carries more fires than the shader holds:
-		# when over budget the NEAREST pools to the player win the slots,
-		# exactly as the hold scene picks its own lights.
-		var flames := (overlay.get("sconces", []) as Array).duplicate()
-		if flames.size() > WARD_LIGHT_MAX - 3:
-			flames.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-				return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
-		var positions := PackedVector2Array()
-		var radii := PackedFloat32Array()
-		if _player_sprite != null:
-			positions.append(player_position)
-			radii.append(WARD_PLAYER_LIGHT_TILES * float(tile_size.x))
-		for light_variant: Variant in overlay.get("static_lights", []) as Array:
-			var light := light_variant as Dictionary
-			positions.append(light.get("pos", Vector2.ZERO) as Vector2)
-			radii.append(float(light.get("radius", 0.0)))
-		for sconce_variant: Variant in flames:
-			if positions.size() >= WARD_LIGHT_MAX:
-				break
-			var sconce := sconce_variant as Dictionary
-			positions.append(sconce.get("pos", Vector2.ZERO) as Vector2)
-			var flicker := 1.0 + 0.07 * sin(flicker_phase * 8.0 + float(sconce.get("phase", 0.0)))
-			radii.append(float(sconce.get("radius", 0.0)) * flicker)
-		ward_material.set_shader_parameter("light_count", positions.size())
-		ward_material.set_shader_parameter("light_pos", positions)
-		ward_material.set_shader_parameter("light_radius", radii)
+		if (overlay.get("lit_player_pos", Vector2.INF) as Vector2) != player_position:
+			# A full main floor carries more fires than the shader holds:
+			# when over budget the NEAREST pools to the player win the
+			# slots, exactly as the hold scene picks its own lights.
+			var flames := overlay.get("sconces", []) as Array
+			if flames.size() > WARD_LIGHT_MAX - 3:
+				flames = flames.duplicate()
+				flames.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+					return (a.get("pos") as Vector2).distance_squared_to(player_position) < (b.get("pos") as Vector2).distance_squared_to(player_position))
+			var positions := PackedVector2Array()
+			var base_radii := PackedFloat32Array()
+			var phases := PackedFloat32Array()
+			var has_flicker := false
+			if _player_sprite != null:
+				positions.append(player_position)
+				base_radii.append(WARD_PLAYER_LIGHT_TILES * float(tile_size.x))
+				phases.append(NAN)
+			for light_variant: Variant in overlay.get("static_lights", []) as Array:
+				var light := light_variant as Dictionary
+				positions.append(light.get("pos", Vector2.ZERO) as Vector2)
+				base_radii.append(float(light.get("radius", 0.0)))
+				phases.append(NAN)
+			for sconce_variant: Variant in flames:
+				if positions.size() >= WARD_LIGHT_MAX:
+					break
+				var sconce := sconce_variant as Dictionary
+				positions.append(sconce.get("pos", Vector2.ZERO) as Vector2)
+				base_radii.append(float(sconce.get("radius", 0.0)))
+				phases.append(float(sconce.get("phase", 0.0)))
+				has_flicker = true
+			overlay["lit_player_pos"] = player_position
+			overlay["lit_base_radii"] = base_radii
+			overlay["lit_phases"] = phases
+			overlay["lit_has_flicker"] = has_flicker
+			ward_material.set_shader_parameter("light_count", positions.size())
+			ward_material.set_shader_parameter("light_pos", positions)
+		elif not bool(overlay.get("lit_has_flicker", false)):
+			continue
+		_push_flicker_radii(ward_material, overlay)
 
 ## --- Digging the massif from inside -----------------------------------------
 ## The mountain is minable in the SAME scene: adjacent clicks swing at
@@ -10748,12 +10809,21 @@ func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	_show_level(1)
 
 ## The cached deep column for a hold gate, generated on first descent.
+## How many holds' deep columns stay cached at once. Each column is three
+## full level grids; a long trek that descends hold after hold would bank
+## them all without a cap. Evicted columns regenerate deterministically and
+## the underhall ledger replays the player's edits, so nothing is lost.
+const HOLD_DEEP_COLUMN_CACHE_CAP := 6
+
 func _hold_deep_column_for(gate_key: String, site: Dictionary) -> Array[Dictionary]:
 	if gate_key.is_empty():
 		gate_key = String(site.get("seed", "hold"))
 	if _hold_deep_columns.has(gate_key):
 		return _hold_deep_columns[gate_key] as Array[Dictionary]
 	var column := _generate_hold_deep_column(site)
+	while _hold_deep_columns.size() >= HOLD_DEEP_COLUMN_CACHE_CAP:
+		# Dictionaries keep insertion order: the first key is the oldest visit.
+		_hold_deep_columns.erase(_hold_deep_columns.keys()[0])
 	_hold_deep_columns[gate_key] = column
 	return column
 
@@ -10981,11 +11051,16 @@ func _evict_far_surface_chunks(player_chunk: Vector2i) -> void:
 			city_layer.erase_cell(cell)
 			decor_layer.erase_cell(cell)
 			_actor_passable_cache.erase(cell)
+			# Crag blockers stream in with their chunk; a long trek would
+			# otherwise bank every mountain cell ever walked past.
+			_surface_blocked_cells.erase(cell)
 			# Street-lamp glows die with their chunk; the deterministic
-			# lamp pass re-lights them when the road streams back in.
-			var lamp_glow := _lamp_glow_sprites.get(cell) as Sprite2D
-			if lamp_glow != null:
-				lamp_glow.queue_free()
+			# lamp pass re-lights them when the road streams back in. The
+			# validity check matters: a bare cast of a freed glow errors.
+			var lamp_glow_variant: Variant = _lamp_glow_sprites.get(cell)
+			if lamp_glow_variant != null:
+				if is_instance_valid(lamp_glow_variant):
+					(lamp_glow_variant as Sprite2D).queue_free()
 				_lamp_glow_sprites.erase(cell)
 		_surface_chunks.erase(chunk)
 		# A gate whose ground just evaporated must stamp itself anew on
@@ -11598,11 +11673,15 @@ func _try_ranged_attack_town(creature_index: int, cell: Vector2i) -> bool:
 		return true
 	return false
 
+var _arrow_texture: ImageTexture
+
 func _spawn_arrow_flight(from_cell: Vector2i, to_cell: Vector2i) -> void:
-	var arrow_image := Image.create(8, 2, false, Image.FORMAT_RGBA8)
-	arrow_image.fill(Color(0.85, 0.78, 0.6, 1.0))
+	if _arrow_texture == null:
+		var arrow_image := Image.create(8, 2, false, Image.FORMAT_RGBA8)
+		arrow_image.fill(Color(0.85, 0.78, 0.6, 1.0))
+		_arrow_texture = ImageTexture.create_from_image(arrow_image)
 	var arrow := Sprite2D.new()
-	arrow.texture = ImageTexture.create_from_image(arrow_image)
+	arrow.texture = _arrow_texture
 	arrow.position = _cell_center_position(from_cell)
 	var target: Vector2 = _cell_center_position(to_cell)
 	arrow.rotation = (target - arrow.position).angle()
@@ -11683,16 +11762,26 @@ func _rebuild_reflection_mask(rect: Rect2i) -> void:
 	_ensure_reflection_sprite()
 	var image := Image.create(rect.size.x, rect.size.y, false, Image.FORMAT_RG8)
 	var any_water := false
+	# One water probe per cell: each column's run of consecutive water rows
+	# accumulates top-down (seeded from the rows just above the rect), in
+	# place of the old per-cell upward walk that re-probed up to 15
+	# neighbours for every water cell in view - a 16x probe cut on lakes.
+	var runs := PackedInt32Array()
+	runs.resize(rect.size.x)
+	for x in rect.size.x:
+		var above := 0
+		while above < 15 and _is_water_cell(rect.position + Vector2i(x, -(above + 1))):
+			above += 1
+		runs[x] = above
 	for y in rect.size.y:
 		for x in rect.size.x:
 			var cell := rect.position + Vector2i(x, y)
 			if not _is_water_cell(cell):
+				runs[x] = 0
 				continue
 			any_water = true
-			var rows_above := 0
-			while rows_above < 15 and _is_water_cell(cell + Vector2i(0, -(rows_above + 1))):
-				rows_above += 1
-			image.set_pixel(x, y, Color(1.0, float(rows_above) / 16.0, 0.0))
+			image.set_pixel(x, y, Color(1.0, float(mini(runs[x], 15)) / 16.0, 0.0))
+			runs[x] = mini(runs[x] + 1, 15)
 	_reflection_sprite.visible = any_water
 	if not any_water:
 		return
