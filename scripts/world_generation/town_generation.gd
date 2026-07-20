@@ -1334,6 +1334,13 @@ func _unhandled_input(event: InputEvent) -> void:
 				_handle_cart_key()
 				get_viewport().set_input_as_handled()
 				return
+			KEY_H:
+				# Deep in the hold: sleep at your own bedroll if one is by,
+				# else plant (or move) your claim on the hall underfoot.
+				if not _rest_at_bedroll():
+					_claim_hall_here()
+				get_viewport().set_input_as_handled()
+				return
 			KEY_I:
 				if _inventory_screen != null:
 					_inventory_screen.toggle()
@@ -10349,7 +10356,222 @@ func _apply_underhall_diffs(level_data: Dictionary, depth: int) -> void:
 			else:
 				carts.erase(cart_cell)
 	level_data["carts"] = carts
+	# The claimed hall's furnishings return with the halls: each recorded
+	# piece stamps back into the level's floor decor (AFTER the mined-out
+	# erasures, so a bedroll laid on a picked-over fungus patch survives),
+	# where the render pass paints it from the hold kit exactly like the
+	# strata's own outcrops.
+	var furnishings_variant: Variant = level_diff.get("claim_furniture")
+	if furnishings_variant is Dictionary:
+		for furnishing_key_variant: Variant in (furnishings_variant as Dictionary).keys():
+			var furnishing_cell := _parse_underhall_cell_key(String(furnishing_key_variant))
+			var furnishing_item := String((furnishings_variant as Dictionary)[furnishing_key_variant])
+			var furnishing_tile := String(CLAIM_FURNISHING_TILES.get(furnishing_item, ""))
+			if not furnishing_tile.is_empty():
+				floor_decor[furnishing_cell] = furnishing_tile
 	_restoring_underhall_diffs = false
+
+## --- The player's claim ------------------------------------------------------
+## A hall of your own in the deep: the walker plants a claim on one hall per
+## hold, names it, furnishes it, and banks loot in its strongbox. Everything
+## rides the underhall ledger in world settings - the claim and the chest's
+## contents as hold-wide fields beside the numeric depth pages (which
+## _apply_underhall_diffs never mistakes for a level: it reads str(depth)
+## only), the furnishings as per-depth "claim_furniture" edits - so an
+## evicted column regenerates the hall with the claim intact, the same
+## diff-and-replay covenant the dug tunnels and rails keep.
+const CLAIM_SETTINGS_FIELD := "claim"
+const CLAIM_CHEST_FIELD := "chest_store"
+const CLAIM_FURNISHING_TILES := {
+	"Dwarven Bedroll": "bed",
+	"Oak Chest": "chest"
+}
+## How far from the claim cell a furnishing may stand: a hall, not a sprawl.
+const CLAIM_FURNISHING_REACH := 6
+
+## This hold's page of the ledger, read fresh from world settings.
+func _claim_hold_diff() -> Dictionary:
+	if _seamless_hold_ledger_key.is_empty():
+		return {}
+	var settings: Dictionary = _world_settings_snapshot()
+	var diffs_variant: Variant = settings.get(UNDERHALL_DIFFS_KEY)
+	if not (diffs_variant is Dictionary):
+		return {}
+	var hold_variant: Variant = (diffs_variant as Dictionary).get(_seamless_hold_ledger_key)
+	if not (hold_variant is Dictionary):
+		return {}
+	return hold_variant as Dictionary
+
+## Writes one hold-wide field (the claim, the strongbox) onto this hold's
+## ledger page, next to the per-depth diffs.
+func _store_claim_field(field: String, value: Variant) -> void:
+	if _seamless_hold_ledger_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var diffs: Dictionary = settings.get(UNDERHALL_DIFFS_KEY, {}) as Dictionary if settings.get(UNDERHALL_DIFFS_KEY) is Dictionary else {}
+	var hold_diff: Dictionary = diffs.get(_seamless_hold_ledger_key, {}) as Dictionary if diffs.get(_seamless_hold_ledger_key) is Dictionary else {}
+	hold_diff[field] = value
+	diffs[_seamless_hold_ledger_key] = hold_diff
+	settings[UNDERHALL_DIFFS_KEY] = diffs
+	_store_world_settings(settings)
+
+## The walker's name as the chronicle knows it: the character sheet's, or
+## the anonymous drifter every unnamed grave gets.
+func _player_display_name() -> String:
+	var player_name := "A wanderer"
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_player_character"):
+		var character: Dictionary = game_session.call("get_player_character")
+		var character_name := String(character.get("name", "")).strip_edges()
+		if not character_name.is_empty():
+			player_name = character_name
+	return player_name
+
+## Plants (or moves - one claim per hold) the walker's claim on the hall
+## underfoot. Only a walkable floor cell in an underhall will take the
+## marker: no claiming the surface, a rock face, or a vein outcrop.
+func _claim_hall_here() -> bool:
+	if _hold_state.current_depth_kind() != "underhall" or _seamless_hold_ledger_key.is_empty():
+		return false
+	if not _is_passable_cell_for_actor(_player_cell):
+		return false
+	_store_claim_field(CLAIM_SETTINGS_FIELD, {
+		"cell": {"x": _player_cell.x, "y": _player_cell.y},
+		"name": "%s's Hall" % _player_display_name(),
+		"depth": _hold_state.current_level_index
+	})
+	_set_save_status("You claim this hall as your own.", Color(0.95, 0.85, 0.5, 1.0))
+	return true
+
+## The recorded claim_furniture page for one depth of this hold.
+func _claim_level_furnishings(depth: int) -> Dictionary:
+	var level_variant: Variant = _claim_hold_diff().get(str(depth))
+	if not (level_variant is Dictionary):
+		return {}
+	var furnishings_variant: Variant = (level_variant as Dictionary).get("claim_furniture")
+	if not (furnishings_variant is Dictionary):
+		return {}
+	return furnishings_variant as Dictionary
+
+## Sets a carried furnishing down at the walker's feet: the item leaves the
+## pack, its hold-kit tile stamps onto the level's floor decor (the same
+## by-reference dict the strata veins ride, so it persists on revisit), and
+## the ledger records it for replay onto every regeneration. Furnishings
+## keep to the claimed hall - same level, within reach of the claim cell -
+## and never bury a vein, a rail, a hatch, or each other.
+func _place_claim_furnishing(item_name: String) -> bool:
+	if not CLAIM_FURNISHING_TILES.has(item_name):
+		return false
+	if _hold_state.current_depth_kind() != "underhall":
+		_set_save_status("Furnishings belong in your hall below.", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	var claim_variant: Variant = _claim_hold_diff().get(CLAIM_SETTINGS_FIELD)
+	if not (claim_variant is Dictionary):
+		_set_save_status("Claim a hall first (H).", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	var claim := claim_variant as Dictionary
+	if int(claim.get("depth", -1)) != _hold_state.current_level_index:
+		_set_save_status("Your claimed hall lies on another level.", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	var claim_cell_dict := claim.get("cell", {}) as Dictionary
+	var claim_cell := Vector2i(int(claim_cell_dict.get("x", 0)), int(claim_cell_dict.get("y", 0)))
+	if maxi(absi(_player_cell.x - claim_cell.x), absi(_player_cell.y - claim_cell.y)) > CLAIM_FURNISHING_REACH:
+		_set_save_status("Too far from your claim to furnish here.", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	if int(_player_inventory.get(item_name, 0)) < 1:
+		return false
+	if _latest_floor_decor.has(_player_cell) or _rail_cells.has(_player_cell):
+		return false
+	for stair_variant: Variant in _hold_state.active_level_stairs.values():
+		if (stair_variant as Vector2i) == _player_cell:
+			return false
+	_add_to_inventory(item_name, -1)
+	_save_player_inventory()
+	var furnishing_tile := String(CLAIM_FURNISHING_TILES[item_name])
+	_latest_floor_decor[_player_cell] = furnishing_tile
+	_place_hold_tile(decor_layer, _player_cell, furnishing_tile)
+	_record_underhall_edit("claim_furniture", _player_cell, item_name)
+	_set_save_status("You set the %s in your hall." % item_name, Color(0.85, 0.9, 0.75, 1.0))
+	return true
+
+## Sleep in your own hall: standing on or beside your placed bedroll mends
+## every heart - the tavern's comfort, earned with your own hands.
+func _rest_at_bedroll() -> bool:
+	if _hold_state.current_depth_kind() != "underhall":
+		return false
+	var furnishings := _claim_level_furnishings(_hold_state.current_level_index)
+	var bedroll_near := false
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			var probe := _player_cell + Vector2i(dx, dy)
+			if String(furnishings.get(_underhall_cell_key(probe), "")) == "Dwarven Bedroll":
+				bedroll_near = true
+	if not bedroll_near:
+		return false
+	_player_hp = _player_max_hp
+	_update_hp_label()
+	_save_player_hp()
+	_set_save_status("You sleep soundly in your own hall.", Color(0.7, 0.95, 0.7, 1.0))
+	return true
+
+## True while an Oak Chest stands placed somewhere in this hold's claim -
+## the strongbox the deposit and withdraw ledgers speak to.
+func _site_has_claim_chest() -> bool:
+	var hold_diff := _claim_hold_diff()
+	for level_key_variant: Variant in hold_diff.keys():
+		var level_variant: Variant = hold_diff[level_key_variant]
+		if not (level_variant is Dictionary):
+			continue
+		var furnishings_variant: Variant = (level_variant as Dictionary).get("claim_furniture")
+		if not (furnishings_variant is Dictionary):
+			continue
+		for furnishing_variant: Variant in (furnishings_variant as Dictionary).values():
+			if String(furnishing_variant) == "Oak Chest":
+				return true
+	return false
+
+## The strongbox's contents (item -> count), copied out of the ledger so
+## callers mutate their own working copy and write back deliberately.
+func _claim_chest_store() -> Dictionary:
+	var store_variant: Variant = _claim_hold_diff().get(CLAIM_CHEST_FIELD)
+	if not (store_variant is Dictionary):
+		return {}
+	return (store_variant as Dictionary).duplicate()
+
+## Banks pack items in the hold's strongbox. The store lives on the ledger
+## page in world settings, so it survives cache eviction, regeneration and
+## session reload alongside the dug tunnels.
+func _chest_deposit(item_name: String, amount: int) -> bool:
+	if item_name.is_empty() or amount <= 0 or _seamless_hold_ledger_key.is_empty():
+		return false
+	if not _site_has_claim_chest():
+		_set_save_status("No chest stands in your hall to hold it.", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	if int(_player_inventory.get(item_name, 0)) < amount:
+		return false
+	_add_to_inventory(item_name, -amount)
+	_save_player_inventory()
+	var store := _claim_chest_store()
+	store[item_name] = int(store.get(item_name, 0)) + amount
+	_store_claim_field(CLAIM_CHEST_FIELD, store)
+	_set_save_status("Stored %s ×%d in your chest." % [item_name, amount], Color(0.85, 0.85, 0.7, 1.0))
+	return true
+
+## Takes banked items back out of the strongbox and into the pack.
+func _chest_withdraw(item_name: String, amount: int) -> bool:
+	if item_name.is_empty() or amount <= 0 or _seamless_hold_ledger_key.is_empty():
+		return false
+	var store := _claim_chest_store()
+	if int(store.get(item_name, 0)) < amount:
+		return false
+	store[item_name] = int(store.get(item_name, 0)) - amount
+	if int(store.get(item_name, 0)) <= 0:
+		store.erase(item_name)
+	_store_claim_field(CLAIM_CHEST_FIELD, store)
+	_add_to_inventory(item_name, amount)
+	_save_player_inventory()
+	_set_save_status("Took %s ×%d from your chest." % [item_name, amount], Color(0.85, 0.85, 0.7, 1.0))
+	return true
 
 ## --- Hold contracts ----------------------------------------------------------
 ## The notice board on the great-hall plaza posts two contracts per hold per
@@ -12604,6 +12826,11 @@ func _use_hotbar_slot(index: int) -> void:
 	if ANIMAL_CRATES.has(item_name):
 		_crate_armed = item_name
 		_set_save_status("🐾 %s armed — click open grass beside you to release the %s." % [item_name, String(ANIMAL_CRATES[item_name])], Color(0.85, 0.9, 0.75, 1.0))
+		return
+	# Hall furnishings set themselves down where the walker stands: the
+	# claimed hall in the deep is the only ground that takes them.
+	if CLAIM_FURNISHING_TILES.has(item_name):
+		_place_claim_furnishing(item_name)
 		return
 	_set_save_status("%s ×%d in the pack." % [item_name, int(_player_inventory.get(item_name, 0))], Color(0.8, 0.8, 0.8, 1.0))
 

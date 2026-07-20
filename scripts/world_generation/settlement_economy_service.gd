@@ -107,7 +107,11 @@ const ITEM_VALUES := {
 	"Carrot Seeds": 3, "Beetroot Seeds": 3, "Tomato Seeds": 3,
 	"Carrot": 3, "Beetroot": 3, "Tomato": 3, "Garden Stew": 9,
 	"Egg": 3, "Truffle": 12, "Milk Pail": 4,
-	"Chicken Crate": 20, "Piglet Crate": 30, "Calf Crate": 45
+	"Chicken Crate": 20, "Piglet Crate": 30, "Calf Crate": 45,
+
+	# Homestead comforts for a claimed hall in the deep: a bedroll to
+	# sleep off the dark, a stout chest to bank what the veins yield.
+	"Dwarven Bedroll": 6, "Oak Chest": 8
 }
 
 ## What each kind of shop keeps behind the counter. Keys cover both the
@@ -119,8 +123,8 @@ const SHOP_STOCK_POOLS := {
 	"tavern": ["Ale Keg", "Grilled Fish", "Hearty Stew", "Roast Meat", "Smoked Ribs", "Loaf of Bread", "Wheel of Cheese", "Trout Stew", "Hunter's Roast"],
 	"inn": ["Loaf of Bread", "Wheel of Cheese", "Jar of Honey", "Grilled Fish", "Ale Keg"],
 	"brewery": ["Ale Keg", "Mushroom Skewer", "Jar of Honey"],
-	"general_store": ["Stone", "Leather Strap", "Wax Candles", "Miner's Lantern", "Old Fishing Rod", "Cork Bobber", "Silk Line Spool", "Spade", "Mushroom Ration"],
-	"general_goods_shop": ["Stone", "Leather Strap", "Miner's Lantern", "Old Fishing Rod", "Cork Bobber", "Silk Line Spool", "Spade", "Mushroom Ration"],
+	"general_store": ["Stone", "Leather Strap", "Wax Candles", "Miner's Lantern", "Old Fishing Rod", "Cork Bobber", "Silk Line Spool", "Spade", "Mushroom Ration", "Dwarven Bedroll", "Oak Chest"],
+	"general_goods_shop": ["Stone", "Leather Strap", "Miner's Lantern", "Old Fishing Rod", "Cork Bobber", "Silk Line Spool", "Spade", "Mushroom Ration", "Dwarven Bedroll", "Oak Chest"],
 	"trade_supply_store": ["Stone", "Leather Strap", "Miner's Lantern", "Rusty Pickaxe", "Spade", "Casting Net", "Fish Trap", "Silk Line Spool"],
 	"market_stall": ["Loaf of Bread", "Wheel of Cheese", "Skein of Wool", "Bolt of Cloth", "Wax Candles", "Dried Fish", "Jar of Honey", "Cured Ham", "Jerky Strip", "Aged Sausage", "Rowanberries"],
 	"smithy": ["Iron Ingot", "Steel Ingot", "Copper Ingot", "Iron Nails", "Iron Horseshoes", "Miner's Pickaxe", "Stone Hammer", "Mason's Chisel", "Whetstone", "Chain Links"],
