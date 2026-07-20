@@ -10936,6 +10936,12 @@ func _check_surface_arrival() -> void:
 		if _hold_descent_is_seamless(site):
 			_begin_seamless_hold_descent(gate, site)
 			return
+		# A dungeon's dark mouth takes the same seamless road: down into
+		# organic caverns within this scene instead of a swap to the
+		# dungeon interior.
+		if _cave_descent_is_seamless(site):
+			_begin_seamless_cave_descent(gate, site)
+			return
 		_begin_site_journey(site, scene_path)
 		return
 
@@ -11001,6 +11007,162 @@ func _apply_hold_doorstep_spawn() -> void:
 	# locks it, until the walker steps off the gate.
 	_surface_arrival_lock = true
 	_wild_needs_recenter = true
+
+## --- Seamless cave descent ---------------------------------------------------
+## A dungeon's dark mouth descends the same way a hold's stair does: a
+## z-change within this scene onto a column of ORGANIC caverns - wobble-
+## carved hollows strung on winding tunnels, geology-true stone and
+## veins, heavy fungal growth, cave wildlife, and a fungal cavern at the
+## bottom. The levels ride the same "underhall" machinery as the holds
+## (mining, digging, darkness, forage, the edit ledger, even a chronicle
+## beast nesting at the bottom) - only their generation differs: no
+## residents, no rooms, no mine railway.
+
+const CAVE_DEEP_LEVELS := 2
+
+## True for a dungeon mouth when the seamless capability is on; caves
+## share the hold descent's master switch.
+func _cave_descent_is_seamless(site: Dictionary) -> bool:
+	return _seamless_hold_descent and String(site.get("class", "")) == "dungeon"
+
+func _begin_seamless_cave_descent(gate: Dictionary, site: Dictionary) -> void:
+	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+	var gate_key := String(gate.get("key", ""))
+	_seamless_hold_ledger_key = String(site.get("seed", "")).strip_edges()
+	if _seamless_hold_ledger_key.is_empty():
+		_seamless_hold_ledger_key = gate_key
+	if _seamless_hold_ledger_key.is_empty():
+		_seamless_hold_ledger_key = String(site.get("name", "cave"))
+	var column := _cave_column_for(gate_key, site)
+	if _seamless_surface_level.is_empty() and _hold_state.has_levels():
+		_seamless_surface_level = _hold_state.generated_levels[0] as Dictionary
+	if column.is_empty() or _seamless_surface_level.is_empty():
+		# Generation failed - never strand the walker; take the old swap.
+		_begin_site_journey(site, WorldSitesService.scene_path_for(site))
+		return
+	var rebuilt: Array[Dictionary] = [_seamless_surface_level]
+	rebuilt.append_array(column)
+	_hold_state.generated_levels = rebuilt
+	# A chronicle beast laired at this tile nests at the cave's bottom,
+	# exactly as it would in a hold's deepest hall.
+	_underhall_lair_beast = WorldChronicleService.lair_beast_for_tile(_world_settings_snapshot(), WorldSitesService.site_tile(site))
+	var trigger_cells := gate.get("trigger_cells", []) as Array
+	_seamless_return_cell = (trigger_cells[0] as Vector2i) if not trigger_cells.is_empty() else anchor
+	_set_save_status("You descend into %s." % String(site.get("name", "the dark")), Color(0.8, 0.82, 0.95, 1.0))
+	_pending_player_spawn_cell = _resolve_stair_spawn_cell(1, "up", _seamless_return_cell)
+	_show_level(1)
+
+## Cave columns share the hold columns' cache and cap: same eviction,
+## same deterministic regeneration, same ledger replay.
+func _cave_column_for(gate_key: String, site: Dictionary) -> Array[Dictionary]:
+	if gate_key.is_empty():
+		gate_key = String(site.get("seed", "cave"))
+	if _hold_deep_columns.has(gate_key):
+		return _hold_deep_columns[gate_key] as Array[Dictionary]
+	var column := _generate_cave_column(site)
+	while _hold_deep_columns.size() >= HOLD_DEEP_COLUMN_CACHE_CAP:
+		_hold_deep_columns.erase(_hold_deep_columns.keys()[0])
+	_hold_deep_columns[gate_key] = column
+	return column
+
+func _generate_cave_column(site: Dictionary) -> Array[Dictionary]:
+	var cave_seed := String(site.get("seed", "")).strip_edges()
+	if cave_seed.is_empty():
+		cave_seed = String(site.get("name", "cave"))
+	var site_geology_variant: Variant = site.get("geology")
+	var site_geology: Dictionary = site_geology_variant if site_geology_variant is Dictionary \
+		else GeologyService.profile_for_seed(hash(cave_seed))
+	var column: Array[Dictionary] = []
+	for depth in range(1, CAVE_DEEP_LEVELS + 1):
+		column.append(_generate_cave_level(cave_seed, depth, site_geology))
+	return column
+
+## One cavern level: hollows strung on winding tunnels through solid
+## rock, geology-true stratum features, pools, and its stairs. Passing
+## CAVE_DEEP_LEVELS + 2 as the ladder length puts the fungal cavern on
+## the bottom level and keeps the starmetal where it belongs - in the
+## holds.
+func _generate_cave_level(cave_seed: String, depth: int, site_geology: Dictionary) -> Dictionary:
+	var cave_rng := RandomNumberGenerator.new()
+	cave_rng.seed = hash("%s::cave_%d" % [cave_seed, depth])
+	var grid: Dictionary = {}
+	var half := Vector2i(28, 21)
+	for y in range(-half.y, half.y + 1):
+		for x in range(-half.x, half.x + 1):
+			grid[Vector2i(x, y)] = CELL_ROCK
+	# Hollows chained across the rock, each carved with a wobbled rim,
+	# each tunneled to the last so the level is one connected warren.
+	var centers: Array[Vector2i] = [Vector2i(-half.x + 8, 0)]
+	var hollow_count := cave_rng.randi_range(5, 7)
+	for _hollow in range(hollow_count - 1):
+		var previous := centers[centers.size() - 1]
+		var candidate := previous + Vector2i(cave_rng.randi_range(4, 13), cave_rng.randi_range(-9, 9))
+		candidate.x = clampi(candidate.x, -half.x + 5, half.x - 5)
+		candidate.y = clampi(candidate.y, -half.y + 5, half.y - 5)
+		centers.append(candidate)
+	for center_index in range(centers.size()):
+		var center := centers[center_index]
+		var radius := cave_rng.randi_range(3, 6)
+		for dy in range(-radius - 2, radius + 3):
+			for dx in range(-radius - 2, radius + 3):
+				var wobble := 1.0 + 0.35 * sin(float(dx) * 0.9 + float(dy) * 1.3 + float(cave_rng.randi_range(0, 6)))
+				if Vector2(dx, dy).length() <= float(radius) * wobble:
+					var cell := center + Vector2i(dx, dy)
+					if grid.has(cell):
+						grid[cell] = CELL_HALL
+		if center_index > 0:
+			# A drunken two-wide tunnel back to the previous hollow.
+			var walker := centers[center_index - 1]
+			var goal := center
+			for _step in range(200):
+				if walker == goal:
+					break
+				var toward := goal - walker
+				var step := Vector2i.ZERO
+				if absi(toward.x) > absi(toward.y) or (toward.y != 0 and cave_rng.randi_range(0, 2) == 0):
+					step = Vector2i(signi(toward.x) if toward.x != 0 else 0, 0)
+				if step == Vector2i.ZERO:
+					step = Vector2i(0, signi(toward.y) if toward.y != 0 else 0)
+				walker += step
+				for widen: Vector2i in [Vector2i.ZERO, Vector2i(0, 1) if step.x != 0 else Vector2i(1, 0)]:
+					if grid.has(walker + widen):
+						grid[walker + widen] = CELL_HALL
+	# Stairs: the way up sits in the first hollow, the way down in the
+	# last (only while a deeper level exists).
+	var stair_cells: Dictionary = {"up": centers[0]}
+	grid[centers[0]] = CELL_HALL
+	if depth < CAVE_DEEP_LEVELS:
+		var down_center := centers[centers.size() - 1]
+		stair_cells["down"] = down_center
+		grid[down_center] = CELL_HALL
+	# The stratum: geology-true stone on the upper level, the fungal
+	# cavern on the bottom, with its veins, growth and pools stamped in.
+	var stratum := DepthStrataService.stratum_for_level_with_geology(site_geology, depth, CAVE_DEEP_LEVELS + 2)
+	var floor_decor: Dictionary = {}
+	for stair_variant: Variant in stair_cells.values():
+		floor_decor[stair_variant as Vector2i] = "protected"
+	DepthStrataService.stamp_stratum_features(grid, floor_decor, stratum, cave_rng)
+	for stair_variant: Variant in stair_cells.values():
+		floor_decor.erase(stair_variant as Vector2i)
+	_carve_underhall_pools(grid, stratum, cave_rng)
+	var level_data := {
+		"kind": "underhall",
+		"grid": grid,
+		"door_cells": {},
+		"zone_counts": {},
+		"requested_zone_counts": {},
+		"civic_buildings_by_id": {},
+		"civic_building_type_map": {},
+		"residence_type_map": {},
+		"resident_target": 0,
+		"village_yards": [],
+		"floor_decor": floor_decor,
+		"stratum": stratum,
+		"stair_cells": stair_cells,
+		"starmetal_cells": []
+	}
+	_apply_underhall_diffs(level_data, depth)
+	return level_data
 
 func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
