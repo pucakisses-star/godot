@@ -930,14 +930,19 @@ func _process(delta: float) -> void:
 	# The stratum's beasts hunt below ground too: _update_surface_life owns
 	# this tick on the surface but early-outs underground, so the underhalls
 	# drive the same shared AI from here.
-	if _is_underground_level() and not _surface_creatures.is_empty():
-		SurfaceLifeService.update_creatures(
-			delta, _surface_creatures, _player_cell,
-			Callable(self, "_is_walkable_cell"),
-			Callable(self, "_cell_center_position"),
-			_rng,
-			Callable(self, "_damage_player")
-		)
+	if _is_underground_level():
+		if not _surface_creatures.is_empty():
+			SurfaceLifeService.update_creatures(
+				delta, _surface_creatures, _player_cell,
+				Callable(self, "_is_walkable_cell"),
+				Callable(self, "_cell_center_position"),
+				_rng,
+				Callable(self, "_damage_player")
+			)
+		# The defense pass runs even with no beasts left: it is the only
+		# thing that RELEASES a guard's combat_duty, and a flag left set
+		# after the last kill would freeze that guard out of the scheduler
+		# for the rest of the level.
 		_update_underhall_defense(delta)
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
@@ -12571,6 +12576,10 @@ const UNDERHALL_GUARD_ENGAGE_RANGE := 8
 
 func _update_underhall_defense(delta: float) -> void:
 	if _surface_creatures.is_empty():
+		# No beasts left: release every guard still on duty, or the last
+		# kill would leave them frozen outside the scheduler.
+		for state: Dictionary in _npc_states:
+			state.erase("combat_duty")
 		return
 	for state: Dictionary in _npc_states:
 		if int(state.get("role", -1)) != ROLE_GUARD:
