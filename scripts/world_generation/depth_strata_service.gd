@@ -210,6 +210,11 @@ static func geology_ore_drops(geology: Dictionary, deep: bool) -> Array:
 		drops.append({"name": String(gem.get("item", "Gem Shard")),
 			"weight": maxi(int(gem_info.get("weight", 5)) * 3 / 5, 2),
 			"min": 1, "max": 1, "mineral": gem_name})
+	# Flux country pays flux: carbonate columns (limestone, chalk,
+	# dolomite, marble) shed the smelter's Flux Stone alongside their
+	# ores - the steel crucible's other ingredient besides coal.
+	if bool(geology.get("flux", false)):
+		drops.append({"name": "Flux Stone", "weight": 12, "min": 1, "max": 2, "mineral": "Flux-grade Limestone"})
 	if deep:
 		drops.append({"name": "Runestone", "weight": 3, "min": 1, "max": 1})
 	return drops

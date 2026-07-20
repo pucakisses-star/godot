@@ -133,8 +133,23 @@ const WARD_FORGE_RECIPES: Array[Dictionary] = [
 	{"output": "Iron Ingot", "materials": {"Iron Ore": 2}, "coins": 0},
 	{"output": "Gold Ingot", "materials": {"Gold Nugget": 2}, "coins": 0},
 	{"output": "Copper Pick", "materials": {"Copper Ingot": 2}, "coins": 0},
-	{"output": "Steel Pickaxe", "materials": {"Iron Ingot": 3}, "coins": 6},
-	{"output": "Dwarven Pickaxe", "materials": {"Iron Ingot": 5, "Gold Nugget": 2}, "coins": 8},
+	# Real steel wants more than iron: flux to draw the slag, coal to
+	# fire the crucible. Limestone country and coal measures are the
+	# strategy the geology survey advertises.
+	{"output": "Steel Ingot", "materials": {"Iron Ingot": 2, "Flux Stone": 1, "Coal": 2}, "coins": 2},
+	{"output": "Steel Pickaxe", "materials": {"Steel Ingot": 2}, "coins": 4},
+	{"output": "Dwarven Pickaxe", "materials": {"Steel Ingot": 3, "Gold Nugget": 2}, "coins": 8},
+]
+
+## The herbalist's bench: the foraged field flora brews into the tonics
+## the apothecary already sells - the gathering loop's sink, run on the
+## same craft machinery as the forge's anvil.
+const APOTHECARY_RECIPES: Array[Dictionary] = [
+	{"output": "Healing Potion", "materials": {"Mushrooms": 2, "Garlic Sprout": 1}, "coins": 2},
+	{"output": "Ironhide Draught", "materials": {"Mandrake Root": 1, "Nightcap Bells": 1}, "coins": 4},
+	{"output": "Hunter's Tonic", "materials": {"Foxglove Sprig": 1, "Chanterelle": 1}, "coins": 3},
+	{"output": "Fleetfoot Philter", "materials": {"Frostleaf": 1, "Glowcap": 1}, "coins": 3},
+	{"output": "Mushroom Ration", "materials": {"Porcini": 1, "King Bolete": 1}, "coins": 0},
 ]
 ## The real-world cell the walk-away leash measures while a trade popup is
 ## open; traveler stocks anchor at a synthetic far-away cell, so the leash
@@ -5573,13 +5588,19 @@ func _refresh_trade_panel() -> void:
 		var quantity := int(entry.get("quantity", 1))
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, item_name, quantity)
 		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
-	# The forge's anvil side: craft entries rendered AFTER the coin wares,
-	# never stored in the stock (the daily reroll and the buy path's
-	# quantity decrement must never touch them).
+	# The craft side - the forge's anvil or the apothecary's bench:
+	# entries rendered AFTER the coin wares, never stored in the stock
+	# (the daily reroll and the buy path's quantity decrement must never
+	# touch them).
 	_chest_slot_recipes.clear()
+	var craft_recipes: Array[Dictionary] = []
 	if _trade_shop_type == "forge":
+		craft_recipes = WARD_FORGE_RECIPES
+	elif _trade_shop_type == "apothecary":
+		craft_recipes = APOTHECARY_RECIPES
+	if not craft_recipes.is_empty():
 		var next_slot := mini(stock.size(), _chest_slot_labels.size())
-		for recipe: Dictionary in WARD_FORGE_RECIPES:
+		for recipe: Dictionary in craft_recipes:
 			if next_slot >= _chest_slot_labels.size():
 				break
 			var output := String(recipe.get("output", ""))
@@ -5595,6 +5616,8 @@ func _refresh_trade_panel() -> void:
 	chest_popup_status_label.text = "🪙 %d coins — click wares to buy, click your pack to sell" % _player_coins
 	if _trade_shop_type == "forge":
 		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or craft at the anvil" % _player_coins
+	elif _trade_shop_type == "apothecary":
+		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or brew at the bench" % _player_coins
 	elif stock.is_empty():
 		chest_popup_status_label.text = "🪙 %d coins — the shelves are bare; come back later" % _player_coins
 
@@ -5646,11 +5669,12 @@ func _craft_forge_entry(recipe: Dictionary) -> void:
 	var output := String(recipe.get("output", ""))
 	var materials := recipe.get("materials", {}) as Dictionary
 	var fee := int(recipe.get("coins", 0))
+	var is_brew := _trade_shop_type == "apothecary"
 	if not GearService.can_afford_craft({"craft": materials}, _player_inventory) or _player_coins < fee:
 		var needed := GearService.craft_costs_text({"craft": materials})
 		if fee > 0:
 			needed += " + %d coins" % fee
-		chest_popup_status_label.text = "The smith needs %s for a %s" % [needed, output]
+		chest_popup_status_label.text = "The %s needs %s for a %s" % ["herbalist" if is_brew else "smith", needed, output]
 		return
 	for material_variant: Variant in materials.keys():
 		_add_to_inventory(String(material_variant), -int(materials[material_variant]))
@@ -5661,7 +5685,7 @@ func _craft_forge_entry(recipe: Dictionary) -> void:
 	if _player_sprite != null:
 		_spawn_floating_text("+%s" % output, _player_sprite.position + Vector2(0, -14), Color(0.85, 0.9, 1.0, 1.0))
 	_refresh_trade_panel()
-	chest_popup_status_label.text = "Forged a %s (🪙 %d)" % [output, _player_coins]
+	chest_popup_status_label.text = "%s a %s (🪙 %d)" % ["Brewed" if is_brew else "Forged", output, _player_coins]
 
 func _sell_item(item_name: String) -> void:
 	if int(_player_inventory.get(item_name, 0)) < 1:
