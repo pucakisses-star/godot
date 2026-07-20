@@ -482,9 +482,20 @@ func _populate_dossier_tabs(dossier: Dictionary, npc_state: Dictionary, identity
 		lines.append("")
 	_personality_text.text = "\n".join(lines)
 
-	# --- Thoughts: the recent-feelings log, feeling words colored ---
+	# --- Thoughts: the LIVED log first (what actually happened to them in
+	# play, newest on top, feeding the mood line), then the rolled
+	# background feelings beneath it. ---
 	lines = []
 	lines.append(_tone("“%s”" % String(dossier.get("quote", "")), "header"))
+	lines.append("")
+	var mood := NpcChatterService.mood_value(npc_state)
+	var mood_tone := "great" if mood >= 5 else ("good" if mood >= 1 else ("bad" if mood <= -2 else "plain"))
+	lines.append(_tone(NpcChatterService.mood_sentence(identity, mood), mood_tone))
+	var live_thoughts := npc_state.get("live_thoughts", []) as Array
+	for live_index in range(live_thoughts.size() - 1, -1, -1):
+		var live := live_thoughts[live_index] as Dictionary
+		var valence := int(live.get("valence", 0))
+		lines.append(_tone("• %s." % String(live.get("text", "")), "good" if valence > 0 else ("bad" if valence < 0 else "plain")))
 	lines.append("")
 	for thought_variant: Variant in (dossier.get("thoughts", []) as Array):
 		var thought := thought_variant as Dictionary

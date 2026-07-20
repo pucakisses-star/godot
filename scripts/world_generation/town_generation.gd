@@ -920,6 +920,7 @@ func _process(delta: float) -> void:
 	_update_player_turn_movement(delta)
 	_update_ground_items(delta)
 	_update_npc_movement(delta)
+	_update_npc_chatter(delta)
 	# The pick's swing cooldown and the deep dark both tick every frame,
 	# above ground and below: _update_surface_life (where the ward's copies
 	# live) early-outs underground, so the seamless underhalls drive theirs
@@ -5711,15 +5712,18 @@ func _apply_identity_appearances() -> void:
 
 func _assign_npc_identities() -> void:
 	var used_names: Dictionary = {}
+	# Underhall residents roll dwarven names and faiths; surface towns
+	# keep their townsfolk census.
+	var identity_kind := "dwarf" if _is_underground_level() else "townsfolk"
 	for state: Dictionary in _npc_states:
 		var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
-		var identity: Dictionary = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+		var identity: Dictionary = NpcIdentityService.generate(_rng, role_title, identity_kind)
 		# Nobody shares a full name: spouse/parent/faction references are
 		# by name, so collisions would tangle the whole census.
 		for _reroll in 8:
 			if not used_names.has(String(identity.get("name", ""))):
 				break
-			identity = NpcIdentityService.generate(_rng, role_title, "townsfolk")
+			identity = NpcIdentityService.generate(_rng, role_title, identity_kind)
 		if used_names.has(String(identity.get("name", ""))):
 			identity["name"] = "%s the Younger" % String(identity.get("name", ""))
 		used_names[String(identity.get("name", ""))] = true
@@ -5793,14 +5797,195 @@ func _update_faction_events() -> void:
 		if not line.is_empty():
 			_set_save_status(line, Color(0.8, 0.75, 0.9, 1.0))
 
+## --- Ambient chatter and live thoughts --------------------------------------
+## Residents speak their minds in small captions over their heads, keyed
+## to the scheduler activity they're living, the weather, raids, the
+## deep, and their own mood; social calls get answered. Underneath it,
+## a Dwarf-Fortress-style live thought log per resident: things that
+## actually happened to them, each with a feeling, summing to the mood
+## the dossier's Thoughts tab reads.
+
+const NPC_CHATTER_TICK_SECONDS := 2.2
+const NPC_CAPTION_SECONDS := 3.6
+const NPC_CHATTER_RANGE_TILES := 13
+const NPC_CAPTION_MAX := 4
+const NPC_THOUGHT_CAP := 6
+var _npc_captions: Array[Dictionary] = []
+var _pending_caption_replies: Array[Dictionary] = []
+var _npc_chatter_timer := 0.0
+
+func _update_npc_chatter(delta: float) -> void:
+	# Live captions ride their speakers and fade out at the end.
+	for caption_index in range(_npc_captions.size() - 1, -1, -1):
+		var caption := _npc_captions[caption_index]
+		var caption_label := caption.get("label") as Label
+		if caption_label == null or not is_instance_valid(caption_label):
+			_npc_captions.remove_at(caption_index)
+			continue
+		caption["ttl"] = float(caption.get("ttl", 0.0)) - delta
+		var speaker_sprite := caption.get("sprite") as Sprite2D
+		if float(caption["ttl"]) <= 0.0 or speaker_sprite == null or not is_instance_valid(speaker_sprite):
+			caption_label.queue_free()
+			_npc_captions.remove_at(caption_index)
+			continue
+		caption_label.position = speaker_sprite.position + Vector2(-caption_label.size.x * 0.5, -float(tile_size.y) - 12.0)
+		caption_label.modulate.a = clampf(float(caption["ttl"]) / 0.5, 0.0, 1.0)
+	# Queued conversation answers land a beat after the opener.
+	for reply_index in range(_pending_caption_replies.size() - 1, -1, -1):
+		var reply := _pending_caption_replies[reply_index]
+		reply["delay"] = float(reply.get("delay", 0.0)) - delta
+		if float(reply["delay"]) > 0.0:
+			continue
+		_pending_caption_replies.remove_at(reply_index)
+		if reply.get("state") is Dictionary:
+			_spawn_npc_caption(reply.get("state") as Dictionary, String(reply.get("text", "")))
+	_npc_chatter_timer -= delta
+	if _npc_chatter_timer > 0.0:
+		return
+	_npc_chatter_timer = NPC_CHATTER_TICK_SECONDS
+	# A roll of silence keeps the streets from reading like a stage play.
+	if _npc_captions.size() >= NPC_CAPTION_MAX or _rng.randf() < 0.35:
+		return
+	var candidates: Array[Dictionary] = []
+	for state: Dictionary in _npc_states:
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null or not is_instance_valid(sprite):
+			continue
+		if String(state.get("mode", "")) == SettlementNpcScheduler.MODE_SLEEP:
+			continue
+		if Time.get_ticks_msec() < int(state.get("next_chatter_ms", 0)):
+			continue
+		var cell := state.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i
+		if maxi(absi(cell.x - _player_cell.x), absi(cell.y - _player_cell.y)) > NPC_CHATTER_RANGE_TILES:
+			continue
+		candidates.append(state)
+	if candidates.is_empty():
+		return
+	var speaker := candidates[_rng.randi_range(0, candidates.size() - 1)]
+	speaker["next_chatter_ms"] = Time.get_ticks_msec() + _rng.randi_range(18000, 40000)
+	_ensure_npc_identity(speaker)
+	_record_context_thoughts(speaker)
+	var identity := speaker.get("identity", {}) as Dictionary
+	var line := NpcChatterService.ambient_line(speaker, identity, _chatter_context(speaker), _rng)
+	if line.is_empty():
+		return
+	_spawn_npc_caption(speaker, line)
+	# A social call gets its answer: the partner speaks back a beat later.
+	var activity := speaker.get("activity", {}) as Dictionary
+	if String(activity.get("kind", "")) == "social" and bool(activity.get("engaged", false)):
+		var partner_index := _find_npc_state_by_name(String(activity.get("partner", "")))
+		if partner_index >= 0:
+			var partner := _npc_states[partner_index]
+			_ensure_npc_identity(partner)
+			partner["next_chatter_ms"] = Time.get_ticks_msec() + _rng.randi_range(18000, 40000)
+			_pending_caption_replies.append({
+				"state": partner, "delay": 1.4,
+				"text": NpcChatterService.social_reply(String(identity.get("first_name", "friend")), _rng)
+			})
+
+func _spawn_npc_caption(state: Dictionary, text: String) -> void:
+	if text.is_empty() or actor_layer == null:
+		return
+	var sprite := state.get("sprite") as Sprite2D
+	if sprite == null or not is_instance_valid(sprite):
+		return
+	# One caption per speaker: a fresh line replaces the old one mid-air.
+	for caption_index in range(_npc_captions.size() - 1, -1, -1):
+		if (_npc_captions[caption_index].get("sprite") as Sprite2D) == sprite:
+			var old_label := _npc_captions[caption_index].get("label") as Label
+			if old_label != null and is_instance_valid(old_label):
+				old_label.queue_free()
+			_npc_captions.remove_at(caption_index)
+	var caption_label := Label.new()
+	caption_label.text = text
+	caption_label.add_theme_font_size_override("font_size", 11)
+	caption_label.add_theme_color_override("font_color", Color(0.96, 0.93, 0.82, 1.0))
+	caption_label.add_theme_color_override("font_outline_color", Color(0.09, 0.07, 0.06, 1.0))
+	caption_label.add_theme_constant_override("outline_size", 4)
+	caption_label.z_index = 32
+	actor_layer.add_child(caption_label)
+	caption_label.reset_size()
+	caption_label.position = sprite.position + Vector2(-caption_label.size.x * 0.5, -float(tile_size.y) - 12.0)
+	_npc_captions.append({"label": caption_label, "sprite": sprite, "ttl": NPC_CAPTION_SECONDS})
+
+## Everyone has a name before they speak; travelers and keepers spawned
+## after the census roll theirs here. Below ground the roll is dwarven.
+func _ensure_npc_identity(state: Dictionary) -> void:
+	if state.get("identity") is Dictionary and not (state.get("identity") as Dictionary).is_empty():
+		if String(state.get("npc_name", "")).is_empty():
+			state["npc_name"] = String((state.get("identity") as Dictionary).get("name", ""))
+		return
+	var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
+	state["identity"] = NpcIdentityService.generate(_rng, role_title, "dwarf" if _is_underground_level() else "townsfolk")
+	state["npc_name"] = String((state["identity"] as Dictionary).get("name", "A villager"))
+
+func _find_npc_state_by_name(npc_name: String) -> int:
+	if npc_name.is_empty():
+		return -1
+	for index in _npc_states.size():
+		if String(_npc_states[index].get("npc_name", "")) == npc_name:
+			return index
+	return -1
+
+## One remembered moment with a feeling. Same-day duplicates fold away;
+## the log keeps the last few, and their sum is the resident's mood.
+func _add_live_thought(state: Dictionary, text: String, valence: int) -> void:
+	var thoughts: Array = state.get("live_thoughts", []) if state.get("live_thoughts") is Array else []
+	for thought_variant: Variant in thoughts:
+		if String((thought_variant as Dictionary).get("text", "")) == text \
+				and int((thought_variant as Dictionary).get("day", -1)) == _game_day:
+			return
+	thoughts.append({"text": text, "valence": valence, "day": _game_day})
+	while thoughts.size() > NPC_THOUGHT_CAP:
+		thoughts.pop_front()
+	state["live_thoughts"] = thoughts
+
+## The speaker notices their situation: an engaged activity or foul
+## weather marks the thought log (once per activity instance, once per
+## day for weather), so the mood follows the life actually lived.
+func _record_context_thoughts(state: Dictionary) -> void:
+	var activity := state.get("activity", {}) as Dictionary
+	if bool(activity.get("engaged", false)) and not bool(activity.get("thought_recorded", false)):
+		activity["thought_recorded"] = true
+		var identity := state.get("identity", {}) as Dictionary
+		match String(activity.get("need", "")):
+			"drink":
+				_add_live_thought(state, "enjoyed a drink lately", 1)
+			"worship":
+				var faith := String(identity.get("faith", ""))
+				_add_live_thought(state, "prayed to %s" % faith if not faith.is_empty() else "sat in quiet reflection", 1)
+			"social":
+				_add_live_thought(state, "chatted with %s" % String(activity.get("partner", "a friend")).get_slice(" ", 0), 1)
+			"recreation":
+				_add_live_thought(state, "took some time to unwind", 1)
+	var weather_kind := String(_current_weather.get("kind", "clear"))
+	if (weather_kind == "rain" or weather_kind == "storm" or weather_kind == "snow") \
+			and int(state.get("weather_thought_day", -1)) != _game_day and not _is_underground_level():
+		state["weather_thought_day"] = _game_day
+		match weather_kind:
+			"rain":
+				_add_live_thought(state, "was soaked by the rain", -1)
+			"storm":
+				_add_live_thought(state, "was caught out in a storm", -2)
+			_:
+				_add_live_thought(state, "was chilled by the snow", -1)
+
+func _chatter_context(state: Dictionary) -> Dictionary:
+	return {
+		"raid": _raid_active,
+		"guard": int(state.get("role", -1)) == ROLE_GUARD,
+		"combat": bool(state.get("combat_duty", false)) or bool(state.get("raid_duty", false)),
+		"weather": String(_current_weather.get("kind", "clear")),
+		"underground": _is_underground_level(),
+		"stratum": String(_latest_stratum.get("name", ""))
+	}
+
 func _show_npc_dialogue(state: Dictionary) -> void:
 	var role_title := String(ROLE_TITLES.get(int(state.get("role", 0)), "Villager"))
 	# Wilds keepers speak as their true calling, not the town role table.
 	if bool(state.get("wilds_keeper", false)):
 		role_title = String((state.get("identity", {}) as Dictionary).get("profession", role_title))
-	if not state.has("identity"):
-		state["identity"] = NpcIdentityService.generate(_rng, role_title, "townsfolk")
-		state["npc_name"] = String((state["identity"] as Dictionary).get("name", "A villager"))
+	_ensure_npc_identity(state)
 	var identity := state.get("identity", {}) as Dictionary
 	# Sworn members talk about their faction, others gossip about the
 	# guilds, and everyone still has personal news and town rumors.
@@ -6654,6 +6839,9 @@ func _setup_surface_world(grid: Dictionary) -> void:
 	# nodes, so the registry must drop with them - stale freed refs made
 	# the has() guard refuse to ever relight a lamp after a descent.
 	_lamp_glow_sprites.clear()
+	# Chatter captions die with the actor layer; unspoken replies with them.
+	_npc_captions.clear()
+	_pending_caption_replies.clear()
 	_clear_sign_hover_label()
 	_clear_caravan_job()
 	for creature: Dictionary in _surface_creatures:
@@ -12693,6 +12881,10 @@ func _maybe_start_raid() -> void:
 	_next_raid_day = _game_day + 3 + _rng.randi_range(0, 2)
 	_persist_next_raid_day()
 	GameAudioService.play_sfx(self, "raid_horn")
+	# The horn marks every resident: terror today, and the memory colors
+	# their mood and chatter until it fades from the log.
+	for resident: Dictionary in _npc_states:
+		_add_live_thought(resident, "heard the raid horn sound", -2)
 	_set_save_status("A war horn sounds — %d raiders march on your homestead!" % spawned, Color(0.95, 0.4, 0.35, 1.0))
 
 func _persist_next_raid_day() -> void:
@@ -12789,9 +12981,12 @@ func _update_underhall_defense(delta: float) -> void:
 		if best_distance <= 1:
 			if float(state.get("guard_attack_timer", 0.0)) <= 0.0:
 				state["guard_attack_timer"] = 1.2
+				var beasts_before := _surface_creatures.size()
 				# Resolve fresh: the strike mutates the list, so a cached
 				# index from an earlier guard this frame could be stale.
 				_strike_surface_creature(best, 2, false)
+				if _surface_creatures.size() < beasts_before:
+					_add_live_thought(state, "struck down a beast in the deep", 1)
 		elif float(state.get("guard_step_timer", 0.0)) <= 0.0:
 			state["guard_step_timer"] = 0.4
 			var step: Vector2i = CreatureCombatService.step_toward(guard_cell, _surface_creatures[best].get("cell", guard_cell) as Vector2i, Callable(self, "_is_npc_walkable_cell"))
@@ -12856,6 +13051,11 @@ func _end_raid(victorious: bool) -> void:
 		_surface_creatures.remove_at(index)
 	for state: Dictionary in _npc_states:
 		state.erase("raid_duty")
+		# How the raid ended is what the town remembers of it.
+		if victorious:
+			_add_live_thought(state, "saw the raiders driven off", 1)
+		else:
+			_add_live_thought(state, "watched raiders plunder the homestead", -2)
 	if victorious:
 		var bounty := 25 + _rng.randi_range(0, 20)
 		_adjust_coins(bounty)
