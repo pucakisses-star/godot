@@ -106,6 +106,13 @@ static func month_name_for_day(day_index: int) -> String:
 static func season_for_day(day_index: int) -> String:
 	return MONTH_SEASONS[month_index_for_day(day_index)]
 
+## The year's quarters in walking order from the thaw: 0 Spring, 1 Summer,
+## 2 Autumn, 3 Winter - for tables that weight by quarter, not by name.
+const SEASON_ORDER: Array[String] = ["Spring", "Summer", "Autumn", "Winter"]
+
+static func season_index_for_day(day_index: int) -> int:
+	return maxi(0, SEASON_ORDER.find(season_for_day(day_index)))
+
 ## e.g. "12 Blossomrise, Year 250, the Year of Ash"
 static func date_text(day_index: int, start_year: int) -> String:
 	var year := year_for_day(day_index, start_year)

@@ -6103,6 +6103,7 @@ func _chatter_context(state: Dictionary) -> Dictionary:
 		"guard": int(state.get("role", -1)) == ROLE_GUARD,
 		"combat": bool(state.get("combat_duty", false)) or bool(state.get("raid_duty", false)),
 		"weather": String(_current_weather.get("kind", "clear")),
+		"season": GameCalendar.season_for_day(_game_day - 1),
 		"underground": _is_underground_level(),
 		"stratum": String(_latest_stratum.get("name", "")),
 		"delivered": delivered,
@@ -11867,7 +11868,8 @@ const CROP_DEFS := {
 }
 const FARM_STAGE_HOURS := 8.0
 ## Season re-rates the growing hour; rain (or a storm) waters for free.
-const FARM_SEASON_GROWTH := {"Spring": 1.15, "Summer": 1.0, "Autumn": 0.85, "Winter": 0.2}
+## Winter has no row: the fields sleep frozen until Thawmarch.
+const FARM_SEASON_GROWTH := {"Spring": 1.15, "Summer": 1.0, "Autumn": 0.85}
 const FARM_RAIN_GROWTH_BONUS := 1.25
 const ANIMAL_CRATES := {"Chicken Crate": "chicken", "Piglet Crate": "pig", "Calf Crate": "cow"}
 const ANIMAL_PRODUCE := {"chicken": "Egg", "pig": "Truffle", "cow": "Milk Pail"}
@@ -12707,6 +12709,10 @@ func _advance_farm_growth() -> void:
 		_persist_farm()
 
 func _farm_growth_multiplier() -> float:
+	# Winter dormancy: frozen ground pushes no stage at all, and no rain
+	# bonus thaws it - planted crops simply wait out the cold.
+	if GameCalendar.season_for_day(_game_day - 1) == "Winter":
+		return 0.0
 	var multiplier := float(FARM_SEASON_GROWTH.get(GameCalendar.season_for_day(_game_day - 1), 1.0))
 	var kind := String(_current_weather.get("kind", "clear"))
 	if kind == WeatherService.KIND_RAIN or kind == WeatherService.KIND_STORM:

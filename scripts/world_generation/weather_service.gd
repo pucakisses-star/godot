@@ -12,9 +12,10 @@ const KIND_STORM := "storm"
 const KIND_SNOW := "snow"
 
 ## Cumulative-roll [kind, weight] rows; each season's weights sum to 1.
-## Winter precipitates only snow; the green seasons never snow.
+## Winter is buried in snow, with the odd freezing rain slipping through;
+## the green seasons never snow.
 const SEASON_TABLES := {
-	"Winter": [[KIND_SNOW, 0.45], [KIND_OVERCAST, 0.25], [KIND_CLEAR, 0.30]],
+	"Winter": [[KIND_SNOW, 0.60], [KIND_RAIN, 0.05], [KIND_OVERCAST, 0.20], [KIND_CLEAR, 0.15]],
 	"Spring": [[KIND_RAIN, 0.30], [KIND_STORM, 0.08], [KIND_OVERCAST, 0.22], [KIND_CLEAR, 0.40]],
 	"Summer": [[KIND_CLEAR, 0.55], [KIND_STORM, 0.12], [KIND_RAIN, 0.13], [KIND_OVERCAST, 0.20]],
 	"Autumn": [[KIND_RAIN, 0.32], [KIND_STORM, 0.10], [KIND_OVERCAST, 0.28], [KIND_CLEAR, 0.30]]
@@ -35,18 +36,22 @@ const KIND_TINTS := {
 static func weather_for_day(world_seed_text: String, day_index: int) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash("%s|weather|%d" % [world_seed_text, day_index])
-	var season := GameCalendar.season_for_day(day_index)
+	var kind := seasonal_weather_roll(GameCalendar.season_for_day(day_index), rng)
+	return {"kind": kind, "intensity": rng.randf_range(0.3, 1.0)}
+
+## One sky drawn from a season's weight table with the caller's dice - the
+## bias itself, separated so anything (a forecast, a chronicle, a test rig)
+## can sample a season without committing to a calendar day.
+static func seasonal_weather_roll(season: String, roll_rng: RandomNumberGenerator) -> String:
 	var table := SEASON_TABLES.get(season, SEASON_TABLES["Spring"]) as Array
-	var roll := rng.randf()
-	var kind := KIND_CLEAR
+	var roll := roll_rng.randf()
 	var cumulative := 0.0
 	for row_variant: Variant in table:
 		var row := row_variant as Array
 		cumulative += float(row[1])
 		if roll <= cumulative:
-			kind = String(row[0])
-			break
-	return {"kind": kind, "intensity": rng.randf_range(0.3, 1.0)}
+			return String(row[0])
+	return KIND_CLEAR
 
 static func is_precipitating(weather: Dictionary) -> bool:
 	var kind := String(weather.get("kind", KIND_CLEAR))
