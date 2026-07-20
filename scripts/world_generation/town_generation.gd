@@ -120,6 +120,22 @@ var _coins_label: Label
 var _trade_shop_cell := Vector2i(2147483647, 2147483647)
 var _crate_armed := ""
 var _trade_shop_type := ""
+## The open trade panel's craft entries: slot index -> recipe. Rebuilt on
+## every refresh; only the ward forge fills it.
+var _chest_slot_recipes: Dictionary = {}
+## The ward forge's craft ladder: smelt mined ore into ingots, then work
+## ingots into picks. Ore is mined for free, so every rung undercuts the
+## shop's coin price without being free - the smith's fee on the upper
+## rungs keeps coins in the loop. Smelt ratios match GearService.SMELT_DEFS
+## so the ward forge and the old hold's deep furnace agree.
+const WARD_FORGE_RECIPES: Array[Dictionary] = [
+	{"output": "Copper Ingot", "materials": {"Copper Ore": 2}, "coins": 0},
+	{"output": "Iron Ingot", "materials": {"Iron Ore": 2}, "coins": 0},
+	{"output": "Gold Ingot", "materials": {"Gold Nugget": 2}, "coins": 0},
+	{"output": "Copper Pick", "materials": {"Copper Ingot": 2}, "coins": 0},
+	{"output": "Steel Pickaxe", "materials": {"Iron Ingot": 3}, "coins": 6},
+	{"output": "Dwarven Pickaxe", "materials": {"Iron Ingot": 5, "Gold Nugget": 2}, "coins": 8},
+]
 ## The real-world cell the walk-away leash measures while a trade popup is
 ## open; traveler stocks anchor at a synthetic far-away cell, so the leash
 ## needs the trader's actual spot (sentinel = fall back to the shop anchor).
@@ -376,6 +392,24 @@ var _cart_origin_cell := Vector2i.ZERO
 var _cart_dir := Vector2i.ZERO
 var _cart_desired_dir := Vector2i.ZERO
 var _cart_progress := 0.0
+## The underhall ledger: player edits to the seamless deep column (tunnels
+## dug, veins mined out, rails laid, cart resting places) recorded as a
+## DIFF in world settings so they ride save slots and replay onto the
+## deterministically regenerated column. A separate key from the old hold
+## scene's "hold_diffs" - the two scenes generate different geometry for
+## the same hold, so sharing a ledger would corrupt both.
+const UNDERHALL_DIFFS_KEY := "underhall_diffs"
+## The current column's ledger identity: the hold's site seed (the same
+## string that drives regeneration), set at descent.
+var _seamless_hold_ledger_key := ""
+## True while a replay is writing edits back onto a level, so the
+## recorders never re-record what the ledger itself just applied.
+var _restoring_underhall_diffs := false
+## The chronicle beast laired in the descended hold, captured at descent
+## (the deepest underhall has no site dict in scope). Empty when the hold
+## harbors no living beast; re-checked against the slain register on every
+## deepest-level show so a kill never respawns.
+var _underhall_lair_beast: Dictionary = {}
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
@@ -904,6 +938,7 @@ func _process(delta: float) -> void:
 			_rng,
 			Callable(self, "_damage_player")
 		)
+		_update_underhall_defense(delta)
 	_update_farm_animals(delta)
 	_update_windmill_sails(delta)
 	_update_water_reflection(delta)
@@ -1825,6 +1860,11 @@ func _update_player_turn_movement(delta: float) -> void:
 ## Walking away slams the lid: the chest/trade popup only works within
 ## reach of its tile, so held keys can't shop from across the map.
 func _close_out_of_range_popups() -> void:
+	# The notice board leashes like a shop counter: walk off, it closes.
+	if _contracts_panel != null and _contracts_panel.visible and _contracts_leash_cell.x != 2147483647:
+		var contracts_span := _player_cell - _contracts_leash_cell
+		if maxi(absi(contracts_span.x), absi(contracts_span.y)) > 6:
+			_close_contracts_board()
 	if chest_popup == null or not chest_popup.visible:
 		return
 	var anchor := _trade_shop_cell if _is_trade_mode() else _selected_chest_cell
@@ -5486,9 +5526,29 @@ func _refresh_trade_panel() -> void:
 		var quantity := int(entry.get("quantity", 1))
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, item_name, quantity)
 		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
+	# The forge's anvil side: craft entries rendered AFTER the coin wares,
+	# never stored in the stock (the daily reroll and the buy path's
+	# quantity decrement must never touch them).
+	_chest_slot_recipes.clear()
+	if _trade_shop_type == "forge":
+		var next_slot := mini(stock.size(), _chest_slot_labels.size())
+		for recipe: Dictionary in WARD_FORGE_RECIPES:
+			if next_slot >= _chest_slot_labels.size():
+				break
+			var output := String(recipe.get("output", ""))
+			_fill_inventory_slot(next_slot, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, output, 1)
+			var craft_tooltip := "\nCraft: %s" % GearService.craft_costs_text({"craft": recipe.get("materials", {})})
+			var fee := int(recipe.get("coins", 0))
+			if fee > 0:
+				craft_tooltip += " + %d coins" % fee
+			_chest_slot_panels[next_slot].tooltip_text += craft_tooltip
+			_chest_slot_recipes[next_slot] = recipe
+			next_slot += 1
 	_populate_backpack_slots()
 	chest_popup_status_label.text = "🪙 %d coins — click wares to buy, click your pack to sell" % _player_coins
-	if stock.is_empty():
+	if _trade_shop_type == "forge":
+		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or craft at the anvil" % _player_coins
+	elif stock.is_empty():
 		chest_popup_status_label.text = "🪙 %d coins — the shelves are bare; come back later" % _player_coins
 
 ## Tavern fare is eaten at the bar the moment it is bought: hearts and
@@ -5499,6 +5559,11 @@ const TAVERN_MEAL_HEARTS := {
 }
 
 func _buy_trade_item(slot_index: int) -> void:
+	# Craft slots resolve first: they cost materials, not shelf stock, and
+	# must never fall through to the coin-buy quantity decrement.
+	if _chest_slot_recipes.has(slot_index):
+		_craft_forge_entry(_chest_slot_recipes[slot_index] as Dictionary)
+		return
 	var stock := _shop_stocks.get(_trade_shop_cell, []) as Array
 	if slot_index < 0 or slot_index >= stock.size():
 		return
@@ -5527,6 +5592,29 @@ func _buy_trade_item(slot_index: int) -> void:
 	_save_player_inventory()
 	_refresh_trade_panel()
 	chest_popup_status_label.text = "Bought %s for %d coins (🪙 %d left)" % [item_name, price, _player_coins]
+
+## One craft at the forge's anvil: check the full cost (materials AND the
+## smith's fee) before deducting anything - never a partial spend.
+func _craft_forge_entry(recipe: Dictionary) -> void:
+	var output := String(recipe.get("output", ""))
+	var materials := recipe.get("materials", {}) as Dictionary
+	var fee := int(recipe.get("coins", 0))
+	if not GearService.can_afford_craft({"craft": materials}, _player_inventory) or _player_coins < fee:
+		var needed := GearService.craft_costs_text({"craft": materials})
+		if fee > 0:
+			needed += " + %d coins" % fee
+		chest_popup_status_label.text = "The smith needs %s for a %s" % [needed, output]
+		return
+	for material_variant: Variant in materials.keys():
+		_add_to_inventory(String(material_variant), -int(materials[material_variant]))
+	if fee > 0:
+		_adjust_coins(-fee)
+	_add_to_inventory(output, 1)
+	GameAudioService.play_sfx(self, "coin")
+	if _player_sprite != null:
+		_spawn_floating_text("+%s" % output, _player_sprite.position + Vector2(0, -14), Color(0.85, 0.9, 1.0, 1.0))
+	_refresh_trade_panel()
+	chest_popup_status_label.text = "Forged a %s (🪙 %d)" % [output, _player_coins]
 
 func _sell_item(item_name: String) -> void:
 	if int(_player_inventory.get(item_name, 0)) < 1:
@@ -6082,6 +6170,10 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 			return
 		_spawn_floating_text("Rock and stone!", _cell_center_position(clicked_cell) + Vector2(0, -12), Color(0.9, 0.85, 0.7, 1.0))
 		return
+	# The hold's notice board: contracts posted on the great-hall plaza.
+	if _ward_notice_board_at_cell(clicked_cell).x != 2147483647 and _is_player_adjacent_to_cell(clicked_cell):
+		_open_contracts_board(clicked_cell)
+		return
 	# The mountain digs from inside: an adjacent swing at massif rock
 	# chips it away by the hold's own geology.
 	if _is_ward_rock_cell(clicked_cell) and _is_player_adjacent_to_cell(clicked_cell):
@@ -6413,7 +6505,7 @@ func _update_npc_movement(delta: float) -> void:
 func _scheduled_states() -> Array[Dictionary]:
 	var living: Array[Dictionary] = []
 	for state: Dictionary in _npc_states:
-		if SettlementAfflictionService.is_active_zombie(state) or bool(state.get("traveler", false)) or bool(state.get("raid_duty", false)) or bool(state.get("wilds_keeper", false)):
+		if SettlementAfflictionService.is_active_zombie(state) or bool(state.get("traveler", false)) or bool(state.get("raid_duty", false)) or bool(state.get("combat_duty", false)) or bool(state.get("wilds_keeper", false)):
 			continue
 		living.append(state)
 	return living
@@ -7795,12 +7887,19 @@ func _plan_dwarfhold_main_floor(landmark: Dictionary, rng: RandomNumberGenerator
 			continue
 		if (hash("ward_spawn|%d|%d" % [(cell_variant as Vector2i).x, (cell_variant as Vector2i).y]) & 0xffff) % 9 == 0:
 			spawn_cells.append(cell_variant)
+	# The notice board: a carved signboard on the great-hall plaza's rim
+	# where the hold posts its contracts. Blocked like furniture, so the
+	# walker stands beside it to read.
+	var notice_board_cell := center + Vector2i(-4, -3)
+	decor[notice_board_cell] = "signboard"
+	blocked[notice_board_cell] = true
 	return {
 		"ok": true, "kind": "dwarfhold_city", "anchor": anchor,
 		"ground": ground, "decor": decor, "blocked": blocked,
 		"sprites": sprites, "bounds": rect.grow(1),
 		"sconces": sconce_cells, "light_cells": light_cells,
 		"spawn_cells": spawn_cells, "stair": center,
+		"notice_board": notice_board_cell,
 		# The buildings keep their trades: clicks inside a plot open the
 		# matching shop counter (forge, tavern, general store).
 		"plots": plots,
@@ -9537,6 +9636,7 @@ func _swing_at_underhall_rock(cell: Vector2i) -> void:
 func _dig_underhall_rock(cell: Vector2i) -> void:
 	_vein_damage.erase(cell)
 	_latest_grid[cell] = CELL_HALL
+	_record_underhall_edit("dug", cell)
 	decor_layer.erase_cell(cell)
 	for offset: Vector2i in [Vector2i.ZERO, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
 		var repaint := cell + offset
@@ -9592,6 +9692,7 @@ func _swing_at_underhall_vein(cell: Vector2i) -> void:
 func _mine_underhall_vein(cell: Vector2i) -> void:
 	_vein_damage.erase(cell)
 	_latest_floor_decor.erase(cell)
+	_record_underhall_edit("decor_erased", cell)
 	decor_layer.erase_cell(cell)
 	_actor_passable_cache.erase(cell)
 	_add_to_inventory("Stone", 1)
@@ -9618,6 +9719,315 @@ func _roll_stratum_ore(stratum: Dictionary) -> Dictionary:
 		if roll <= running:
 			return {"name": String(drop.get("name", "")), "amount": randi_range(int(drop.get("min", 1)), int(drop.get("max", 1)))}
 	return {}
+
+## --- The underhall ledger ---------------------------------------------------
+## The seamless column regenerates deterministically from the hold seed, so
+## everything the PLAYER changed - tunnels dug, veins mined out, rails laid,
+## where a cart came to rest - is recorded as a diff in world settings (it
+## rides every save slot) and replayed onto each freshly generated level.
+## Mirrors the old hold scene's hold-diffs ledger under its own key: the two
+## scenes generate different geometry for the same hold, so a shared ledger
+## would corrupt both.
+
+func _underhall_cell_key(cell: Vector2i) -> String:
+	return "%d,%d" % [cell.x, cell.y]
+
+func _parse_underhall_cell_key(cell_key: String) -> Vector2i:
+	var parts := cell_key.split(",")
+	if parts.size() != 2:
+		return Vector2i(2147483647, 2147483647)
+	return Vector2i(int(parts[0]), int(parts[1]))
+
+## Records one player edit against the current hold + level. List fields
+## ("dug", "decor_erased", "rails") pass value=null and accumulate cells;
+## keyed fields ("cart_at") store cell -> value. Inert while a replay is
+## running so the ledger never re-records itself.
+func _record_underhall_edit(field: String, cell: Vector2i, value: Variant = null) -> void:
+	if _restoring_underhall_diffs or _seamless_hold_ledger_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var diffs: Dictionary = settings.get(UNDERHALL_DIFFS_KEY, {}) as Dictionary if settings.get(UNDERHALL_DIFFS_KEY) is Dictionary else {}
+	var hold_diff: Dictionary = diffs.get(_seamless_hold_ledger_key, {}) as Dictionary if diffs.get(_seamless_hold_ledger_key) is Dictionary else {}
+	var level_key := str(_hold_state.current_level_index)
+	var level_diff: Dictionary = hold_diff.get(level_key, {}) as Dictionary if hold_diff.get(level_key) is Dictionary else {}
+	var cell_key := _underhall_cell_key(cell)
+	if value == null:
+		var cells: Array = level_diff.get(field, []) as Array if level_diff.get(field) is Array else []
+		if not cells.has(cell_key):
+			cells.append(cell_key)
+		level_diff[field] = cells
+	else:
+		var edits: Dictionary = level_diff.get(field, {}) as Dictionary if level_diff.get(field) is Dictionary else {}
+		edits[cell_key] = value
+		level_diff[field] = edits
+	hold_diff[level_key] = level_diff
+	diffs[_seamless_hold_ledger_key] = hold_diff
+	settings[UNDERHALL_DIFFS_KEY] = diffs
+	_store_world_settings(settings)
+
+## Replays the saved diff for one depth onto its freshly generated level:
+## dug cells become hall, mined veins vanish, player rails and cart moves
+## land on top of the generated line. A diff, not a snapshot - untouched
+## ground is untouched, which is exactly why regeneration must stay
+## deterministic.
+func _apply_underhall_diffs(level_data: Dictionary, depth: int) -> void:
+	if _seamless_hold_ledger_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var diffs_variant: Variant = settings.get(UNDERHALL_DIFFS_KEY)
+	if not (diffs_variant is Dictionary):
+		return
+	var hold_variant: Variant = (diffs_variant as Dictionary).get(_seamless_hold_ledger_key)
+	if not (hold_variant is Dictionary):
+		return
+	var level_variant: Variant = (hold_variant as Dictionary).get(str(depth))
+	if not (level_variant is Dictionary):
+		return
+	var level_diff := level_variant as Dictionary
+	_restoring_underhall_diffs = true
+	var grid := level_data.get("grid", {}) as Dictionary
+	for dug_variant: Variant in (level_diff.get("dug", []) as Array):
+		grid[_parse_underhall_cell_key(String(dug_variant))] = CELL_HALL
+	var floor_decor := level_data.get("floor_decor", {}) as Dictionary
+	for mined_variant: Variant in (level_diff.get("decor_erased", []) as Array):
+		floor_decor.erase(_parse_underhall_cell_key(String(mined_variant)))
+	var rails := level_data.get("rails", []) as Array
+	for rail_variant: Variant in (level_diff.get("rails", []) as Array):
+		var rail_cell := _parse_underhall_cell_key(String(rail_variant))
+		if not rails.has(rail_cell):
+			rails.append(rail_cell)
+	level_data["rails"] = rails
+	var carts := level_data.get("carts", []) as Array
+	var cart_edits_variant: Variant = level_diff.get("cart_at")
+	if cart_edits_variant is Dictionary:
+		for cart_key_variant: Variant in (cart_edits_variant as Dictionary).keys():
+			var cart_cell := _parse_underhall_cell_key(String(cart_key_variant))
+			if bool((cart_edits_variant as Dictionary)[cart_key_variant]):
+				if not carts.has(cart_cell):
+					carts.append(cart_cell)
+			else:
+				carts.erase(cart_cell)
+	level_data["carts"] = carts
+	_restoring_underhall_diffs = false
+
+## --- Hold contracts ----------------------------------------------------------
+## The notice board on the great-hall plaza posts two contracts per hold per
+## day, deterministic from the hold's seed and the calendar: a slay bounty
+## on the beasts prowling THIS hold's underhalls, and an ore delivery. Only
+## ACCEPTED contracts persist (per site seed, in world settings, riding
+## every save); unaccepted offers are recomputed on each open, so the board
+## is stateless until the walker signs.
+const HOLD_CONTRACTS_SETTINGS_KEY := "hold_contracts"
+
+var _contracts_panel: PanelContainer
+var _contracts_rows: VBoxContainer
+var _contracts_title: Label
+var _contracts_board_seed_key := ""
+var _contracts_leash_cell := Vector2i(2147483647, 2147483647)
+
+func _roll_hold_contract_offers(seed_key: String) -> Dictionary:
+	var offer_rng := RandomNumberGenerator.new()
+	offer_rng.seed = hash("hold_contract|%s|%d" % [seed_key, _game_day])
+	var slay_target := offer_rng.randi_range(4, 8)
+	var deliver_ore := "Iron Ore" if offer_rng.randi_range(0, 1) == 0 else "Copper Ore"
+	var deliver_target := offer_rng.randi_range(6, 12)
+	var ore_worth := int(SettlementEconomyService.ITEM_VALUES.get(deliver_ore, 4))
+	return {
+		"slay": {"target": slay_target, "pay": slay_target * offer_rng.randi_range(9, 13)},
+		"deliver": {"ore": deliver_ore, "target": deliver_target, "pay": deliver_target * (ore_worth + offer_rng.randi_range(2, 4))}
+	}
+
+func _hold_contract_state(seed_key: String) -> Dictionary:
+	var settings: Dictionary = _world_settings_snapshot()
+	var contracts: Dictionary = settings.get(HOLD_CONTRACTS_SETTINGS_KEY, {}) as Dictionary if settings.get(HOLD_CONTRACTS_SETTINGS_KEY) is Dictionary else {}
+	return contracts.get(seed_key, {}) as Dictionary if contracts.get(seed_key) is Dictionary else {}
+
+func _store_hold_contract_state(seed_key: String, state: Dictionary) -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var contracts: Dictionary = settings.get(HOLD_CONTRACTS_SETTINGS_KEY, {}) as Dictionary if settings.get(HOLD_CONTRACTS_SETTINGS_KEY) is Dictionary else {}
+	contracts[seed_key] = state
+	settings[HOLD_CONTRACTS_SETTINGS_KEY] = contracts
+	_store_world_settings(settings)
+
+## The kill hook: a beast the PLAYER fells in this hold's underhalls counts
+## toward its accepted slay bounty. Guard kills run the quiet strike and
+## never reach here.
+func _record_underhall_beast_slain() -> void:
+	if _seamless_hold_ledger_key.is_empty():
+		return
+	if _hold_state.current_depth_kind() != "underhall":
+		return
+	var state := _hold_contract_state(_seamless_hold_ledger_key)
+	if not (state.get("slay") is Dictionary):
+		return
+	var slay := state.get("slay") as Dictionary
+	slay["slain"] = int(slay.get("slain", 0)) + 1
+	state["slay"] = slay
+	_store_hold_contract_state(_seamless_hold_ledger_key, state)
+	var remaining := maxi(int(slay.get("target", 0)) - int(slay.get("slain", 0)), 0)
+	if remaining > 0:
+		_set_save_status("Bounty: %d more beast%s to fell." % [remaining, "" if remaining == 1 else "s"], Color(0.8, 0.85, 0.95, 1.0))
+	else:
+		_set_save_status("Bounty filled — the notice board owes you coin.", Color(0.7, 0.95, 0.7, 1.0))
+
+## The board's site seed: the gazetteer identity of the gate nearest this
+## ward cell, matching the underhall ledger's key so bounty kills below
+## and the board above agree on which hold they mean.
+func _ward_site_seed_for_cell(cell: Vector2i) -> String:
+	for gate: Dictionary in _surface_gates:
+		var site := gate.get("site", {}) as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		var gate_anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+		if maxi(absi(gate_anchor.x - cell.x), absi(gate_anchor.y - cell.y)) <= HOLD_CITY_HALF_H * 2 + 6:
+			var site_seed := String(site.get("seed", "")).strip_edges()
+			if site_seed.is_empty():
+				site_seed = String(gate.get("key", ""))
+			return site_seed
+	return ""
+
+## The ward's notice board at this cell, or the invalid sentinel.
+func _ward_notice_board_at_cell(cell: Vector2i) -> Vector2i:
+	for landmark: Dictionary in _surface_landmarks:
+		if String(landmark.get("structure", "")) != "dwarfhold_city":
+			continue
+		var plan := landmark.get("plan", {}) as Dictionary
+		var board_variant: Variant = plan.get("notice_board")
+		if board_variant is Vector2i and (board_variant as Vector2i) == cell:
+			return cell
+	return Vector2i(2147483647, 2147483647)
+
+func _open_contracts_board(board_cell: Vector2i) -> void:
+	var seed_key := _ward_site_seed_for_cell(board_cell)
+	if seed_key.is_empty():
+		return
+	_contracts_board_seed_key = seed_key
+	_contracts_leash_cell = board_cell
+	if _contracts_panel == null:
+		_contracts_panel = PanelContainer.new()
+		_contracts_panel.z_index = 50
+		_contracts_panel.custom_minimum_size = Vector2(380, 0)
+		var column := VBoxContainer.new()
+		column.add_theme_constant_override("separation", 8)
+		_contracts_panel.add_child(column)
+		_contracts_title = Label.new()
+		_contracts_title.add_theme_font_size_override("font_size", 17)
+		_contracts_title.add_theme_color_override("font_color", Color(0.93, 0.88, 0.78, 1.0))
+		column.add_child(_contracts_title)
+		_contracts_rows = VBoxContainer.new()
+		_contracts_rows.add_theme_constant_override("separation", 6)
+		column.add_child(_contracts_rows)
+		var close_button := Button.new()
+		close_button.text = "Close"
+		close_button.focus_mode = Control.FOCUS_NONE
+		close_button.pressed.connect(_close_contracts_board)
+		column.add_child(close_button)
+		chest_popup.get_parent().add_child(_contracts_panel)
+		_contracts_panel.position = Vector2(220, 120)
+	if _contracts_title != null:
+		_contracts_title.text = "Notice Board — contracts"
+	_refresh_contracts_board()
+	_contracts_panel.visible = true
+
+func _close_contracts_board() -> void:
+	if _contracts_panel != null:
+		_contracts_panel.visible = false
+	_contracts_board_seed_key = ""
+	_contracts_leash_cell = Vector2i(2147483647, 2147483647)
+
+## Rebuilds the two offer rows from the ledger and today's deterministic
+## roll: Accept when unsigned, live progress while signed, Turn In when
+## filled, and "paid today" after a turn-in until tomorrow's offers.
+func _refresh_contracts_board() -> void:
+	if _contracts_rows == null or _contracts_board_seed_key.is_empty():
+		return
+	for child: Node in _contracts_rows.get_children():
+		child.queue_free()
+	var offers := _roll_hold_contract_offers(_contracts_board_seed_key)
+	var state := _hold_contract_state(_contracts_board_seed_key)
+	for kind: String in ["slay", "deliver"]:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		var text := Label.new()
+		text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		text.custom_minimum_size = Vector2(260, 0)
+		var action: Button = null
+		if state.get(kind) is Dictionary:
+			var active := state.get(kind) as Dictionary
+			var pay := int(active.get("pay", 0))
+			var target := int(active.get("target", 0))
+			var have := 0
+			if kind == "slay":
+				have = int(active.get("slain", 0))
+				text.text = "Bounty: fell %d beasts in the deep — %d/%d slain (%d coins)" % [target, mini(have, target), target, pay]
+			else:
+				var ore := String(active.get("ore", "Iron Ore"))
+				have = int(_player_inventory.get(ore, 0))
+				text.text = "Supply: deliver %d %s — %d/%d in your pack (%d coins)" % [target, ore, mini(have, target), target, pay]
+			if have >= target:
+				action = Button.new()
+				action.text = "Turn in"
+				action.pressed.connect(_turn_in_hold_contract.bind(kind))
+		elif int(state.get(kind + "_done_day", -1)) == _game_day:
+			text.text = "The %s contract is filled and paid — new work tomorrow." % kind
+		else:
+			var offer := offers.get(kind, {}) as Dictionary
+			var pay := int(offer.get("pay", 0))
+			var target := int(offer.get("target", 0))
+			if kind == "slay":
+				text.text = "Bounty: fell %d beasts in the deep (%d coins)" % [target, pay]
+			else:
+				text.text = "Supply: deliver %d %s (%d coins)" % [target, String(offer.get("ore", "Iron Ore")), pay]
+			action = Button.new()
+			action.text = "Accept"
+			action.pressed.connect(_accept_hold_contract.bind(kind))
+		row.add_child(text)
+		if action != null:
+			action.focus_mode = Control.FOCUS_NONE
+			row.add_child(action)
+		_contracts_rows.add_child(row)
+
+func _accept_hold_contract(kind: String) -> void:
+	if _contracts_board_seed_key.is_empty():
+		return
+	var state := _hold_contract_state(_contracts_board_seed_key)
+	if state.get(kind) is Dictionary:
+		return
+	var offers := _roll_hold_contract_offers(_contracts_board_seed_key)
+	var offer := (offers.get(kind, {}) as Dictionary).duplicate(true)
+	if kind == "slay":
+		offer["slain"] = 0
+	state[kind] = offer
+	_store_hold_contract_state(_contracts_board_seed_key, state)
+	_set_save_status("Contract signed — the hold expects results.", Color(0.85, 0.9, 0.7, 1.0))
+	_refresh_contracts_board()
+
+func _turn_in_hold_contract(kind: String) -> void:
+	if _contracts_board_seed_key.is_empty():
+		return
+	var state := _hold_contract_state(_contracts_board_seed_key)
+	if not (state.get(kind) is Dictionary):
+		return
+	var active := state.get(kind) as Dictionary
+	var target := int(active.get("target", 0))
+	var pay := int(active.get("pay", 0))
+	if kind == "slay":
+		if int(active.get("slain", 0)) < target:
+			return
+	else:
+		var ore := String(active.get("ore", "Iron Ore"))
+		if int(_player_inventory.get(ore, 0)) < target:
+			return
+		_add_to_inventory(ore, -target)
+	state.erase(kind)
+	state[kind + "_done_day"] = _game_day
+	_store_hold_contract_state(_contracts_board_seed_key, state)
+	_adjust_coins(pay)
+	GameAudioService.play_sfx(self, "coin")
+	if _player_sprite != null:
+		_spawn_floating_text("+%d coins" % pay, _player_sprite.position + Vector2(0, -14), Color(0.95, 0.8, 0.4, 1.0))
+	_set_save_status("Contract fulfilled — %d coins from the hold." % pay, Color(0.7, 0.95, 0.7, 1.0))
+	_refresh_contracts_board()
 
 ## --- Minecart rails in the deep -------------------------------------------
 ## The hold scene's own rail-and-cart system, mirrored for the seamless
@@ -9710,6 +10120,7 @@ func _place_rail() -> void:
 	if not level_data.has("rails"):
 		level_data["rails"] = []
 	(level_data["rails"] as Array).append(cell)
+	_record_underhall_edit("rails", cell)
 	_rail_cells[cell] = true
 	_spawn_rail_at(cell)
 	_refresh_rail_art_around(cell)
@@ -9900,6 +10311,7 @@ func _place_minecart() -> void:
 	if not level_data.has("carts"):
 		level_data["carts"] = []
 	(level_data["carts"] as Array).append(cell)
+	_record_underhall_edit("cart_at", cell, true)
 	_spawn_minecart_at(cell)
 	_set_save_status("Minecart built - press C beside it to ride", Color(0.85, 0.82, 0.7, 1.0))
 
@@ -9993,6 +10405,8 @@ func _settle_cart() -> void:
 	if not carts.has(_cart_cell):
 		carts.append(_cart_cell)
 	level_data["carts"] = carts
+	_record_underhall_edit("cart_at", _cart_origin_cell, false)
+	_record_underhall_edit("cart_at", _cart_cell, true)
 	_cart_origin_cell = _cart_cell
 
 func _swing_at_ward_rock(cell: Vector2i) -> void:
@@ -10208,6 +10622,15 @@ func _apply_hold_doorstep_spawn() -> void:
 func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
 	var gate_key := String(gate.get("key", ""))
+	# The ledger key is the site seed - the same string that drives the
+	# column's deterministic regeneration, so recorded edits always replay
+	# onto the geometry they were made on. Set BEFORE generation so the
+	# apply pass inside it can read the saved diff.
+	_seamless_hold_ledger_key = String(site.get("seed", "")).strip_edges()
+	if _seamless_hold_ledger_key.is_empty():
+		_seamless_hold_ledger_key = gate_key
+	if _seamless_hold_ledger_key.is_empty():
+		_seamless_hold_ledger_key = String(site.get("name", "hold"))
 	var column := _hold_deep_column_for(gate_key, site)
 	# The wild surface is level 0; preserve it once so climbing back out
 	# restores the exact embark. The descended hold's halls sit beneath it.
@@ -10220,6 +10643,10 @@ func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	var rebuilt: Array[Dictionary] = [_seamless_surface_level]
 	rebuilt.append_array(column)
 	_hold_state.generated_levels = rebuilt
+	# The chronicle's laired beast, if one still lives here: looked up by
+	# the hold's overworld tile exactly as the old hold scene and the
+	# surface-lair landmarks do.
+	_underhall_lair_beast = WorldChronicleService.lair_beast_for_tile(_world_settings_snapshot(), WorldSitesService.site_tile(site))
 	# Climb back out to the mouth stair we descended through.
 	_seamless_return_cell = _hold_ward_stair_cell(anchor)
 	_set_save_status("You descend into %s." % String(site.get("name", "the hold")), Color(0.85, 0.9, 0.7, 1.0))
@@ -10284,6 +10711,10 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		# The hold's mine line: rails from the entry stair to the descent
 		# stair, a cart parked mid-track, ready the day the walker arrives.
 		_lay_underhall_railway(level_data)
+		# Last, the ledger: the player's saved edits replay onto the fresh
+		# level - dug tunnels reopen, worked-out veins stay gone, laid rails
+		# and moved carts land on top of the generated line.
+		_apply_underhall_diffs(level_data, depth)
 		column.append(level_data)
 	_generating_hold_column = false
 	_hold_state.selected_hold_population = saved_selected
@@ -10341,6 +10772,66 @@ func _populate_underhall_creatures(level_data: Dictionary) -> void:
 				)
 				guard_posted = true
 				break
+	_maybe_spawn_underhall_lair_boss()
+
+## The chronicle's beast holds the bottom of the hold: on the DEEPEST
+## underhall it nests at the hall cell farthest from wherever the walker
+## came in, grown and tinted into the named beast by the same boss specs
+## the hold scene and the surface lairs use. The kill already routes:
+## _strike_surface_creature's death branch fires _award_surface_lair_kill
+## for any boss:true state - trophy, hoard, and the world remembering.
+## The slain register is re-checked every show, so it never respawns.
+func _maybe_spawn_underhall_lair_boss() -> void:
+	if _underhall_lair_beast.is_empty() or not _hold_state.is_deepest():
+		return
+	if _hold_state.current_depth_kind() != "underhall":
+		return
+	if WorldChronicleService.is_beast_slain(_world_settings_snapshot(), String(_underhall_lair_beast.get("name", ""))):
+		_underhall_lair_beast = {}
+		return
+	for existing: Dictionary in _surface_creatures:
+		if bool(existing.get("boss", false)):
+			return
+	var lair_hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in _latest_grid.keys():
+		if int(_latest_grid[cell_variant]) == CELL_HALL:
+			lair_hall_cells.append(cell_variant as Vector2i)
+	if lair_hall_cells.is_empty():
+		return
+	var boss_cell := lair_hall_cells[0]
+	var best_distance := -1.0
+	for hall_cell: Vector2i in lair_hall_cells:
+		var lair_distance := Vector2(hall_cell - _player_cell).length()
+		if lair_distance > best_distance:
+			best_distance = lair_distance
+			boss_cell = hall_cell
+	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(_underhall_lair_beast.get("kind", "dragon")))
+	var size_before := _surface_creatures.size()
+	SurfaceLifeService.spawn_creature(
+		_surface_creatures, SURFACE_CREATURE_TEXTURE, int(spec.get("def_index", 7)),
+		boss_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
+	)
+	if _surface_creatures.size() <= size_before:
+		return
+	var boss := _surface_creatures[_surface_creatures.size() - 1]
+	var display := String(_underhall_lair_beast.get("display", "a nameless beast"))
+	boss["site_key"] = _seamless_hold_ledger_key
+	boss["home_cell"] = boss_cell
+	boss["boss"] = true
+	boss["beast_name"] = String(_underhall_lair_beast.get("name", ""))
+	boss["beast_display"] = display
+	boss["beast_kind"] = String(_underhall_lair_beast.get("kind", "dragon"))
+	boss["lair_name"] = String(_underhall_lair_beast.get("lair_name", ""))
+	boss["hp"] = int(spec.get("max_hp", 200))
+	boss["damage_override"] = int(spec.get("damage", 8))
+	boss["aggro_override"] = int(spec.get("aggro_range", 12))
+	boss["cooldown_override"] = float(spec.get("attack_cooldown", 1.5))
+	boss["speed_override"] = float(spec.get("speed", 80.0))
+	boss["leash_override"] = 6
+	var boss_sprite := boss.get("sprite") as Sprite2D
+	if boss_sprite != null:
+		UndergroundCreatureService.apply_boss_visuals(boss_sprite, spec, WorldChronicleService._capitalize_first(display))
+	_set_save_status("The deep stirs — %s nests here." % display, Color(1.0, 0.55, 0.45, 1.0))
 
 ## Still water in the deep: wobble-edged pools carved into the undug rock
 ## beside the halls - the fungal caverns hold real lakes, the other strata
@@ -10562,7 +11053,10 @@ func _attack_surface_creature(creature_index: int) -> void:
 	_strike_surface_creature(creature_index, int(PlayerStatsService.for_session(self).get("attack", 2)))
 
 ## Shared edge for melee, bow, staff, guards and the loyal sporeling.
-func _strike_surface_creature(creature_index: int, damage: int) -> void:
+## announce=false is the guards' edge: a dwarf felling a prowler pays the
+## PLAYER nothing and posts no ticker line (several guards mobbing one
+## beast would spam both), but boss and camp routing stay intact.
+func _strike_surface_creature(creature_index: int, damage: int, announce: bool = true) -> void:
 	if creature_index < 0 or creature_index >= _surface_creatures.size():
 		return
 	var state := _surface_creatures[creature_index]
@@ -10576,24 +11070,41 @@ func _strike_surface_creature(creature_index: int, damage: int) -> void:
 	if int(state.get("hp", 0)) > 0:
 		return
 	var creature_name := String(def.get("name", "creature"))
-	var coins := _rng.randi_range(2, 6) + int(def.get("damage", 1)) * 2
-	_adjust_coins(coins)
-	GameAudioService.play_sfx(self, "coin")
+	if announce:
+		# A beast the player fells in the underhalls counts toward this
+		# hold's accepted slay bounty (the quiet guard path never does).
+		_record_underhall_beast_slain()
+		var coins := _rng.randi_range(2, 6) + int(def.get("damage", 1)) * 2
+		_adjust_coins(coins)
+		GameAudioService.play_sfx(self, "coin")
+		if sprite != null:
+			_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
+		if sprite != null:
+			sprite.queue_free()
+		var fallen_site_key := String(state.get("site_key", ""))
+		var is_boss := bool(state.get("boss", false))
+		_surface_creatures.remove_at(creature_index)
+		if is_boss:
+			# A named beast, not a camp band: trophy, hoard, and recorded
+			# history instead of tent plunder.
+			_award_surface_lair_kill(state)
+			return
+		_set_save_status("The %s falls — %d coins scavenged." % [creature_name, coins], Color(0.85, 0.95, 0.7, 1.0))
+		# The last of a camp's garrison marks the site cleared (with plunder).
+		if not fallen_site_key.is_empty():
+			_note_camp_creature_down(fallen_site_key)
+		return
+	# The quiet path: the beast falls to a dwarf's axe.
 	if sprite != null:
-		_spawn_floating_text("+%d coins" % coins, sprite.position, Color(0.95, 0.8, 0.4, 1.0))
 		sprite.queue_free()
-	var fallen_site_key := String(state.get("site_key", ""))
-	var is_boss := bool(state.get("boss", false))
+	var quiet_site_key := String(state.get("site_key", ""))
+	var quiet_boss := bool(state.get("boss", false))
 	_surface_creatures.remove_at(creature_index)
-	if is_boss:
-		# A named beast, not a camp band: trophy, hoard, and recorded
-		# history instead of tent plunder.
+	if quiet_boss:
 		_award_surface_lair_kill(state)
 		return
-	_set_save_status("The %s falls — %d coins scavenged." % [creature_name, coins], Color(0.85, 0.95, 0.7, 1.0))
-	# The last of a camp's garrison marks the site cleared (with plunder).
-	if not fallen_site_key.is_empty():
-		_note_camp_creature_down(fallen_site_key)
+	if not quiet_site_key.is_empty():
+		_note_camp_creature_down(quiet_site_key)
 
 ## --- The homestead layer ---------------------------------------------------
 ## Everything the player owns above ground: built walls and floors, tilled
@@ -12049,6 +12560,56 @@ func _update_raider_bashing(raider: Dictionary, delta: float) -> void:
 		return
 
 ## Town guards drop their rounds and close on raiders within their ward.
+## The hold defends itself: underhall guards near a prowling beast break
+## from their rounds, close on it, and cut it down - the same one-way
+## combat the surface raid guards run (dwarves carry no HP; creatures
+## keep hunting the PLAYER, so a guard standing in the beast's path is
+## the wall between it and you, and the guards win over time). The
+## combat_duty flag pulls a fighting guard out of the scheduler so the
+## two systems never tug the same sprite.
+const UNDERHALL_GUARD_ENGAGE_RANGE := 8
+
+func _update_underhall_defense(delta: float) -> void:
+	if _surface_creatures.is_empty():
+		return
+	for state: Dictionary in _npc_states:
+		if int(state.get("role", -1)) != ROLE_GUARD:
+			continue
+		var sprite := state.get("sprite") as Sprite2D
+		if sprite == null:
+			continue
+		var guard_cell := state.get("cell", Vector2i.ZERO) as Vector2i
+		var best := -1
+		var best_distance := UNDERHALL_GUARD_ENGAGE_RANGE + 1
+		for index in _surface_creatures.size():
+			if bool(_surface_creatures[index].get("dying", false)):
+				continue
+			if _surface_creatures[index].get("sprite") as Sprite2D == null:
+				continue
+			var beast_cell := _surface_creatures[index].get("cell", Vector2i(9999, 9999)) as Vector2i
+			var distance := maxi(absi(beast_cell.x - guard_cell.x), absi(beast_cell.y - guard_cell.y))
+			if distance < best_distance:
+				best_distance = distance
+				best = index
+		if best < 0:
+			state.erase("combat_duty")
+			continue
+		state["combat_duty"] = true
+		state["guard_step_timer"] = float(state.get("guard_step_timer", 0.0)) - delta
+		state["guard_attack_timer"] = maxf(float(state.get("guard_attack_timer", 0.0)) - delta, 0.0)
+		if best_distance <= 1:
+			if float(state.get("guard_attack_timer", 0.0)) <= 0.0:
+				state["guard_attack_timer"] = 1.2
+				# Resolve fresh: the strike mutates the list, so a cached
+				# index from an earlier guard this frame could be stale.
+				_strike_surface_creature(best, 2, false)
+		elif float(state.get("guard_step_timer", 0.0)) <= 0.0:
+			state["guard_step_timer"] = 0.4
+			var step: Vector2i = CreatureCombatService.step_toward(guard_cell, _surface_creatures[best].get("cell", guard_cell) as Vector2i, Callable(self, "_is_npc_walkable_cell"))
+			if step != Vector2i.ZERO:
+				state["cell"] = guard_cell + step
+				sprite.position = _cell_center_position(guard_cell + step)
+
 func _update_guard_response(delta: float, raiders: Array[Dictionary]) -> void:
 	for state: Dictionary in _npc_states:
 		if int(state.get("role", -1)) != ROLE_GUARD:
