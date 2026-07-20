@@ -9949,7 +9949,7 @@ func _dig_underhall_rock(cell: Vector2i) -> void:
 		var ore := _roll_stratum_ore(_latest_stratum)
 		if not ore.is_empty():
 			_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
-			_spawn_floating_text("Struck %s!" % String(ore.get("name", "")), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
+			_spawn_floating_text(_ore_strike_text(ore), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
 	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.5, 0.48, 0.46, 1.0), 12)
 	# Rebuild the darkness when the dig demands it: a long tunnel can outrun
 	# the quad's edge, and a dug wall may have carried a mounted sconce -
@@ -10011,7 +10011,7 @@ func _mine_underhall_vein(cell: Vector2i) -> void:
 	var ore := _roll_stratum_ore(_latest_stratum)
 	if not ore.is_empty():
 		_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
-		_spawn_floating_text("Struck %s!" % String(ore.get("name", "")), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
+		_spawn_floating_text(_ore_strike_text(ore), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
 	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.6, 0.58, 0.55, 1.0), 12)
 
 ## Weighted roll from a stratum's ore_drops table -> {name, amount}, or {} for
@@ -10029,8 +10029,20 @@ func _roll_stratum_ore(stratum: Dictionary) -> Dictionary:
 		var drop := drop_variant as Dictionary
 		running += int(drop.get("weight", 0))
 		if roll <= running:
-			return {"name": String(drop.get("name", "")), "amount": randi_range(int(drop.get("min", 1)), int(drop.get("max", 1)))}
+			return {"name": String(drop.get("name", "")),
+				"amount": randi_range(int(drop.get("min", 1)), int(drop.get("max", 1))),
+				"mineral": String(drop.get("mineral", ""))}
 	return {}
+
+## "Struck hematite — +2 Iron Ore!" when the drop knows its mineral;
+## plain "Struck Iron Ore!" on the legacy tables that don't.
+func _ore_strike_text(ore: Dictionary) -> String:
+	var mineral := String(ore.get("mineral", ""))
+	var item := String(ore.get("name", ""))
+	var amount := int(ore.get("amount", 1))
+	if mineral.is_empty() or mineral == item:
+		return "Struck %s!" % item
+	return "Struck %s — +%d %s!" % [mineral.to_lower(), amount, item]
 
 ## --- The underhall ledger ---------------------------------------------------
 ## The seamless column regenerates deterministically from the hold seed, so
@@ -11039,17 +11051,24 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 	var column: Array[Dictionary] = []
 	# _generate_single_level reseeds _rng from the level seed, so generating
 	# the halls never disturbs the already-built surface embark.
+	# The tile's own geology decides what each level is carved through:
+	# its real stones, the minerals that country hosts, its formations.
+	# Sites carry their overworld tile's profile; a hold without one
+	# derives a stable profile from its seed.
+	var site_geology_variant: Variant = site.get("geology")
+	var site_geology: Dictionary = site_geology_variant if site_geology_variant is Dictionary \
+		else GeologyService.profile_for_seed(hash(hold_seed))
 	for depth in range(1, HOLD_DEEP_LEVELS + 1):
 		var level_seed := "%s::underhall_%d" % [hold_seed, depth]
 		var level_data := _generate_single_level(level_seed, depth, HOLD_DEEP_LEVELS + 1)
 		level_data["kind"] = "underhall"
-		# The earth changes with depth: each level belongs to a stratum (soil,
-		# then the fungal cavern, then the starmetal deep) that seeds its own
-		# ore veins and fungus onto the hall floor. Veins are "stone" outcrops
-		# the walker mines for the stratum's ore. Stamped on its own seeded rng
-		# so a revisit re-deals nothing; the stratum rides the level so digging
-		# rolls the right ore table.
-		var stratum := DepthStrataService.stratum_for_level(depth, HOLD_DEEP_LEVELS + 1)
+		# The earth changes with depth: each level belongs to a stratum (the
+		# profile's own stone, then the fungal cavern, then the starmetal
+		# deep) that seeds its own ore veins and fungus onto the hall floor.
+		# Veins are "stone" outcrops the walker mines for the stratum's ore.
+		# Stamped on its own seeded rng so a revisit re-deals nothing; the
+		# stratum rides the level so digging rolls the right ore table.
+		var stratum := DepthStrataService.stratum_for_level_with_geology(site_geology, depth, HOLD_DEEP_LEVELS + 1)
 		var strata_floor_decor: Dictionary = {}
 		var strata_rng := RandomNumberGenerator.new()
 		strata_rng.seed = hash("%s::strata" % level_seed)

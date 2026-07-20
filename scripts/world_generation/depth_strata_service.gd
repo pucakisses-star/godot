@@ -118,6 +118,102 @@ static func cavern_level_index(level_count: int) -> int:
 		return -1
 	return maxi(2, (level_count * 3) / 5)
 
+## Creature casts by depth band - the same ladder the fixed strata use,
+## kept separate so geology-driven strata field identical wildlife.
+static func _creature_slots_for_fraction(fraction: float) -> Array:
+	if fraction <= 0.34:
+		return SOIL.get("creature_slots", []) as Array
+	if fraction <= 0.67:
+		return SEDIMENTARY.get("creature_slots", []) as Array
+	return IGNEOUS.get("creature_slots", []) as Array
+
+const RELIC_PIECES_BY_CLASS := {
+	"sedimentary": ["df_tool_16_0", "df_tool_17_0", "df_tool_18_0", "df_tool_18_1", "df_box_0_0", "df_tool_25_0"],
+	"igneous_extrusive": ["df_tool_16_0", "df_tool_16_1", "df_tool_17_0", "df_tool_17_1", "df_tool_26_0", "df_box_0_0"],
+	"igneous_intrusive": ["df_tool_16_0", "df_tool_16_1", "df_tool_17_0", "df_tool_17_1", "df_tool_26_0", "df_tool_26_1", "df_box_0_0"],
+	"metamorphic": ["df_tool_16_1", "df_tool_17_1", "df_tool_26_0", "df_tool_25_0", "df_box_0_1"]
+}
+
+## The stratum a level belongs to when its tile's REAL geology is known:
+## the level carves through the profile's own stratigraphic column - its
+## named stones, their wall tints, and an ore table built from the
+## minerals and gems that country actually hosts. The fungal cavern
+## (promoted shallower where karst riddles the limestone) and the
+## starmetal deep keep their places in the ladder.
+static func stratum_for_level_with_geology(geology: Dictionary, level_index: int, level_count: int) -> Dictionary:
+	if geology.is_empty():
+		return stratum_for_level(level_index, level_count)
+	if level_index <= 0:
+		return SURFACE
+	var karst := (geology.get("formations", []) as Array).has("Karst Caves")
+	var cavern_index := cavern_level_index(level_count)
+	if karst and cavern_index < 0 and level_count >= 3:
+		cavern_index = maxi(1, (level_count * 2) / 5)
+	if level_index == cavern_index:
+		var cavern := CAVERN.duplicate(true)
+		if karst:
+			cavern["name"] = "The Karst Caverns"
+		return cavern
+	if level_index == level_count - 1 and level_count >= 3:
+		return STARMETAL_DEPTH
+	var column: Array[Dictionary] = GeologyService.strata_column(geology, maxi(level_count - 1, 1))
+	if column.is_empty():
+		return stratum_for_level(level_index, level_count)
+	var entry := column[clampi(level_index - 1, 0, column.size() - 1)]
+	var entry_class := String(entry.get("class", "sedimentary"))
+	var fraction := float(level_index) / float(maxi(level_count - 1, 1))
+	var is_soil := bool(entry.get("soil", false))
+	var vein_range := Vector2i(10, 16) if is_soil else _vein_range_for_class(entry_class)
+	var mushroom_range := Vector2i(14, 22) if is_soil \
+		else (Vector2i(8, 14) if entry_class == "sedimentary" else (Vector2i(6, 10) if entry_class == "metamorphic" else Vector2i(3, 7)))
+	return {
+		"relic_pieces": (SOIL.get("relic_pieces") if is_soil else RELIC_PIECES_BY_CLASS.get(entry_class, SEDIMENTARY.get("relic_pieces"))) as Array,
+		"name": String(entry.get("name", "Deep Stone")),
+		"stone": String(entry.get("stone", "")),
+		"ore_drops": geology_ore_drops(geology, fraction > 0.5),
+		"vein_count_range": vein_range,
+		"mushroom_count_range": mushroom_range,
+		"creature_slots": _creature_slots_for_fraction(fraction),
+		"tint": entry.get("tint", Color(1.0, 1.0, 1.0)),
+		"cavern": false,
+		"starmetal": false
+	}
+
+static func _vein_range_for_class(layer_class: String) -> Vector2i:
+	match layer_class:
+		"sedimentary":
+			return Vector2i(14, 22)
+		"igneous_extrusive":
+			return Vector2i(14, 22)
+		"metamorphic":
+			return Vector2i(15, 24)
+		_:
+			return Vector2i(16, 26)
+
+## The ore table a tile's real minerals build: every hosted ore mineral
+## and gem species becomes a weighted drop paying its true item, tagged
+## with the mineral name so a strike can announce what was struck.
+static func geology_ore_drops(geology: Dictionary, deep: bool) -> Array:
+	var drops: Array = []
+	for mineral_variant: Variant in (geology.get("minerals", []) as Array):
+		var mineral := mineral_variant as Dictionary
+		var mineral_name := String(mineral.get("name", ""))
+		var info := GeologyService.MINERAL_CATALOG.get(mineral_name, {}) as Dictionary
+		var item := String(mineral.get("item", "Iron Ore"))
+		var top := 3 if item == "Iron Ore" or item == "Copper Ore" or item == "Coal" else 2
+		drops.append({"name": item, "weight": int(info.get("weight", 8)),
+			"min": 1, "max": top + (1 if deep else 0), "mineral": mineral_name})
+	for gem_variant: Variant in (geology.get("gems", []) as Array):
+		var gem := gem_variant as Dictionary
+		var gem_name := String(gem.get("name", ""))
+		var gem_info := GeologyService.GEM_CATALOG.get(gem_name, {}) as Dictionary
+		drops.append({"name": String(gem.get("item", "Gem Shard")),
+			"weight": maxi(int(gem_info.get("weight", 5)) * 3 / 5, 2),
+			"min": 1, "max": 1, "mineral": gem_name})
+	if deep:
+		drops.append({"name": "Runestone", "weight": 3, "min": 1, "max": 1})
+	return drops
+
 static func stratum_for_level(level_index: int, level_count: int) -> Dictionary:
 	if level_index <= 0:
 		return SURFACE

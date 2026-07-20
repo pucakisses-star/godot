@@ -9246,8 +9246,13 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		var geology_text := "%s — %s" % [String(geology.get("layer_label", "")), ", ".join(stones)]
 		if bool(geology.get("flux", false)):
 			geology_text += " (flux)"
+		var coal_rank := String(geology.get("coal_rank", ""))
 		if bool(geology.get("coal", false)):
-			geology_text += ", coal seams"
+			geology_text += ", %s seams" % (coal_rank if not coal_rank.is_empty() else "coal")
+		# The tile's geological events, spelled out the way a survey would.
+		for formation_variant: Variant in (geology.get("formations", []) as Array):
+			var formation := GeologyService.FORMATION_CATALOG.get(String(formation_variant), {}) as Dictionary
+			geology_text += " • %s" % String(formation.get("label", String(formation_variant)))
 		_set_tooltip_label(tooltip_geology, geology_text, true)
 		var soil_text := "%s soil" % String(geology.get("soil", "Shallow"))
 		var clay_text := String(geology.get("clay", ""))
@@ -9256,8 +9261,29 @@ func _refresh_map_tooltip(coord: Vector2i) -> void:
 		_set_tooltip_label(tooltip_soil, soil_text, true)
 		var aquifer_text := String(geology.get("aquifer", ""))
 		_set_tooltip_label(tooltip_aquifer, aquifer_text, not aquifer_text.is_empty())
-		var metals := _variant_array_to_strings(geology.get("metals", []))
-		_set_tooltip_label(tooltip_metals, ", ".join(metals), not metals.is_empty())
+		# Ore MINERALS grouped under their metal ("Iron (hematite, siderite)"),
+		# then the gem species this country bears.
+		var minerals_by_metal: Dictionary = {}
+		for mineral_variant: Variant in (geology.get("minerals", []) as Array):
+			var mineral := mineral_variant as Dictionary
+			var metal := String(mineral.get("metal", ""))
+			if metal.is_empty():
+				continue
+			if not minerals_by_metal.has(metal):
+				minerals_by_metal[metal] = []
+			(minerals_by_metal[metal] as Array).append(String(mineral.get("name", "")).to_lower())
+		var metal_parts: Array[String] = []
+		for metal_variant: Variant in minerals_by_metal.keys():
+			metal_parts.append("%s (%s)" % [String(metal_variant), ", ".join(_variant_array_to_strings(minerals_by_metal[metal_variant]))])
+		var gem_names: Array[String] = []
+		for gem_variant: Variant in (geology.get("gems", []) as Array):
+			gem_names.append(String((gem_variant as Dictionary).get("name", "")).to_lower())
+		var metals_text := " • ".join(metal_parts)
+		if not gem_names.is_empty():
+			metals_text += ("  ✦ " if not metals_text.is_empty() else "✦ ") + ", ".join(gem_names)
+		if metals_text.is_empty():
+			metals_text = ", ".join(_variant_array_to_strings(geology.get("metals", [])))
+		_set_tooltip_label(tooltip_metals, metals_text, not metals_text.is_empty())
 
 	var culture_tooltip := _culture_pipeline.build_tooltip_data(data)
 	var population_groups := _tile_population_groups_for_coord(coord)
