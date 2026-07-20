@@ -491,6 +491,8 @@ func _populate_dossier_tabs(dossier: Dictionary, npc_state: Dictionary, identity
 	var mood := NpcChatterService.mood_value(npc_state)
 	var mood_tone := "great" if mood >= 5 else ("good" if mood >= 1 else ("bad" if mood <= -2 else "plain"))
 	lines.append(_tone(NpcChatterService.mood_sentence(identity, mood), mood_tone))
+	for bond_line: String in bond_lines(npc_state):
+		lines.append(_tone(bond_line, "bad" if bond_line.begins_with("Nurses") else "good"))
 	var live_thoughts := npc_state.get("live_thoughts", []) as Array
 	for live_index in range(live_thoughts.size() - 1, -1, -1):
 		var live := live_thoughts[live_index] as Dictionary
@@ -505,6 +507,32 @@ func _populate_dossier_tabs(dossier: Dictionary, npc_state: Dictionary, identity
 			_tone(String(thought.get("rest", "")), "plain")
 		])
 	_thoughts_text.text = "\n".join(lines)
+
+## The session's bond ledger distilled to what a dossier cares about:
+## the warmest friendship and the coldest grudge, at most one line each.
+static func bond_lines(npc_state: Dictionary) -> Array[String]:
+	var summary: Array[String] = []
+	if not (npc_state.get("bonds") is Dictionary):
+		return summary
+	var bonds := npc_state.get("bonds") as Dictionary
+	var best_name := ""
+	var best_score := -10
+	var worst_name := ""
+	var worst_score := 10
+	for name_variant: Variant in bonds.keys():
+		var other_name := String(name_variant)
+		var score := int(bonds.get(name_variant, 0))
+		if score > best_score:
+			best_score = score
+			best_name = other_name
+		if score < worst_score:
+			worst_score = score
+			worst_name = other_name
+	if best_score >= 3 and not best_name.is_empty():
+		summary.append("Fast friends with %s." % best_name)
+	if worst_score <= -2 and not worst_name.is_empty():
+		summary.append("Nurses a grudge against %s." % worst_name)
+	return summary
 
 func _populate_slots(items: Array) -> void:
 	for slot_index in range(SLOT_COUNT):

@@ -360,6 +360,10 @@ static func update_scheduled_npcs(
 				var needs := state.get("needs", {}) as Dictionary
 				if not sated.is_empty() and needs.has(sated):
 					needs[sated] = 0.0
+				# A chat seen through to its end is a shared moment; leave the
+				# partner's name so the scene can settle it into the pair's bond.
+				if String(running.get("kind", "")) == "social":
+					state["social_call_done"] = String(running.get("partner", ""))
 				state.erase("activity")
 
 		var mode := mode_for_hour(state, hour, shelter)

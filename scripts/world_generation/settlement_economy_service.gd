@@ -12,6 +12,11 @@ const ITEM_VALUES := {
 	"Gold Ore": 12, "Tin Ore": 6, "Lead Ore": 4, "Zinc Ore": 5,
 	"Nickel Ore": 7, "Platinum Ore": 16, "Coal": 3, "Flux Stone": 3,
 	"Gold Nugget": 14, "Gem Shard": 16, "Starmetal Ore": 60, "Starmetal Bar": 150, "Old Tome": 12, "Carved Curio": 6, "Iron Ingot": 8, "Leather Strap": 2,
+	# Stones of the Abyssal Deep, brought up past the starmetal: glassy
+	# obsidian and sea-floor basalt from the Magma Sea's shores, fire opal
+	# glinting out of the melt, and the seam's adamantine - worth more than
+	# any ore the survey knows, short of the starmetal itself.
+	"Obsidian": 7, "Basalt": 4, "Fire Opal": 18, "Adamantine Ore": 40,
 
 	"Amber": 12, "Spider Amber": 18, "Fern Amber": 16, "Fossil Leaf": 10,
 	"Ancient Skull": 20, "Beast Skull": 18, "Fossil Claw": 12,
@@ -43,6 +48,11 @@ const ITEM_VALUES := {
 	"Golden Koi": 20, "Cave Lobster": 8, "Pale Squid": 6,
 	"Gloom Octopus": 6, "Ember Squid": 7, "Cave Crab": 5,
 	"Coral Snail": 4, "Bloodworm": 1, "Mud Grub": 1, "Dried Fish": 4,
+
+	# The hand-liner's biome catch, and the meals the hearth makes of it.
+	"River Trout": 4, "Icefin Char": 5, "Dune Barb": 4,
+	"Mudwhisker Catfish": 5, "Pale Cavefish": 6,
+	"Trout Stew": 10, "Hunter's Roast": 12, "Cave Chowder": 11, "Rowanberry Tart": 8,
 
 	# Mounted trophy fish: bragging rights, priced accordingly.
 	"Trophy Gudgeon": 18, "Trophy Bleak": 20, "Trophy Ruffe": 22,
@@ -102,20 +112,24 @@ const ITEM_VALUES := {
 	"Carrot Seeds": 3, "Beetroot Seeds": 3, "Tomato Seeds": 3,
 	"Carrot": 3, "Beetroot": 3, "Tomato": 3, "Garden Stew": 9,
 	"Egg": 3, "Truffle": 12, "Milk Pail": 4,
-	"Chicken Crate": 20, "Piglet Crate": 30, "Calf Crate": 45
+	"Chicken Crate": 20, "Piglet Crate": 30, "Calf Crate": 45,
+
+	# Homestead comforts for a claimed hall in the deep: a bedroll to
+	# sleep off the dark, a stout chest to bank what the veins yield.
+	"Dwarven Bedroll": 6, "Oak Chest": 8
 }
 
 ## What each kind of shop keeps behind the counter. Keys cover both the
 ## town and dwarfhold building-type vocabularies.
 const SHOP_STOCK_POOLS := {
-	"bakery": ["Loaf of Bread", "Mushroom Ration", "Jar of Honey", "Wheel of Cheese", "Mushroom Skewer"],
+	"bakery": ["Loaf of Bread", "Mushroom Ration", "Jar of Honey", "Wheel of Cheese", "Mushroom Skewer", "Rowanberry Tart"],
 	"kitchen": ["Loaf of Bread", "Mushroom Ration", "Grilled Fish", "Hearty Stew", "Mushroom Skewer"],
 	"grand_kitchens": ["Hearty Stew", "Grilled Fish", "Mushroom Skewer", "Mushroom Ration", "Wheel of Cheese"],
-	"tavern": ["Ale Keg", "Grilled Fish", "Hearty Stew", "Roast Meat", "Smoked Ribs", "Loaf of Bread", "Wheel of Cheese"],
+	"tavern": ["Ale Keg", "Grilled Fish", "Hearty Stew", "Roast Meat", "Smoked Ribs", "Loaf of Bread", "Wheel of Cheese", "Trout Stew", "Hunter's Roast"],
 	"inn": ["Loaf of Bread", "Wheel of Cheese", "Jar of Honey", "Grilled Fish", "Ale Keg"],
 	"brewery": ["Ale Keg", "Mushroom Skewer", "Jar of Honey"],
-	"general_store": ["Stone", "Leather Strap", "Wax Candles", "Miner's Lantern", "Old Fishing Rod", "Cork Bobber", "Silk Line Spool", "Spade", "Mushroom Ration"],
-	"general_goods_shop": ["Stone", "Leather Strap", "Miner's Lantern", "Old Fishing Rod", "Cork Bobber", "Silk Line Spool", "Spade", "Mushroom Ration"],
+	"general_store": ["Stone", "Leather Strap", "Wax Candles", "Miner's Lantern", "Old Fishing Rod", "Cork Bobber", "Silk Line Spool", "Spade", "Mushroom Ration", "Dwarven Bedroll", "Oak Chest"],
+	"general_goods_shop": ["Stone", "Leather Strap", "Miner's Lantern", "Old Fishing Rod", "Cork Bobber", "Silk Line Spool", "Spade", "Mushroom Ration", "Dwarven Bedroll", "Oak Chest"],
 	"trade_supply_store": ["Stone", "Leather Strap", "Miner's Lantern", "Rusty Pickaxe", "Spade", "Casting Net", "Fish Trap", "Silk Line Spool"],
 	"market_stall": ["Loaf of Bread", "Wheel of Cheese", "Skein of Wool", "Bolt of Cloth", "Wax Candles", "Dried Fish", "Jar of Honey", "Cured Ham", "Jerky Strip", "Aged Sausage", "Rowanberries"],
 	"smithy": ["Iron Ingot", "Steel Ingot", "Copper Ingot", "Iron Nails", "Iron Horseshoes", "Miner's Pickaxe", "Stone Hammer", "Mason's Chisel", "Whetstone", "Chain Links"],

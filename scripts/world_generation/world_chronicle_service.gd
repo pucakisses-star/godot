@@ -2234,6 +2234,80 @@ static func boosted_hold_population(settings: Dictionary, tile: Vector2i, base_p
 		return base_population
 	return base_population + maxi(base_population * 15 / 100, 20)
 
+## --- Rumors & renown ----------------------------------------------------------
+## Deeds travel. Every beast on the player's kill ledger earns renown:
+## the hold-felling terrors weigh heaviest, chronicle-known beasts next,
+## and kills no history remembers still count for one. Renown climbs a
+## title ladder the taverns greet the walker by, and a known name
+## commands better contract terms at the notice boards.
+
+static func player_renown(settings: Dictionary) -> int:
+	var kills := player_kills(settings)
+	if kills.is_empty():
+		return 0
+	var beasts := chronicle_from_settings(settings).get("beasts", []) as Array
+	var renown := 0
+	for kill_name_variant: Variant in kills.keys():
+		var beast := _beast_by_name(beasts, String(kill_name_variant))
+		if beast.is_empty():
+			renown += 1
+		elif bool(beast.get("fells_holds", false)):
+			renown += 3
+		else:
+			renown += 2
+	return renown
+
+## The ladder: 0 Unknown, 1-3 Wayfarer, 4-7 Beast-Slayer, 8-12 Deliverer,
+## 13+ Legend.
+static func renown_tier(renown: int) -> int:
+	if renown <= 0:
+		return 0
+	if renown <= 3:
+		return 1
+	if renown <= 7:
+		return 2
+	if renown <= 12:
+		return 3
+	return 4
+
+static func renown_title(renown: int) -> String:
+	var titles: Array[String] = ["Unknown", "Wayfarer", "Beast-Slayer", "Deliverer", "Legend"]
+	return titles[renown_tier(renown)]
+
+## The player's freshest deed — the kill with the highest recorded year —
+## as {"name", "display", "place", "year"}. The display is the beast's
+## storied name when the chronicle remembers it, the bare name otherwise.
+## {} when the ledger is empty.
+static func latest_player_deed(settings: Dictionary) -> Dictionary:
+	var kills := player_kills(settings)
+	if kills.is_empty():
+		return {}
+	var best_name := ""
+	var best_kill: Dictionary = {}
+	var best_year := -1
+	for kill_name_variant: Variant in kills.keys():
+		var kill_name := String(kill_name_variant)
+		if not (kills[kill_name] is Dictionary):
+			continue
+		var kill := kills[kill_name] as Dictionary
+		var kill_year := int(kill.get("year", 0))
+		if kill_year > best_year:
+			best_year = kill_year
+			best_name = kill_name
+			best_kill = kill
+	if best_name.is_empty():
+		return {}
+	var beast := _beast_by_name(chronicle_from_settings(settings).get("beasts", []) as Array, best_name)
+	var display := best_name
+	if not beast.is_empty():
+		display = String(beast.get("display", best_name))
+	return {
+		"name": best_name,
+		"display": display,
+		"place": String(best_kill.get("place", "")),
+		"year": best_year
+	}
+
 ## "Skarthrax's Fang" — the beast's unique trophy item name.
 static func beast_trophy_name(beast: Dictionary) -> String:
 	var suffix := String(BEAST_TROPHY_SUFFIXES.get(String(beast.get("kind", "dragon")), "Fang"))

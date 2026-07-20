@@ -28,6 +28,18 @@ const WEATHER_LINES := {
 	"snow": ["Cold as a tomb out here.", "My beard's gone to frost.",
 		"Snow again. Of course."]
 }
+## The turning year gets its own small talk: quieter than weather, but a
+## farmer notices the season before the sky.
+const SEASON_LINES := {
+	"Spring": ["First thaw at last.", "The green is coming back.",
+		"Seedtide soon - sharpen the hoe."],
+	"Summer": ["Long days, good work.", "The sun earns its keep today.",
+		"Highsun heat, even in the shade."],
+	"Autumn": ["The harvest won't wait.", "Leaves turning already.",
+		"Salt the stores before the cold comes."],
+	"Winter": ["The frost bites early this year.", "Deep winter. Keep the hearth fed.",
+		"Nothing grows till thaw. Nothing."]
+}
 const JOYFUL_LINES: Array[String] = [
 	"A fine day, truly.", "Life sits well with me.", "Couldn't ask for better."
 ]
@@ -88,6 +100,15 @@ const DELIVERANCE_LINES: Array[String] = [
 	"The deep is ours again.", "New kin arrive every day now.",
 	"The gates stand open once more.", "They'll sing of that kill for a century."
 ]
+## Deeds travel: surface folk trade tavern gossip about the walker's
+## freshest kill, %s standing in for the beast's storied name.
+const RUMOR_LINES: Array[String] = [
+	"They say a walker felled %s.", "Heard the news? %s is slain.",
+	"Drinks were raised when word came: %s is dead.",
+	"No more watching the road for %s.",
+	"Somebody finally did for %s. Imagine that.",
+	"A pedlar swore it true: %s is no more."
+]
 const GENERIC_IDLE_LINES: Array[String] = [
 	"Hm? Just thinking.", "Stone and steel, another day.", "So it goes."
 ]
@@ -133,8 +154,9 @@ static func _pick_format(lines: Array, value: String, rng: RandomNumberGenerator
 
 ## The one ambient line for this speaker right now. Priority runs from
 ## the loudest circumstance down to idle small talk: raids and combat
-## shout over everything, foul weather grumbles, then the current
-## activity speaks, then the deep, then the person themselves.
+## shout over everything, foul weather grumbles, the turning season gets
+## a quieter word, then the current activity speaks, then the deep, then
+## the person themselves.
 static func ambient_line(state: Dictionary, identity: Dictionary, context: Dictionary, rng: RandomNumberGenerator) -> String:
 	if bool(context.get("raid", false)):
 		return _pick(RAID_GUARD_LINES if bool(context.get("guard", false)) else RAID_VILLAGER_LINES, rng)
@@ -143,8 +165,16 @@ static func ambient_line(state: Dictionary, identity: Dictionary, context: Dicti
 	var weather := String(context.get("weather", "clear"))
 	if not bool(context.get("underground", false)) and WEATHER_LINES.has(weather) and rng.randf() < 0.45:
 		return _pick(WEATHER_LINES[weather] as Array, rng)
+	var season := String(context.get("season", ""))
+	if not bool(context.get("underground", false)) and SEASON_LINES.has(season) and rng.randf() < 0.2:
+		return _pick(SEASON_LINES[season] as Array, rng)
 	if bool(context.get("delivered", false)) and rng.randf() < 0.3:
 		return _pick(DELIVERANCE_LINES, rng)
+	# Above ground the same deed is hearsay, not homecoming: the news
+	# arrives by road and gets retold over mugs.
+	var rumor := String(context.get("rumor", ""))
+	if not rumor.is_empty() and not bool(context.get("underground", false)) and rng.randf() < 0.25:
+		return _pick_format(RUMOR_LINES, rumor, rng)
 	var mood := mood_value(state)
 	if (mood >= 5 or mood <= -4) and rng.randf() < 0.35:
 		return _pick(JOYFUL_LINES if mood > 0 else MISERABLE_LINES, rng)

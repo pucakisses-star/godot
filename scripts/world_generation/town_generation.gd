@@ -101,6 +101,16 @@ var _latest_resident_target := 0
 ## and the vein stays gone on revisit. The stratum drives the ore a vein yields.
 var _latest_floor_decor: Dictionary = {}
 var _latest_stratum: Dictionary = DepthStrataService.SURFACE
+## The Magma Sea's molten pools (cell -> true) on the current level. Lava
+## takes a footfall - unlike still water it does not block - but the melt
+## scalds and throws the walker back where they stepped from. Empty
+## everywhere above the Abyssal Deep.
+var _latest_lava_cells: Dictionary = {}
+## The Adamant Seam's adamantine outcrops (cell -> true) on the current
+## level. The reference stored on the level itself, like the floor decor,
+## so a worked-out vein stays worked out for the visit; mining one wakes
+## the seam's wardens.
+var _latest_adamantine_cells: Dictionary = {}
 ## Accumulated pick damage on the vein being mined, cleared on level change so
 ## a half-mined vein's progress never bleeds across a descent.
 var _vein_damage: Dictionary = {}
@@ -150,6 +160,16 @@ const APOTHECARY_RECIPES: Array[Dictionary] = [
 	{"output": "Hunter's Tonic", "materials": {"Foxglove Sprig": 1, "Chanterelle": 1}, "coins": 3},
 	{"output": "Fleetfoot Philter", "materials": {"Frostleaf": 1, "Glowcap": 1}, "coins": 3},
 	{"output": "Mushroom Ration", "materials": {"Porcini": 1, "King Bolete": 1}, "coins": 0},
+]
+
+## The cook's hearth at the tavern and the bakery ovens: the wilds' own
+## catch, quarry, and gathering stew down into meals on the same craft
+## machinery as the anvil and the bench — water feeds the pot.
+const COOK_RECIPES: Array[Dictionary] = [
+	{"output": "Trout Stew", "materials": {"River Trout": 1, "Garlic Sprout": 1}, "coins": 1},
+	{"output": "Hunter's Roast", "materials": {"Marbled Steak": 1, "Foxglove Sprig": 1}, "coins": 1},
+	{"output": "Cave Chowder", "materials": {"Pale Cavefish": 1, "Glowcap": 1}, "coins": 1},
+	{"output": "Rowanberry Tart", "materials": {"Rowanberries": 2, "Jar of Honey": 1}, "coins": 1},
 ]
 ## The real-world cell the walk-away leash measures while a trade popup is
 ## open; traveler stocks anchor at a synthetic far-away cell, so the leash
@@ -350,6 +370,10 @@ var _town_market: Dictionary = {}
 var _caravan_job: Dictionary = {}
 var _caravan_next_offer_stamp := 0.0
 var _caravan_offer_dialog: ConfirmationDialog
+## The visiting dwarven trade caravan's camp on the square (wagon sprite +
+## visiting-hold record); empty on non-visit days.
+var _caravan_camp: Dictionary = {}
+var _caravan_camp_announced_day := -1
 var _game_hour := 9.0
 var _game_day := 1
 var _calendar_start_year := 250
@@ -430,6 +454,18 @@ var _restoring_underhall_diffs := false
 ## harbors no living beast; re-checked against the slain register on every
 ## deepest-level show so a kill never respawns.
 var _underhall_lair_beast: Dictionary = {}
+## A hold under siege: the living laired beast has left its nest and
+## stormed the level the walker stands on. While set, chatter shouts the
+## alarm and the whole watch converges; it clears when the beast falls,
+## or when a level swap frees the actors and the assault breaks off.
+var _siege_active := false
+## Absolute game-hours before another siege may erupt: the beast gathers
+## itself between assaults, so the halls are not stormed twice in a night.
+var _siege_cooldown_until := 0.0
+## Rolled once per game hour underground - rare by design, so most
+## descents pass in peace and the horn means something when it sounds.
+const SIEGE_CHANCE_PER_HOUR := 0.02
+const SIEGE_COOLDOWN_HOURS := 48.0
 # Core Keeper-style shoreline reflections: a screen-sampling shader quad
 # follows the view, masked to the water cells it currently covers.
 const WATER_REFLECTION_SHADER := preload("res://shaders/water_reflection.gdshader")
@@ -991,9 +1027,12 @@ func _advance_game_clock(delta: float) -> void:
 		_refresh_player_stats_town()
 		_advance_farm_growth()
 		_maybe_start_raid()
+		_maybe_start_siege()
 		if _game_day != day_before:
 			_advance_world_events()
 			_refresh_weather(true)
+			# A new morning decides whether the trail wagons roll in or on.
+			_refresh_caravan_camp()
 	# Strolling the market works up an appetite too.
 	_player_satiety = clampf(_player_satiety - delta_hours * PlayerStatsService.SATIETY_DRAIN_PER_GAME_HOUR, 0.0, PlayerStatsService.SATIETY_MAX)
 	_advance_afflictions(delta_hours)
@@ -1303,6 +1342,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_C:
 				# Deep in the hold: build, board, or step off a minecart.
 				_handle_cart_key()
+				get_viewport().set_input_as_handled()
+				return
+			KEY_H:
+				# Deep in the hold: sleep at your own bedroll if one is by,
+				# else plant (or move) your claim on the hall underfoot.
+				if not _rest_at_bedroll():
+					_claim_hall_here()
 				get_viewport().set_input_as_handled()
 				return
 			KEY_I:
@@ -1872,9 +1918,15 @@ func _update_player_turn_movement(delta: float) -> void:
 			break
 		budget -= remaining
 		_player_sprite.position = _player_move_target_position
+		var departed_cell := _player_cell
 		_player_cell = _player_move_target_cell
 		_player_is_moving = false
 		_close_out_of_range_popups()
+		# The melt punishes the footfall the moment it lands - before the
+		# stair check, so a scalded walker never also rides a hatch.
+		if _resolve_lava_step(_player_cell, departed_cell):
+			_center_view_on_world_position(_player_sprite.position)
+			return
 		if _try_use_stairs_at_player_cell():
 			_center_view_on_world_position(_player_sprite.position)
 			return
@@ -3493,6 +3545,11 @@ func _compute_passable_cell_for_actor(cell: Vector2i) -> bool:
 	# afloat), so sea cells are passable and let the walker roam the water.
 	if _wild_water and _is_water_cell(cell):
 		return true
+	# The Magma Sea's melt takes a step - it is the one water-painted ground
+	# an actor may enter, so the scald-and-bounce hazard can actually fire.
+	# Still water everywhere else keeps blocking.
+	if _latest_lava_cells.has(cell):
+		return true
 	# Mountain crags in the streamed wilds keep their rocky tile but block
 	# movement; roads never enter this set, so passes stay open.
 	if _surface_blocked_cells.has(cell):
@@ -4332,6 +4389,10 @@ func _show_level(target_level_index: int) -> void:
 		depth_label.text = "Level 0 / 0"
 		return
 
+	# A level swap frees the actor layer, siege beast included: the assault
+	# breaks off (the beast withdraws into the dark) rather than leaving a
+	# stuck alarm shouting over halls with nothing left in them.
+	_siege_active = false
 	_hold_state.current_level_index = _hold_state.clamp_index(target_level_index)
 	var level_data := _hold_state.generated_levels[_hold_state.current_level_index] as Dictionary
 	var grid := level_data.get("grid", {}) as Dictionary
@@ -4351,6 +4412,10 @@ func _show_level(target_level_index: int) -> void:
 	# The strata veins ride the level by reference, so mining one persists.
 	_latest_floor_decor = level_data.get("floor_decor", {}) as Dictionary
 	_latest_stratum = level_data.get("stratum", DepthStrataService.SURFACE) as Dictionary
+	# The Abyssal Deep's hazards ride their levels the same way; both come
+	# up empty on every level above the abyss.
+	_latest_lava_cells = level_data.get("lava_cells", {}) as Dictionary
+	_latest_adamantine_cells = level_data.get("adamantine_cells", {}) as Dictionary
 	_vein_damage.clear()
 	_plan_village_signboards(grid)
 	_village_yards = level_data.get("village_yards", []) as Array
@@ -4370,6 +4435,9 @@ func _show_level(target_level_index: int) -> void:
 	_faction_event_stamps.clear()
 	_clear_chest_selection()
 	_render_city(grid, _hold_state.active_level_stairs)
+	# The Abyssal Stair announces itself the way the surface gates do: a
+	# floating name over the hatch that leaves the survey's maps.
+	_spawn_abyss_stair_label(level_data)
 	# The level's rail network and parked carts come back with it (and the
 	# clear is the teardown on the surface and in storage cellars).
 	_rebuild_underhall_rails(level_data)
@@ -4393,6 +4461,10 @@ func _show_level(target_level_index: int) -> void:
 	_build_farmsteads()
 	_scatter_desert_decor()
 	_spawn_farm_animals()
+	# The trail wagons pay off in-scene: on a visit day the dwarven caravan
+	# camps the square the moment the surface stands (after the actor-layer
+	# rebuild above, which swept any earlier camp).
+	_refresh_caravan_camp()
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
 	_update_depth_controls()
@@ -5592,7 +5664,7 @@ func _refresh_trade_panel() -> void:
 		var item_name := String(entry.get("name", "Supplies"))
 		var quantity := int(entry.get("quantity", 1))
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, item_name, quantity)
-		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
+		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % _trade_buy_price(item_name)
 	# The craft side - the forge's anvil or the apothecary's bench:
 	# entries rendered AFTER the coin wares, never stored in the stock
 	# (the daily reroll and the buy path's quantity decrement must never
@@ -5603,6 +5675,8 @@ func _refresh_trade_panel() -> void:
 		craft_recipes = WARD_FORGE_RECIPES
 	elif _trade_shop_type == "apothecary":
 		craft_recipes = APOTHECARY_RECIPES
+	elif _trade_shop_type == "tavern" or _trade_shop_type == "bakery":
+		craft_recipes = COOK_RECIPES
 	if not craft_recipes.is_empty():
 		var next_slot := mini(stock.size(), _chest_slot_labels.size())
 		for recipe: Dictionary in craft_recipes:
@@ -5623,14 +5697,29 @@ func _refresh_trade_panel() -> void:
 		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or craft at the anvil" % _player_coins
 	elif _trade_shop_type == "apothecary":
 		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or brew at the bench" % _player_coins
+	elif _trade_shop_type == "tavern" or _trade_shop_type == "bakery":
+		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or cook at the hearth" % _player_coins
 	elif stock.is_empty():
 		chest_popup_status_label.text = "🪙 %d coins — the shelves are bare; come back later" % _player_coins
+	if _trade_shop_type == "tavern":
+		var greeting := _tavern_greeting_line()
+		if not greeting.is_empty():
+			chest_popup_status_label.text = "%s\n%s" % [greeting, chest_popup_status_label.text]
+
+## The taproom knows the walker's deeds before the walker sits down:
+## renown earns a nod from the keeper. Empty until the first deed.
+func _tavern_greeting_line() -> String:
+	var renown := WorldChronicleService.player_renown(_world_settings_snapshot())
+	if renown <= 0:
+		return ""
+	return "The keeper nods — a %s drinks here tonight." % WorldChronicleService.renown_title(renown)
 
 ## Tavern fare is eaten at the bar the moment it is bought: hearts and
 ## a full belly instead of a backpack item.
 const TAVERN_MEAL_HEARTS := {
 	"Hearty Stew": 6, "Roast Meat": 5, "Smoked Ribs": 5, "Grilled Fish": 4,
-	"Loaf of Bread": 3, "Wheel of Cheese": 3, "Ale Keg": 2
+	"Loaf of Bread": 3, "Wheel of Cheese": 3, "Ale Keg": 2,
+	"Trout Stew": 3, "Hunter's Roast": 4, "Cave Chowder": 3, "Rowanberry Tart": 2
 }
 
 func _buy_trade_item(slot_index: int) -> void:
@@ -5644,7 +5733,7 @@ func _buy_trade_item(slot_index: int) -> void:
 		return
 	var entry := stock[slot_index] as Dictionary
 	var item_name := String(entry.get("name", "Supplies"))
-	var price := SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
+	var price := _trade_buy_price(item_name)
 	if _player_coins < price:
 		chest_popup_status_label.text = "Not enough coins for %s (%d needed)" % [item_name, price]
 		return
@@ -5675,11 +5764,17 @@ func _craft_forge_entry(recipe: Dictionary) -> void:
 	var materials := recipe.get("materials", {}) as Dictionary
 	var fee := int(recipe.get("coins", 0))
 	var is_brew := _trade_shop_type == "apothecary"
+	var is_cook := _trade_shop_type == "tavern" or _trade_shop_type == "bakery"
 	if not GearService.can_afford_craft({"craft": materials}, _player_inventory) or _player_coins < fee:
 		var needed := GearService.craft_costs_text({"craft": materials})
 		if fee > 0:
 			needed += " + %d coins" % fee
-		chest_popup_status_label.text = "The %s needs %s for a %s" % ["herbalist" if is_brew else "smith", needed, output]
+		var crafter := "smith"
+		if is_brew:
+			crafter = "herbalist"
+		elif is_cook:
+			crafter = "cook"
+		chest_popup_status_label.text = "The %s needs %s for a %s" % [crafter, needed, output]
 		return
 	for material_variant: Variant in materials.keys():
 		_add_to_inventory(String(material_variant), -int(materials[material_variant]))
@@ -5690,12 +5785,15 @@ func _craft_forge_entry(recipe: Dictionary) -> void:
 	if _player_sprite != null:
 		_spawn_floating_text("+%s" % output, _player_sprite.position + Vector2(0, -14), Color(0.85, 0.9, 1.0, 1.0))
 	_refresh_trade_panel()
-	chest_popup_status_label.text = "%s a %s (🪙 %d)" % ["Brewed" if is_brew else "Forged", output, _player_coins]
+	if is_cook:
+		chest_popup_status_label.text = "Cooked a %s — the pot takes it from there (🪙 %d)" % [output, _player_coins]
+	else:
+		chest_popup_status_label.text = "%s a %s (🪙 %d)" % ["Brewed" if is_brew else "Forged", output, _player_coins]
 
 func _sell_item(item_name: String) -> void:
 	if int(_player_inventory.get(item_name, 0)) < 1:
 		return
-	var price := SettlementEconomyService.local_sell_price(item_name, _town_market)
+	var price := _trade_sell_price(item_name)
 	_player_inventory[item_name] = int(_player_inventory.get(item_name, 0)) - 1
 	if int(_player_inventory.get(item_name, 0)) <= 0:
 		_player_inventory.erase(item_name)
@@ -5991,6 +6089,62 @@ func _add_live_thought(state: Dictionary, text: String, valence: int) -> void:
 		thoughts.pop_front()
 	state["live_thoughts"] = thoughts
 
+## --- Bonds: friendships and grudges -----------------------------------------
+## Residents remember who they pass their evenings with. Each finished
+## social call nudges the pair's regard both ways: most visits warm it a
+## step, a soured one cools it hard and leaves a quarrel in both logs.
+## Cross the warm threshold and the pair are friends for the session —
+## the graph lives and dies with the scene, like the thought log it feeds.
+const NPC_BOND_MIN := -9
+const NPC_BOND_MAX := 9
+const NPC_BOND_FRIEND := 5
+const NPC_SOCIAL_SOUR_CHANCE := 0.12
+
+func _record_social_bond(state_a: Dictionary, state_b: Dictionary, soured: bool) -> void:
+	_ensure_npc_identity(state_a)
+	_ensure_npc_identity(state_b)
+	_shift_npc_bond(state_a, state_b, soured)
+	_shift_npc_bond(state_b, state_a, soured)
+
+## One side of the ledger: adjust this resident's regard for the other
+## and let them feel it — a quarrel, a friendship sealed, or (between
+## friends already) the odd shared laugh worth remembering.
+func _shift_npc_bond(state: Dictionary, other: Dictionary, soured: bool) -> void:
+	var other_name := String(other.get("npc_name", ""))
+	if other_name.is_empty():
+		return
+	var bonds: Dictionary = state.get("bonds", {}) if state.get("bonds") is Dictionary else {}
+	var before := int(bonds.get(other_name, 0))
+	var after := clampi(before + (-2 if soured else 1), NPC_BOND_MIN, NPC_BOND_MAX)
+	bonds[other_name] = after
+	state["bonds"] = bonds
+	var first_name := other_name.get_slice(" ", 0)
+	if soured:
+		_add_live_thought(state, "quarreled with %s" % first_name, -2)
+	elif after >= NPC_BOND_FRIEND and before < NPC_BOND_FRIEND:
+		# A friendship seals once; a bond that cools and warms again
+		# doesn't read as a fresh revelation.
+		var sealed: Dictionary = state.get("bond_sealed", {}) if state.get("bond_sealed") is Dictionary else {}
+		if not sealed.has(other_name):
+			sealed[other_name] = true
+			state["bond_sealed"] = sealed
+			_add_live_thought(state, "grew close to %s" % first_name, 2)
+	elif before >= NPC_BOND_FRIEND and _rng.randf() < 0.4:
+		_add_live_thought(state, "shared a laugh with %s" % first_name, 1)
+
+## The scheduler leaves the partner's name on a state whose social call
+## ran its course; settle those into the bond graph, the odd visit
+## souring into a quarrel instead of warming toward friendship.
+func _settle_completed_socials() -> void:
+	for state: Dictionary in _npc_states:
+		var done_partner := String(state.get("social_call_done", ""))
+		if done_partner.is_empty():
+			continue
+		state.erase("social_call_done")
+		var partner_index := _find_npc_state_by_name(done_partner)
+		if partner_index >= 0:
+			_record_social_bond(state, _npc_states[partner_index], _rng.randf() < NPC_SOCIAL_SOUR_CHANCE)
+
 ## The speaker notices their situation: an engaged activity or foul
 ## weather marks the thought log (once per activity instance, once per
 ## day for weather), so the mood follows the life actually lived.
@@ -6025,14 +6179,22 @@ func _chatter_context(state: Dictionary) -> Dictionary:
 	# A hall whose laired terror the walker has slain celebrates it.
 	var delivered := _is_underground_level() and _seamless_site_tile.x != 2147483647 \
 		and not WorldChronicleService.deliverance_for_tile(_world_settings_snapshot(), _seamless_site_tile).is_empty()
+	# On the surface the same deed travels as hearsay instead: the
+	# walker's freshest kill, by its storied name, retold on the roads.
+	var rumor := ""
+	if not _is_underground_level():
+		rumor = String(WorldChronicleService.latest_player_deed(_world_settings_snapshot()).get("display", ""))
 	return {
-		"raid": _raid_active,
+		# A beast storming the halls is a raid as far as the shouting goes.
+		"raid": _raid_active or _siege_active,
 		"guard": int(state.get("role", -1)) == ROLE_GUARD,
 		"combat": bool(state.get("combat_duty", false)) or bool(state.get("raid_duty", false)),
 		"weather": String(_current_weather.get("kind", "clear")),
+		"season": GameCalendar.season_for_day(_game_day - 1),
 		"underground": _is_underground_level(),
 		"stratum": String(_latest_stratum.get("name", "")),
-		"delivered": delivered
+		"delivered": delivered,
+		"rumor": rumor
 	}
 
 func _show_npc_dialogue(state: Dictionary) -> void:
@@ -6469,6 +6631,10 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 			return
 		if bool(npc_state.get("traveler", false)) and _try_open_traveler_trade(npc_state):
 			return
+		# The visiting hold's merchant trades before the keeper fallback: the
+		# caravan flag rides atop the keeper machinery it borrows.
+		if bool(npc_state.get("caravan_merchant", false)) and _try_open_caravan_trade(npc_state):
+			return
 		if bool(npc_state.get("wilds_keeper", false)) and _try_open_keeper_trade(npc_state):
 			return
 		_show_npc_dialogue(npc_state)
@@ -6501,6 +6667,10 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	if _try_forage(clicked_cell):
 		return
 	if _try_chop_tree(clicked_cell):
+		return
+	# Only close-in clicks reach the shoreline cast; a distant click stays
+	# travel, and open water itself still belongs to the coracle above.
+	if _is_player_adjacent_to_cell(clicked_cell) and _try_fish():
 		return
 	_request_player_move_to_cell(clicked_cell)
 
@@ -6573,6 +6743,14 @@ func _try_use_stairs_at_player_cell() -> bool:
 		var destination_index := _hold_state.current_level_index + 1
 		_pending_player_spawn_cell = _resolve_stair_spawn_cell(destination_index, "up", _player_cell)
 		_show_level(destination_index)
+		return true
+	# The Abyssal Stair: a down-hatch on the deepest STANDARD hall with no
+	# level yet beneath it. The step that takes it dares the deep - the
+	# column grows two levels past the starmetal and the descent rides the
+	# same machinery as every other stair. Once the abyss exists, the
+	# ordinary down-branch above handles this cell like any other hatch.
+	if stair_direction == "down" and _player_cell == _abyss_stair_cell_for_current_level():
+		_extend_column_to_abyss()
 		return true
 	if stair_direction == "up" and _hold_state.current_level_index > 0:
 		var destination_index := _hold_state.current_level_index - 1
@@ -6789,6 +6967,7 @@ func _update_npc_movement(delta: float) -> void:
 		WeatherService.is_storm(_current_weather),
 		_npc_pois
 	)
+	_settle_completed_socials()
 
 ## The dead answer to their hunger, not the clock.
 func _scheduled_states() -> Array[Dictionary]:
@@ -7682,6 +7861,12 @@ func _award_surface_lair_kill(state: Dictionary) -> void:
 	var beast_display := String(state.get("beast_display", "the beast"))
 	for resident: Dictionary in _npc_states:
 		_add_live_thought(resident, "saw %s slain" % beast_display, 2)
+	# A siege beaten back is its own memory, worth more than watching:
+	# these dwarves HELD when the terror came to them.
+	if _siege_active:
+		_siege_active = false
+		for resident: Dictionary in _npc_states:
+			_add_live_thought(resident, "stood the siege", 2)
 	if not _seamless_gate_key.is_empty():
 		_hold_deep_columns.erase(_seamless_gate_key)
 	_store_world_settings(settings)
@@ -10019,6 +10204,9 @@ func _dig_underhall_rock(cell: Vector2i) -> void:
 		var ore := _roll_stratum_ore(_latest_stratum)
 		if not ore.is_empty():
 			_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
+			# Ore raised from the hold's own strata may be the very haul
+			# a sworn chain asked for.
+			_advance_quest_progress("mine", String(ore.get("name", "")), int(ore.get("amount", 1)))
 			_spawn_floating_text(_ore_strike_text(ore), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
 	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.5, 0.48, 0.46, 1.0), 12)
 	# Rebuild the darkness when the dig demands it: a long tunnel can outrun
@@ -10077,10 +10265,22 @@ func _mine_underhall_vein(cell: Vector2i) -> void:
 	_record_underhall_edit("decor_erased", cell)
 	decor_layer.erase_cell(cell)
 	_actor_passable_cache.erase(cell)
+	# The Adamant Seam's own metal: an adamantine outcrop pays the deep's
+	# prize instead of a table roll - and the strike is heard. The ledger
+	# entry above already keeps the worked-out vein gone on revisit.
+	if _latest_adamantine_cells.has(cell):
+		_latest_adamantine_cells.erase(cell)
+		_add_to_inventory("Adamantine Ore", 1)
+		_spawn_floating_text("Struck adamantine!", _cell_center_position(cell), Color(0.75, 0.85, 1.0, 1.0))
+		TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.55, 0.62, 0.8, 1.0), 12)
+		_wake_seam_wardens(cell)
+		return
 	_add_to_inventory("Stone", 1)
 	var ore := _roll_stratum_ore(_latest_stratum)
 	if not ore.is_empty():
 		_add_to_inventory(String(ore.get("name", "")), int(ore.get("amount", 1)))
+		# A broken vein pays the stratum's ore - and a sworn chain's haul.
+		_advance_quest_progress("mine", String(ore.get("name", "")), int(ore.get("amount", 1)))
 		_spawn_floating_text(_ore_strike_text(ore), _cell_center_position(cell), Color(0.95, 0.85, 0.5, 1.0))
 	TileBreakFxService.chip_burst(city_layer, _cell_center_position(cell), Color(0.6, 0.58, 0.55, 1.0), 12)
 
@@ -10202,7 +10402,222 @@ func _apply_underhall_diffs(level_data: Dictionary, depth: int) -> void:
 			else:
 				carts.erase(cart_cell)
 	level_data["carts"] = carts
+	# The claimed hall's furnishings return with the halls: each recorded
+	# piece stamps back into the level's floor decor (AFTER the mined-out
+	# erasures, so a bedroll laid on a picked-over fungus patch survives),
+	# where the render pass paints it from the hold kit exactly like the
+	# strata's own outcrops.
+	var furnishings_variant: Variant = level_diff.get("claim_furniture")
+	if furnishings_variant is Dictionary:
+		for furnishing_key_variant: Variant in (furnishings_variant as Dictionary).keys():
+			var furnishing_cell := _parse_underhall_cell_key(String(furnishing_key_variant))
+			var furnishing_item := String((furnishings_variant as Dictionary)[furnishing_key_variant])
+			var furnishing_tile := String(CLAIM_FURNISHING_TILES.get(furnishing_item, ""))
+			if not furnishing_tile.is_empty():
+				floor_decor[furnishing_cell] = furnishing_tile
 	_restoring_underhall_diffs = false
+
+## --- The player's claim ------------------------------------------------------
+## A hall of your own in the deep: the walker plants a claim on one hall per
+## hold, names it, furnishes it, and banks loot in its strongbox. Everything
+## rides the underhall ledger in world settings - the claim and the chest's
+## contents as hold-wide fields beside the numeric depth pages (which
+## _apply_underhall_diffs never mistakes for a level: it reads str(depth)
+## only), the furnishings as per-depth "claim_furniture" edits - so an
+## evicted column regenerates the hall with the claim intact, the same
+## diff-and-replay covenant the dug tunnels and rails keep.
+const CLAIM_SETTINGS_FIELD := "claim"
+const CLAIM_CHEST_FIELD := "chest_store"
+const CLAIM_FURNISHING_TILES := {
+	"Dwarven Bedroll": "bed",
+	"Oak Chest": "chest"
+}
+## How far from the claim cell a furnishing may stand: a hall, not a sprawl.
+const CLAIM_FURNISHING_REACH := 6
+
+## This hold's page of the ledger, read fresh from world settings.
+func _claim_hold_diff() -> Dictionary:
+	if _seamless_hold_ledger_key.is_empty():
+		return {}
+	var settings: Dictionary = _world_settings_snapshot()
+	var diffs_variant: Variant = settings.get(UNDERHALL_DIFFS_KEY)
+	if not (diffs_variant is Dictionary):
+		return {}
+	var hold_variant: Variant = (diffs_variant as Dictionary).get(_seamless_hold_ledger_key)
+	if not (hold_variant is Dictionary):
+		return {}
+	return hold_variant as Dictionary
+
+## Writes one hold-wide field (the claim, the strongbox) onto this hold's
+## ledger page, next to the per-depth diffs.
+func _store_claim_field(field: String, value: Variant) -> void:
+	if _seamless_hold_ledger_key.is_empty():
+		return
+	var settings: Dictionary = _world_settings_snapshot()
+	var diffs: Dictionary = settings.get(UNDERHALL_DIFFS_KEY, {}) as Dictionary if settings.get(UNDERHALL_DIFFS_KEY) is Dictionary else {}
+	var hold_diff: Dictionary = diffs.get(_seamless_hold_ledger_key, {}) as Dictionary if diffs.get(_seamless_hold_ledger_key) is Dictionary else {}
+	hold_diff[field] = value
+	diffs[_seamless_hold_ledger_key] = hold_diff
+	settings[UNDERHALL_DIFFS_KEY] = diffs
+	_store_world_settings(settings)
+
+## The walker's name as the chronicle knows it: the character sheet's, or
+## the anonymous drifter every unnamed grave gets.
+func _player_display_name() -> String:
+	var player_name := "A wanderer"
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session != null and game_session.has_method("get_player_character"):
+		var character: Dictionary = game_session.call("get_player_character")
+		var character_name := String(character.get("name", "")).strip_edges()
+		if not character_name.is_empty():
+			player_name = character_name
+	return player_name
+
+## Plants (or moves - one claim per hold) the walker's claim on the hall
+## underfoot. Only a walkable floor cell in an underhall will take the
+## marker: no claiming the surface, a rock face, or a vein outcrop.
+func _claim_hall_here() -> bool:
+	if _hold_state.current_depth_kind() != "underhall" or _seamless_hold_ledger_key.is_empty():
+		return false
+	if not _is_passable_cell_for_actor(_player_cell):
+		return false
+	_store_claim_field(CLAIM_SETTINGS_FIELD, {
+		"cell": {"x": _player_cell.x, "y": _player_cell.y},
+		"name": "%s's Hall" % _player_display_name(),
+		"depth": _hold_state.current_level_index
+	})
+	_set_save_status("You claim this hall as your own.", Color(0.95, 0.85, 0.5, 1.0))
+	return true
+
+## The recorded claim_furniture page for one depth of this hold.
+func _claim_level_furnishings(depth: int) -> Dictionary:
+	var level_variant: Variant = _claim_hold_diff().get(str(depth))
+	if not (level_variant is Dictionary):
+		return {}
+	var furnishings_variant: Variant = (level_variant as Dictionary).get("claim_furniture")
+	if not (furnishings_variant is Dictionary):
+		return {}
+	return furnishings_variant as Dictionary
+
+## Sets a carried furnishing down at the walker's feet: the item leaves the
+## pack, its hold-kit tile stamps onto the level's floor decor (the same
+## by-reference dict the strata veins ride, so it persists on revisit), and
+## the ledger records it for replay onto every regeneration. Furnishings
+## keep to the claimed hall - same level, within reach of the claim cell -
+## and never bury a vein, a rail, a hatch, or each other.
+func _place_claim_furnishing(item_name: String) -> bool:
+	if not CLAIM_FURNISHING_TILES.has(item_name):
+		return false
+	if _hold_state.current_depth_kind() != "underhall":
+		_set_save_status("Furnishings belong in your hall below.", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	var claim_variant: Variant = _claim_hold_diff().get(CLAIM_SETTINGS_FIELD)
+	if not (claim_variant is Dictionary):
+		_set_save_status("Claim a hall first (H).", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	var claim := claim_variant as Dictionary
+	if int(claim.get("depth", -1)) != _hold_state.current_level_index:
+		_set_save_status("Your claimed hall lies on another level.", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	var claim_cell_dict := claim.get("cell", {}) as Dictionary
+	var claim_cell := Vector2i(int(claim_cell_dict.get("x", 0)), int(claim_cell_dict.get("y", 0)))
+	if maxi(absi(_player_cell.x - claim_cell.x), absi(_player_cell.y - claim_cell.y)) > CLAIM_FURNISHING_REACH:
+		_set_save_status("Too far from your claim to furnish here.", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	if int(_player_inventory.get(item_name, 0)) < 1:
+		return false
+	if _latest_floor_decor.has(_player_cell) or _rail_cells.has(_player_cell):
+		return false
+	for stair_variant: Variant in _hold_state.active_level_stairs.values():
+		if (stair_variant as Vector2i) == _player_cell:
+			return false
+	_add_to_inventory(item_name, -1)
+	_save_player_inventory()
+	var furnishing_tile := String(CLAIM_FURNISHING_TILES[item_name])
+	_latest_floor_decor[_player_cell] = furnishing_tile
+	_place_hold_tile(decor_layer, _player_cell, furnishing_tile)
+	_record_underhall_edit("claim_furniture", _player_cell, item_name)
+	_set_save_status("You set the %s in your hall." % item_name, Color(0.85, 0.9, 0.75, 1.0))
+	return true
+
+## Sleep in your own hall: standing on or beside your placed bedroll mends
+## every heart - the tavern's comfort, earned with your own hands.
+func _rest_at_bedroll() -> bool:
+	if _hold_state.current_depth_kind() != "underhall":
+		return false
+	var furnishings := _claim_level_furnishings(_hold_state.current_level_index)
+	var bedroll_near := false
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			var probe := _player_cell + Vector2i(dx, dy)
+			if String(furnishings.get(_underhall_cell_key(probe), "")) == "Dwarven Bedroll":
+				bedroll_near = true
+	if not bedroll_near:
+		return false
+	_player_hp = _player_max_hp
+	_update_hp_label()
+	_save_player_hp()
+	_set_save_status("You sleep soundly in your own hall.", Color(0.7, 0.95, 0.7, 1.0))
+	return true
+
+## True while an Oak Chest stands placed somewhere in this hold's claim -
+## the strongbox the deposit and withdraw ledgers speak to.
+func _site_has_claim_chest() -> bool:
+	var hold_diff := _claim_hold_diff()
+	for level_key_variant: Variant in hold_diff.keys():
+		var level_variant: Variant = hold_diff[level_key_variant]
+		if not (level_variant is Dictionary):
+			continue
+		var furnishings_variant: Variant = (level_variant as Dictionary).get("claim_furniture")
+		if not (furnishings_variant is Dictionary):
+			continue
+		for furnishing_variant: Variant in (furnishings_variant as Dictionary).values():
+			if String(furnishing_variant) == "Oak Chest":
+				return true
+	return false
+
+## The strongbox's contents (item -> count), copied out of the ledger so
+## callers mutate their own working copy and write back deliberately.
+func _claim_chest_store() -> Dictionary:
+	var store_variant: Variant = _claim_hold_diff().get(CLAIM_CHEST_FIELD)
+	if not (store_variant is Dictionary):
+		return {}
+	return (store_variant as Dictionary).duplicate()
+
+## Banks pack items in the hold's strongbox. The store lives on the ledger
+## page in world settings, so it survives cache eviction, regeneration and
+## session reload alongside the dug tunnels.
+func _chest_deposit(item_name: String, amount: int) -> bool:
+	if item_name.is_empty() or amount <= 0 or _seamless_hold_ledger_key.is_empty():
+		return false
+	if not _site_has_claim_chest():
+		_set_save_status("No chest stands in your hall to hold it.", Color(0.8, 0.8, 0.8, 1.0))
+		return false
+	if int(_player_inventory.get(item_name, 0)) < amount:
+		return false
+	_add_to_inventory(item_name, -amount)
+	_save_player_inventory()
+	var store := _claim_chest_store()
+	store[item_name] = int(store.get(item_name, 0)) + amount
+	_store_claim_field(CLAIM_CHEST_FIELD, store)
+	_set_save_status("Stored %s ×%d in your chest." % [item_name, amount], Color(0.85, 0.85, 0.7, 1.0))
+	return true
+
+## Takes banked items back out of the strongbox and into the pack.
+func _chest_withdraw(item_name: String, amount: int) -> bool:
+	if item_name.is_empty() or amount <= 0 or _seamless_hold_ledger_key.is_empty():
+		return false
+	var store := _claim_chest_store()
+	if int(store.get(item_name, 0)) < amount:
+		return false
+	store[item_name] = int(store.get(item_name, 0)) - amount
+	if int(store.get(item_name, 0)) <= 0:
+		store.erase(item_name)
+	_store_claim_field(CLAIM_CHEST_FIELD, store)
+	_add_to_inventory(item_name, amount)
+	_save_player_inventory()
+	_set_save_status("Took %s ×%d from your chest." % [item_name, amount], Color(0.85, 0.85, 0.7, 1.0))
+	return true
 
 ## --- Hold contracts ----------------------------------------------------------
 ## The notice board on the great-hall plaza posts two contracts per hold per
@@ -10227,10 +10642,19 @@ func _roll_hold_contract_offers(seed_key: String) -> Dictionary:
 	var deliver_ore := "Iron Ore" if offer_rng.randi_range(0, 1) == 0 else "Copper Ore"
 	var deliver_target := offer_rng.randi_range(6, 12)
 	var ore_worth := int(SettlementEconomyService.ITEM_VALUES.get(deliver_ore, 4))
+	# A storied name commands better terms: the board sweetens its coin
+	# for the walker the taverns already sing about.
+	var pay_tier := WorldChronicleService.renown_tier(WorldChronicleService.player_renown(_world_settings_snapshot()))
 	return {
-		"slay": {"target": slay_target, "pay": slay_target * offer_rng.randi_range(9, 13)},
-		"deliver": {"ore": deliver_ore, "target": deliver_target, "pay": deliver_target * (ore_worth + offer_rng.randi_range(2, 4))}
+		"slay": {"target": slay_target,
+			"pay": _renown_scaled_pay(slay_target * offer_rng.randi_range(9, 13), pay_tier)},
+		"deliver": {"ore": deliver_ore, "target": deliver_target,
+			"pay": _renown_scaled_pay(deliver_target * (ore_worth + offer_rng.randi_range(2, 4)), pay_tier)}
 	}
+
+## Contract coin grows a tenth per renown tier over the base offer.
+static func _renown_scaled_pay(base_pay: int, tier: int) -> int:
+	return base_pay * (100 + 10 * tier) / 100
 
 func _hold_contract_state(seed_key: String) -> Dictionary:
 	var settings: Dictionary = _world_settings_snapshot()
@@ -10386,6 +10810,58 @@ func _refresh_contracts_board() -> void:
 			action.focus_mode = Control.FOCUS_NONE
 			row.add_child(action)
 		_contracts_rows.add_child(row)
+	# Beneath the day's postings hang the hold's chains: a held oath shows
+	# the step it stands on; a free hand sees the stories still untold.
+	var active_chain := _active_quest_chain()
+	if not active_chain.is_empty() and String(active_chain.get("site", "")) != _contracts_board_seed_key:
+		var pledged := Label.new()
+		pledged.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		pledged.custom_minimum_size = Vector2(260, 0)
+		pledged.text = "Chain: your oath is held by another hold — finish that story first."
+		_contracts_rows.add_child(pledged)
+		return
+	if not active_chain.is_empty():
+		var chain := _quest_chain_by_id(_contracts_board_seed_key, String(active_chain.get("id", "")))
+		if chain.is_empty():
+			return
+		var steps := chain.get("steps", []) as Array
+		var step_index := clampi(int(active_chain.get("step_index", 0)), 0, steps.size() - 1)
+		var step := steps[step_index] as Dictionary
+		var count := int(step.get("count", 0))
+		var have := int(active_chain.get("progress", 0))
+		if String(step.get("kind", "")) == "deliver":
+			have = int(_player_inventory.get(String(step.get("item", "")), 0))
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		var text := Label.new()
+		text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		text.custom_minimum_size = Vector2(260, 0)
+		text.text = "Chain: %s — %s — %d/%d (%d coins)" % [String(chain.get("name", "")),
+			String(step.get("label", "")), mini(have, count), count, int(chain.get("reward", 0))]
+		row.add_child(text)
+		if String(step.get("kind", "")) == "deliver" and have >= count:
+			var action := Button.new()
+			action.text = "Deliver"
+			action.focus_mode = Control.FOCUS_NONE
+			action.pressed.connect(_deliver_quest_items)
+			row.add_child(action)
+		_contracts_rows.add_child(row)
+		return
+	for chain: Dictionary in _offered_hold_quest_chains(_contracts_board_seed_key):
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		var text := Label.new()
+		text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		text.custom_minimum_size = Vector2(260, 0)
+		var steps := chain.get("steps", []) as Array
+		text.text = "Chain: %s — %d deeds (%d coins)" % [String(chain.get("name", "")), steps.size(), int(chain.get("reward", 0))]
+		row.add_child(text)
+		var action := Button.new()
+		action.text = "Accept"
+		action.focus_mode = Control.FOCUS_NONE
+		action.pressed.connect(_accept_quest_chain.bind(String(chain.get("id", ""))))
+		row.add_child(action)
+		_contracts_rows.add_child(row)
 
 func _accept_hold_contract(kind: String) -> void:
 	if _contracts_board_seed_key.is_empty():
@@ -10434,6 +10910,248 @@ func _turn_in_hold_contract(kind: String) -> void:
 		_spawn_floating_text("+%d coins" % pay, _player_sprite.position + Vector2(0, -14), Color(0.95, 0.8, 0.4, 1.0))
 	_set_save_status("Contract fulfilled — %d coins from the hold." % pay, Color(0.7, 0.95, 0.7, 1.0))
 	_refresh_contracts_board()
+
+## --- Quest chains ------------------------------------------------------------
+## Contracts that grow into stories: alongside the day's postings the board
+## carries the hold's CHAINS - multi-step works rolled once from the hold's
+## seed (a story does not reroll at dawn). Every deed a chain asks for is
+## one the hold already knows how to demand: culls in its own underhalls,
+## ore its own strata actually carry, a delivery signed at this board - and
+## the purse at the end pays well above any single day's contract. One
+## chain holds the walker's oath at a time; the oath rides world settings
+## so the story survives every scene swap.
+const QUEST_CHAIN_ACTIVE_SETTINGS_KEY := "active_quest_chain"
+const QUEST_CHAINS_DONE_SETTINGS_KEY := "quest_chains_done"
+
+## The geology the chains mine by: the recorded profile of this hold's own
+## overworld tile when a gate carries it, else the same seed-stable profile
+## the deep column digs through - so a chain never asks for ore the picks
+## below could not strike.
+func _quest_hold_geology(seed_key: String) -> Dictionary:
+	for gate: Dictionary in _surface_gates:
+		var site := gate.get("site", {}) as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		if String(site.get("seed", "")).strip_edges() != seed_key:
+			continue
+		var geology_variant: Variant = site.get("geology")
+		if geology_variant is Dictionary:
+			return geology_variant as Dictionary
+	return GeologyService.profile_for_seed(hash(seed_key))
+
+## Every ore this hold's strata yield, walked level by level down the same
+## ladder the deep column is carved through.
+func _hold_strata_ore_names(seed_key: String) -> Array[String]:
+	var geology := _quest_hold_geology(seed_key)
+	var names: Array[String] = []
+	for depth in range(1, HOLD_DEEP_LEVELS + 1):
+		var stratum := DepthStrataService.stratum_for_level_with_geology(geology, depth, HOLD_DEEP_LEVELS + 1)
+		for drop_variant: Variant in (stratum.get("ore_drops", []) as Array):
+			var drop_name := String((drop_variant as Dictionary).get("name", ""))
+			if not drop_name.is_empty() and not names.has(drop_name):
+				names.append(drop_name)
+	return names
+
+## The hold's three stories, deterministic from its seed alone. Each step
+## reuses a working the hold already runs - slay, mine, deliver - and each
+## purse outweighs a full day of single contracts.
+func _roll_hold_quest_chains(seed_key: String) -> Array[Dictionary]:
+	var chain_rng := RandomNumberGenerator.new()
+	chain_rng.seed = hash("hold_quest_chain|%s" % seed_key)
+	var ores: Array[String] = _hold_strata_ore_names(seed_key)
+	if ores.is_empty():
+		ores.append("Iron Ore")
+	var chains: Array[Dictionary] = []
+	# The Deep Roads: clear the way down, raise the ore, bring it home.
+	var road_cull := chain_rng.randi_range(3, 4)
+	var road_ore := ores[chain_rng.randi_range(0, ores.size() - 1)]
+	var road_haul := chain_rng.randi_range(4, 6)
+	chains.append({
+		"id": "deep_roads",
+		"name": "The Deep Roads",
+		"steps": [
+			{"kind": "slay", "count": road_cull, "label": "Cull %d deep beasts" % road_cull},
+			{"kind": "mine", "item": road_ore, "count": road_haul, "label": "Mine %d %s" % [road_haul, road_ore]},
+			{"kind": "deliver", "item": road_ore, "count": road_haul, "label": "Deliver %d %s" % [road_haul, road_ore]}
+		],
+		"reward": 120 + road_cull * 8 + road_haul * 6 + chain_rng.randi_range(0, 20)
+	})
+	# The Hungry Dark: feed the forges first, then answer what stirs below.
+	var dark_ore := ores[chain_rng.randi_range(0, ores.size() - 1)]
+	var dark_haul := chain_rng.randi_range(3, 5)
+	var dark_cull := chain_rng.randi_range(4, 6)
+	chains.append({
+		"id": "hungry_dark",
+		"name": "The Hungry Dark",
+		"steps": [
+			{"kind": "mine", "item": dark_ore, "count": dark_haul, "label": "Mine %d %s" % [dark_haul, dark_ore]},
+			{"kind": "deliver", "item": dark_ore, "count": dark_haul, "label": "Deliver %d %s" % [dark_haul, dark_ore]},
+			{"kind": "slay", "count": dark_cull, "label": "Cull %d deep beasts" % dark_cull}
+		],
+		"reward": 130 + dark_cull * 9 + dark_haul * 5 + chain_rng.randi_range(0, 25)
+	})
+	# The Old Vein: prove the seam still pays, then thin what guards it.
+	var vein_ore := ores[chain_rng.randi_range(0, ores.size() - 1)]
+	var vein_haul := chain_rng.randi_range(2, 4)
+	var vein_cull := chain_rng.randi_range(2, 3)
+	chains.append({
+		"id": "old_vein",
+		"name": "The Old Vein",
+		"steps": [
+			{"kind": "deliver", "item": vein_ore, "count": vein_haul, "label": "Deliver %d %s" % [vein_haul, vein_ore]},
+			{"kind": "slay", "count": vein_cull, "label": "Cull %d deep beasts" % vein_cull}
+		],
+		"reward": 115 + vein_cull * 10 + vein_haul * 7 + chain_rng.randi_range(0, 15)
+	})
+	return chains
+
+## What the board still posts: a finished story is told - the hold never
+## asks for it twice.
+func _offered_hold_quest_chains(seed_key: String) -> Array[Dictionary]:
+	var offered: Array[Dictionary] = []
+	for chain: Dictionary in _roll_hold_quest_chains(seed_key):
+		if not _quest_chain_done(seed_key, String(chain.get("id", ""))):
+			offered.append(chain)
+	return offered
+
+func _quest_chain_by_id(seed_key: String, chain_id: String) -> Dictionary:
+	for chain: Dictionary in _roll_hold_quest_chains(seed_key):
+		if String(chain.get("id", "")) == chain_id:
+			return chain
+	return {}
+
+func _active_quest_chain() -> Dictionary:
+	var settings: Dictionary = _world_settings_snapshot()
+	return settings.get(QUEST_CHAIN_ACTIVE_SETTINGS_KEY, {}) as Dictionary if settings.get(QUEST_CHAIN_ACTIVE_SETTINGS_KEY) is Dictionary else {}
+
+func _store_active_quest_chain(state: Dictionary) -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	if state.is_empty():
+		settings.erase(QUEST_CHAIN_ACTIVE_SETTINGS_KEY)
+	else:
+		settings[QUEST_CHAIN_ACTIVE_SETTINGS_KEY] = state
+	_store_world_settings(settings)
+
+func _quest_chain_done(seed_key: String, chain_id: String) -> bool:
+	var settings: Dictionary = _world_settings_snapshot()
+	var done: Dictionary = settings.get(QUEST_CHAINS_DONE_SETTINGS_KEY, {}) as Dictionary if settings.get(QUEST_CHAINS_DONE_SETTINGS_KEY) is Dictionary else {}
+	var site_done: Dictionary = done.get(seed_key, {}) as Dictionary if done.get(seed_key) is Dictionary else {}
+	return bool(site_done.get(chain_id, false))
+
+func _record_quest_chain_done(seed_key: String, chain_id: String) -> void:
+	var settings: Dictionary = _world_settings_snapshot()
+	var done: Dictionary = settings.get(QUEST_CHAINS_DONE_SETTINGS_KEY, {}) as Dictionary if settings.get(QUEST_CHAINS_DONE_SETTINGS_KEY) is Dictionary else {}
+	var site_done: Dictionary = done.get(seed_key, {}) as Dictionary if done.get(seed_key) is Dictionary else {}
+	site_done[chain_id] = true
+	done[seed_key] = site_done
+	settings[QUEST_CHAINS_DONE_SETTINGS_KEY] = done
+	_store_world_settings(settings)
+
+## Signing a chain: one oath at a time, never a story already told here.
+## The oath binds to the hold whose board posted it, so its culls and
+## hauls are owed to THESE deeps and no other's.
+func _accept_quest_chain(chain_id: String) -> void:
+	if _contracts_board_seed_key.is_empty():
+		return
+	if not _active_quest_chain().is_empty():
+		return
+	if _quest_chain_done(_contracts_board_seed_key, chain_id):
+		return
+	var chain := _quest_chain_by_id(_contracts_board_seed_key, chain_id)
+	if chain.is_empty():
+		return
+	_store_active_quest_chain({"id": chain_id, "site": _contracts_board_seed_key, "step_index": 0, "progress": 0})
+	var steps := chain.get("steps", []) as Array
+	var first_label := String((steps[0] as Dictionary).get("label", "")) if steps.size() > 0 else String("")
+	_set_save_status("Chain signed: %s — %s." % [String(chain.get("name", "")), first_label], Color(0.85, 0.9, 0.7, 1.0))
+	_refresh_contracts_board()
+
+## The chain's walking edge: every hook feeds deeds through here, and only
+## the ACTIVE step of the ACTIVE chain drinks them. Slay counts any beast
+## felled where the hooks fire; mine counts only the step's own ore; the
+## delivery never trickles - it closes at the board with the goods in hand.
+func _advance_quest_progress(step_kind: String, item_name: String, amount: int) -> void:
+	if amount <= 0:
+		return
+	var active := _active_quest_chain()
+	if active.is_empty():
+		return
+	var chain_site := String(active.get("site", ""))
+	# A deed done in some other hold's deeps honors no one here.
+	if not _seamless_hold_ledger_key.is_empty() and _seamless_hold_ledger_key != chain_site:
+		return
+	var chain := _quest_chain_by_id(chain_site, String(active.get("id", "")))
+	if chain.is_empty():
+		return
+	var steps := chain.get("steps", []) as Array
+	var step_index := int(active.get("step_index", 0))
+	if step_index < 0 or step_index >= steps.size():
+		return
+	var step := steps[step_index] as Dictionary
+	if String(step.get("kind", "")) != step_kind:
+		return
+	if step_kind == "deliver":
+		return
+	if step_kind == "mine" and String(step.get("item", "")) != item_name:
+		return
+	var count := int(step.get("count", 0))
+	var progress := mini(int(active.get("progress", 0)) + amount, count)
+	active["progress"] = progress
+	_store_active_quest_chain(active)
+	if progress >= count:
+		_complete_active_quest_step(chain, active)
+
+## A step closes: the story turns its page, or - on the last page - the
+## purse opens, the ticker celebrates, and the hold marks the tale told.
+func _complete_active_quest_step(chain: Dictionary, active: Dictionary) -> void:
+	var steps := chain.get("steps", []) as Array
+	var next_index := int(active.get("step_index", 0)) + 1
+	if next_index < steps.size():
+		active["step_index"] = next_index
+		active["progress"] = 0
+		_store_active_quest_chain(active)
+		var next_label := String((steps[next_index] as Dictionary).get("label", ""))
+		_set_save_status("Quest advanced: %s" % next_label, Color(0.8, 0.85, 0.95, 1.0))
+		_refresh_contracts_board()
+		return
+	var reward := int(chain.get("reward", 0))
+	_record_quest_chain_done(String(active.get("site", "")), String(active.get("id", "")))
+	_store_active_quest_chain({})
+	_adjust_coins(reward)
+	GameAudioService.play_sfx(self, "coin")
+	if _player_sprite != null:
+		_spawn_floating_text("+%d coins" % reward, _player_sprite.position + Vector2(0, -14), Color(0.95, 0.8, 0.4, 1.0))
+	_set_save_status("The chain %s is done — %d coins from the hold." % [String(chain.get("name", "")), reward], Color(0.7, 0.95, 0.7, 1.0))
+	_refresh_contracts_board()
+
+## The board takes the chain's delivery: checks the pack, consumes the
+## goods, and turns the page. Refuses politely when the pack runs short or
+## the story is not standing at a delivery.
+func _deliver_quest_items() -> bool:
+	if _contracts_board_seed_key.is_empty():
+		return false
+	var active := _active_quest_chain()
+	if active.is_empty() or String(active.get("site", "")) != _contracts_board_seed_key:
+		return false
+	var chain := _quest_chain_by_id(_contracts_board_seed_key, String(active.get("id", "")))
+	if chain.is_empty():
+		return false
+	var steps := chain.get("steps", []) as Array
+	var step_index := int(active.get("step_index", 0))
+	if step_index < 0 or step_index >= steps.size():
+		return false
+	var step := steps[step_index] as Dictionary
+	if String(step.get("kind", "")) != "deliver":
+		return false
+	var item := String(step.get("item", ""))
+	var count := int(step.get("count", 0))
+	if int(_player_inventory.get(item, 0)) < count:
+		_set_save_status("The board wants %d %s — your pack runs short." % [count, item], Color(0.95, 0.7, 0.5, 1.0))
+		return false
+	_add_to_inventory(item, -count)
+	active["progress"] = count
+	_complete_active_quest_step(chain, active)
+	return true
 
 ## --- Minecart rails in the deep -------------------------------------------
 ## The hold scene's own rail-and-cart system, mirrored for the seamless
@@ -11340,6 +12058,10 @@ func _generate_hold_deep_column(site: Dictionary) -> Array[Dictionary]:
 		# level - dug tunnels reopen, worked-out veins stay gone, laid rails
 		# and moved carts land on top of the generated line.
 		_apply_underhall_diffs(level_data, depth)
+		# The deepest surveyed hall hides one more way down: the Abyssal
+		# Stair, dealt on the level's own seed, waiting past the starmetal.
+		if depth == HOLD_DEEP_LEVELS:
+			_stamp_abyss_stair(level_data, level_seed)
 		column.append(level_data)
 	_generating_hold_column = false
 	_hold_state.selected_hold_population = saved_selected
@@ -11385,6 +12107,9 @@ func _populate_underhall_creatures(level_data: Dictionary) -> void:
 			var prowler := _surface_creatures[_surface_creatures.size() - 1]
 			WildlifeService.apply_species(prowler,
 				WildlifeService.cave_species_for_slot(int(prowler.get("def_index", 0)), _rng))
+			# An abyss stratum re-casts its kin after the species dress: the
+			# Magma Sea's prowlers burn cinder-red and hit a tier harder.
+			_apply_abyss_creature_cast(prowler)
 	# The starmetal's guardians: the stratum's meanest slot, mustered
 	# around the deposit. The deposit cell itself is a solid outcrop (and
 	# its flanks may hold veins), so each guard takes the first open cell
@@ -11416,7 +12141,7 @@ func _populate_underhall_creatures(level_data: Dictionary) -> void:
 ## for any boss:true state - trophy, hoard, and the world remembering.
 ## The slain register is re-checked every show, so it never respawns.
 func _maybe_spawn_underhall_lair_boss() -> void:
-	if _underhall_lair_beast.is_empty() or not _hold_state.is_deepest():
+	if _underhall_lair_beast.is_empty() or _hold_state.current_level_index != _deepest_standard_level_index():
 		return
 	if _hold_state.current_depth_kind() != "underhall":
 		return
@@ -11439,6 +12164,16 @@ func _maybe_spawn_underhall_lair_boss() -> void:
 		if lair_distance > best_distance:
 			best_distance = lair_distance
 			boss_cell = hall_cell
+	if _spawn_underhall_boss_at(boss_cell).is_empty():
+		return
+	_set_save_status("The deep stirs — %s nests here." % String(_underhall_lair_beast.get("display", "a nameless beast")), Color(1.0, 0.55, 0.45, 1.0))
+
+## One beast, wherever it stands: the chronicle's terror grown and tinted
+## by its boss spec on the given cell. The deepest-level nest and a siege
+## both spawn through here, so _strike_surface_creature's death branch
+## routes the same kill - trophy, hoard, the world remembering - no
+## matter which door the beast came in by.
+func _spawn_underhall_boss_at(boss_cell: Vector2i) -> Dictionary:
 	var spec: Dictionary = UndergroundCreatureService.boss_spec_for_kind(String(_underhall_lair_beast.get("kind", "dragon")))
 	var size_before := _surface_creatures.size()
 	SurfaceLifeService.spawn_creature(
@@ -11446,7 +12181,7 @@ func _maybe_spawn_underhall_lair_boss() -> void:
 		boss_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
 	)
 	if _surface_creatures.size() <= size_before:
-		return
+		return {}
 	var boss := _surface_creatures[_surface_creatures.size() - 1]
 	var display := String(_underhall_lair_beast.get("display", "a nameless beast"))
 	boss["site_key"] = _seamless_hold_ledger_key
@@ -11465,7 +12200,77 @@ func _maybe_spawn_underhall_lair_boss() -> void:
 	var boss_sprite := boss.get("sprite") as Sprite2D
 	if boss_sprite != null:
 		UndergroundCreatureService.apply_boss_visuals(boss_sprite, spec, WorldChronicleService._capitalize_first(display))
-	_set_save_status("The deep stirs — %s nests here." % display, Color(1.0, 0.55, 0.45, 1.0))
+	return boss
+
+## --- hold sieges -------------------------------------------------------------
+## While the laired terror lives, the deep is never safe: once in a rare
+## while it leaves its nest and storms whatever level the walker stands
+## on. Rolled on the hourly clock hook, long-cooled between assaults.
+func _maybe_start_siege() -> void:
+	if _siege_active or not _is_underground_level():
+		return
+	if _hold_state.current_depth_kind() != "underhall" or _underhall_lair_beast.is_empty():
+		return
+	if float(_game_day) * 24.0 + _game_hour < _siege_cooldown_until:
+		return
+	if _rng.randf() >= SIEGE_CHANCE_PER_HOUR:
+		return
+	_begin_hold_siege()
+
+## The beast breaks in at the level's rim, far from the walker, and the
+## whole watch drops its rounds to meet it. Slaying it routes exactly like
+## the nest kill - it is the same beast - plus every soul in the halls
+## remembers having stood the siege.
+func _begin_hold_siege() -> void:
+	if _siege_active or _underhall_lair_beast.is_empty():
+		return
+	if _hold_state.current_depth_kind() != "underhall":
+		return
+	if WorldChronicleService.is_beast_slain(_world_settings_snapshot(), String(_underhall_lair_beast.get("name", ""))):
+		# A slain terror storms nothing; the register outlives the capture.
+		_underhall_lair_beast = {}
+		return
+	for existing: Dictionary in _surface_creatures:
+		if bool(existing.get("boss", false)):
+			return
+	var breach_cell := _siege_breach_cell()
+	if breach_cell == DwarfHoldStateModel.INVALID_CELL:
+		return
+	if _spawn_underhall_boss_at(breach_cell).is_empty():
+		return
+	_siege_active = true
+	_siege_cooldown_until = float(_game_day) * 24.0 + _game_hour + SIEGE_COOLDOWN_HOURS
+	# The watch musters: combat duty exactly as the defense pass grants it
+	# (out of the scheduler, into the fight); the widened siege engage
+	# range below keeps the duty held until the beast or the level is gone.
+	for state: Dictionary in _npc_states:
+		if int(state.get("role", -1)) == ROLE_GUARD:
+			state["combat_duty"] = true
+	GameAudioService.play_sfx(self, "raid_horn")
+	_set_save_status("%s storms the halls!" % WorldChronicleService._capitalize_first(String(_underhall_lair_beast.get("display", "a nameless beast"))), Color(1.0, 0.45, 0.35, 1.0))
+
+## Where the siege breaks in: a walkable hall cell hugging the level's
+## bounds, as far from the walker as the rim allows - the beast comes out
+## of the dark at the edge of the halls, never out of thin air underfoot.
+func _siege_breach_cell() -> Vector2i:
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in _latest_grid.keys():
+		if int(_latest_grid[cell_variant]) == CELL_HALL and not _latest_floor_decor.has(cell_variant):
+			hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return DwarfHoldStateModel.INVALID_CELL
+	var bounds := _find_bounds(_latest_grid)
+	var breach := DwarfHoldStateModel.INVALID_CELL
+	var best_score := -1.0e12
+	for hall_cell: Vector2i in hall_cells:
+		var rim_distance := mini(
+			mini(hall_cell.x - bounds.position.x, bounds.end.x - 1 - hall_cell.x),
+			mini(hall_cell.y - bounds.position.y, bounds.end.y - 1 - hall_cell.y))
+		var score := Vector2(hall_cell - _player_cell).length() - float(rim_distance) * 4.0
+		if score > best_score:
+			best_score = score
+			breach = hall_cell
+	return breach
 
 ## Still water in the deep: wobble-edged pools carved into the undug rock
 ## beside the halls - the fungal caverns hold real lakes, the other strata
@@ -11494,6 +12299,337 @@ func _carve_underhall_pools(grid: Dictionary, stratum: Dictionary, rng: RandomNu
 				var pool_cell := center + Vector2i(dx, dy)
 				if int(grid.get(pool_cell, CELL_ROCK)) == CELL_ROCK:
 					grid[pool_cell] = DwarfHoldTileService.CELL_WATER
+
+## --- The Abyssal Deep ---------------------------------------------------------
+## Below the starmetal the survey ends. One special hatch - the Abyssal
+## Stair - hides on a hold's deepest surveyed hall; taking it appends two
+## more levels to the live column: the Magma Sea (depth 4), then the
+## Adamant Seam (depth 5). Hold columns only; a cave's dark bottom stays
+## its bottom. Everything below regenerates deterministically from the
+## hold seed and the underhall ledger replays the walker's edits, exactly
+## as the standard levels do - the abyss simply never joins the cached
+## three-level column, so the surveyed maps other systems trust (the lair
+## beast's nest above all) never shift.
+
+const ABYSS_DEEP_LEVELS := 2
+const LAVA_STEP_HEARTS := 2
+
+## The deepest SURVEYED level of the live column: the last level that is
+## not abyss. This is where the chronicle's lair beast nests - appending
+## the abyss must never lure it deeper than the starmetal.
+func _deepest_standard_level_index() -> int:
+	var deepest := _hold_state.generated_levels.size() - 1
+	while deepest > 0 and bool((_hold_state.generated_levels[deepest] as Dictionary).get("abyss", false)):
+		deepest -= 1
+	return deepest
+
+## The current level's Abyssal Stair cell, or the invalid sentinel when
+## the level carries none (only a hold column's deepest surveyed hall does).
+func _abyss_stair_cell_for_current_level() -> Vector2i:
+	var cell_variant: Variant = _hold_state.current_level().get("abyss_stair_cell")
+	return (cell_variant as Vector2i) if cell_variant is Vector2i else DwarfHoldStateModel.INVALID_CELL
+
+## Stamps the one Abyssal Stair onto a freshly dug deepest hall, dealt on
+## the level's own seed. It rides the floor decor as a hold stairway_down
+## piece: the decor painter renders it, the hold atlas walks it, and the
+## stair reader answers "down" on it - so the whole stair-arrival pipeline
+## works unmodified. Kept OUT of stair_cells: the rail line and the spawn
+## resolver only ever know the surveyed stairs.
+func _stamp_abyss_stair(level_data: Dictionary, level_seed: String) -> void:
+	var grid := level_data.get("grid", {}) as Dictionary
+	var floor_decor := level_data.get("floor_decor", {}) as Dictionary
+	var stair_cells := level_data.get("stair_cells", {}) as Dictionary
+	var rails := level_data.get("rails", []) as Array
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in grid.keys():
+		if int(grid[cell_variant]) != CELL_HALL:
+			continue
+		if floor_decor.has(cell_variant) or rails.has(cell_variant as Vector2i):
+			continue
+		hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	var stair_rng := RandomNumberGenerator.new()
+	stair_rng.seed = hash("%s::abyss_stair" % level_seed)
+	# Away from the entry stairs: of a fixed hand of candidates, keep the
+	# one with the most clearance from every surveyed stair (good enough
+	# past ~14 tiles), so the hatch is a find, not a doormat.
+	var best_cell := hall_cells[0]
+	var best_clearance := -1
+	for _deal in range(60):
+		var candidate := hall_cells[stair_rng.randi_range(0, hall_cells.size() - 1)]
+		var clearance := 2147483647
+		for stair_variant: Variant in stair_cells.values():
+			var stair_cell := stair_variant as Vector2i
+			clearance = mini(clearance, maxi(absi(candidate.x - stair_cell.x), absi(candidate.y - stair_cell.y)))
+		if clearance > best_clearance:
+			best_clearance = clearance
+			best_cell = candidate
+		if best_clearance >= 14:
+			break
+	floor_decor[best_cell] = "stairway_down"
+	level_data["abyss_stair_cell"] = best_cell
+
+## Names the Abyssal Stair over its hatch, the way the surface gates name
+## their holds. Rides the gate-label registry so the next level switch
+## frees it with the rest.
+func _spawn_abyss_stair_label(level_data: Dictionary) -> void:
+	var cell_variant: Variant = level_data.get("abyss_stair_cell")
+	if not (cell_variant is Vector2i):
+		return
+	var stair_label := Label.new()
+	stair_label.text = "The Abyssal Stair"
+	stair_label.add_theme_font_size_override("font_size", 18)
+	stair_label.add_theme_color_override("font_color", Color(0.98, 0.62, 0.5, 1.0))
+	stair_label.add_theme_color_override("font_outline_color", Color(0.1, 0.05, 0.05, 1.0))
+	stair_label.add_theme_constant_override("outline_size", 5)
+	stair_label.position = city_layer.map_to_local((cell_variant as Vector2i) + Vector2i(-2, -2))
+	stair_label.z_index = 30
+	city_layer.add_child(stair_label)
+	_surface_gate_labels.append(stair_label)
+
+## Dares the deep: appends the two abyss levels (depths 4 and 5) to the
+## live column if they are not already dug, then descends onto the Magma
+## Sea's entry stair. Re-dug deterministically from the hold seed on each
+## extension - the deep-column cache keeps only the surveyed three - and
+## the underhall ledger replays the walker's edits, so nothing mined or
+## dug below is ever lost.
+func _extend_column_to_abyss() -> void:
+	var first_abyss_index := HOLD_DEEP_LEVELS + 1
+	if _hold_state.generated_levels.size() <= first_abyss_index:
+		var hold_seed := _seamless_hold_ledger_key
+		if hold_seed.is_empty():
+			hold_seed = "hold"
+		for depth in range(first_abyss_index, first_abyss_index + ABYSS_DEEP_LEVELS):
+			_hold_state.generated_levels.append(_generate_abyss_level(hold_seed, depth))
+		_set_save_status("The Abyssal Stair opens — the earth below the starmetal takes you.", Color(1.0, 0.62, 0.5, 1.0))
+	_pending_player_spawn_cell = _resolve_stair_spawn_cell(first_abyss_index, "up", _player_cell)
+	_show_level(first_abyss_index)
+
+## One level of the Abyssal Deep, deterministic on the hold seed. Depth 4
+## is the Magma Sea: a broad basalt cavern whose floor breaks into molten
+## pools. Depth 5 is the Adamant Seam: near-solid rock, one carved pocket
+## and a few worm-tunnels, threaded with adamantine outcrops. Both ride
+## the same underhall machinery as the standard levels (mining, darkness,
+## creatures, the ledger).
+func _generate_abyss_level(hold_seed: String, depth: int) -> Dictionary:
+	var abyss_rng := RandomNumberGenerator.new()
+	abyss_rng.seed = hash("%s::abyss_%d" % [hold_seed, depth])
+	var stratum := DepthStrataService.abyss_stratum(depth)
+	var magma := depth == HOLD_DEEP_LEVELS + 1
+	var half := Vector2i(26, 19) if magma else Vector2i(19, 14)
+	var grid: Dictionary = {}
+	for y in range(-half.y, half.y + 1):
+		for x in range(-half.x, half.x + 1):
+			grid[Vector2i(x, y)] = CELL_ROCK
+	# Hollows chained across the rock - the sea's are wide shores, the
+	# seam's a tight pocket and whatever its worm-tunnels reach.
+	var centers: Array[Vector2i] = [Vector2i(-half.x + 7, 0)]
+	var hollow_count := abyss_rng.randi_range(5, 7) if magma else abyss_rng.randi_range(3, 4)
+	for _hollow in range(hollow_count - 1):
+		var previous := centers[centers.size() - 1]
+		var candidate := previous + Vector2i(abyss_rng.randi_range(5, 12), abyss_rng.randi_range(-8, 8))
+		candidate.x = clampi(candidate.x, -half.x + 4, half.x - 4)
+		candidate.y = clampi(candidate.y, -half.y + 4, half.y - 4)
+		centers.append(candidate)
+	for center_index in range(centers.size()):
+		var center := centers[center_index]
+		var radius := abyss_rng.randi_range(4, 6) if magma else abyss_rng.randi_range(2, 3)
+		for dy in range(-radius - 2, radius + 3):
+			for dx in range(-radius - 2, radius + 3):
+				var wobble := 1.0 + 0.35 * sin(float(dx) * 0.9 + float(dy) * 1.3 + float(abyss_rng.randi_range(0, 6)))
+				if Vector2(dx, dy).length() <= float(radius) * wobble:
+					var cell := center + Vector2i(dx, dy)
+					if grid.has(cell):
+						grid[cell] = CELL_HALL
+		if center_index > 0:
+			var walker := centers[center_index - 1]
+			var goal := center
+			for _step in range(200):
+				if walker == goal:
+					break
+				var toward := goal - walker
+				var step := Vector2i.ZERO
+				if absi(toward.x) > absi(toward.y) or (toward.y != 0 and abyss_rng.randi_range(0, 2) == 0):
+					step = Vector2i(signi(toward.x) if toward.x != 0 else 0, 0)
+				if step == Vector2i.ZERO:
+					step = Vector2i(0, signi(toward.y) if toward.y != 0 else 0)
+				walker += step
+				if grid.has(walker):
+					grid[walker] = CELL_HALL
+				# The sea's tunnels run two wide; the seam keeps single worm-holes.
+				if magma:
+					var widen := walker + (Vector2i(0, 1) if step.x != 0 else Vector2i(1, 0))
+					if grid.has(widen):
+						grid[widen] = CELL_HALL
+	# Stairs: the way up in the first hollow; a way further down only
+	# while the abyss goes deeper still.
+	var stair_cells: Dictionary = {"up": centers[0]}
+	grid[centers[0]] = CELL_HALL
+	if depth < HOLD_DEEP_LEVELS + ABYSS_DEEP_LEVELS:
+		var down_center := centers[centers.size() - 1]
+		stair_cells["down"] = down_center
+		grid[down_center] = CELL_HALL
+	var floor_decor: Dictionary = {}
+	for stair_variant: Variant in stair_cells.values():
+		floor_decor[stair_variant as Vector2i] = "protected"
+	DepthStrataService.stamp_stratum_features(grid, floor_decor, stratum, abyss_rng)
+	for stair_variant: Variant in stair_cells.values():
+		floor_decor.erase(stair_variant as Vector2i)
+	var lava_cells: Dictionary = {}
+	var adamantine_cells: Dictionary = {}
+	if magma:
+		_carve_lava_pools(grid, floor_decor, stair_cells, lava_cells, abyss_rng)
+	else:
+		_stamp_adamantine_veins(grid, floor_decor, stair_cells, adamantine_cells, abyss_rng)
+	var level_data := {
+		"kind": "underhall",
+		"abyss": true,
+		"grid": grid,
+		"door_cells": {},
+		"zone_counts": {},
+		"requested_zone_counts": {},
+		"civic_buildings_by_id": {},
+		"civic_building_type_map": {},
+		"residence_type_map": {},
+		"resident_target": 0,
+		"village_yards": [],
+		"floor_decor": floor_decor,
+		"stratum": stratum,
+		"stair_cells": stair_cells,
+		"starmetal_cells": [],
+		"lava_cells": lava_cells,
+		"adamantine_cells": adamantine_cells
+	}
+	_apply_underhall_diffs(level_data, depth)
+	return level_data
+
+## The Magma Sea's pools: wobble-rimmed melt blown into the cavern floor
+## and the rock beside it. Unlike the still pools of the upper strata the
+## melt EATS dug floor (never a stair's landing, never an outcrop) - the
+## sea is the hazard and the shores are the path.
+func _carve_lava_pools(grid: Dictionary, floor_decor: Dictionary, stair_cells: Dictionary, lava_cells: Dictionary, rng: RandomNumberGenerator) -> void:
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in grid.keys():
+		if int(grid[cell_variant]) == CELL_HALL:
+			hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	var landings: Dictionary = {}
+	for stair_variant: Variant in stair_cells.values():
+		var stair_cell := stair_variant as Vector2i
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				landings[stair_cell + Vector2i(dx, dy)] = true
+	for _pool in range(rng.randi_range(4, 6)):
+		var anchor := hall_cells[rng.randi_range(0, hall_cells.size() - 1)]
+		var center := anchor + Vector2i(rng.randi_range(-6, 6), rng.randi_range(-5, 5))
+		var radius := rng.randi_range(2, 4)
+		for dy in range(-radius, radius + 1):
+			for dx in range(-radius, radius + 1):
+				var wobble := 1.0 + 0.3 * sin(float(dx) * 1.1 + float(dy) * 0.7)
+				if Vector2(dx, dy).length() > float(radius) * 0.85 * wobble:
+					continue
+				var pool_cell := center + Vector2i(dx, dy)
+				if not grid.has(pool_cell) or landings.has(pool_cell) or floor_decor.has(pool_cell):
+					continue
+				grid[pool_cell] = DwarfHoldTileService.CELL_WATER
+				lava_cells[pool_cell] = true
+
+## The seam's prize: 4-6 adamantine outcrops dealt onto the pocket floor.
+## Each is a solid "stone" vein to the pick, but registered here so the
+## strike pays the true metal - and wakes what guards it.
+func _stamp_adamantine_veins(grid: Dictionary, floor_decor: Dictionary, stair_cells: Dictionary, adamantine_cells: Dictionary, rng: RandomNumberGenerator) -> void:
+	var landings: Array = stair_cells.values()
+	var hall_cells: Array[Vector2i] = []
+	for cell_variant: Variant in grid.keys():
+		if int(grid[cell_variant]) != CELL_HALL:
+			continue
+		if floor_decor.has(cell_variant) or landings.has(cell_variant):
+			continue
+		hall_cells.append(cell_variant as Vector2i)
+	if hall_cells.is_empty():
+		return
+	var vein_target := rng.randi_range(4, 6)
+	for _deal in range(80):
+		if adamantine_cells.size() >= vein_target:
+			break
+		var cell := hall_cells[rng.randi_range(0, hall_cells.size() - 1)]
+		if floor_decor.has(cell):
+			continue
+		floor_decor[cell] = "stone"
+		adamantine_cells[cell] = true
+
+## The melt holds one footfall's weight and no more: stepping onto lava
+## scalds for two hearts and throws the walker back onto the ground they
+## left. True means the bounce fired and the step is over - no stair
+## check, no next glide.
+func _resolve_lava_step(arrived_cell: Vector2i, departed_cell: Vector2i) -> bool:
+	if not _latest_lava_cells.has(arrived_cell):
+		return false
+	_damage_player(LAVA_STEP_HEARTS, "the molten sea")
+	if arrived_cell != departed_cell and not _latest_lava_cells.has(departed_cell):
+		_player_cell = departed_cell
+	if _player_sprite != null:
+		_actor_sprite_to_cell(_player_sprite, _player_cell)
+		_spawn_floating_text("The melt scalds!", _player_sprite.position + Vector2(0, -14), Color(1.0, 0.5, 0.35, 1.0))
+	_player_is_moving = false
+	_player_move_path.clear()
+	return true
+
+## The abyss breeds meaner kin: a stratum carrying a creature tint (the
+## Magma Sea's fire-cast) paints its prowlers in it and stokes them a
+## tier past their upland cousins - same bodies, same AI, hotter blood.
+func _apply_abyss_creature_cast(prowler: Dictionary) -> void:
+	var cast_variant: Variant = _latest_stratum.get("creature_tint")
+	if not (cast_variant is Color):
+		return
+	prowler["hp"] = int(prowler.get("hp", 8)) + 6
+	prowler["damage_override"] = int(prowler.get("damage_override", 3)) + 1
+	var prowler_sprite := prowler.get("sprite") as Sprite2D
+	if prowler_sprite != null:
+		prowler_sprite.modulate = cast_variant as Color
+
+## "The seam's wardens wake": mining an adamantine vein musters two
+## high-tier guardians on open floor within a few tiles of the strike -
+## the deep does not give its metal away. Same shared creature pipeline,
+## dressed with warden overrides the way the cave kin wear species.
+func _wake_seam_wardens(vein_cell: Vector2i) -> void:
+	var posted := 0
+	for ring in range(1, 4):
+		if posted >= 2:
+			break
+		for dy in range(-ring, ring + 1):
+			if posted >= 2:
+				break
+			for dx in range(-ring, ring + 1):
+				if posted >= 2:
+					break
+				if maxi(absi(dx), absi(dy)) != ring:
+					continue
+				var guard_cell := vein_cell + Vector2i(dx, dy)
+				if guard_cell == _player_cell or not _is_walkable_cell(guard_cell):
+					continue
+				var wardens_before := _surface_creatures.size()
+				SurfaceLifeService.spawn_creature(
+					_surface_creatures, SURFACE_CREATURE_TEXTURE,
+					UndergroundCreatureService.CREATURE_DEFS.size() - 1,
+					guard_cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
+				)
+				if _surface_creatures.size() <= wardens_before:
+					continue
+				var warden := _surface_creatures[_surface_creatures.size() - 1]
+				warden["species_name"] = "Seam Warden"
+				warden["hp"] = 32
+				warden["damage_override"] = 5
+				warden["aggro_override"] = 12
+				var warden_sprite := warden.get("sprite") as Sprite2D
+				if warden_sprite != null:
+					warden_sprite.modulate = Color(0.72, 0.82, 1.2, 1.0)
+					warden_sprite.scale *= 1.2
+				posted += 1
+	if posted > 0:
+		_set_save_status("The seam's wardens wake!", Color(0.75, 0.82, 1.0, 1.0))
 
 func _player_on_any_gate_cell() -> bool:
 	for gate: Dictionary in _surface_gates:
@@ -11719,6 +12855,10 @@ func _strike_surface_creature(creature_index: int, damage: int, announce: bool =
 		# A beast the player fells in the underhalls counts toward this
 		# hold's accepted slay bounty (the quiet guard path never does).
 		_record_underhall_beast_slain()
+		# The same fall speaks to a sworn chain: a cull in the right
+		# hold's deeps walks its story a step forward.
+		if _hold_state.current_depth_kind() == "underhall":
+			_advance_quest_progress("slay", "", 1)
 		var coins := _rng.randi_range(2, 6) + int(def.get("damage", 1)) * 2
 		_adjust_coins(coins)
 		GameAudioService.play_sfx(self, "coin")
@@ -11783,7 +12923,8 @@ const CROP_DEFS := {
 }
 const FARM_STAGE_HOURS := 8.0
 ## Season re-rates the growing hour; rain (or a storm) waters for free.
-const FARM_SEASON_GROWTH := {"Spring": 1.15, "Summer": 1.0, "Autumn": 0.85, "Winter": 0.2}
+## Winter has no row: the fields sleep frozen until Thawmarch.
+const FARM_SEASON_GROWTH := {"Spring": 1.15, "Summer": 1.0, "Autumn": 0.85}
 const FARM_RAIN_GROWTH_BONUS := 1.25
 const ANIMAL_CRATES := {"Chicken Crate": "chicken", "Piglet Crate": "pig", "Calf Crate": "cow"}
 const ANIMAL_PRODUCE := {"chicken": "Egg", "pig": "Truffle", "cow": "Milk Pail"}
@@ -12069,6 +13210,11 @@ func _use_hotbar_slot(index: int) -> void:
 	if ANIMAL_CRATES.has(item_name):
 		_crate_armed = item_name
 		_set_save_status("🐾 %s armed — click open grass beside you to release the %s." % [item_name, String(ANIMAL_CRATES[item_name])], Color(0.85, 0.9, 0.75, 1.0))
+		return
+	# Hall furnishings set themselves down where the walker stands: the
+	# claimed hall in the deep is the only ground that takes them.
+	if CLAIM_FURNISHING_TILES.has(item_name):
+		_place_claim_furnishing(item_name)
 		return
 	_set_save_status("%s ×%d in the pack." % [item_name, int(_player_inventory.get(item_name, 0))], Color(0.8, 0.8, 0.8, 1.0))
 
@@ -12623,6 +13769,10 @@ func _advance_farm_growth() -> void:
 		_persist_farm()
 
 func _farm_growth_multiplier() -> float:
+	# Winter dormancy: frozen ground pushes no stage at all, and no rain
+	# bonus thaws it - planted crops simply wait out the cold.
+	if GameCalendar.season_for_day(_game_day - 1) == "Winter":
+		return 0.0
 	var multiplier := float(FARM_SEASON_GROWTH.get(GameCalendar.season_for_day(_game_day - 1), 1.0))
 	var kind := String(_current_weather.get("kind", "clear"))
 	if kind == WeatherService.KIND_RAIN or kind == WeatherService.KIND_STORM:
@@ -13093,6 +14243,42 @@ func _try_chop_tree(cell: Vector2i) -> bool:
 	_set_save_status("You fell the %s — the wilds grow them back in time." % species_name.to_lower(), Color(0.75, 0.92, 0.7, 1.0))
 	return true
 
+## A close-in click with nothing else to answer it, water within arm's
+## reach: the hand line goes out. No rod, no bobber wait — the rod-and-F
+## minigame stays the patient angler's game; this is the forager's cast,
+## and the biome stocks the hook. The koi ignores the biome entirely.
+func _try_fish() -> bool:
+	var water_cell := _adjacent_fishable_water_cell()
+	if water_cell.x == 2147483647:
+		return false
+	GameAudioService.play_sfx(self, "splash")
+	if _rng.randf() >= 0.55:
+		_set_save_status("The waters keep their secrets.", Color(0.7, 0.82, 0.95, 1.0))
+		return true
+	var fish: Dictionary = FishingService.catch_for_biome(_wild_biome_at_cell(_player_cell), _rng)
+	var fish_name := String(fish.get("name", "River Trout"))
+	_add_to_inventory(fish_name, 1)
+	GameAudioService.play_sfx(self, "harvest")
+	_spawn_floating_text("+1 %s" % fish_name, _cell_center_position(water_cell), Color(0.6, 0.95, 1.0, 1.0))
+	_set_save_status("You land a %s!" % fish_name, Color(0.6, 0.9, 1.0, 1.0))
+	return true
+
+## The water beside the walker's boots: rendered surface water, or an
+## underhall pool straight off the level grid — pool tiles ride the hold
+## atlas, so the rendered-tile family test can't see them.
+func _adjacent_fishable_water_cell() -> Vector2i:
+	var underground := _is_underground_level()
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			if offset_x == 0 and offset_y == 0:
+				continue
+			var candidate := _player_cell + Vector2i(offset_x, offset_y)
+			if _is_water_cell(candidate):
+				return candidate
+			if underground and int(_latest_grid.get(candidate, -1)) == DwarfHoldTileService.CELL_WATER:
+				return candidate
+	return Vector2i(2147483647, 2147483647)
+
 ## --- trading on the road -----------------------------------------------------
 
 func _try_open_traveler_trade(state: Dictionary) -> bool:
@@ -13417,6 +14603,257 @@ func _clear_caravan_job() -> void:
 	# A rebuilt world owes no cooldown; the master offers fresh.
 	_caravan_next_offer_stamp = 0.0
 
+## --- dwarven caravan arrivals --------------------------------------------------
+## The trail wagons pay off in-scene: every few days a hold's trade caravan
+## rolls into the settlement square - a covered wagon by the plaza and one
+## dwarven merchant selling whatever that mountain digs. A hold the walker
+## has DELIVERED sends its wagons first; the deed pays off in trade.
+
+const CARAVAN_VISIT_SHOP_TYPE := "dwarven_caravan"
+## Synthetic far-off stock anchor, traveler-style, one wagon per town.
+const CARAVAN_VISIT_STOCK_ANCHOR := Vector2i(4000001, 0)
+## Raw stones the price book has never listed (Granite, Gabbro...) trade
+## at this flat worth off the wagon.
+const CARAVAN_UNKNOWN_WARE_VALUE := 4
+## The caravan outbids the town counters by a tenth when it buys.
+const CARAVAN_SELL_PREMIUM := 1.1
+
+func _caravan_visit_today() -> bool:
+	return _caravan_visit_on_day(_game_day)
+
+## Deterministic per settlement+day: cadence (every 3rd-5th day) and phase
+## both hash off the site seed alone, so the same town always keeps the
+## same caravan calendar and any day can be checked in advance.
+func _caravan_visit_on_day(day: int) -> bool:
+	var seed_text := seed_input.text.strip_edges()
+	var cadence := 3 + absi(hash("caravan_cadence|%s" % seed_text)) % 3
+	return day % cadence == absi(hash("caravan_phase|%s" % seed_text)) % cadence
+
+## The hold whose caravan is on the road this visit: a DELIVERED hold wins
+## outright (the world remembers who unbarred its gates), else the nearest
+## dwarfhold in the gazetteer. A world with no holds at all still trades -
+## a nameless deep-roads consortium with geology fabricated from the seed.
+func _caravan_visiting_hold() -> Dictionary:
+	var settings: Dictionary = _world_settings_snapshot()
+	var chosen: Dictionary = {}
+	var chosen_distance := 2147483647
+	for site_variant: Variant in WorldSitesService.sites_from_settings(settings):
+		var site := site_variant as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		var tile: Vector2i = WorldSitesService.site_tile(site)
+		if not WorldChronicleService.deliverance_for_tile(settings, tile).is_empty():
+			chosen = site
+			break
+		var tile_distance := maxi(absi(tile.x - _surface_own_tile.x), absi(tile.y - _surface_own_tile.y))
+		if tile_distance < chosen_distance:
+			chosen = site
+			chosen_distance = tile_distance
+	var hold_name := String(chosen.get("name", "")).strip_edges()
+	if hold_name.is_empty():
+		hold_name = "the Deep Roads"
+	var geology: Dictionary = chosen.get("geology", {}) if chosen.get("geology") is Dictionary else {}
+	if geology.is_empty():
+		# Holds recorded before the gazetteer carried geology (and the
+		# consortium) mine a stable fabricated mountain instead.
+		geology = GeologyService.profile_for_seed(hash("caravan_hold|%s" % String(chosen.get("seed", _surface_world_seed_text))))
+	return {"name": hold_name, "geology": geology, "site": chosen}
+
+## Wares priced by the same book as every counter in town, except stones
+## the book has never heard of.
+func _caravan_ware_value(item_name: String) -> int:
+	if SettlementEconomyService.ITEM_VALUES.has(item_name):
+		return SettlementEconomyService.item_value(item_name)
+	return CARAVAN_UNKNOWN_WARE_VALUE
+
+## What a shelf item asks: local pricing everywhere, but the caravan's
+## unlisted raw stones ride the flat caravan book value.
+func _trade_buy_price(item_name: String) -> int:
+	if _trade_shop_type == CARAVAN_VISIT_SHOP_TYPE and not SettlementEconomyService.ITEM_VALUES.has(item_name):
+		return maxi(1, int(round(float(CARAVAN_UNKNOWN_WARE_VALUE) * _price_scale())))
+	return SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
+
+## What a counter pays for the player's goods: the caravan pays a tenth
+## over the town rate, rounded up - hauling to the wagon always beats the
+## shelf by at least a coin.
+func _trade_sell_price(item_name: String) -> int:
+	var price := SettlementEconomyService.local_sell_price(item_name, _town_market)
+	if _trade_shop_type == CARAVAN_VISIT_SHOP_TYPE:
+		price = ceili(float(price) * CARAVAN_SELL_PREMIUM)
+	return price
+
+## The visiting hold's manifest: 3-5 wares dug from its own geology (ore
+## items where the catalog names them, raw strata stones otherwise), plus
+## the steel ingot every mountain trades on. Rolled per settlement+hold+day
+## so reopening the pack shows the same shelves.
+func _caravan_stock(visiting: Dictionary) -> Array[Dictionary]:
+	var geology := visiting.get("geology", {}) as Dictionary
+	var pool: Array[String] = []
+	for mineral_variant: Variant in (geology.get("minerals", []) as Array):
+		var mineral_item := String((mineral_variant as Dictionary).get("item", "")).strip_edges()
+		if not mineral_item.is_empty() and not pool.has(mineral_item):
+			pool.append(mineral_item)
+	for stone_variant: Variant in (geology.get("stones", []) as Array):
+		var stone_name := String(stone_variant).strip_edges()
+		if not stone_name.is_empty() and not pool.has(stone_name):
+			pool.append(stone_name)
+	if bool(geology.get("flux", false)) and not pool.has("Flux Stone"):
+		pool.append("Flux Stone")
+	if bool(geology.get("coal", false)) and not pool.has("Coal"):
+		pool.append("Coal")
+	if pool.is_empty():
+		# No wagon rolls empty: the commonest ore of the deep roads.
+		pool.append("Iron Ore")
+	var stock_rng := RandomNumberGenerator.new()
+	stock_rng.seed = hash("caravan_stock|%s|%s|%d" % [seed_input.text.strip_edges(), String(visiting.get("name", "")), _game_day])
+	var stock: Array[Dictionary] = []
+	var want := mini(stock_rng.randi_range(3, 5), pool.size())
+	for _pick_index in range(want):
+		var pick_index := stock_rng.randi_range(0, pool.size() - 1)
+		var item_name := String(pool[pick_index])
+		pool.remove_at(pick_index)
+		var quantity := stock_rng.randi_range(2, 4) if _caravan_ware_value(item_name) <= 6 else stock_rng.randi_range(1, 2)
+		stock.append({"name": item_name, "quantity": quantity})
+	stock.append({"name": "Steel Ingot", "quantity": stock_rng.randi_range(1, 2)})
+	return stock
+
+## Checked at generation and on every day rollover: a visit morning raises
+## the camp on the square, the first non-visit morning it packs and rolls on.
+func _refresh_caravan_camp() -> void:
+	if not _caravan_camp.is_empty() and not is_instance_valid(_caravan_camp.get("wagon") as Sprite2D):
+		# A level rebuild freed the actor layer under the camp (and the
+		# teardown swept the merchant with the keepers); drop the stale refs.
+		_caravan_camp = {}
+	var wants_camp := not _wild_mode and _hold_state.has_levels() \
+		and not _is_underground_level() and _caravan_visit_today()
+	if wants_camp and _caravan_camp.is_empty():
+		_spawn_caravan_camp()
+	elif not wants_camp and not _caravan_camp.is_empty():
+		_despawn_caravan_camp()
+
+## A clear pair of cells by the square - the village well's plaza where one
+## stands, the central market plaza otherwise - searched outward ring by
+## ring: wagon cell first, the merchant's stand beside it.
+func _caravan_camp_cells() -> Array[Vector2i]:
+	var anchor := _village_well_cell if _village_well_cell.x != 2147483647 else Vector2i.ZERO
+	for radius in range(1, 10):
+		for y_offset in range(-radius, radius + 1):
+			for x_offset in range(-radius, radius + 1):
+				if maxi(absi(x_offset), absi(y_offset)) != radius:
+					continue
+				var wagon_cell := anchor + Vector2i(x_offset, y_offset)
+				var merchant_cell := wagon_cell + Vector2i.RIGHT
+				if not _is_walkable_cell(wagon_cell) or not _is_walkable_cell(merchant_cell):
+					continue
+				if _is_cell_occupied_by_npc(wagon_cell) or _is_cell_occupied_by_npc(merchant_cell):
+					continue
+				if wagon_cell == _player_cell or merchant_cell == _player_cell:
+					continue
+				return [wagon_cell, merchant_cell]
+	return []
+
+func _spawn_caravan_camp() -> void:
+	var visiting := _caravan_visiting_hold()
+	var camp_cells := _caravan_camp_cells()
+	if camp_cells.size() < 2:
+		return
+	var wagon_cell := camp_cells[0]
+	var merchant_cell := camp_cells[1]
+	# The same covered stall that walks the escort routes parks by the plaza.
+	var wagon_sprite := Sprite2D.new()
+	wagon_sprite.texture = FARM_HOUSES_TEXTURE
+	wagon_sprite.region_enabled = true
+	wagon_sprite.region_rect = CARAVAN_WAGON_CROP
+	wagon_sprite.position = _cell_center_position(wagon_cell)
+	wagon_sprite.z_index = 12
+	actor_layer.add_child(wagon_sprite)
+	var camp_rng := RandomNumberGenerator.new()
+	camp_rng.seed = hash("caravan_visit|%s|%s" % [seed_input.text.strip_edges(), String(visiting.get("name", ""))])
+	var identity: Dictionary = NpcIdentityService.generate(camp_rng, "Caravan Merchant", "dwarf")
+	if String(identity.get("race", "")) != "Dwarf":
+		# Whoever the roads rolled, a hold trusts its wagon to a dwarf.
+		identity["race"] = "Dwarf"
+		identity["name"] = SettlementEconomyService.dwarf_npc_name(camp_rng)
+		identity["first_name"] = String(identity.get("name", "")).get_slice(" ", 0)
+		identity["clan"] = String(identity.get("name", "")).get_slice(" ", 1)
+	var layers: Dictionary = NpcIdentityService.appearance_for_identity(identity, "dwarf")
+	var merchant_sprite := Sprite2D.new()
+	merchant_sprite.texture = DwarfSpriteComposer.compose(layers)
+	merchant_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	merchant_sprite.scale = Vector2(float(tile_size.x) / 32.0, float(tile_size.y) / 32.0) * float(layers.get("body_scale", 1.0))
+	merchant_sprite.z_index = 11
+	merchant_sprite.position = _cell_center_position(merchant_cell)
+	actor_layer.add_child(merchant_sprite)
+	_npc_states.append({
+		"caravan_merchant": true,
+		# Rides the keeper machinery: leashed doorstep wander, no town
+		# schedule, and the level-rebuild teardown sweeps it with the rest.
+		"wilds_keeper": true,
+		"role": ROLE_MERCHANT,
+		"identity": identity,
+		"npc_name": String(identity.get("name", "A caravan merchant")),
+		"composed": true,
+		"cell": merchant_cell,
+		"sprite": merchant_sprite,
+		"home_cell": merchant_cell,
+		"work_cell": wagon_cell,
+		"wander_timer": camp_rng.randf_range(1.0, 3.0),
+		"hold_name": String(visiting.get("name", "")),
+		"shop_anchor": CARAVAN_VISIT_STOCK_ANCHOR
+	})
+	_caravan_camp = {"wagon": wagon_sprite, "hold": visiting, "day": _game_day}
+	# A fresh visit rolls a fresh manifest, even on an anchor collision.
+	_shop_stocks.erase(CARAVAN_VISIT_STOCK_ANCHOR)
+	if _caravan_camp_announced_day != _game_day:
+		_caravan_camp_announced_day = _game_day
+		_set_save_status("A caravan from %s rolls into the square." % String(visiting.get("name", "")), Color(0.85, 0.9, 0.75, 1.0))
+
+## The camp packs up clean: wagon freed, merchant swept from the rolls, any
+## open wagon trade closed mid-haggle.
+func _despawn_caravan_camp() -> void:
+	var wagon_sprite := _caravan_camp.get("wagon") as Sprite2D
+	if wagon_sprite != null and is_instance_valid(wagon_sprite):
+		wagon_sprite.queue_free()
+	for state_index in range(_npc_states.size() - 1, -1, -1):
+		if not bool(_npc_states[state_index].get("caravan_merchant", false)):
+			continue
+		var merchant_sprite := _npc_states[state_index].get("sprite") as Sprite2D
+		if merchant_sprite != null and is_instance_valid(merchant_sprite):
+			merchant_sprite.queue_free()
+		_npc_states.remove_at(state_index)
+	_shop_stocks.erase(CARAVAN_VISIT_STOCK_ANCHOR)
+	if _is_trade_mode() and _trade_shop_type == CARAVAN_VISIT_SHOP_TYPE:
+		_end_trade_mode()
+		chest_popup.visible = false
+	_caravan_camp = {}
+
+## The wagon trades traveler-style: synthetic far-off anchor, manifest
+## rolled per visit from the hold's own geology, leash measured from where
+## the merchant stands.
+func _try_open_caravan_trade(state: Dictionary) -> bool:
+	if not bool(state.get("caravan_merchant", false)):
+		return false
+	var anchor := state.get("shop_anchor", CARAVAN_VISIT_STOCK_ANCHOR) as Vector2i
+	if not _shop_stocks.has(anchor):
+		var visiting := _caravan_camp.get("hold", {}) as Dictionary
+		if visiting.is_empty():
+			visiting = _caravan_visiting_hold()
+		_shop_stocks[anchor] = _caravan_stock(visiting)
+	_selected_chest_cell = Vector2i(2147483647, 2147483647)
+	_trade_shop_cell = anchor
+	# The leash measures from where the merchant stands, not the synthetic
+	# far-away stock anchor, so a single step can't slam the popup shut.
+	_trade_leash_cell = state.get("cell", _player_cell) as Vector2i
+	_trade_shop_type = CARAVAN_VISIT_SHOP_TYPE
+	chest_popup.visible = true
+	chest_popup_title.text = "Trade — %s" % String(state.get("npc_name", "A caravan merchant"))
+	chest_popup_take_all_button.disabled = true
+	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
+	if section_label != null:
+		section_label.text = _with_market_hint("Wares off the wagon of %s" % String(state.get("hold_name", "the Deep Roads")))
+	_refresh_trade_panel()
+	return true
+
 ## --- raids on the homestead --------------------------------------------------
 
 ## Once the homestead is worth robbing, evening raids come for it. The
@@ -13433,7 +14870,7 @@ func _maybe_start_raid() -> void:
 	if _game_day < _next_raid_day or int(_game_hour) < 19 or int(_game_hour) >= 23:
 		return
 	var center := _homestead_center()
-	var raider_count := 4 + mini(3, _game_day / 4)
+	var raider_count := 4 + mini(3, _game_day / 4) + _raid_bonus_for_wealth(_player_coins)
 	var spawned := 0
 	for attempt in raider_count * 6:
 		if spawned >= raider_count:
@@ -13464,6 +14901,11 @@ func _maybe_start_raid() -> void:
 	for resident: Dictionary in _npc_states:
 		_add_live_thought(resident, "heard the raid horn sound", -2)
 	_set_save_status("A war horn sounds — %d raiders march on your homestead!" % spawned, Color(0.95, 0.4, 0.35, 1.0))
+
+## Wealth is a beacon: every 500 coins in the walker's purse draws one
+## more blade to the horn, to a cap - even greed marches in small bands.
+func _raid_bonus_for_wealth(coins: int) -> int:
+	return clampi(coins / 500, 0, 4)
 
 func _persist_next_raid_day() -> void:
 	var settings: Dictionary = _world_settings_snapshot()
@@ -13523,6 +14965,9 @@ func _update_raider_bashing(raider: Dictionary, delta: float) -> void:
 ## combat_duty flag pulls a fighting guard out of the scheduler so the
 ## two systems never tug the same sprite.
 const UNDERHALL_GUARD_ENGAGE_RANGE := 8
+## A siege is everyone's fight: the whole level's watch converges on the
+## storming beast instead of only the guards already within a ward of it.
+const UNDERHALL_SIEGE_ENGAGE_RANGE := 999
 
 func _update_underhall_defense(delta: float) -> void:
 	if _surface_creatures.is_empty():
@@ -13531,6 +14976,7 @@ func _update_underhall_defense(delta: float) -> void:
 		for state: Dictionary in _npc_states:
 			state.erase("combat_duty")
 		return
+	var engage_range: int = UNDERHALL_SIEGE_ENGAGE_RANGE if _siege_active else UNDERHALL_GUARD_ENGAGE_RANGE
 	for state: Dictionary in _npc_states:
 		if int(state.get("role", -1)) != ROLE_GUARD:
 			continue
@@ -13539,7 +14985,7 @@ func _update_underhall_defense(delta: float) -> void:
 			continue
 		var guard_cell := state.get("cell", Vector2i.ZERO) as Vector2i
 		var best := -1
-		var best_distance := UNDERHALL_GUARD_ENGAGE_RANGE + 1
+		var best_distance := engage_range + 1
 		for index in _surface_creatures.size():
 			if bool(_surface_creatures[index].get("dying", false)):
 				continue
