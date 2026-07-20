@@ -82,6 +82,12 @@ const UNDERGROUND_LINES: Array[String] = [
 	"The stone hums today.", "Good honest dark, this.",
 	"The deep provides.", "Hear that? The mountain settling."
 ]
+## A hall whose laired terror the walker slew remembers its deliverer.
+const DELIVERANCE_LINES: Array[String] = [
+	"The beast is dead — drink to the walker!", "Sleep comes easy without the roars.",
+	"The deep is ours again.", "New kin arrive every day now.",
+	"The gates stand open once more.", "They'll sing of that kill for a century."
+]
 const GENERIC_IDLE_LINES: Array[String] = [
 	"Hm? Just thinking.", "Stone and steel, another day.", "So it goes."
 ]
@@ -137,6 +143,8 @@ static func ambient_line(state: Dictionary, identity: Dictionary, context: Dicti
 	var weather := String(context.get("weather", "clear"))
 	if not bool(context.get("underground", false)) and WEATHER_LINES.has(weather) and rng.randf() < 0.45:
 		return _pick(WEATHER_LINES[weather] as Array, rng)
+	if bool(context.get("delivered", false)) and rng.randf() < 0.3:
+		return _pick(DELIVERANCE_LINES, rng)
 	var mood := mood_value(state)
 	if (mood >= 5 or mood <= -4) and rng.randf() < 0.35:
 		return _pick(JOYFUL_LINES if mood > 0 else MISERABLE_LINES, rng)

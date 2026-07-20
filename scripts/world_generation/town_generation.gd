@@ -264,6 +264,11 @@ var _seamless_surface_level: Dictionary = {}
 ## Where to place the walker when they climb back out of a hold's halls -
 ## the mouth stair on the surface they descended through.
 var _seamless_return_cell := Vector2i(2147483647, 2147483647)
+## The descended site's overworld tile and gate key: the deliverance
+## checks (celebration chatter, census growth, cache eviction on the
+## boss kill) all key off them.
+var _seamless_site_tile := Vector2i(2147483647, 2147483647)
+var _seamless_gate_key := ""
 ## Set only while generating a hold's deep column, so the per-level
 ## population target gives the halls their folk (a town cellar stays empty).
 var _generating_hold_column := false
@@ -6017,13 +6022,17 @@ func _record_context_thoughts(state: Dictionary) -> void:
 				_add_live_thought(state, "was chilled by the snow", -1)
 
 func _chatter_context(state: Dictionary) -> Dictionary:
+	# A hall whose laired terror the walker has slain celebrates it.
+	var delivered := _is_underground_level() and _seamless_site_tile.x != 2147483647 \
+		and not WorldChronicleService.deliverance_for_tile(_world_settings_snapshot(), _seamless_site_tile).is_empty()
 	return {
 		"raid": _raid_active,
 		"guard": int(state.get("role", -1)) == ROLE_GUARD,
 		"combat": bool(state.get("combat_duty", false)) or bool(state.get("raid_duty", false)),
 		"weather": String(_current_weather.get("kind", "clear")),
 		"underground": _is_underground_level(),
-		"stratum": String(_latest_stratum.get("name", ""))
+		"stratum": String(_latest_stratum.get("name", "")),
+		"delivered": delivered
 	}
 
 func _show_npc_dialogue(state: Dictionary) -> void:
@@ -7066,8 +7075,9 @@ func _plan_surface_site(site: Dictionary, site_key: String) -> void:
 					"structure": "dwarfhold_city",
 					"name": String(site.get("name", "")),
 					# The gazetteer's gate status: a Closed hold bars its
-					# mouth against outsiders in the stamped city.
-					"closed": String(site.get("access", "Open")) == "Closed",
+					# mouth against outsiders in the stamped city - unless
+					# the walker has slain the terror that sealed it.
+					"closed": _site_gates_closed(site),
 					"plan": {},
 					"rect": Rect2i(
 						anchor - Vector2i(HOLD_CITY_HALF_W + 1, HOLD_CITY_HALF_H * 2 + 1),
@@ -7666,6 +7676,14 @@ func _award_surface_lair_kill(state: Dictionary) -> void:
 	var kill_year := GameCalendar.year_for_day(_game_day - 1, _calendar_start_year)
 	var settings: Dictionary = _world_settings_snapshot()
 	WorldChronicleService.record_player_beast_kill(settings, String(state.get("beast_name", "")), player_name, place, kill_year)
+	# The halls erupt: every dwarf in them remembers the day, and the
+	# next descent rebuilds the column with the deliverance census (the
+	# ledger replays every edit, so nothing else changes).
+	var beast_display := String(state.get("beast_display", "the beast"))
+	for resident: Dictionary in _npc_states:
+		_add_live_thought(resident, "saw %s slain" % beast_display, 2)
+	if not _seamless_gate_key.is_empty():
+		_hold_deep_columns.erase(_seamless_gate_key)
 	_store_world_settings(settings)
 	_set_save_status(
 		"%s is slain! You claim %s and %d coins — the world will remember this." % [
@@ -9319,7 +9337,7 @@ func _stamp_gates_in_rect(rect: Rect2i) -> void:
 		var gate_label := Label.new()
 		gate_label.text = String(site.get("name", "Somewhere"))
 		# A closed hold announces itself: the name wears its status.
-		if String(site.get("class", "")) == "dwarfhold" and String(site.get("access", "Open")) == "Closed":
+		if _site_gates_closed(site):
 			gate_label.text += "\n⛓ Gates sealed"
 		gate_label.add_theme_font_size_override("font_size", 18)
 		gate_label.add_theme_color_override("font_color", Color(0.98, 0.94, 0.82, 1.0))
@@ -11052,6 +11070,8 @@ func _cave_descent_is_seamless(site: Dictionary) -> bool:
 func _begin_seamless_cave_descent(gate: Dictionary, site: Dictionary) -> void:
 	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
 	var gate_key := String(gate.get("key", ""))
+	_seamless_site_tile = WorldSitesService.site_tile(site)
+	_seamless_gate_key = gate_key
 	_seamless_hold_ledger_key = String(site.get("seed", "")).strip_edges()
 	if _seamless_hold_ledger_key.is_empty():
 		_seamless_hold_ledger_key = gate_key
@@ -11188,9 +11208,29 @@ func _generate_cave_level(cave_seed: String, depth: int, site_geology: Dictionar
 	_apply_underhall_diffs(level_data, depth)
 	return level_data
 
+## The gazetteer's gate status, chronicle-aware: a Closed hold whose
+## laired terror the player has slain stands Open again.
+func _site_gates_closed(site: Dictionary) -> bool:
+	if String(site.get("class", "")) != "dwarfhold":
+		return false
+	if String(site.get("access", "Open")) != "Closed":
+		return false
+	return WorldChronicleService.deliverance_for_tile(_world_settings_snapshot(), WorldSitesService.site_tile(site)).is_empty()
+
 func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
 	var gate_key := String(gate.get("key", ""))
+	# A delivered hold's halls fill again: the census the column builds
+	# from carries the deliverance growth (+15% souls), so more dwarves
+	# actually walk these levels once the terror is slain.
+	var base_population := int(site.get("population", 0))
+	var grown_population := WorldChronicleService.boosted_hold_population(
+		_world_settings_snapshot(), WorldSitesService.site_tile(site), base_population)
+	if grown_population != base_population:
+		site = site.duplicate()
+		site["population"] = grown_population
+	_seamless_site_tile = WorldSitesService.site_tile(site)
+	_seamless_gate_key = gate_key
 	# The ledger key is the site seed - the same string that drives the
 	# column's deterministic regeneration, so recorded edits always replay
 	# onto the geometry they were made on. Set BEFORE generation so the

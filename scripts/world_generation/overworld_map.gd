@@ -1666,7 +1666,9 @@ func _show_structure_details_modal(tile_coord: Vector2i, details: Dictionary) ->
 	if settlement_type.is_empty():
 		settlement_type = String(details.get("settlement_type", "Settlement")).strip_edges().capitalize()
 	if _is_dwarfhold_structure(details):
-		var dwarfhold_access := String(details.get("dwarfhold_access", "")).strip_edges()
+		var dwarfhold_access := _effective_hold_access_for(tile_coord, details)
+		if String(details.get("dwarfhold_access", "")).strip_edges().is_empty():
+			dwarfhold_access = ""
 		var dwarfhold_depth := String(details.get("dwarfhold_depth", "")).strip_edges()
 		var status_parts: Array[String] = []
 		if not dwarfhold_access.is_empty():
@@ -8704,7 +8706,7 @@ const HOLD_EDICTS: Array[String] = [
 func _dwarfhold_policies_bbcode(tile_coord: Vector2i, details: Dictionary) -> String:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash("hold_policies|%d|%d|%d" % [tile_coord.x, tile_coord.y, map_seed])
-	var access := String(details.get("dwarfhold_access", "Open")).strip_edges()
+	var access := _effective_hold_access_for(tile_coord, details)
 	var classification_key := String(details.get("settlement_classification_key", ""))
 	if classification_key == "abandoned":
 		return "[b]The halls keep no law now.[/b]\n\nThe old code is still carved beside the gate:\n• %s\n• %s\n\nNo one remains to enforce it." % [
@@ -8713,6 +8715,9 @@ func _dwarfhold_policies_bbcode(tile_coord: Vector2i, details: Dictionary) -> St
 		]
 	var gate_line := "Open — outsiders may pass the mouth freely" if access != "Closed" \
 		else "Sealed — no outsiders enter or leave; the gate slabs are barred"
+	# A gate the walker's own deed unbarred says so.
+	if access == "Open" and String(details.get("dwarfhold_access", "Open")).strip_edges() == "Closed":
+		gate_line = "Open — the gate slabs stand newly unbarred; the terror that sealed them is slain"
 	var ruler_title := String(details.get("ruler_title", "")).strip_edges()
 	var ruler_name := String(details.get("ruler_name", "")).strip_edges()
 	var ruler_display := ("%s %s" % [ruler_title, ruler_name]).strip_edges()
@@ -8734,6 +8739,17 @@ func _dwarfhold_policies_bbcode(tile_coord: Vector2i, details: Dictionary) -> St
 		ruler_display,
 		edict_lines
 	]
+
+## The chronicle-aware gate status: a Closed hold whose laired terror
+## the player has slain reads (and plays) as Open everywhere.
+func _effective_hold_access_for(coord: Vector2i, details: Dictionary) -> String:
+	var rolled := String(details.get("dwarfhold_access", "Open")).strip_edges()
+	var game_session := get_node_or_null("/root/GameSession")
+	if game_session == null or not game_session.has_method("get_world_settings"):
+		return rolled
+	return WorldChronicleService.effective_hold_access(
+		game_session.call("get_world_settings") as Dictionary, coord, rolled,
+		String(details.get("settlement_classification_key", "")))
 
 func _dwarfhold_access_status_for_classification(classification_key: String, rng: RandomNumberGenerator) -> String:
 	if classification_key == "abandoned":
@@ -10151,35 +10167,78 @@ func _spawn_caravans() -> void:
 	var caravan_count := mini(6, _route_segments.size())
 	for _caravan_index in range(caravan_count):
 		var path := _route_segments[caravan_rng.randi_range(0, _route_segments.size() - 1)] as PackedVector2Array
-		if path.size() < 4:
+		_spawn_caravan_on_path(path, caravan_rng, Color.WHITE, false)
+	# Dwarven caravans: trails that run hold-to-hold carry the holds' own
+	# steel-blue wagons, and every hold the walker has DELIVERED (its
+	# laired terror slain) sends one more - prosperity on wheels.
+	var game_session := get_node_or_null("/root/GameSession")
+	var world_settings: Dictionary = {}
+	if game_session != null and game_session.has_method("get_world_settings"):
+		world_settings = game_session.call("get_world_settings")
+	var hold_tiles: Dictionary = {}
+	var delivered_holds := 0
+	for coord_variant: Variant in _tile_data.keys():
+		var tile_info := _tile_data.get(coord_variant, {}) as Dictionary
+		if String(tile_info.get("settlement_type", "")) != "dwarfhold":
 			continue
-		# Cumulative arc length per waypoint, computed once: the per-frame
-		# mover binary-searches this instead of re-summing every segment
-		# of the route every frame for every caravan.
-		var cumulative := PackedFloat32Array()
-		cumulative.resize(path.size())
-		var total_length := 0.0
-		cumulative[0] = 0.0
-		for i in range(path.size() - 1):
-			total_length += path[i].distance_to(path[i + 1])
-			cumulative[i + 1] = total_length
-		if total_length <= 1.0:
+		if String(tile_info.get("settlement_classification_key", "")) == "abandoned":
 			continue
-		var sprite := Sprite2D.new()
-		sprite.texture = _caravan_texture
-		sprite.centered = true
-		_caravans_layer.add_child(sprite)
-		_caravan_states.append({
-			"path": path,
-			"cumulative": cumulative,
-			"length": total_length,
-			"t": caravan_rng.randf_range(0.0, total_length),
-			"dir": 1.0 if caravan_rng.randf() < 0.5 else -1.0,
-			"speed": caravan_rng.randf_range(9.0, 16.0),
-			"sprite": sprite
-		})
+		hold_tiles[coord_variant as Vector2i] = true
+		if not world_settings.is_empty() \
+				and not WorldChronicleService.deliverance_for_tile(world_settings, coord_variant as Vector2i).is_empty():
+			delivered_holds += 1
+	var segment_tiles: Array = []
+	for path_variant: Variant in _route_segments:
+		var segment := path_variant as PackedVector2Array
+		var pair := {"from": Vector2i(-9999, -9999), "to": Vector2i(-9999, -9999)}
+		if segment.size() >= 2:
+			pair["from"] = _route_endpoint_tile(segment[0])
+			pair["to"] = _route_endpoint_tile(segment[segment.size() - 1])
+		segment_tiles.append(pair)
+	var dwarven_indexes: Array[int] = WorldSitesService.dwarven_route_indexes(segment_tiles, hold_tiles)
+	var wagon_count := WorldSitesService.dwarven_caravan_count(dwarven_indexes.size(), delivered_holds)
+	for wagon_index in range(wagon_count):
+		var dwarven_path := _route_segments[dwarven_indexes[wagon_index % dwarven_indexes.size()]] as PackedVector2Array
+		_spawn_caravan_on_path(dwarven_path, caravan_rng, Color(0.78, 0.84, 1.1), true)
 	_update_caravans(0.0)
 	_update_caravans_visibility()
+
+## One wagon on a route. Cumulative arc length per waypoint is computed
+## once: the per-frame mover binary-searches it instead of re-summing
+## every segment of the route every frame for every caravan.
+func _spawn_caravan_on_path(path: PackedVector2Array, caravan_rng: RandomNumberGenerator, tint: Color, dwarven: bool) -> void:
+	if path.size() < 4:
+		return
+	var cumulative := PackedFloat32Array()
+	cumulative.resize(path.size())
+	var total_length := 0.0
+	cumulative[0] = 0.0
+	for i in range(path.size() - 1):
+		total_length += path[i].distance_to(path[i + 1])
+		cumulative[i + 1] = total_length
+	if total_length <= 1.0:
+		return
+	var sprite := Sprite2D.new()
+	sprite.texture = _caravan_texture
+	sprite.centered = true
+	sprite.modulate = tint
+	_caravans_layer.add_child(sprite)
+	_caravan_states.append({
+		"path": path,
+		"cumulative": cumulative,
+		"length": total_length,
+		"t": caravan_rng.randf_range(0.0, total_length),
+		"dir": 1.0 if caravan_rng.randf() < 0.5 else -1.0,
+		# The holds' wagons roll heavier-laden and a touch slower.
+		"speed": caravan_rng.randf_range(8.0, 13.0) if dwarven else caravan_rng.randf_range(9.0, 16.0),
+		"dwarven": dwarven,
+		"sprite": sprite
+	})
+
+## The overworld tile a route endpoint sits on (endpoints are settlement
+## tile centers in pixel space).
+func _route_endpoint_tile(endpoint: Vector2) -> Vector2i:
+	return Vector2i(floori(endpoint.x / float(tile_size)), floori(endpoint.y / float(tile_size)))
 
 func _update_caravans(delta: float) -> void:
 	for state: Dictionary in _caravan_states:
