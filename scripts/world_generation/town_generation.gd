@@ -350,6 +350,10 @@ var _town_market: Dictionary = {}
 var _caravan_job: Dictionary = {}
 var _caravan_next_offer_stamp := 0.0
 var _caravan_offer_dialog: ConfirmationDialog
+## The visiting dwarven trade caravan's camp on the square (wagon sprite +
+## visiting-hold record); empty on non-visit days.
+var _caravan_camp: Dictionary = {}
+var _caravan_camp_announced_day := -1
 var _game_hour := 9.0
 var _game_day := 1
 var _calendar_start_year := 250
@@ -1007,6 +1011,8 @@ func _advance_game_clock(delta: float) -> void:
 		if _game_day != day_before:
 			_advance_world_events()
 			_refresh_weather(true)
+			# A new morning decides whether the trail wagons roll in or on.
+			_refresh_caravan_camp()
 	# Strolling the market works up an appetite too.
 	_player_satiety = clampf(_player_satiety - delta_hours * PlayerStatsService.SATIETY_DRAIN_PER_GAME_HOUR, 0.0, PlayerStatsService.SATIETY_MAX)
 	_advance_afflictions(delta_hours)
@@ -4410,6 +4416,10 @@ func _show_level(target_level_index: int) -> void:
 	_build_farmsteads()
 	_scatter_desert_decor()
 	_spawn_farm_animals()
+	# The trail wagons pay off in-scene: on a visit day the dwarven caravan
+	# camps the square the moment the surface stands (after the actor-layer
+	# rebuild above, which swept any earlier camp).
+	_refresh_caravan_camp()
 	_update_summary(grid, seed_input.text.strip_edges())
 	_update_zone_overlay()
 	_update_depth_controls()
@@ -5609,7 +5619,7 @@ func _refresh_trade_panel() -> void:
 		var item_name := String(entry.get("name", "Supplies"))
 		var quantity := int(entry.get("quantity", 1))
 		_fill_inventory_slot(i, _chest_slot_panels, _chest_slot_labels, _chest_slot_icons, item_name, quantity)
-		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
+		_chest_slot_panels[i].tooltip_text += "\nBuy for %d coins" % _trade_buy_price(item_name)
 	# The craft side - the forge's anvil or the apothecary's bench:
 	# entries rendered AFTER the coin wares, never stored in the stock
 	# (the daily reroll and the buy path's quantity decrement must never
@@ -5673,7 +5683,7 @@ func _buy_trade_item(slot_index: int) -> void:
 		return
 	var entry := stock[slot_index] as Dictionary
 	var item_name := String(entry.get("name", "Supplies"))
-	var price := SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
+	var price := _trade_buy_price(item_name)
 	if _player_coins < price:
 		chest_popup_status_label.text = "Not enough coins for %s (%d needed)" % [item_name, price]
 		return
@@ -5724,7 +5734,7 @@ func _craft_forge_entry(recipe: Dictionary) -> void:
 func _sell_item(item_name: String) -> void:
 	if int(_player_inventory.get(item_name, 0)) < 1:
 		return
-	var price := SettlementEconomyService.local_sell_price(item_name, _town_market)
+	var price := _trade_sell_price(item_name)
 	_player_inventory[item_name] = int(_player_inventory.get(item_name, 0)) - 1
 	if int(_player_inventory.get(item_name, 0)) <= 0:
 		_player_inventory.erase(item_name)
@@ -6561,6 +6571,10 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 				_set_save_status("The corpse falls still at last.", Color(0.8, 0.85, 0.7, 1.0))
 			return
 		if bool(npc_state.get("traveler", false)) and _try_open_traveler_trade(npc_state):
+			return
+		# The visiting hold's merchant trades before the keeper fallback: the
+		# caravan flag rides atop the keeper machinery it borrows.
+		if bool(npc_state.get("caravan_merchant", false)) and _try_open_caravan_trade(npc_state):
 			return
 		if bool(npc_state.get("wilds_keeper", false)) and _try_open_keeper_trade(npc_state):
 			return
@@ -13913,6 +13927,257 @@ func _clear_caravan_job() -> void:
 	_finish_caravan_job("")
 	# A rebuilt world owes no cooldown; the master offers fresh.
 	_caravan_next_offer_stamp = 0.0
+
+## --- dwarven caravan arrivals --------------------------------------------------
+## The trail wagons pay off in-scene: every few days a hold's trade caravan
+## rolls into the settlement square - a covered wagon by the plaza and one
+## dwarven merchant selling whatever that mountain digs. A hold the walker
+## has DELIVERED sends its wagons first; the deed pays off in trade.
+
+const CARAVAN_VISIT_SHOP_TYPE := "dwarven_caravan"
+## Synthetic far-off stock anchor, traveler-style, one wagon per town.
+const CARAVAN_VISIT_STOCK_ANCHOR := Vector2i(4000001, 0)
+## Raw stones the price book has never listed (Granite, Gabbro...) trade
+## at this flat worth off the wagon.
+const CARAVAN_UNKNOWN_WARE_VALUE := 4
+## The caravan outbids the town counters by a tenth when it buys.
+const CARAVAN_SELL_PREMIUM := 1.1
+
+func _caravan_visit_today() -> bool:
+	return _caravan_visit_on_day(_game_day)
+
+## Deterministic per settlement+day: cadence (every 3rd-5th day) and phase
+## both hash off the site seed alone, so the same town always keeps the
+## same caravan calendar and any day can be checked in advance.
+func _caravan_visit_on_day(day: int) -> bool:
+	var seed_text := seed_input.text.strip_edges()
+	var cadence := 3 + absi(hash("caravan_cadence|%s" % seed_text)) % 3
+	return day % cadence == absi(hash("caravan_phase|%s" % seed_text)) % cadence
+
+## The hold whose caravan is on the road this visit: a DELIVERED hold wins
+## outright (the world remembers who unbarred its gates), else the nearest
+## dwarfhold in the gazetteer. A world with no holds at all still trades -
+## a nameless deep-roads consortium with geology fabricated from the seed.
+func _caravan_visiting_hold() -> Dictionary:
+	var settings: Dictionary = _world_settings_snapshot()
+	var chosen: Dictionary = {}
+	var chosen_distance := 2147483647
+	for site_variant: Variant in WorldSitesService.sites_from_settings(settings):
+		var site := site_variant as Dictionary
+		if String(site.get("class", "")) != "dwarfhold":
+			continue
+		var tile: Vector2i = WorldSitesService.site_tile(site)
+		if not WorldChronicleService.deliverance_for_tile(settings, tile).is_empty():
+			chosen = site
+			break
+		var tile_distance := maxi(absi(tile.x - _surface_own_tile.x), absi(tile.y - _surface_own_tile.y))
+		if tile_distance < chosen_distance:
+			chosen = site
+			chosen_distance = tile_distance
+	var hold_name := String(chosen.get("name", "")).strip_edges()
+	if hold_name.is_empty():
+		hold_name = "the Deep Roads"
+	var geology: Dictionary = chosen.get("geology", {}) if chosen.get("geology") is Dictionary else {}
+	if geology.is_empty():
+		# Holds recorded before the gazetteer carried geology (and the
+		# consortium) mine a stable fabricated mountain instead.
+		geology = GeologyService.profile_for_seed(hash("caravan_hold|%s" % String(chosen.get("seed", _surface_world_seed_text))))
+	return {"name": hold_name, "geology": geology, "site": chosen}
+
+## Wares priced by the same book as every counter in town, except stones
+## the book has never heard of.
+func _caravan_ware_value(item_name: String) -> int:
+	if SettlementEconomyService.ITEM_VALUES.has(item_name):
+		return SettlementEconomyService.item_value(item_name)
+	return CARAVAN_UNKNOWN_WARE_VALUE
+
+## What a shelf item asks: local pricing everywhere, but the caravan's
+## unlisted raw stones ride the flat caravan book value.
+func _trade_buy_price(item_name: String) -> int:
+	if _trade_shop_type == CARAVAN_VISIT_SHOP_TYPE and not SettlementEconomyService.ITEM_VALUES.has(item_name):
+		return maxi(1, int(round(float(CARAVAN_UNKNOWN_WARE_VALUE) * _price_scale())))
+	return SettlementEconomyService.local_buy_price(item_name, _price_scale(), _town_market)
+
+## What a counter pays for the player's goods: the caravan pays a tenth
+## over the town rate, rounded up - hauling to the wagon always beats the
+## shelf by at least a coin.
+func _trade_sell_price(item_name: String) -> int:
+	var price := SettlementEconomyService.local_sell_price(item_name, _town_market)
+	if _trade_shop_type == CARAVAN_VISIT_SHOP_TYPE:
+		price = ceili(float(price) * CARAVAN_SELL_PREMIUM)
+	return price
+
+## The visiting hold's manifest: 3-5 wares dug from its own geology (ore
+## items where the catalog names them, raw strata stones otherwise), plus
+## the steel ingot every mountain trades on. Rolled per settlement+hold+day
+## so reopening the pack shows the same shelves.
+func _caravan_stock(visiting: Dictionary) -> Array[Dictionary]:
+	var geology := visiting.get("geology", {}) as Dictionary
+	var pool: Array[String] = []
+	for mineral_variant: Variant in (geology.get("minerals", []) as Array):
+		var mineral_item := String((mineral_variant as Dictionary).get("item", "")).strip_edges()
+		if not mineral_item.is_empty() and not pool.has(mineral_item):
+			pool.append(mineral_item)
+	for stone_variant: Variant in (geology.get("stones", []) as Array):
+		var stone_name := String(stone_variant).strip_edges()
+		if not stone_name.is_empty() and not pool.has(stone_name):
+			pool.append(stone_name)
+	if bool(geology.get("flux", false)) and not pool.has("Flux Stone"):
+		pool.append("Flux Stone")
+	if bool(geology.get("coal", false)) and not pool.has("Coal"):
+		pool.append("Coal")
+	if pool.is_empty():
+		# No wagon rolls empty: the commonest ore of the deep roads.
+		pool.append("Iron Ore")
+	var stock_rng := RandomNumberGenerator.new()
+	stock_rng.seed = hash("caravan_stock|%s|%s|%d" % [seed_input.text.strip_edges(), String(visiting.get("name", "")), _game_day])
+	var stock: Array[Dictionary] = []
+	var want := mini(stock_rng.randi_range(3, 5), pool.size())
+	for _pick_index in range(want):
+		var pick_index := stock_rng.randi_range(0, pool.size() - 1)
+		var item_name := String(pool[pick_index])
+		pool.remove_at(pick_index)
+		var quantity := stock_rng.randi_range(2, 4) if _caravan_ware_value(item_name) <= 6 else stock_rng.randi_range(1, 2)
+		stock.append({"name": item_name, "quantity": quantity})
+	stock.append({"name": "Steel Ingot", "quantity": stock_rng.randi_range(1, 2)})
+	return stock
+
+## Checked at generation and on every day rollover: a visit morning raises
+## the camp on the square, the first non-visit morning it packs and rolls on.
+func _refresh_caravan_camp() -> void:
+	if not _caravan_camp.is_empty() and not is_instance_valid(_caravan_camp.get("wagon") as Sprite2D):
+		# A level rebuild freed the actor layer under the camp (and the
+		# teardown swept the merchant with the keepers); drop the stale refs.
+		_caravan_camp = {}
+	var wants_camp := not _wild_mode and _hold_state.has_levels() \
+		and not _is_underground_level() and _caravan_visit_today()
+	if wants_camp and _caravan_camp.is_empty():
+		_spawn_caravan_camp()
+	elif not wants_camp and not _caravan_camp.is_empty():
+		_despawn_caravan_camp()
+
+## A clear pair of cells by the square - the village well's plaza where one
+## stands, the central market plaza otherwise - searched outward ring by
+## ring: wagon cell first, the merchant's stand beside it.
+func _caravan_camp_cells() -> Array[Vector2i]:
+	var anchor := _village_well_cell if _village_well_cell.x != 2147483647 else Vector2i.ZERO
+	for radius in range(1, 10):
+		for y_offset in range(-radius, radius + 1):
+			for x_offset in range(-radius, radius + 1):
+				if maxi(absi(x_offset), absi(y_offset)) != radius:
+					continue
+				var wagon_cell := anchor + Vector2i(x_offset, y_offset)
+				var merchant_cell := wagon_cell + Vector2i.RIGHT
+				if not _is_walkable_cell(wagon_cell) or not _is_walkable_cell(merchant_cell):
+					continue
+				if _is_cell_occupied_by_npc(wagon_cell) or _is_cell_occupied_by_npc(merchant_cell):
+					continue
+				if wagon_cell == _player_cell or merchant_cell == _player_cell:
+					continue
+				return [wagon_cell, merchant_cell]
+	return []
+
+func _spawn_caravan_camp() -> void:
+	var visiting := _caravan_visiting_hold()
+	var camp_cells := _caravan_camp_cells()
+	if camp_cells.size() < 2:
+		return
+	var wagon_cell := camp_cells[0]
+	var merchant_cell := camp_cells[1]
+	# The same covered stall that walks the escort routes parks by the plaza.
+	var wagon_sprite := Sprite2D.new()
+	wagon_sprite.texture = FARM_HOUSES_TEXTURE
+	wagon_sprite.region_enabled = true
+	wagon_sprite.region_rect = CARAVAN_WAGON_CROP
+	wagon_sprite.position = _cell_center_position(wagon_cell)
+	wagon_sprite.z_index = 12
+	actor_layer.add_child(wagon_sprite)
+	var camp_rng := RandomNumberGenerator.new()
+	camp_rng.seed = hash("caravan_visit|%s|%s" % [seed_input.text.strip_edges(), String(visiting.get("name", ""))])
+	var identity: Dictionary = NpcIdentityService.generate(camp_rng, "Caravan Merchant", "dwarf")
+	if String(identity.get("race", "")) != "Dwarf":
+		# Whoever the roads rolled, a hold trusts its wagon to a dwarf.
+		identity["race"] = "Dwarf"
+		identity["name"] = SettlementEconomyService.dwarf_npc_name(camp_rng)
+		identity["first_name"] = String(identity.get("name", "")).get_slice(" ", 0)
+		identity["clan"] = String(identity.get("name", "")).get_slice(" ", 1)
+	var layers: Dictionary = NpcIdentityService.appearance_for_identity(identity, "dwarf")
+	var merchant_sprite := Sprite2D.new()
+	merchant_sprite.texture = DwarfSpriteComposer.compose(layers)
+	merchant_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	merchant_sprite.scale = Vector2(float(tile_size.x) / 32.0, float(tile_size.y) / 32.0) * float(layers.get("body_scale", 1.0))
+	merchant_sprite.z_index = 11
+	merchant_sprite.position = _cell_center_position(merchant_cell)
+	actor_layer.add_child(merchant_sprite)
+	_npc_states.append({
+		"caravan_merchant": true,
+		# Rides the keeper machinery: leashed doorstep wander, no town
+		# schedule, and the level-rebuild teardown sweeps it with the rest.
+		"wilds_keeper": true,
+		"role": ROLE_MERCHANT,
+		"identity": identity,
+		"npc_name": String(identity.get("name", "A caravan merchant")),
+		"composed": true,
+		"cell": merchant_cell,
+		"sprite": merchant_sprite,
+		"home_cell": merchant_cell,
+		"work_cell": wagon_cell,
+		"wander_timer": camp_rng.randf_range(1.0, 3.0),
+		"hold_name": String(visiting.get("name", "")),
+		"shop_anchor": CARAVAN_VISIT_STOCK_ANCHOR
+	})
+	_caravan_camp = {"wagon": wagon_sprite, "hold": visiting, "day": _game_day}
+	# A fresh visit rolls a fresh manifest, even on an anchor collision.
+	_shop_stocks.erase(CARAVAN_VISIT_STOCK_ANCHOR)
+	if _caravan_camp_announced_day != _game_day:
+		_caravan_camp_announced_day = _game_day
+		_set_save_status("A caravan from %s rolls into the square." % String(visiting.get("name", "")), Color(0.85, 0.9, 0.75, 1.0))
+
+## The camp packs up clean: wagon freed, merchant swept from the rolls, any
+## open wagon trade closed mid-haggle.
+func _despawn_caravan_camp() -> void:
+	var wagon_sprite := _caravan_camp.get("wagon") as Sprite2D
+	if wagon_sprite != null and is_instance_valid(wagon_sprite):
+		wagon_sprite.queue_free()
+	for state_index in range(_npc_states.size() - 1, -1, -1):
+		if not bool(_npc_states[state_index].get("caravan_merchant", false)):
+			continue
+		var merchant_sprite := _npc_states[state_index].get("sprite") as Sprite2D
+		if merchant_sprite != null and is_instance_valid(merchant_sprite):
+			merchant_sprite.queue_free()
+		_npc_states.remove_at(state_index)
+	_shop_stocks.erase(CARAVAN_VISIT_STOCK_ANCHOR)
+	if _is_trade_mode() and _trade_shop_type == CARAVAN_VISIT_SHOP_TYPE:
+		_end_trade_mode()
+		chest_popup.visible = false
+	_caravan_camp = {}
+
+## The wagon trades traveler-style: synthetic far-off anchor, manifest
+## rolled per visit from the hold's own geology, leash measured from where
+## the merchant stands.
+func _try_open_caravan_trade(state: Dictionary) -> bool:
+	if not bool(state.get("caravan_merchant", false)):
+		return false
+	var anchor := state.get("shop_anchor", CARAVAN_VISIT_STOCK_ANCHOR) as Vector2i
+	if not _shop_stocks.has(anchor):
+		var visiting := _caravan_camp.get("hold", {}) as Dictionary
+		if visiting.is_empty():
+			visiting = _caravan_visiting_hold()
+		_shop_stocks[anchor] = _caravan_stock(visiting)
+	_selected_chest_cell = Vector2i(2147483647, 2147483647)
+	_trade_shop_cell = anchor
+	# The leash measures from where the merchant stands, not the synthetic
+	# far-away stock anchor, so a single step can't slam the popup shut.
+	_trade_leash_cell = state.get("cell", _player_cell) as Vector2i
+	_trade_shop_type = CARAVAN_VISIT_SHOP_TYPE
+	chest_popup.visible = true
+	chest_popup_title.text = "Trade — %s" % String(state.get("npc_name", "A caravan merchant"))
+	chest_popup_take_all_button.disabled = true
+	var section_label := chest_popup.find_child("ChestSectionLabel", true, false) as Label
+	if section_label != null:
+		section_label.text = _with_market_hint("Wares off the wagon of %s" % String(state.get("hold_name", "the Deep Roads")))
+	_refresh_trade_panel()
+	return true
 
 ## --- raids on the homestead --------------------------------------------------
 
