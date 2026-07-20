@@ -5364,22 +5364,44 @@ func _update_farm_animals(delta: float) -> void:
 		state["anim_time"] = float(state.get("anim_time", 0.0)) + delta
 		if bool(state.get("moving", false)):
 			var target := state.get("move_target", sprite.position) as Vector2
-			sprite.position = sprite.position.move_toward(target, float(def.get("speed", 20.0)) * delta)
+			sprite.position = sprite.position.move_toward(target, float(def.get("speed", 20.0)) * float(state.get("speed_scale", 1.0)) * delta)
 			if sprite.position.distance_to(target) <= 0.5:
 				sprite.position = target
 				state["cell"] = state.get("move_cell", state.get("cell", Vector2i.ZERO)) as Vector2i
 				state["moving"] = false
 		else:
+			# A stalked wild grazer breaks its drift: short quick steps
+			# straight away from the hunter, the leash dragged along.
+			var fleeing: bool = bool(state.get("wild", false)) \
+				and Time.get_ticks_msec() < int(state.get("flee_until_ms", 0))
+			if not fleeing:
+				state["speed_scale"] = 1.0
 			state["wander_timer"] = float(state.get("wander_timer", 0.0)) - delta
 			if float(state.get("wander_timer", 0.0)) <= 0.0:
-				state["wander_timer"] = _rng.randf_range(1.5, 5.0)
+				state["wander_timer"] = 0.35 if fleeing else _rng.randf_range(1.5, 5.0)
 				var directions: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
 				var step := directions[_rng.randi_range(0, 3)]
-				var next_cell := (state.get("cell", Vector2i.ZERO) as Vector2i) + step
+				var animal_cell := state.get("cell", Vector2i.ZERO) as Vector2i
+				if fleeing:
+					var flee_from := state.get("flee_from", sprite.position) as Vector2
+					var best_away := -1.0
+					for flee_dir: Vector2i in directions:
+						var flee_next := animal_cell + flee_dir
+						if not _is_passable_cell_for_actor(flee_next):
+							continue
+						var away := _cell_center_position(flee_next).distance_squared_to(flee_from)
+						if away > best_away:
+							best_away = away
+							step = flee_dir
+				var next_cell := animal_cell + step
 				# Animals keep to the greens; penned animals keep to their pen.
 				var pen_index := int(state.get("pen_index", -1))
 				var allowed: bool
-				if pen_index == -2:
+				if fleeing:
+					allowed = _is_passable_cell_for_actor(next_cell)
+					if allowed:
+						state["home"] = next_cell
+				elif pen_index == -2:
 					var home := state.get("home", state.get("cell", Vector2i.ZERO)) as Vector2i
 					allowed = maxi(absi(next_cell.x - home.x), absi(next_cell.y - home.y)) <= 3 and _is_passable_cell_for_actor(next_cell)
 				elif pen_index >= 0 and pen_index < _farm_pens.size():
@@ -10914,6 +10936,12 @@ func _check_surface_arrival() -> void:
 		if _hold_descent_is_seamless(site):
 			_begin_seamless_hold_descent(gate, site)
 			return
+		# A dungeon's dark mouth takes the same seamless road: down into
+		# organic caverns within this scene instead of a swap to the
+		# dungeon interior.
+		if _cave_descent_is_seamless(site):
+			_begin_seamless_cave_descent(gate, site)
+			return
 		_begin_site_journey(site, scene_path)
 		return
 
@@ -10979,6 +11007,162 @@ func _apply_hold_doorstep_spawn() -> void:
 	# locks it, until the walker steps off the gate.
 	_surface_arrival_lock = true
 	_wild_needs_recenter = true
+
+## --- Seamless cave descent ---------------------------------------------------
+## A dungeon's dark mouth descends the same way a hold's stair does: a
+## z-change within this scene onto a column of ORGANIC caverns - wobble-
+## carved hollows strung on winding tunnels, geology-true stone and
+## veins, heavy fungal growth, cave wildlife, and a fungal cavern at the
+## bottom. The levels ride the same "underhall" machinery as the holds
+## (mining, digging, darkness, forage, the edit ledger, even a chronicle
+## beast nesting at the bottom) - only their generation differs: no
+## residents, no rooms, no mine railway.
+
+const CAVE_DEEP_LEVELS := 2
+
+## True for a dungeon mouth when the seamless capability is on; caves
+## share the hold descent's master switch.
+func _cave_descent_is_seamless(site: Dictionary) -> bool:
+	return _seamless_hold_descent and String(site.get("class", "")) == "dungeon"
+
+func _begin_seamless_cave_descent(gate: Dictionary, site: Dictionary) -> void:
+	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
+	var gate_key := String(gate.get("key", ""))
+	_seamless_hold_ledger_key = String(site.get("seed", "")).strip_edges()
+	if _seamless_hold_ledger_key.is_empty():
+		_seamless_hold_ledger_key = gate_key
+	if _seamless_hold_ledger_key.is_empty():
+		_seamless_hold_ledger_key = String(site.get("name", "cave"))
+	var column := _cave_column_for(gate_key, site)
+	if _seamless_surface_level.is_empty() and _hold_state.has_levels():
+		_seamless_surface_level = _hold_state.generated_levels[0] as Dictionary
+	if column.is_empty() or _seamless_surface_level.is_empty():
+		# Generation failed - never strand the walker; take the old swap.
+		_begin_site_journey(site, WorldSitesService.scene_path_for(site))
+		return
+	var rebuilt: Array[Dictionary] = [_seamless_surface_level]
+	rebuilt.append_array(column)
+	_hold_state.generated_levels = rebuilt
+	# A chronicle beast laired at this tile nests at the cave's bottom,
+	# exactly as it would in a hold's deepest hall.
+	_underhall_lair_beast = WorldChronicleService.lair_beast_for_tile(_world_settings_snapshot(), WorldSitesService.site_tile(site))
+	var trigger_cells := gate.get("trigger_cells", []) as Array
+	_seamless_return_cell = (trigger_cells[0] as Vector2i) if not trigger_cells.is_empty() else anchor
+	_set_save_status("You descend into %s." % String(site.get("name", "the dark")), Color(0.8, 0.82, 0.95, 1.0))
+	_pending_player_spawn_cell = _resolve_stair_spawn_cell(1, "up", _seamless_return_cell)
+	_show_level(1)
+
+## Cave columns share the hold columns' cache and cap: same eviction,
+## same deterministic regeneration, same ledger replay.
+func _cave_column_for(gate_key: String, site: Dictionary) -> Array[Dictionary]:
+	if gate_key.is_empty():
+		gate_key = String(site.get("seed", "cave"))
+	if _hold_deep_columns.has(gate_key):
+		return _hold_deep_columns[gate_key] as Array[Dictionary]
+	var column := _generate_cave_column(site)
+	while _hold_deep_columns.size() >= HOLD_DEEP_COLUMN_CACHE_CAP:
+		_hold_deep_columns.erase(_hold_deep_columns.keys()[0])
+	_hold_deep_columns[gate_key] = column
+	return column
+
+func _generate_cave_column(site: Dictionary) -> Array[Dictionary]:
+	var cave_seed := String(site.get("seed", "")).strip_edges()
+	if cave_seed.is_empty():
+		cave_seed = String(site.get("name", "cave"))
+	var site_geology_variant: Variant = site.get("geology")
+	var site_geology: Dictionary = site_geology_variant if site_geology_variant is Dictionary \
+		else GeologyService.profile_for_seed(hash(cave_seed))
+	var column: Array[Dictionary] = []
+	for depth in range(1, CAVE_DEEP_LEVELS + 1):
+		column.append(_generate_cave_level(cave_seed, depth, site_geology))
+	return column
+
+## One cavern level: hollows strung on winding tunnels through solid
+## rock, geology-true stratum features, pools, and its stairs. Passing
+## CAVE_DEEP_LEVELS + 2 as the ladder length puts the fungal cavern on
+## the bottom level and keeps the starmetal where it belongs - in the
+## holds.
+func _generate_cave_level(cave_seed: String, depth: int, site_geology: Dictionary) -> Dictionary:
+	var cave_rng := RandomNumberGenerator.new()
+	cave_rng.seed = hash("%s::cave_%d" % [cave_seed, depth])
+	var grid: Dictionary = {}
+	var half := Vector2i(28, 21)
+	for y in range(-half.y, half.y + 1):
+		for x in range(-half.x, half.x + 1):
+			grid[Vector2i(x, y)] = CELL_ROCK
+	# Hollows chained across the rock, each carved with a wobbled rim,
+	# each tunneled to the last so the level is one connected warren.
+	var centers: Array[Vector2i] = [Vector2i(-half.x + 8, 0)]
+	var hollow_count := cave_rng.randi_range(5, 7)
+	for _hollow in range(hollow_count - 1):
+		var previous := centers[centers.size() - 1]
+		var candidate := previous + Vector2i(cave_rng.randi_range(4, 13), cave_rng.randi_range(-9, 9))
+		candidate.x = clampi(candidate.x, -half.x + 5, half.x - 5)
+		candidate.y = clampi(candidate.y, -half.y + 5, half.y - 5)
+		centers.append(candidate)
+	for center_index in range(centers.size()):
+		var center := centers[center_index]
+		var radius := cave_rng.randi_range(3, 6)
+		for dy in range(-radius - 2, radius + 3):
+			for dx in range(-radius - 2, radius + 3):
+				var wobble := 1.0 + 0.35 * sin(float(dx) * 0.9 + float(dy) * 1.3 + float(cave_rng.randi_range(0, 6)))
+				if Vector2(dx, dy).length() <= float(radius) * wobble:
+					var cell := center + Vector2i(dx, dy)
+					if grid.has(cell):
+						grid[cell] = CELL_HALL
+		if center_index > 0:
+			# A drunken two-wide tunnel back to the previous hollow.
+			var walker := centers[center_index - 1]
+			var goal := center
+			for _step in range(200):
+				if walker == goal:
+					break
+				var toward := goal - walker
+				var step := Vector2i.ZERO
+				if absi(toward.x) > absi(toward.y) or (toward.y != 0 and cave_rng.randi_range(0, 2) == 0):
+					step = Vector2i(signi(toward.x) if toward.x != 0 else 0, 0)
+				if step == Vector2i.ZERO:
+					step = Vector2i(0, signi(toward.y) if toward.y != 0 else 0)
+				walker += step
+				for widen: Vector2i in [Vector2i.ZERO, Vector2i(0, 1) if step.x != 0 else Vector2i(1, 0)]:
+					if grid.has(walker + widen):
+						grid[walker + widen] = CELL_HALL
+	# Stairs: the way up sits in the first hollow, the way down in the
+	# last (only while a deeper level exists).
+	var stair_cells: Dictionary = {"up": centers[0]}
+	grid[centers[0]] = CELL_HALL
+	if depth < CAVE_DEEP_LEVELS:
+		var down_center := centers[centers.size() - 1]
+		stair_cells["down"] = down_center
+		grid[down_center] = CELL_HALL
+	# The stratum: geology-true stone on the upper level, the fungal
+	# cavern on the bottom, with its veins, growth and pools stamped in.
+	var stratum := DepthStrataService.stratum_for_level_with_geology(site_geology, depth, CAVE_DEEP_LEVELS + 2)
+	var floor_decor: Dictionary = {}
+	for stair_variant: Variant in stair_cells.values():
+		floor_decor[stair_variant as Vector2i] = "protected"
+	DepthStrataService.stamp_stratum_features(grid, floor_decor, stratum, cave_rng)
+	for stair_variant: Variant in stair_cells.values():
+		floor_decor.erase(stair_variant as Vector2i)
+	_carve_underhall_pools(grid, stratum, cave_rng)
+	var level_data := {
+		"kind": "underhall",
+		"grid": grid,
+		"door_cells": {},
+		"zone_counts": {},
+		"requested_zone_counts": {},
+		"civic_buildings_by_id": {},
+		"civic_building_type_map": {},
+		"residence_type_map": {},
+		"resident_target": 0,
+		"village_yards": [],
+		"floor_decor": floor_decor,
+		"stratum": stratum,
+		"stair_cells": stair_cells,
+		"starmetal_cells": []
+	}
+	_apply_underhall_diffs(level_data, depth)
+	return level_data
 
 func _begin_seamless_hold_descent(gate: Dictionary, site: Dictionary) -> void:
 	var anchor := gate.get("anchor", Vector2i.ZERO) as Vector2i
@@ -11333,6 +11517,7 @@ func _update_surface_life(delta: float) -> void:
 		Callable(self, "_damage_player")
 	)
 	SurfaceLifeService.despawn_far_creatures(_surface_creatures, _player_cell)
+	_update_predation(delta)
 	_update_wilds_keepers(delta)
 	var finished: Array[int] = SurfaceLifeService.update_travelers(delta, _npc_states, Callable(self, "_cell_center_position"))
 	for finished_position in range(finished.size() - 1, -1, -1):
@@ -12639,6 +12824,85 @@ func _spawn_wild_animal_at(cell: Vector2i, species: Dictionary) -> void:
 		"wild": true, "species_name": String(species.get("name", "beast")),
 		"hp": int(species.get("max_hp", 5)), "loot": species.get("loot", [])
 	})
+
+## --- Predator and prey -------------------------------------------------------
+## The food chain runs without the walker: a hungry predator whose
+## quarrel isn't with the player stalks the nearest grazer, runs it
+## down, and feeds. The kill is the hunter's - no coins, no loot, just
+## a fed beast that leaves the herds alone for a while. Prey knows it:
+## a stalked grazer breaks its lazy drift and sprints.
+
+const PREDATOR_HUNT_RANGE := 10
+const PREDATOR_ATTACK_SECONDS := 1.1
+const PREDATOR_FED_SECONDS := 90.0
+const PREY_FLEE_MS := 2500
+
+func _update_predation(delta: float) -> void:
+	if not _wild_mode or _is_underground_level() or _surface_creatures.is_empty() or _farm_animals.is_empty():
+		return
+	var now_ms := Time.get_ticks_msec()
+	for state: Dictionary in _surface_creatures:
+		if not bool(state.get("predator", false)):
+			continue
+		if now_ms < int(state.get("fed_until_ms", 0)):
+			continue
+		var hunter_cell := state.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i
+		# The walker is the priority quarry: a predator with the player in
+		# (or near) aggro reach is the chase AI's business, not the hunt's.
+		var aggro := int(state.get("aggro_override", 8))
+		if maxi(absi(hunter_cell.x - _player_cell.x), absi(hunter_cell.y - _player_cell.y)) <= aggro + 2:
+			continue
+		var best := -1
+		var best_distance := PREDATOR_HUNT_RANGE + 1
+		for animal_index in _farm_animals.size():
+			var animal := _farm_animals[animal_index]
+			if not bool(animal.get("wild", false)):
+				continue
+			var animal_cell := animal.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i
+			var animal_distance := maxi(absi(animal_cell.x - hunter_cell.x), absi(animal_cell.y - hunter_cell.y))
+			if animal_distance < best_distance:
+				best_distance = animal_distance
+				best = animal_index
+		if best < 0:
+			continue
+		var prey := _farm_animals[best]
+		# The quarry smells the hunter and bolts.
+		prey["flee_from"] = _cell_center_position(hunter_cell)
+		prey["flee_until_ms"] = now_ms + PREY_FLEE_MS
+		prey["speed_scale"] = 1.7
+		state["hunt_step_timer"] = float(state.get("hunt_step_timer", 0.0)) - delta
+		state["hunt_attack_timer"] = maxf(float(state.get("hunt_attack_timer", 0.0)) - delta, 0.0)
+		if best_distance <= 1:
+			if float(state.get("hunt_attack_timer", 0.0)) > 0.0:
+				continue
+			state["hunt_attack_timer"] = PREDATOR_ATTACK_SECONDS
+			prey["hp"] = int(prey.get("hp", 5)) - 3
+			var prey_sprite := prey.get("sprite") as Sprite2D
+			if prey_sprite != null and is_instance_valid(prey_sprite):
+				_flash_sprite(prey_sprite, Color(1.0, 0.4, 0.35, 1.0))
+			if int(prey.get("hp", 0)) > 0:
+				continue
+			# The kill: the carcass is the hunter's, and a fed predator
+			# leaves the herds (and everything else) in peace a while.
+			if prey_sprite != null and is_instance_valid(prey_sprite):
+				prey_sprite.queue_free()
+			var prey_name := String(prey.get("species_name", "beast"))
+			_farm_animals.remove_at(best)
+			state["fed_until_ms"] = now_ms + int(PREDATOR_FED_SECONDS * 1000.0)
+			state["hp"] = int(state.get("hp", 1)) + 2
+			if maxi(absi(hunter_cell.x - _player_cell.x), absi(hunter_cell.y - _player_cell.y)) <= 20:
+				var hunter_def: Dictionary = UndergroundCreatureService.CREATURE_DEFS[int(state.get("def_index", 0))]
+				var hunter_name := String(state.get("species_name", String(hunter_def.get("name", "predator"))))
+				_set_save_status("A %s brings down a %s." % [hunter_name.to_lower(), prey_name.to_lower()], Color(0.88, 0.8, 0.62, 1.0))
+		elif float(state.get("hunt_step_timer", 0.0)) <= 0.0:
+			state["hunt_step_timer"] = 0.45
+			var step: Vector2i = CreatureCombatService.step_toward(hunter_cell,
+				prey.get("cell", hunter_cell) as Vector2i, Callable(self, "_is_walkable_cell"))
+			if step != Vector2i.ZERO:
+				state["cell"] = hunter_cell + step
+				var hunter_sprite := state.get("sprite") as Sprite2D
+				if hunter_sprite != null and is_instance_valid(hunter_sprite):
+					hunter_sprite.position = _cell_center_position(hunter_cell + step)
 
 ## Click a wild grazer: a hunt. Swings ride the player attack cooldown;
 ## the kill pays the species' meat and hide.
