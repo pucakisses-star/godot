@@ -6441,6 +6441,10 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 		return
 	if _try_release_animal(clicked_cell):
 		return
+	if _try_hunt_wild_animal(clicked_cell):
+		return
+	if _try_forage(clicked_cell):
+		return
 	if _try_chop_tree(clicked_cell):
 		return
 	_request_player_move_to_cell(clicked_cell)
@@ -8511,7 +8515,9 @@ func _ensure_surface_chunk(chunk: Vector2i) -> void:
 				# of cutting hard along the cell grid.
 				base_key = _surface_fringe_base_key(cell, base_key)
 			_place_surface_tile(city_layer, cell, base_key, danger)
-			if not decor_key.is_empty():
+			# A gathered patch stays gathered: foraging picked this cell
+			# clean for the session, so the restream leaves it bare.
+			if not decor_key.is_empty() and not _foraged_cells.has(cell):
 				_place_surface_tile(decor_layer, cell, decor_key, danger)
 			if _player_built_cells.has(cell):
 				_stamp_player_build(cell, String(_player_built_cells[cell]))
@@ -11119,11 +11125,18 @@ func _populate_underhall_creatures(level_data: Dictionary) -> void:
 		# Never in the walker's lap: beasts prowl in from the dark.
 		if maxi(absi(cell.x - _player_cell.x), absi(cell.y - _player_cell.y)) < 12:
 			continue
+		var prowlers_before := _surface_creatures.size()
 		SurfaceLifeService.spawn_creature(
 			_surface_creatures, SURFACE_CREATURE_TEXTURE,
 			int(slots[_rng.randi_range(0, slots.size() - 1)]),
 			cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng, true
 		)
+		# The deep breeds its own kin of each body: cave skinks, glowcap
+		# wardens, deep trolls - the stratum's cast wearing cave species.
+		if _surface_creatures.size() > prowlers_before:
+			var prowler := _surface_creatures[_surface_creatures.size() - 1]
+			WildlifeService.apply_species(prowler,
+				WildlifeService.cave_species_for_slot(int(prowler.get("def_index", 0)), _rng))
 	# The starmetal's guardians: the stratum's meanest slot, mustered
 	# around the deposit. The deposit cell itself is a solid outcrop (and
 	# its flanks may hold veins), so each guard takes the first open cell
@@ -11309,6 +11322,7 @@ func _update_surface_life(delta: float) -> void:
 	if _surface_spawn_timer <= 0.0:
 		_surface_spawn_timer = 2.5
 		_maintain_surface_creatures(danger)
+		_maintain_wild_herds()
 		_maintain_travelers()
 	_roll_surface_ambush(danger)
 	SurfaceLifeService.update_creatures(
@@ -11336,11 +11350,13 @@ func _maintain_surface_creatures(danger: float) -> void:
 		return
 	# The tier rolls off the SPAWN cell's danger, so a beast prowling in
 	# from the dark is as mean as the ground it rose from.
+	var spawned_before := _surface_creatures.size()
 	SurfaceLifeService.spawn_creature(
 		_surface_creatures, SURFACE_CREATURE_TEXTURE,
 		SurfaceLifeService.tier_def_index(SurfaceLifeService.danger_for_cell(cell, _surface_anchor_cells), _rng),
 		cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng
 	)
+	_dress_spawn_in_species(spawned_before, cell)
 
 ## A walkable wild cell in a ring around the player - never inside the
 ## town's protected ground.
@@ -11374,11 +11390,13 @@ func _roll_surface_ambush(danger: float) -> void:
 		var cell := _random_wild_cell_near_player(3, 7)
 		if cell.x == 2147483647:
 			continue
+		var ambush_before := _surface_creatures.size()
 		SurfaceLifeService.spawn_creature(
 			_surface_creatures, SURFACE_CREATURE_TEXTURE,
 			SurfaceLifeService.tier_def_index(danger, _rng),
 			cell, actor_layer, Callable(self, "_cell_center_position"), tile_size, _rng
 		)
+		_dress_spawn_in_species(ambush_before, cell)
 	if _surface_creatures.size() > before:
 		_set_save_status("Ambush! Shapes rush you from the treeline!", Color(0.95, 0.45, 0.4, 1.0))
 
@@ -11447,7 +11465,7 @@ func _strike_surface_creature(creature_index: int, damage: int, announce: bool =
 		_spawn_floating_text("-%d" % damage, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
 	if int(state.get("hp", 0)) > 0:
 		return
-	var creature_name := String(def.get("name", "creature"))
+	var creature_name := String(state.get("species_name", String(def.get("name", "creature"))))
 	if announce:
 		# A beast the player fells in the underhalls counts toward this
 		# hold's accepted slay bounty (the quiet guard path never does).
@@ -11467,7 +11485,15 @@ func _strike_surface_creature(creature_index: int, damage: int, announce: bool =
 			# history instead of tent plunder.
 			_award_surface_lair_kill(state)
 			return
-		_set_save_status("The %s falls — %d coins scavenged." % [creature_name, coins], Color(0.85, 0.95, 0.7, 1.0))
+		# The carcass pays its species' worth: hides, meat, oddments.
+		var loot: Dictionary = UndergroundCreatureService.roll_loot(
+			{"loot": state.get("loot_override", def.get("loot", []))}, _rng)
+		var loot_text := ""
+		for loot_item_variant: Variant in loot.keys():
+			var loot_item := String(loot_item_variant)
+			_add_to_inventory(loot_item, int(loot[loot_item]))
+			loot_text += ", +%d %s" % [int(loot[loot_item]), loot_item]
+		_set_save_status("The %s falls — %d coins scavenged%s." % [creature_name, coins, loot_text], Color(0.85, 0.95, 0.7, 1.0))
 		# The last of a camp's garrison marks the site cleared (with plunder).
 		if not fallen_site_key.is_empty():
 			_note_camp_creature_down(fallen_site_key)
@@ -12505,19 +12531,217 @@ func _restore_homestead(settings: Dictionary) -> void:
 
 ## --- tree felling ------------------------------------------------------------
 
+## --- Wildlife and flora ------------------------------------------------------
+## The species layer: hostile spawns dress in biome-true species, grazing
+## herds wander the wilds and can be hunted, and every plant patch grows
+## a named species the walker can forage or fell.
+
+const WILD_HERD_CAP := 6
+const WILD_HERD_DESPAWN_TILES := 46
+var _foraged_cells: Dictionary = {}
+
+## What ground a spawn rises from: sand, snow, marsh (reeds close by),
+## forest (canopy close by), cave below ground, else open grass.
+func _wild_biome_at_cell(cell: Vector2i) -> String:
+	if _is_underground_level():
+		return "cave"
+	var family := ""
+	if city_layer.get_cell_source_id(cell) >= 0:
+		family = _family_for_atlas_coords(city_layer.get_cell_atlas_coords(cell))
+	if family == "sand":
+		return "sand"
+	if family == "snow":
+		return "snow"
+	for offset_variant: Variant in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+			Vector2i(1, 1), Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1),
+			Vector2i(2, 0), Vector2i(-2, 0), Vector2i(0, 2), Vector2i(0, -2)]:
+		var probe := cell + (offset_variant as Vector2i)
+		if decor_layer.get_cell_source_id(probe) < 0:
+			continue
+		var probe_atlas := decor_layer.get_cell_atlas_coords(probe)
+		for tree_key: String in ["tree", "tree_dark", "tree_snowy", "tree_dark_snowy"]:
+			if probe_atlas == (TILE_ATLAS.get(tree_key, Vector2i(-1000, -1000)) as Vector2i):
+				return "forest"
+		for marsh_key: String in ["reeds", "reeds_alt", "lily_flower"]:
+			if probe_atlas == (TILE_ATLAS.get(marsh_key, Vector2i(-1000, -1000)) as Vector2i):
+				return "marsh"
+	return "grass"
+
+## Dresses the creature a spawn call just appended (if any) in a species
+## picked for its body tier and the ground it rose from.
+func _dress_spawn_in_species(count_before: int, cell: Vector2i) -> void:
+	if _surface_creatures.size() <= count_before:
+		return
+	var state := _surface_creatures[_surface_creatures.size() - 1]
+	var tier := WildlifeService.tier_for_slot(int(state.get("def_index", 0)))
+	WildlifeService.apply_species(state, WildlifeService.pick_species(_wild_biome_at_cell(cell), tier, _rng))
+
+## Grazers near the walker: capped, despawned when left far behind, and
+## spawned for whatever biome the picked ground supports.
+func _maintain_wild_herds() -> void:
+	if not _wild_mode:
+		return
+	var wild_count := 0
+	for animal_index in range(_farm_animals.size() - 1, -1, -1):
+		var animal := _farm_animals[animal_index]
+		if not bool(animal.get("wild", false)):
+			continue
+		var animal_cell := animal.get("cell", Vector2i.ZERO) as Vector2i
+		if maxi(absi(animal_cell.x - _player_cell.x), absi(animal_cell.y - _player_cell.y)) > WILD_HERD_DESPAWN_TILES:
+			var far_sprite := animal.get("sprite") as Sprite2D
+			if far_sprite != null and is_instance_valid(far_sprite):
+				far_sprite.queue_free()
+			_farm_animals.remove_at(animal_index)
+			continue
+		wild_count += 1
+	if wild_count >= WILD_HERD_CAP:
+		return
+	var cell := _random_wild_cell_near_player(10, 18)
+	if cell.x == 2147483647:
+		return
+	var species: Dictionary = WildlifeService.pick_herd_species(_wild_biome_at_cell(cell), _rng)
+	if species.is_empty():
+		return
+	_spawn_wild_animal_at(cell, species)
+
+func _spawn_wild_animal_at(cell: Vector2i, species: Dictionary) -> void:
+	var body := String(species.get("body", "chicken"))
+	var def: Dictionary = {}
+	for def_variant: Variant in FARM_ANIMAL_DEFS:
+		if String((def_variant as Dictionary).get("id", "")) == body:
+			def = def_variant as Dictionary
+			break
+	if def.is_empty() or actor_layer == null:
+		return
+	var animal_id := String(def.get("id", "chicken"))
+	if not _farm_animal_textures.has(animal_id):
+		_farm_animal_textures[animal_id] = load(String(def.get("path", ""))) as Texture2D
+	var texture := _farm_animal_textures.get(animal_id) as Texture2D
+	if texture == null:
+		return
+	var frame_px := int(def.get("frame", 32))
+	var sprite := Sprite2D.new()
+	sprite.texture = texture
+	sprite.region_enabled = true
+	sprite.region_rect = Rect2(0, 0, frame_px, frame_px)
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.scale = Vector2.ONE * (float(tile_size.y) / 32.0) * float(species.get("scale", 1.0))
+	sprite.modulate = species.get("tint", Color.WHITE) as Color
+	sprite.position = _cell_center_position(cell)
+	sprite.z_index = 11
+	actor_layer.add_child(sprite)
+	# pen_index -2 is the home-leashed open-ground wander mode the owned
+	# animals already use: a grazing herd drifts around its own ground.
+	_farm_animals.append({
+		"def": def, "sprite": sprite, "cell": cell, "pen_index": -2, "home": cell,
+		"moving": false, "facing": Vector2i(0, 1),
+		"wander_timer": _rng.randf_range(0.5, 4.0), "anim_time": _rng.randf_range(0.0, 2.0),
+		"wild": true, "species_name": String(species.get("name", "beast")),
+		"hp": int(species.get("max_hp", 5)), "loot": species.get("loot", [])
+	})
+
+## Click a wild grazer: a hunt. Swings ride the player attack cooldown;
+## the kill pays the species' meat and hide.
+func _try_hunt_wild_animal(cell: Vector2i) -> bool:
+	for animal_index in range(_farm_animals.size()):
+		var animal := _farm_animals[animal_index]
+		if not bool(animal.get("wild", false)):
+			continue
+		if (animal.get("cell", Vector2i(2147483647, 2147483647)) as Vector2i) != cell:
+			continue
+		if not _is_player_adjacent_to_cell(cell):
+			return false
+		if _player_attack_timer > 0.0:
+			return true
+		_player_attack_timer = 0.45
+		GameAudioService.play_sfx(self, "swing")
+		var damage := int(PlayerStatsService.for_session(self).get("attack", 2))
+		animal["hp"] = int(animal.get("hp", 5)) - damage
+		var sprite := animal.get("sprite") as Sprite2D
+		if sprite != null and is_instance_valid(sprite):
+			_flash_sprite(sprite, Color(1.0, 0.4, 0.35, 1.0))
+			_spawn_floating_text("-%d" % damage, sprite.position, Color(1.0, 0.85, 0.5, 1.0))
+		if int(animal.get("hp", 0)) > 0:
+			return true
+		var species_name := String(animal.get("species_name", "beast"))
+		for loot_variant: Variant in (animal.get("loot", []) as Array):
+			var loot := loot_variant as Dictionary
+			if _rng.randi_range(1, 100) > int(loot.get("chance", 100)):
+				continue
+			var amount := _rng.randi_range(int(loot.get("min", 1)), int(loot.get("max", 1)))
+			if amount > 0:
+				_add_to_inventory(String(loot.get("item", "")), amount)
+				if sprite != null and is_instance_valid(sprite):
+					_spawn_floating_text("+%d %s" % [amount, String(loot.get("item", ""))],
+						sprite.position + Vector2(0, -12), Color(0.8, 0.95, 0.7, 1.0))
+		if sprite != null and is_instance_valid(sprite):
+			sprite.queue_free()
+		_farm_animals.remove_at(animal_index)
+		_set_save_status("The %s falls — good hunting." % species_name.to_lower(), Color(0.85, 0.95, 0.7, 1.0))
+		return true
+	return false
+
+## Click a flower patch, mushroom ring, or reed bed: gather the species
+## growing there. Gatherables pay their pantry or apothecary item and
+## the patch stays picked over; scenery species just give their name.
+func _try_forage(cell: Vector2i) -> bool:
+	if not _is_player_adjacent_to_cell(cell):
+		return false
+	if decor_layer.get_cell_source_id(cell) < 0:
+		return false
+	var atlas_coords := decor_layer.get_cell_atlas_coords(cell)
+	var atlas_table: Dictionary = TILE_ATLAS_DEFS.DWARFHOLD_TILE_ATLAS \
+		if decor_layer.get_cell_source_id(cell) == HOLD_TILE_SOURCE_ID else TILE_ATLAS
+	var underground := _is_underground_level()
+	var tile_key := ""
+	for forage_key: String in FloraService.FORAGE_TILE_KEYS:
+		if atlas_coords == (atlas_table.get(forage_key, Vector2i(-1000, -1000)) as Vector2i):
+			tile_key = forage_key
+			break
+	if tile_key.is_empty():
+		return false
+	var species: Dictionary = FloraService.flora_species_at(tile_key, cell, hash(_surface_world_seed_text), underground)
+	if species.is_empty():
+		return false
+	var species_name := String(species.get("name", "plant"))
+	if not species.has("item"):
+		# Named scenery: nothing to gather, but the field guide speaks.
+		_spawn_floating_text(species_name, _cell_center_position(cell), Color(0.85, 0.9, 0.75, 1.0))
+		return true
+	var amount := _rng.randi_range(int(species.get("min", 1)), int(species.get("max", 1)))
+	_add_to_inventory(String(species.get("item", "")), amount)
+	GameAudioService.play_sfx(self, "harvest")
+	_spawn_floating_text("+%d %s — %s" % [amount, String(species.get("item", "")), species_name],
+		_cell_center_position(cell), Color(0.8, 0.95, 0.7, 1.0))
+	decor_layer.erase_cell(cell)
+	_actor_passable_cache.erase(cell)
+	if underground:
+		# Fungus patches are level decor: the pick-over persists via the
+		# same ledger the mined-out veins ride.
+		if _latest_floor_decor.has(cell):
+			_latest_floor_decor.erase(cell)
+			_record_underhall_edit("decor_erased", cell)
+	else:
+		_foraged_cells[cell] = true
+	return true
+
 func _try_chop_tree(cell: Vector2i) -> bool:
 	if not _is_player_adjacent_to_cell(cell):
 		return false
 	if decor_layer.get_cell_source_id(cell) < 0:
 		return false
 	var atlas_coords := decor_layer.get_cell_atlas_coords(cell)
-	var choppable := false
-	for tree_key: String in ["tree", "tree_dark", "tree_snowy", "tree_dark_snowy"]:
+	var matched_tree_key := ""
+	for tree_key: String in ["tree", "tree_dark", "tree_snowy", "tree_dark_snowy", "cactus", "cactus_small"]:
 		if atlas_coords == (TILE_ATLAS.get(tree_key, Vector2i(-1, -1)) as Vector2i):
-			choppable = true
+			matched_tree_key = tree_key
 			break
-	if not choppable:
+	if matched_tree_key.is_empty():
 		return false
+	# Every trunk is a SPECIES, stable per cell: the same hillside always
+	# grows the same oak, and fruiting trees drop their harvest alongside.
+	var species: Dictionary = FloraService.tree_species_at(matched_tree_key, cell, hash(_surface_world_seed_text))
+	var species_name := String(species.get("name", "tree"))
 	# Grab the tree's art before it is cleared so the break FX can topple a
 	# ghost of it; the tree leans away from the player as it falls.
 	var art := TileBreakFxService.tile_art(decor_layer, cell)
@@ -12530,8 +12754,15 @@ func _try_chop_tree(cell: Vector2i) -> bool:
 	if not art.is_empty():
 		TileBreakFxService.topple_ghost(city_layer, fell_position, art["texture"] as Texture2D, art["region"] as Rect2, lean_sign)
 	TileBreakFxService.chip_burst(city_layer, fell_position, Color(0.36, 0.55, 0.22, 1.0), 14)
-	_spawn_floating_text("+2 Timber", fell_position, Color(0.8, 0.95, 0.7, 1.0))
-	_set_save_status("You fell the tree — the wilds grow them back in time.", Color(0.75, 0.92, 0.7, 1.0))
+	_spawn_floating_text("%s — +2 Timber" % species_name, fell_position, Color(0.8, 0.95, 0.7, 1.0))
+	if species.get("bonus") is Dictionary:
+		var bonus := species.get("bonus") as Dictionary
+		var bonus_amount := _rng.randi_range(int(bonus.get("min", 1)), int(bonus.get("max", 1)))
+		if bonus_amount > 0:
+			_add_to_inventory(String(bonus.get("item", "")), bonus_amount)
+			_spawn_floating_text("+%d %s" % [bonus_amount, String(bonus.get("item", ""))],
+				fell_position + Vector2(0, -14), Color(0.95, 0.85, 0.5, 1.0))
+	_set_save_status("You fell the %s — the wilds grow them back in time." % species_name.to_lower(), Color(0.75, 0.92, 0.7, 1.0))
 	return true
 
 ## --- trading on the road -----------------------------------------------------
