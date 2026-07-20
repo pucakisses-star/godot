@@ -151,6 +151,16 @@ const APOTHECARY_RECIPES: Array[Dictionary] = [
 	{"output": "Fleetfoot Philter", "materials": {"Frostleaf": 1, "Glowcap": 1}, "coins": 3},
 	{"output": "Mushroom Ration", "materials": {"Porcini": 1, "King Bolete": 1}, "coins": 0},
 ]
+
+## The cook's hearth at the tavern and the bakery ovens: the wilds' own
+## catch, quarry, and gathering stew down into meals on the same craft
+## machinery as the anvil and the bench — water feeds the pot.
+const COOK_RECIPES: Array[Dictionary] = [
+	{"output": "Trout Stew", "materials": {"River Trout": 1, "Garlic Sprout": 1}, "coins": 1},
+	{"output": "Hunter's Roast", "materials": {"Marbled Steak": 1, "Foxglove Sprig": 1}, "coins": 1},
+	{"output": "Cave Chowder", "materials": {"Pale Cavefish": 1, "Glowcap": 1}, "coins": 1},
+	{"output": "Rowanberry Tart", "materials": {"Rowanberries": 2, "Jar of Honey": 1}, "coins": 1},
+]
 ## The real-world cell the walk-away leash measures while a trade popup is
 ## open; traveler stocks anchor at a synthetic far-away cell, so the leash
 ## needs the trader's actual spot (sentinel = fall back to the shop anchor).
@@ -5630,6 +5640,8 @@ func _refresh_trade_panel() -> void:
 		craft_recipes = WARD_FORGE_RECIPES
 	elif _trade_shop_type == "apothecary":
 		craft_recipes = APOTHECARY_RECIPES
+	elif _trade_shop_type == "tavern" or _trade_shop_type == "bakery":
+		craft_recipes = COOK_RECIPES
 	if not craft_recipes.is_empty():
 		var next_slot := mini(stock.size(), _chest_slot_labels.size())
 		for recipe: Dictionary in craft_recipes:
@@ -5650,6 +5662,8 @@ func _refresh_trade_panel() -> void:
 		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or craft at the anvil" % _player_coins
 	elif _trade_shop_type == "apothecary":
 		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or brew at the bench" % _player_coins
+	elif _trade_shop_type == "tavern" or _trade_shop_type == "bakery":
+		chest_popup_status_label.text = "🪙 %d coins — buy wares, sell from your pack, or cook at the hearth" % _player_coins
 	elif stock.is_empty():
 		chest_popup_status_label.text = "🪙 %d coins — the shelves are bare; come back later" % _player_coins
 	if _trade_shop_type == "tavern":
@@ -5669,7 +5683,8 @@ func _tavern_greeting_line() -> String:
 ## a full belly instead of a backpack item.
 const TAVERN_MEAL_HEARTS := {
 	"Hearty Stew": 6, "Roast Meat": 5, "Smoked Ribs": 5, "Grilled Fish": 4,
-	"Loaf of Bread": 3, "Wheel of Cheese": 3, "Ale Keg": 2
+	"Loaf of Bread": 3, "Wheel of Cheese": 3, "Ale Keg": 2,
+	"Trout Stew": 3, "Hunter's Roast": 4, "Cave Chowder": 3, "Rowanberry Tart": 2
 }
 
 func _buy_trade_item(slot_index: int) -> void:
@@ -5714,11 +5729,17 @@ func _craft_forge_entry(recipe: Dictionary) -> void:
 	var materials := recipe.get("materials", {}) as Dictionary
 	var fee := int(recipe.get("coins", 0))
 	var is_brew := _trade_shop_type == "apothecary"
+	var is_cook := _trade_shop_type == "tavern" or _trade_shop_type == "bakery"
 	if not GearService.can_afford_craft({"craft": materials}, _player_inventory) or _player_coins < fee:
 		var needed := GearService.craft_costs_text({"craft": materials})
 		if fee > 0:
 			needed += " + %d coins" % fee
-		chest_popup_status_label.text = "The %s needs %s for a %s" % ["herbalist" if is_brew else "smith", needed, output]
+		var crafter := "smith"
+		if is_brew:
+			crafter = "herbalist"
+		elif is_cook:
+			crafter = "cook"
+		chest_popup_status_label.text = "The %s needs %s for a %s" % [crafter, needed, output]
 		return
 	for material_variant: Variant in materials.keys():
 		_add_to_inventory(String(material_variant), -int(materials[material_variant]))
@@ -5729,7 +5750,10 @@ func _craft_forge_entry(recipe: Dictionary) -> void:
 	if _player_sprite != null:
 		_spawn_floating_text("+%s" % output, _player_sprite.position + Vector2(0, -14), Color(0.85, 0.9, 1.0, 1.0))
 	_refresh_trade_panel()
-	chest_popup_status_label.text = "%s a %s (🪙 %d)" % ["Brewed" if is_brew else "Forged", output, _player_coins]
+	if is_cook:
+		chest_popup_status_label.text = "Cooked a %s — the pot takes it from there (🪙 %d)" % [output, _player_coins]
+	else:
+		chest_popup_status_label.text = "%s a %s (🪙 %d)" % ["Brewed" if is_brew else "Forged", output, _player_coins]
 
 func _sell_item(item_name: String) -> void:
 	if int(_player_inventory.get(item_name, 0)) < 1:
@@ -6608,6 +6632,10 @@ func _handle_player_click_action(mouse_position: Vector2) -> void:
 	if _try_forage(clicked_cell):
 		return
 	if _try_chop_tree(clicked_cell):
+		return
+	# Only close-in clicks reach the shoreline cast; a distant click stays
+	# travel, and open water itself still belongs to the coracle above.
+	if _is_player_adjacent_to_cell(clicked_cell) and _try_fish():
 		return
 	_request_player_move_to_cell(clicked_cell)
 
@@ -13603,6 +13631,42 @@ func _try_chop_tree(cell: Vector2i) -> bool:
 				fell_position + Vector2(0, -14), Color(0.95, 0.85, 0.5, 1.0))
 	_set_save_status("You fell the %s — the wilds grow them back in time." % species_name.to_lower(), Color(0.75, 0.92, 0.7, 1.0))
 	return true
+
+## A close-in click with nothing else to answer it, water within arm's
+## reach: the hand line goes out. No rod, no bobber wait — the rod-and-F
+## minigame stays the patient angler's game; this is the forager's cast,
+## and the biome stocks the hook. The koi ignores the biome entirely.
+func _try_fish() -> bool:
+	var water_cell := _adjacent_fishable_water_cell()
+	if water_cell.x == 2147483647:
+		return false
+	GameAudioService.play_sfx(self, "splash")
+	if _rng.randf() >= 0.55:
+		_set_save_status("The waters keep their secrets.", Color(0.7, 0.82, 0.95, 1.0))
+		return true
+	var fish: Dictionary = FishingService.catch_for_biome(_wild_biome_at_cell(_player_cell), _rng)
+	var fish_name := String(fish.get("name", "River Trout"))
+	_add_to_inventory(fish_name, 1)
+	GameAudioService.play_sfx(self, "harvest")
+	_spawn_floating_text("+1 %s" % fish_name, _cell_center_position(water_cell), Color(0.6, 0.95, 1.0, 1.0))
+	_set_save_status("You land a %s!" % fish_name, Color(0.6, 0.9, 1.0, 1.0))
+	return true
+
+## The water beside the walker's boots: rendered surface water, or an
+## underhall pool straight off the level grid — pool tiles ride the hold
+## atlas, so the rendered-tile family test can't see them.
+func _adjacent_fishable_water_cell() -> Vector2i:
+	var underground := _is_underground_level()
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			if offset_x == 0 and offset_y == 0:
+				continue
+			var candidate := _player_cell + Vector2i(offset_x, offset_y)
+			if _is_water_cell(candidate):
+				return candidate
+			if underground and int(_latest_grid.get(candidate, -1)) == DwarfHoldTileService.CELL_WATER:
+				return candidate
+	return Vector2i(2147483647, 2147483647)
 
 ## --- trading on the road -----------------------------------------------------
 

@@ -44,6 +44,11 @@ const ITEM_VALUES := {
 	"Gloom Octopus": 6, "Ember Squid": 7, "Cave Crab": 5,
 	"Coral Snail": 4, "Bloodworm": 1, "Mud Grub": 1, "Dried Fish": 4,
 
+	# The hand-liner's biome catch, and the meals the hearth makes of it.
+	"River Trout": 4, "Icefin Char": 5, "Dune Barb": 4,
+	"Mudwhisker Catfish": 5, "Pale Cavefish": 6,
+	"Trout Stew": 10, "Hunter's Roast": 12, "Cave Chowder": 11, "Rowanberry Tart": 8,
+
 	# Mounted trophy fish: bragging rights, priced accordingly.
 	"Trophy Gudgeon": 18, "Trophy Bleak": 20, "Trophy Ruffe": 22,
 	"Trophy Rudd": 26, "Trophy Perch": 28, "Trophy Bluegill": 28,
@@ -108,10 +113,10 @@ const ITEM_VALUES := {
 ## What each kind of shop keeps behind the counter. Keys cover both the
 ## town and dwarfhold building-type vocabularies.
 const SHOP_STOCK_POOLS := {
-	"bakery": ["Loaf of Bread", "Mushroom Ration", "Jar of Honey", "Wheel of Cheese", "Mushroom Skewer"],
+	"bakery": ["Loaf of Bread", "Mushroom Ration", "Jar of Honey", "Wheel of Cheese", "Mushroom Skewer", "Rowanberry Tart"],
 	"kitchen": ["Loaf of Bread", "Mushroom Ration", "Grilled Fish", "Hearty Stew", "Mushroom Skewer"],
 	"grand_kitchens": ["Hearty Stew", "Grilled Fish", "Mushroom Skewer", "Mushroom Ration", "Wheel of Cheese"],
-	"tavern": ["Ale Keg", "Grilled Fish", "Hearty Stew", "Roast Meat", "Smoked Ribs", "Loaf of Bread", "Wheel of Cheese"],
+	"tavern": ["Ale Keg", "Grilled Fish", "Hearty Stew", "Roast Meat", "Smoked Ribs", "Loaf of Bread", "Wheel of Cheese", "Trout Stew", "Hunter's Roast"],
 	"inn": ["Loaf of Bread", "Wheel of Cheese", "Jar of Honey", "Grilled Fish", "Ale Keg"],
 	"brewery": ["Ale Keg", "Mushroom Skewer", "Jar of Honey"],
 	"general_store": ["Stone", "Leather Strap", "Wax Candles", "Miner's Lantern", "Old Fishing Rod", "Cork Bobber", "Silk Line Spool", "Spade", "Mushroom Ration"],
