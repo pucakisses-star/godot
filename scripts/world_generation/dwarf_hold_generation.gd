@@ -6365,7 +6365,16 @@ func _roll_dig_ore(layer_class: String) -> String:
 	var metals := _geology.get("metals", []) as Array
 	if metals.is_empty():
 		return ""
-	var host_pool := GeologyService.METAL_POOLS.get(layer_class, []) as Array
+	# The metals this world advertises that actually occur in the current
+	# layer, read off the live mineral catalog (the old METAL_POOLS table
+	# was folded into MINERAL_CATALOG's per-mineral host lists).
+	var host_pool: Array[String] = []
+	for mineral_variant: Variant in GeologyService.MINERAL_CATALOG.values():
+		var mineral := mineral_variant as Dictionary
+		if (mineral.get("hosts", []) as Array).has(layer_class):
+			var host_metal := String(mineral.get("metal", ""))
+			if not host_metal.is_empty() and not host_pool.has(host_metal):
+				host_pool.append(host_metal)
 	var candidates: Array[String] = []
 	for metal_variant: Variant in metals:
 		var metal := String(metal_variant)
@@ -6414,7 +6423,7 @@ func _level_stone_name() -> String:
 		var surface_stones := _geology.get("stones", []) as Array
 		if not surface_stones.is_empty():
 			return String(surface_stones[0])
-	var stones := GeologyService.LAYER_STONES.get(layer, []) as Array
+	var stones := GeologyService.COMMON_STONES.get(layer, []) as Array
 	if stones.is_empty():
 		return "Stone"
 	return String(stones[absi(_world_seed_hash + _hold_state.current_level_index * 31) % stones.size()])
