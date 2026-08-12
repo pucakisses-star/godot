@@ -3798,10 +3798,8 @@ func _spawn_torch_at(cell: Vector2i) -> void:
 	# respects walls, which an additive blob never can). Full-radius
 	# glows painted a second, wall-ignoring light over the shader's
 	# pools and the two reads fought each other.
-	var glow := _create_glow_sprite(FLAME_HALO_TILES)
-	glow.position = Vector2.ZERO
-	glow.visible = _lighting_enabled
-	torch.add_child(glow)
+	# ...and no corona at all now: the shader's pool is tile-quantized, so
+	# a soft round halo laid over it just smears those hard bands.
 	_torch_sprites[cell] = torch
 	# A fresh torch is a new light pool; hand it to the shader at once.
 	_update_light_uniforms()
@@ -3934,13 +3932,10 @@ func _spawn_sconce_at(cell: Vector2i, is_candle: bool) -> void:
 		flame.play()
 		flame.frame = absi(cell.x * 7 + cell.y * 13) % 3
 		sconce.add_child(flame)
-	# The shader still lights the sconce's full pool (via
-	# _auto_sconce_cells below); the sprite is only the flame's corona.
+	# The shader lights the sconce's full pool (via _auto_sconce_cells
+	# below) in hard tile bands, so the flame sprite stands alone - a
+	# soft corona on top would blur exactly those edges.
 	var radius_tiles := CANDLE_SCONCE_LIGHT_TILES if is_candle else SCONCE_LIGHT_TILES
-	var glow := _create_glow_sprite(CANDLE_HALO_TILES if is_candle else FLAME_HALO_TILES)
-	glow.position = Vector2.ZERO
-	glow.visible = _lighting_enabled
-	sconce.add_child(glow)
 	_auto_sconce_sprites[cell] = sconce
 	_auto_sconce_cells[cell] = radius_tiles
 
@@ -6995,15 +6990,9 @@ func _apply_furnishing_placements(placements: Array[Dictionary]) -> void:
 				_furnishing_blocked_cells[cell] = true
 				_actor_passable_cache.erase(cell)
 		if RoomFurnishingService.piece_emits_light(piece_name):
+			# The shader lights the hearth's actual pool, in hard tile
+			# bands; no additive corona to soften them.
 			_light_furnishing_cells.append(base_cell)
-			# Corona only - the shader lights the hearth's actual pool.
-			var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(
-				_cell_center_position(base_cell),
-				0.9 * float(tile_size.x),
-				Color(1.0, 0.72, 0.35, 1.0)
-			)
-			actor_layer.add_child(glow)
-			_furnishing_sprites.append(glow)
 
 func _actor_sprite_to_cell(sprite: Sprite2D, cell: Vector2i) -> void:
 	sprite.position = _cell_center_position(cell)
