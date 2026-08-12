@@ -5120,7 +5120,14 @@ func _place_house_hearth(grid: Dictionary, component: Array[Vector2i], is_occupi
 ## Glows are recorded during furnishing and baked into ONE additive
 ## overlay texture afterwards - a single canvas item instead of a sprite
 ## per hearth and candle (the Core Keeper approach to static light).
-const LIGHT_OVERLAY_PX_PER_TILE := 4
+## ONE texel per TILE: firelight lands as whole flat tiles, upscaled
+## nearest, so a hearth's warmth steps in hard squares that line up with
+## the darkness shader's own bands instead of smearing a soft gradient
+## across them.
+const LIGHT_OVERLAY_PX_PER_TILE := 1
+## The overlay's warmth in hard steps, brightest first - the same
+## four-band ladder the darkness shader falls off through.
+const LIGHT_OVERLAY_BANDS: Array[float] = [0.32, 0.2, 0.1]
 
 func _spawn_hearth_glow(cell: Vector2i, radius_cells: float) -> void:
 	_pending_glows.append({"cell": cell, "radius": radius_cells})
@@ -5148,17 +5155,25 @@ func _rebuild_light_overlay() -> void:
 				var falloff := 1.0 - Vector2(px + 0.5, py + 0.5).distance_to(center) / radius_px
 				if falloff <= 0.0:
 					continue
-				falloff *= falloff * 0.55
+				# Hard bands, not a gradient: the tile takes one flat step
+				# of warmth chosen by how deep inside the pool it sits.
+				var band := LIGHT_OVERLAY_BANDS[clampi(
+					int((1.0 - falloff) * float(LIGHT_OVERLAY_BANDS.size())),
+					0, LIGHT_OVERLAY_BANDS.size() - 1)]
 				var existing := image.get_pixel(px, py)
 				image.set_pixel(px, py, Color(
 					glow_color.r, glow_color.g, glow_color.b,
-					minf(existing.a + falloff, 0.8)
+					minf(maxf(existing.a, band), 0.5)
 				))
 	_light_overlay_sprite = Sprite2D.new()
 	_light_overlay_sprite.texture = ImageTexture.create_from_image(image)
 	_light_overlay_sprite.centered = false
 	_light_overlay_sprite.position = Vector2(bounds.position * tile_size)
 	_light_overlay_sprite.scale = Vector2(tile_size) / float(LIGHT_OVERLAY_PX_PER_TILE)
+	# One texel per tile blown up 32x: without nearest filtering the
+	# hardware would interpolate every step back into the soft gradient
+	# this overlay exists to avoid.
+	_light_overlay_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	var overlay_material := CanvasItemMaterial.new()
 	overlay_material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
 	_light_overlay_sprite.material = overlay_material
@@ -7579,6 +7594,14 @@ func _apply_landmark_plan_slice(landmark: Dictionary, plan: Dictionary, chunk: V
 					decor_layer.add_child(piece_sprite)
 					nodes.append(piece_sprite)
 			"glow":
+				# Inside a hold's ward the darkness shader owns every light:
+				# each of these hearths and candelabras is already handed to
+				# it as a real pool, so an additive halo here would only
+				# smear a soft blob across those hard tile bands. Out in the
+				# open wilds there IS no shader, so a wayside fire still
+				# needs its own glow to read at night.
+				if String(landmark.get("structure", "")) == "dwarfhold_city":
+					continue
 				var glow_sprite: Sprite2D = RoomFurnishingService.create_glow_sprite(
 					_cell_center_position(cell),
 					float(sprite_def.get("radius", 2.5)) * float(tile_size.x),
@@ -9825,11 +9848,11 @@ func _spawn_ward_sconce(cell: Vector2i) -> Sprite2D:
 	flame.position = Vector2(0.0, -10.0)
 	flame.frame = absi(cell.x * 7 + cell.y * 13) % 3
 	sconce.add_child(flame)
-	# Corona only: the ward's darkness shader carves the real pool, so
-	# the sprite just hugs the flame instead of fogging the street.
-	var glow: Sprite2D = RoomFurnishingService.create_glow_sprite(Vector2.ZERO, 0.9 * float(tile_size.x), Color(1.0, 0.72, 0.35, 1.0))
-	glow.position = Vector2(0.0, -6.0)
-	sconce.add_child(glow)
+	# No corona. The darkness shader already carves this torch a real,
+	# tile-quantized pool; an additive halo on top would draw a soft
+	# round blob straight through those hard bands - the exact floaty
+	# smear hard pixel lighting exists to avoid. The flame sprite is
+	# the fire; the shader is the light.
 	actor_layer.add_child(sconce)
 	flame.play()
 	return sconce
